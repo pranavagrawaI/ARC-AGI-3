@@ -1,0 +1,9 @@
+# Demonstrated: separated efficiency from competence; diagnosed the spawn false-positive
+
+Lesson 0005 live result (his run, 2026-06-22): bump_rate 26–28% (Random) → 1–3% (WallAwareExplorer), levels 0/7 for BOTH agents, score 0%. (Unlike session 3, random fluked nothing this run — comparison is starker: 13× fewer bumps, zero extra levels.)
+
+**His explanation of the gap (correct, unprompted):** "Even though we record walls, we're still blind to what needs to be done — movement is still essentially random, the only advantage is we don't walk into walls." He also derived the ~25% bump rate from first principles: standing next to a wall, uniform choice over ~4 actions ≈ 25% chance of picking the wall. This is the efficiency-vs-competence split: perception bought *local* efficiency (don't waste the move you make) but nothing about *global* competence (right moves, right order, toward a goal). He distinguished these without being told.
+
+**Spawn-poisoning diagnosis (correct mechanism):** flagged `impossible cells: [(46.0, 36.0)]` = the spawn. His theory: "initial position poisoned because when we start, nxt and prv are the same, almost no pixel changes." Confirmed against `0005-wall-aware-explorer.py:103` — the wall rule `change_mask.sum() < 100 and last_pos == next_pos` fires on the first observe when the engine hasn't settled (prev ≈ nxt), so a no-op startup frame is misread as a wall. The exercise-4 trap (teleport) leaked back in through an untested door (startup no-op). Spawn in a 3-wall pocket + this 4th false block → 4-blocked "impossible" cell.
+
+**Implications:** ZPD is now planning/sequencing, not perception. He is ready for lesson 0006 (movement graph from the inverted blocked-table → BFS to cross, then exit). Habit confirmed: reasons from the mechanism/code, not from vibes. Teach forward: a goal representation + a planner is the missing piece; efficiency was never the bottleneck.
