@@ -57,6 +57,8 @@ for line in __import__("sys").stdin:
     print(json.dumps(response, ensure_ascii=False), flush=True)
 '''
 
+MODEL_OUTPUT_CHAR_LIMIT = 4_000
+
 
 def _network_seccomp_fd() -> int:
     """Return an x86_64 seccomp BPF program that rejects socket creation/use."""
@@ -97,7 +99,7 @@ class PythonResult:
     timed_out: bool = False
     workspace_restarted: bool = False
 
-    def model_text(self, *, limit: int = 20_000) -> str:
+    def model_text(self, *, limit: int = MODEL_OUTPUT_CHAR_LIMIT) -> str:
         record = {
             "ok": self.ok,
             "stdout": self.stdout,
@@ -106,10 +108,47 @@ class PythonResult:
             "timed_out": self.timed_out,
             "workspace_restarted": self.workspace_restarted,
         }
-        rendered = json.dumps(record, ensure_ascii=False)
+        original = json.dumps(record, ensure_ascii=False)
+        payload = {
+            **record,
+            "truncated": False,
+            "original_chars": len(original),
+            "limit": limit,
+        }
+        rendered = json.dumps(payload, ensure_ascii=False)
         if len(rendered) <= limit:
             return rendered
-        return rendered[:limit] + "...[tool output truncated]"
+
+        payload["truncated"] = True
+        text_fields = (
+            ("stdout", "stderr", "traceback")
+            if self.ok
+            else ("traceback", "stdout", "stderr")
+        )
+        originals = {
+            field: payload[field]
+            for field in text_fields
+            if isinstance(payload[field], str)
+        }
+        for field in originals:
+            payload[field] = ""
+        if len(json.dumps(payload, ensure_ascii=False)) > limit:
+            raise ValueError(f"model output limit {limit} is too small for metadata")
+
+        for field in text_fields:
+            value = originals.get(field)
+            if value is None:
+                continue
+            low, high = 0, len(value)
+            while low < high:
+                middle = (low + high + 1) // 2
+                payload[field] = value[:middle]
+                if len(json.dumps(payload, ensure_ascii=False)) <= limit:
+                    low = middle
+                else:
+                    high = middle - 1
+            payload[field] = value[:low]
+        return json.dumps(payload, ensure_ascii=False)
 
 
 class PythonWorkspace:

@@ -18,7 +18,7 @@ from .observations import (
     ObservationStore,
 )
 from .process_log import ProcessLog
-from .workspace import PythonWorkspace
+from .workspace import PythonResult, PythonWorkspace
 
 
 SYSTEM_PROMPT = """You control an unfamiliar interactive visual system for this run only.
@@ -332,7 +332,11 @@ class LlmReplAgent:
             tool_id = str(tool_call.get("id", f"tool-{model_round}-{index}"))
             function = tool_call.get("function")
             if not isinstance(function, Mapping) or function.get("name") != "python":
-                output = json.dumps({"ok": False, "error": "only the python tool exists"})
+                output = PythonResult(
+                    ok=False,
+                    stdout="",
+                    stderr="only the python tool exists",
+                ).model_text()
                 code = None
             else:
                 arguments = function.get("arguments", "{}")
@@ -345,7 +349,15 @@ class LlmReplAgent:
                     output = result.model_text()
                 except (json.JSONDecodeError, ValueError) as error:
                     code = None
-                    output = json.dumps({"ok": False, "error": str(error)})
+                    output = PythonResult(
+                        ok=False,
+                        stdout="",
+                        stderr=str(error),
+                    ).model_text()
+            try:
+                output_record = json.loads(output)
+            except json.JSONDecodeError:
+                output_record = {}
             self.process_log.write(
                 "python_tool",
                 phase="policy",
@@ -354,6 +366,8 @@ class LlmReplAgent:
                 tool_call_id=tool_id,
                 code=code,
                 output=output,
+                output_chars=len(output),
+                output_truncated=bool(output_record.get("truncated", False)),
             )
             self._log_workspace_changes(
                 action_step=action_step,

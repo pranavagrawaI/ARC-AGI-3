@@ -64,6 +64,12 @@ after cumulative provider-reported usage reaches the threshold; a response may
 cross that threshold because its input usage is not known locally in advance.
 The per-request completion limit bounds output-side overshoot.
 
+Each Python result sent back to the model is valid JSON capped at 4,000
+characters. The result includes `truncated`, `original_chars`, and `limit`
+metadata, and `process.jsonl` preserves the exact bounded text the model saw.
+This is a generic context-bandwidth constraint; it does not summarize or
+interpret the output for the model.
+
 For the local FP8 checkpoint later, keep the same Qwen request profile and
 change only the transport and served model ID:
 

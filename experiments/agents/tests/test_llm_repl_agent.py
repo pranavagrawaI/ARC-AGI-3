@@ -29,7 +29,7 @@ from llm_repl_agent.config import model_request_options, resolve_model_environme
 from llm_repl_agent.conversation import RollingConversation
 from llm_repl_agent.observations import ColorPermutation
 from llm_repl_agent.process_log import annotation_template, measurement_summary, ProcessLog
-from llm_repl_agent.workspace import PythonWorkspace
+from llm_repl_agent.workspace import PythonResult, PythonWorkspace
 from probe_model import PNG_DATA_URL, valid_python_tool_call
 
 
@@ -253,6 +253,22 @@ class RollingConversationTests(unittest.TestCase):
 
 
 class PythonWorkspaceTests(unittest.TestCase):
+    def test_model_text_is_valid_bounded_json_with_truncation_metadata(self) -> None:
+        result = PythonResult(
+            ok=True,
+            stdout="x" * 10_000,
+            stderr="",
+        )
+
+        model_text = result.model_text()
+        payload = json.loads(model_text)
+
+        self.assertLessEqual(len(model_text), 4_000)
+        self.assertTrue(payload["truncated"])
+        self.assertGreater(payload["original_chars"], payload["limit"])
+        self.assertEqual(payload["limit"], 4_000)
+        self.assertTrue(payload["stdout"].startswith("x"))
+
     def test_namespace_and_files_persist_without_repo_or_home_mounts(self) -> None:
         with PythonWorkspace(timeout_seconds=5) as workspace:
             first = workspace.execute(
@@ -326,7 +342,7 @@ class LlmReplAgentTests(unittest.TestCase):
                             "code": "from pathlib import Path\n"
                             "probe = 21 * 2\n"
                             "Path('notes.txt').write_text(str(probe))\n"
-                            "print(probe)"
+                            "print('x' * 5000)"
                         }),
                     },
                 }],
@@ -364,7 +380,14 @@ class LlmReplAgentTests(unittest.TestCase):
                 continued_assistant["reasoning_content"],
                 "I should inspect the workspace first.",
             )
-            self.assertTrue(any(item["type"] == "python_tool" for item in events))
+            python_tool = next(item for item in events if item["type"] == "python_tool")
+            self.assertTrue(python_tool["output_truncated"])
+            self.assertEqual(python_tool["output_chars"], len(python_tool["output"]))
+            self.assertEqual(json.loads(python_tool["output"])["truncated"], True)
+            self.assertEqual(
+                client.requests[1]["messages"][-1]["content"],
+                python_tool["output"],
+            )
             workspace_change = next(item for item in events if item["type"] == "workspace_change")
             self.assertEqual(workspace_change["phase"], "policy")
             self.assertEqual(workspace_change["changes"][0]["path"], "notes.txt")
@@ -411,6 +434,38 @@ class LlmReplAgentTests(unittest.TestCase):
         self.assertEqual(len(client.requests), 1)
         self.assertEqual(agent.model_calls, 1)
         self.assertTrue(any(item["type"] == "model_budget_exhausted" for item in events))
+
+    def test_invalid_tool_call_uses_the_bounded_result_envelope(self) -> None:
+        invalid_tool = ChatResponse(
+            message={
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "shell", "arguments": "{}"},
+                }],
+            },
+            usage={},
+        )
+        client = ScriptedClient([
+            invalid_tool,
+            response('{"action": 1, "data": null, "reason": "recover"}'),
+        ])
+        with TemporaryDirectory() as directory, PythonWorkspace(timeout_seconds=5) as workspace:
+            with ProcessLog(Path(directory) / "process.jsonl") as process_log:
+                agent = LlmReplAgent(
+                    client=client,
+                    workspace=workspace,
+                    process_log=process_log,
+                )
+
+                agent.act(observation())
+
+        tool_result = json.loads(client.requests[1]["messages"][-1]["content"])
+        self.assertFalse(tool_result["ok"])
+        self.assertFalse(tool_result["truncated"])
+        self.assertEqual(tool_result["limit"], 4_000)
 
     def test_reported_token_budget_refuses_the_next_request(self) -> None:
         tool_response = ChatResponse(
