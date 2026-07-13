@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
+import struct
 import sys
 from tempfile import TemporaryDirectory
 import unittest
@@ -28,7 +30,7 @@ from llm_repl_agent.conversation import RollingConversation
 from llm_repl_agent.observations import ColorPermutation
 from llm_repl_agent.process_log import annotation_template, measurement_summary, ProcessLog
 from llm_repl_agent.workspace import PythonWorkspace
-from probe_model import valid_python_tool_call
+from probe_model import PNG_DATA_URL, valid_python_tool_call
 
 
 def observation(
@@ -207,6 +209,14 @@ class ModelEnvironmentTests(unittest.TestCase):
 
 
 class ModelProbeTests(unittest.TestCase):
+    def test_embedded_image_meets_qwen_minimum_dimensions(self) -> None:
+        encoded = PNG_DATA_URL.split(",", 1)[1]
+        png = base64.b64decode(encoded)
+        width, height = struct.unpack(">II", png[16:24])
+
+        self.assertGreater(width, 10)
+        self.assertGreater(height, 10)
+
     def test_requires_parseable_python_code_arguments(self) -> None:
         valid = [{
             "function": {

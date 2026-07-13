@@ -27,11 +27,11 @@ from llm_repl_agent import (
 from llm_repl_agent.agent import PYTHON_TOOL
 
 
-# Valid one-pixel PNG. The probe tests image transport, not visual competence.
+# Valid 16x16 PNG. The probe tests image transport, not visual competence.
 PNG_DATA_URL = (
     "data:image/png;base64,"
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUB"
-    "AScY42YAAAAASUVORK5CYII="
+    "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAGUlEQVR4nGP8//8/AymA"
+    "iSTVoxpGNQwpDQBVbQMdPVIhQwAAAABJRU5ErkJggg=="
 )
 
 
