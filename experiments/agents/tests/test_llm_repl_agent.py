@@ -16,12 +16,19 @@ AGENT_ROOT = Path(__file__).resolve().parents[1] / "0002-llm-repl-agent"
 if str(AGENT_ROOT) not in sys.path:
     sys.path.insert(0, str(AGENT_ROOT))
 
-from llm_repl_agent.agent import LlmAgentConfig, LlmReplAgent, SYSTEM_PROMPT
+from llm_repl_agent.agent import (
+    LlmAgentConfig,
+    LlmReplAgent,
+    ModelBudgetExceeded,
+    SYSTEM_PROMPT,
+)
 from llm_repl_agent.client import ChatResponse, OpenAICompatibleChatClient
+from llm_repl_agent.config import model_request_options, resolve_model_environment
 from llm_repl_agent.conversation import RollingConversation
 from llm_repl_agent.observations import ColorPermutation
 from llm_repl_agent.process_log import annotation_template, measurement_summary, ProcessLog
 from llm_repl_agent.workspace import PythonWorkspace
+from probe_model import valid_python_tool_call
 
 
 def observation(
@@ -121,6 +128,99 @@ class OpenAICompatibleClientTests(unittest.TestCase):
         self.assertEqual(body["seed"], 9)
         self.assertEqual(result.response_id, "chat-1")
 
+    def test_posts_qwen_thinking_and_sampling_contract(self) -> None:
+        options = model_request_options("qwen3.6")
+        client = OpenAICompatibleChatClient(
+            base_url="https://model.invalid/v1",
+            model="qwen3.6-27b",
+            api_key="test-key",
+            **options,
+            seed=9,
+        )
+        with patch("llm_repl_agent.client.urlopen", return_value=FakeHttpResponse()) as opened:
+            client.complete(messages=[{"role": "user", "content": "hello"}], tools=[])
+
+        body = json.loads(opened.call_args.args[0].data)
+        self.assertNotIn("max_tokens", body)
+        self.assertEqual(body["max_completion_tokens"], 4096)
+        self.assertEqual(body["temperature"], 1.0)
+        self.assertEqual(body["top_p"], 0.95)
+        self.assertEqual(body["top_k"], 20)
+        self.assertEqual(body["presence_penalty"], 0.0)
+        self.assertIs(body["enable_thinking"], True)
+        self.assertIs(body["preserve_thinking"], True)
+
+
+class ModelEnvironmentTests(unittest.TestCase):
+    def test_qwen_names_take_precedence_without_exposing_key_in_repr(self) -> None:
+        resolved = resolve_model_environment({
+            "QWEN_API_KEY": "qwen-secret",
+            "QWEN_MODEL": "qwen3.6-27b",
+            "OPENAI_API_KEY": "generic-secret",
+            "OPENAI_MODEL": "other-model",
+            "OPENAI_BASE_URL": "https://workspace.invalid/compatible-mode/v1",
+        })
+
+        self.assertEqual(resolved.model, "qwen3.6-27b")
+        self.assertEqual(resolved.profile, "qwen3.6")
+        self.assertEqual(resolved.api_key, "qwen-secret")
+        self.assertEqual(resolved.api_key_source, "QWEN_API_KEY")
+        self.assertNotIn("qwen-secret", repr(resolved))
+
+    def test_repeating_qwen_model_on_cli_does_not_change_profile(self) -> None:
+        resolved = resolve_model_environment(
+            {
+                "QWEN_API_KEY": "qwen-secret",
+                "QWEN_MODEL": "qwen3.6-27b",
+                "OPENAI_BASE_URL": "https://workspace.invalid/compatible-mode/v1",
+            },
+            model="qwen3.6-27b",
+        )
+
+        self.assertEqual(resolved.profile, "qwen3.6")
+
+    def test_remote_endpoint_requires_a_key(self) -> None:
+        with self.assertRaisesRegex(ValueError, "API key"):
+            resolve_model_environment({
+                "OPENAI_MODEL": "remote-model",
+                "OPENAI_BASE_URL": "https://model.invalid/v1",
+            })
+
+    def test_local_generic_endpoint_uses_empty_compatibility_key(self) -> None:
+        resolved = resolve_model_environment({"OPENAI_MODEL": "local-model"})
+
+        self.assertEqual(resolved.endpoint, "http://127.0.0.1:8000/v1")
+        self.assertEqual(resolved.api_key, "EMPTY")
+        self.assertEqual(resolved.profile, "generic")
+
+    def test_hosted_keys_are_never_sent_to_a_local_endpoint(self) -> None:
+        resolved = resolve_model_environment(
+            {
+                "QWEN_API_KEY": "hosted-secret",
+                "QWEN_MODEL": "qwen3.6-27b",
+            },
+            endpoint="http://127.0.0.1:8000/v1",
+        )
+
+        self.assertEqual(resolved.api_key, "EMPTY")
+        self.assertIsNone(resolved.api_key_source)
+
+
+class ModelProbeTests(unittest.TestCase):
+    def test_requires_parseable_python_code_arguments(self) -> None:
+        valid = [{
+            "function": {
+                "name": "python",
+                "arguments": json.dumps({"code": "print(6 * 7)"}),
+            }
+        }]
+        malformed = [{
+            "function": {"name": "python", "arguments": "not-json"}
+        }]
+
+        self.assertTrue(valid_python_tool_call(valid))
+        self.assertFalse(valid_python_tool_call(malformed))
+
 
 class RollingConversationTests(unittest.TestCase):
     def test_evicts_complete_old_turns_but_never_the_system_message(self) -> None:
@@ -164,7 +264,8 @@ class PythonWorkspaceTests(unittest.TestCase):
             )
             environment = workspace.execute(
                 "import importlib.util, os\n"
-                "print('ARC_API_KEY' in os.environ, os.environ.get('HOME'), "
+                "print('ARC_API_KEY' in os.environ, 'QWEN_API_KEY' in os.environ, "
+                "os.environ.get('HOME'), "
                 "importlib.util.find_spec('requests'))\n"
             )
 
@@ -174,7 +275,7 @@ class PythonWorkspaceTests(unittest.TestCase):
             self.assertTrue(network.ok, network.traceback)
             self.assertEqual(network.stdout.strip(), "PermissionError 1")
             self.assertTrue(environment.ok, environment.traceback)
-            self.assertEqual(environment.stdout.strip(), "False /workspace None")
+            self.assertEqual(environment.stdout.strip(), "False False /workspace None")
             runtime = workspace.runtime_info()
             self.assertEqual(runtime["executable"], "/usr/bin/python3.12")
             self.assertNotIn("requests", runtime["top_level_modules"])
@@ -205,6 +306,7 @@ class LlmReplAgentTests(unittest.TestCase):
             message={
                 "role": "assistant",
                 "content": None,
+                "reasoning_content": "I should inspect the workspace first.",
                 "tool_calls": [{
                     "id": "call-1",
                     "type": "function",
@@ -247,6 +349,11 @@ class LlmReplAgentTests(unittest.TestCase):
             self.assertEqual(decision.reasoning["decision_repairs"], 1)
             self.assertEqual(agent.usage, {"prompt_tokens": 24, "completion_tokens": 10})
             self.assertEqual(len(client.requests), 3)
+            continued_assistant = client.requests[1]["messages"][-2]
+            self.assertEqual(
+                continued_assistant["reasoning_content"],
+                "I should inspect the workspace first.",
+            )
             self.assertTrue(any(item["type"] == "python_tool" for item in events))
             workspace_change = next(item for item in events if item["type"] == "workspace_change")
             self.assertEqual(workspace_change["phase"], "policy")
@@ -258,6 +365,119 @@ class LlmReplAgentTests(unittest.TestCase):
                 (workspace.root / "public_history.jsonl").read_text().count("\n"),
                 1,
             )
+
+    def test_model_call_budget_refuses_a_second_request(self) -> None:
+        tool_response = ChatResponse(
+            message={
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "python",
+                        "arguments": json.dumps({"code": "print(1)"}),
+                    },
+                }],
+            },
+            usage={"prompt_tokens": 4, "completion_tokens": 3, "total_tokens": 7},
+        )
+        client = ScriptedClient([tool_response, response("{}")])
+        with TemporaryDirectory() as directory, PythonWorkspace(timeout_seconds=5) as workspace:
+            log_path = Path(directory) / "process.jsonl"
+            with ProcessLog(log_path) as process_log:
+                agent = LlmReplAgent(
+                    client=client,
+                    workspace=workspace,
+                    process_log=process_log,
+                    config=LlmAgentConfig(max_model_calls=1),
+                )
+
+                with self.assertRaisesRegex(ModelBudgetExceeded, "model-call budget"):
+                    agent.act(observation())
+
+            events = [json.loads(line) for line in log_path.read_text().splitlines()]
+
+        self.assertEqual(len(client.requests), 1)
+        self.assertEqual(agent.model_calls, 1)
+        self.assertTrue(any(item["type"] == "model_budget_exhausted" for item in events))
+
+    def test_reported_token_budget_refuses_the_next_request(self) -> None:
+        tool_response = ChatResponse(
+            message={
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "python",
+                        "arguments": json.dumps({"code": "print(1)"}),
+                    },
+                }],
+            },
+            usage={"prompt_tokens": 4, "completion_tokens": 3, "total_tokens": 7},
+        )
+        client = ScriptedClient([tool_response, response("{}")])
+        with TemporaryDirectory() as directory, PythonWorkspace(timeout_seconds=5) as workspace:
+            with ProcessLog(Path(directory) / "process.jsonl") as process_log:
+                agent = LlmReplAgent(
+                    client=client,
+                    workspace=workspace,
+                    process_log=process_log,
+                    config=LlmAgentConfig(max_reported_tokens=7),
+                )
+
+                with self.assertRaisesRegex(ModelBudgetExceeded, "reported-token budget"):
+                    agent.act(observation())
+
+        self.assertEqual(len(client.requests), 1)
+
+    def test_reported_token_budget_handles_mixed_usage_schemas(self) -> None:
+        first = ChatResponse(
+            message={
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "python",
+                        "arguments": json.dumps({"code": "print(1)"}),
+                    },
+                }],
+            },
+            usage={"prompt_tokens": 4, "completion_tokens": 3, "total_tokens": 7},
+        )
+        second = ChatResponse(
+            message={
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "call-2",
+                    "type": "function",
+                    "function": {
+                        "name": "python",
+                        "arguments": json.dumps({"code": "print(2)"}),
+                    },
+                }],
+            },
+            usage={"prompt_tokens": 2, "completion_tokens": 2},
+        )
+        client = ScriptedClient([first, second, response("{}")])
+        with TemporaryDirectory() as directory, PythonWorkspace(timeout_seconds=5) as workspace:
+            with ProcessLog(Path(directory) / "process.jsonl") as process_log:
+                agent = LlmReplAgent(
+                    client=client,
+                    workspace=workspace,
+                    process_log=process_log,
+                    config=LlmAgentConfig(max_reported_tokens=11),
+                )
+
+                with self.assertRaisesRegex(ModelBudgetExceeded, "11/11"):
+                    agent.act(observation())
+
+        self.assertEqual(len(client.requests), 2)
 
     def test_coordinate_action_requires_in_bounds_integer_data(self) -> None:
         client = ScriptedClient([

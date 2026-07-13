@@ -22,17 +22,24 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/mpl-cache")
 
 import arc_agi
 from arc_agi.base import OperationMode
+from dotenv import load_dotenv
 
 from experiments.harness import JsonlTraceWriter, run_episode
 from llm_repl_agent import (
     ColorPermutation,
     LlmAgentConfig,
     LlmReplAgent,
+    ModelBudgetExceeded,
     OpenAICompatibleChatClient,
     ProcessLog,
     PythonWorkspace,
+    model_request_options,
+    resolve_model_environment,
     write_annotation_template,
 )
+
+
+load_dotenv(REPO / ".env")
 
 
 def _jsonable(value: Any) -> Any:
@@ -61,22 +68,23 @@ def operation_mode(value: str) -> OperationMode:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run a generic local multimodal LLM contestant.")
+    parser = argparse.ArgumentParser(description="Run a generic multimodal LLM contestant.")
     parser.add_argument("--game", required=True, help="Host-only game id; never shown to the model.")
-    parser.add_argument("--model", default=os.environ.get("OPENAI_MODEL"))
-    parser.add_argument(
-        "--endpoint",
-        default=os.environ.get("OPENAI_BASE_URL", "http://127.0.0.1:8000/v1"),
-    )
+    parser.add_argument("--model")
+    parser.add_argument("--endpoint")
+    parser.add_argument("--model-profile", choices=("generic", "qwen3.6"))
     parser.add_argument("--operation-mode", type=operation_mode, default=OperationMode.OFFLINE)
     parser.add_argument("--env-seed", type=int, default=0)
     parser.add_argument("--model-seed", type=int, default=0)
-    parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--max-tokens", type=int, default=2048)
+    parser.add_argument("--temperature", type=float)
+    parser.add_argument("--max-tokens", type=int)
+    parser.add_argument("--max-completion-tokens", type=int)
     parser.add_argument("--max-actions", type=int, default=500)
     parser.add_argument("--max-context-turns", type=int, default=6)
     parser.add_argument("--max-model-rounds-per-action", type=int, default=10)
     parser.add_argument("--max-decision-repairs", type=int, default=2)
+    parser.add_argument("--max-model-calls", type=int, default=100)
+    parser.add_argument("--max-reported-tokens", type=int, default=250_000)
     parser.add_argument("--workspace-timeout", type=float, default=20.0)
     parser.add_argument("--color-permutation-seed", type=int)
     parser.add_argument("--no-retrospective", action="store_true")
@@ -86,8 +94,21 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
-    if not args.model:
-        raise SystemExit("--model or OPENAI_MODEL is required")
+    try:
+        model_environment = resolve_model_environment(
+            os.environ,
+            model=args.model,
+            endpoint=args.endpoint,
+            profile=args.model_profile,
+        )
+        request_options = model_request_options(
+            model_environment.profile,
+            temperature=args.temperature,
+            max_tokens=args.max_tokens,
+            max_completion_tokens=args.max_completion_tokens,
+        )
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
 
     run_id = f"run-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid4().hex[:8]}"
     run_dir = args.run_dir or AGENT_ROOT / "artifacts" / "runs" / run_id
@@ -105,17 +126,20 @@ def main() -> None:
         "agent": "0002-llm-repl-agent",
         "game": args.game,
         "game_identifier_exposed_to_model": False,
-        "model": args.model,
-        "endpoint": args.endpoint,
+        "model": model_environment.model,
+        "endpoint": model_environment.endpoint,
+        "model_profile": model_environment.profile,
+        "api_key_source": model_environment.api_key_source,
         "operation_mode": args.operation_mode.value,
         "env_seed": args.env_seed,
         "model_seed": args.model_seed,
-        "temperature": args.temperature,
-        "max_tokens": args.max_tokens,
+        "model_request": request_options,
         "max_actions": args.max_actions,
         "max_context_turns": args.max_context_turns,
         "max_model_rounds_per_action": args.max_model_rounds_per_action,
         "max_decision_repairs": args.max_decision_repairs,
+        "max_model_calls": args.max_model_calls,
+        "max_reported_tokens": args.max_reported_tokens,
         "workspace_timeout": args.workspace_timeout,
         "retrospective_enabled": not args.no_retrospective,
         "color_permutation_seed": args.color_permutation_seed,
@@ -131,11 +155,10 @@ def main() -> None:
         raise RuntimeError(f"could not create requested game: {args.game}")
 
     client = OpenAICompatibleChatClient(
-        base_url=args.endpoint,
-        model=args.model,
-        api_key=os.environ.get("OPENAI_API_KEY", "EMPTY"),
-        temperature=args.temperature,
-        max_tokens=args.max_tokens,
+        base_url=model_environment.endpoint,
+        model=model_environment.model,
+        api_key=model_environment.api_key,
+        **request_options,
         seed=args.model_seed,
     )
     workspace = PythonWorkspace(timeout_seconds=args.workspace_timeout)
@@ -151,11 +174,14 @@ def main() -> None:
             max_context_turns=args.max_context_turns,
             max_model_rounds_per_action=args.max_model_rounds_per_action,
             max_decision_repairs=args.max_decision_repairs,
+            max_model_calls=args.max_model_calls,
+            max_reported_tokens=args.max_reported_tokens,
         ),
     )
     result = None
     retrospective = None
     error: BaseException | None = None
+    budget_exhausted = False
     workspace_snapshotted = False
     try:
         process_log.write("run_started", run_id=run_id)
@@ -172,6 +198,15 @@ def main() -> None:
             state=result.final.state,
             stop_reason=result.stop_reason,
             usage=agent.usage,
+        )
+    except ModelBudgetExceeded as caught:
+        error = caught
+        budget_exhausted = True
+        process_log.write(
+            "run_stopped",
+            stop_reason="model_budget_exhausted",
+            detail=str(caught),
+            actions=agent.actions,
         )
     except BaseException as caught:
         error = caught
@@ -192,14 +227,23 @@ def main() -> None:
     _write_json(run_dir / "scorecard.json", scorecard)
     manifest.update({
         "finished_at": datetime.now(timezone.utc).isoformat(),
-        "status": "failed" if error is not None else "complete",
+        "status": (
+            "budget_exhausted"
+            if budget_exhausted
+            else "failed" if error is not None else "complete"
+        ),
         "actions": result.actions if result is not None else agent.actions,
         "levels_completed": result.final.levels_completed if result is not None else None,
         "state": result.final.state if result is not None else None,
-        "stop_reason": result.stop_reason if result is not None else "error",
+        "stop_reason": (
+            result.stop_reason
+            if result is not None
+            else "model_budget_exhausted" if budget_exhausted else "error"
+        ),
         "usage": dict(agent.usage),
         "retrospective": retrospective,
-        "error": repr(error) if error is not None else None,
+        "error": repr(error) if error is not None and not budget_exhausted else None,
+        "budget_message": str(error) if budget_exhausted else None,
     })
     _write_json(run_dir / "manifest.json", manifest)
     print(json.dumps({
@@ -212,7 +256,7 @@ def main() -> None:
         "usage": manifest["usage"],
         "run_dir": str(run_dir),
     }, indent=2, sort_keys=True))
-    if error is not None:
+    if error is not None and not budget_exhausted:
         raise error
 
 

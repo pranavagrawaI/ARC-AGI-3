@@ -67,9 +67,15 @@ class LlmAgentConfig:
     max_context_turns: int = 6
     max_model_rounds_per_action: int = 10
     max_decision_repairs: int = 2
+    max_model_calls: int | None = None
+    max_reported_tokens: int | None = None
 
 
 class DecisionFormatError(ValueError):
+    pass
+
+
+class ModelBudgetExceeded(RuntimeError):
     pass
 
 
@@ -100,6 +106,8 @@ class LlmReplAgent:
         self._pending_before: ModelObservation | None = None
         self._history: list[dict[str, Any]] = []
         self._usage: dict[str, int] = {}
+        self._reported_tokens_total = 0
+        self._model_calls = 0
         self._workspace_evidence = workspace.evidence_state()
 
     def act(self, observation: Observation) -> Decision:
@@ -110,8 +118,7 @@ class LlmReplAgent:
 
         for model_round in range(1, self.config.max_model_rounds_per_action + 1):
             messages = self.conversation.messages() + turn
-            response = self.client.complete(messages=messages, tools=(PYTHON_TOOL,))
-            self._add_usage(response.usage)
+            response = self._complete(messages=messages, tools=(PYTHON_TOOL,))
             self.process_log.write(
                 "model_response",
                 action_step=self.actions + 1,
@@ -213,8 +220,15 @@ class LlmReplAgent:
             ],
         }]
         request_messages = self.conversation.messages() + turn
-        response = self.client.complete(messages=request_messages, tools=())
-        self._add_usage(response.usage)
+        budget_reason = self._budget_reason()
+        if budget_reason is not None:
+            self.process_log.write(
+                "retrospective_skipped",
+                actions=self.actions,
+                reason=budget_reason,
+            )
+            return {"skipped": budget_reason}
+        response = self._complete(messages=request_messages, tools=())
         self.process_log.write(
             "model_response",
             phase="retrospective",
@@ -236,6 +250,47 @@ class LlmReplAgent:
     @property
     def usage(self) -> Mapping[str, int]:
         return dict(self._usage)
+
+    @property
+    def model_calls(self) -> int:
+        return self._model_calls
+
+    def _complete(
+        self,
+        *,
+        messages: Sequence[Mapping[str, Any]],
+        tools: Sequence[Mapping[str, Any]],
+    ) -> ChatResponse:
+        budget_reason = self._budget_reason()
+        if budget_reason is not None:
+            self.process_log.write(
+                "model_budget_exhausted",
+                actions=self.actions,
+                model_calls=self._model_calls,
+                usage=self.usage,
+                reason=budget_reason,
+            )
+            raise ModelBudgetExceeded(budget_reason)
+        self._model_calls += 1
+        response = self.client.complete(messages=messages, tools=tools)
+        self._add_usage(response.usage)
+        return response
+
+    def _budget_reason(self) -> str | None:
+        max_calls = self.config.max_model_calls
+        if max_calls is not None and self._model_calls >= max_calls:
+            return f"model-call budget exhausted ({self._model_calls}/{max_calls})"
+        max_tokens = self.config.max_reported_tokens
+        reported_tokens = self._reported_tokens()
+        if max_tokens is not None and reported_tokens >= max_tokens:
+            return (
+                "reported-token budget exhausted "
+                f"({reported_tokens}/{max_tokens}); the last response may cross this gate"
+            )
+        return None
+
+    def _reported_tokens(self) -> int:
+        return self._reported_tokens_total
 
     def _observation(self, observation: Observation) -> ModelObservation:
         if self._current is None:
@@ -383,6 +438,14 @@ class LlmReplAgent:
         )
 
     def _add_usage(self, usage: Mapping[str, Any]) -> None:
+        total_tokens = usage.get("total_tokens")
+        if isinstance(total_tokens, int) and not isinstance(total_tokens, bool):
+            self._reported_tokens_total += total_tokens
+        else:
+            for key in ("prompt_tokens", "completion_tokens"):
+                value = usage.get(key)
+                if isinstance(value, int) and not isinstance(value, bool):
+                    self._reported_tokens_total += value
         for key, value in usage.items():
             if isinstance(value, int) and not isinstance(value, bool):
                 self._usage[key] = self._usage.get(key, 0) + value
@@ -409,6 +472,8 @@ def _assistant_message(message: Mapping[str, Any]) -> dict[str, Any]:
     }
     if isinstance(message.get("tool_calls"), list):
         output["tool_calls"] = message["tool_calls"]
+    if isinstance(message.get("reasoning_content"), str):
+        output["reasoning_content"] = message["reasoning_content"]
     return output
 
 

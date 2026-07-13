@@ -44,16 +44,26 @@ class OpenAICompatibleChatClient:
         model: str,
         api_key: str = "EMPTY",
         temperature: float = 0.0,
-        max_tokens: int = 2048,
+        max_tokens: int | None = 2048,
+        max_completion_tokens: int | None = None,
+        top_p: float | None = None,
+        presence_penalty: float | None = None,
         seed: int | None = 0,
         timeout_seconds: float = 300.0,
         extra_body: Mapping[str, Any] | None = None,
     ) -> None:
+        if (max_tokens is None) == (max_completion_tokens is None):
+            raise ValueError(
+                "configure exactly one of max_tokens or max_completion_tokens"
+            )
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.max_completion_tokens = max_completion_tokens
+        self.top_p = top_p
+        self.presence_penalty = presence_penalty
         self.seed = seed
         self.timeout_seconds = timeout_seconds
         self.extra_body = dict(extra_body or {})
@@ -70,8 +80,15 @@ class OpenAICompatibleChatClient:
             "tools": list(tools),
             "tool_choice": "auto",
             "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
         }
+        if self.max_tokens is not None:
+            payload["max_tokens"] = self.max_tokens
+        if self.max_completion_tokens is not None:
+            payload["max_completion_tokens"] = self.max_completion_tokens
+        if self.top_p is not None:
+            payload["top_p"] = self.top_p
+        if self.presence_penalty is not None:
+            payload["presence_penalty"] = self.presence_penalty
         if self.seed is not None:
             payload["seed"] = self.seed
         payload.update(self.extra_body)
