@@ -19,6 +19,7 @@ if str(AGENT_ROOT) not in sys.path:
     sys.path.insert(0, str(AGENT_ROOT))
 
 from llm_repl_agent.agent import (
+    EXPERIMENT_FIRST_SYSTEM_PROMPT,
     LlmAgentConfig,
     LlmReplAgent,
     ModelBudgetExceeded,
@@ -327,6 +328,26 @@ class PythonWorkspaceTests(unittest.TestCase):
 
 
 class LlmReplAgentTests(unittest.TestCase):
+    def test_selected_system_prompt_is_sent_in_the_first_model_request(self) -> None:
+        client = ScriptedClient([
+            response('{"action": 1, "data": null, "reason": "probe early"}')
+        ])
+        with TemporaryDirectory() as directory, PythonWorkspace(timeout_seconds=5) as workspace:
+            with ProcessLog(Path(directory) / "process.jsonl") as process_log:
+                agent = LlmReplAgent(
+                    client=client,
+                    workspace=workspace,
+                    process_log=process_log,
+                    system_prompt=EXPERIMENT_FIRST_SYSTEM_PROMPT,
+                )
+
+                agent.act(observation())
+
+        self.assertEqual(
+            client.requests[0]["messages"][0],
+            {"role": "system", "content": EXPERIMENT_FIRST_SYSTEM_PROMPT},
+        )
+
     def test_python_tool_then_legal_action_repair_and_transition_logging(self) -> None:
         tool_response = ChatResponse(
             message={
@@ -591,10 +612,17 @@ class LlmReplAgentTests(unittest.TestCase):
         self.assertEqual(retrospective_state, policy_state)
 
     def test_policy_prompt_contains_no_game_or_benchmark_identifier(self) -> None:
-        lowered = SYSTEM_PROMPT.lower()
-        self.assertNotIn("arc-agi", lowered)
-        self.assertNotIn("ls20", lowered)
-        self.assertNotIn("benchmark", lowered)
+        for prompt in (SYSTEM_PROMPT, EXPERIMENT_FIRST_SYSTEM_PROMPT):
+            lowered = prompt.lower()
+            self.assertNotIn("arc-agi", lowered)
+            self.assertNotIn("ls20", lowered)
+            self.assertNotIn("benchmark", lowered)
+
+    def test_experiment_first_prompt_prefers_interaction_over_description(self) -> None:
+        lowered = EXPERIMENT_FIRST_SYSTEM_PROMPT.lower()
+        self.assertIn("wing it", lowered)
+        self.assertIn("quick\nlegal probes", lowered)
+        self.assertIn("not for exhaustive description before acting", lowered)
 
 
 class ProcessAnnotationTests(unittest.TestCase):

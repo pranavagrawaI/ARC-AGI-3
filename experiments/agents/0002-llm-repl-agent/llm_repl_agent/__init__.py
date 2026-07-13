@@ -1,6 +1,12 @@
 """Generic LLM + isolated Python workspace contestant."""
 
-from .agent import LlmAgentConfig, LlmReplAgent, ModelBudgetExceeded
+from .agent import (
+    EXPERIMENT_FIRST_SYSTEM_PROMPT,
+    POLICY_PROMPTS,
+    LlmAgentConfig,
+    LlmReplAgent,
+    ModelBudgetExceeded,
+)
 from .client import ChatClient, ChatResponse, OpenAICompatibleChatClient
 from .config import ModelEnvironment, model_request_options, resolve_model_environment
 from .observations import ColorPermutation
@@ -11,6 +17,7 @@ __all__ = [
     "ChatClient",
     "ChatResponse",
     "ColorPermutation",
+    "EXPERIMENT_FIRST_SYSTEM_PROMPT",
     "LlmAgentConfig",
     "LlmReplAgent",
     "ModelBudgetExceeded",
@@ -18,6 +25,7 @@ __all__ = [
     "MODEL_OUTPUT_CHAR_LIMIT",
     "model_request_options",
     "OpenAICompatibleChatClient",
+    "POLICY_PROMPTS",
     "measurement_summary",
     "ProcessLog",
     "PythonWorkspace",

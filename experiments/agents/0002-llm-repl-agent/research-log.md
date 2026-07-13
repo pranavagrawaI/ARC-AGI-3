@@ -38,3 +38,29 @@ real environment transition, but it does not yet make the controller viable at
 this budget. First-action latency remains eight tool calls. Raising the token
 budget would conceal that control problem; the next experiment should isolate
 why analysis does not terminate earlier.
+
+## 2026-07-13 — experiment-first prompt probe
+
+Question: does a prompt-only instruction to prioritize quick interaction over
+initial-frame understanding reduce action latency under the same controller and
+resource limits?
+
+The `experiment-first` variant adds no mechanism or game knowledge. It tells the
+model to wing it, use uncertainty as a reason to run legal probes, and reserve
+Python for concise comparison and bookkeeping. The run
+`run-20260713T100519Z-7e89c8a1` used the same model, game, seeds, five-action
+limit, fifteen-call limit, 50,000-token gate, 4,000-character Python-output
+bound, and disabled retrospective as the neutral run.
+
+Qwen issued action 1 on its first model call and action 2 on its second, with no
+Python calls. Both produced 52-pixel transitions. It then made six Python calls
+to compare the two transitions before issuing action 3, which also changed 52
+pixels. The run stopped before action 4 at 53,741 reported tokens. No level was
+completed.
+
+Compared with the neutral recorded run, first-action tool latency fell from
+eight calls to zero and completed probes increased from one to three. This is a
+single stochastic comparison, not a stable effect estimate. The trace does show
+that prompt wording can redirect early control, while the remaining bottleneck
+moves to post-transition analysis: failed dependency assumptions, schema
+rediscovery, and verbose pixel-level comparison.

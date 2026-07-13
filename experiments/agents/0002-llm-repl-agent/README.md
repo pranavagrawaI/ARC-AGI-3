@@ -52,6 +52,11 @@ uv run python experiments/agents/0002-llm-repl-agent/run.py \
   --no-retrospective
 ```
 
+Add `--policy-prompt experiment-first` for the prompt-only comparison that
+prioritizes quick legal probes and learning from visible transitions over
+exhaustive description of the initial frame. The default `neutral` prompt is
+unchanged. Each manifest records the selected variant and prompt SHA-256.
+
 When `QWEN_MODEL` is present, the runner selects the explicit `qwen3.6`
 profile: thinking and preserved thinking enabled, `temperature=1.0`,
 `top_p=0.95`, `top_k=20`, `presence_penalty=0`, and

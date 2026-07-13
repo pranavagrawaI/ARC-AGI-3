@@ -42,6 +42,23 @@ object whenever more analysis is useful.
 """
 
 
+EXPERIMENT_FIRST_SYSTEM_PROMPT = SYSTEM_PROMPT + """
+
+Experiment-first mode: wing it. Prioritize learning through interaction over explaining
+the initial screen. Do not try to understand the whole scene before acting. Make quick
+legal probes, observe their visible consequences, and revise your working model. Act as
+soon as you have a reasonable probe; uncertainty is a reason to experiment, not a reason
+to keep inspecting. Use Python for concise comparisons and bookkeeping when that directly
+helps choose or interpret an experiment, not for exhaustive description before acting.
+"""
+
+
+POLICY_PROMPTS = {
+    "neutral": SYSTEM_PROMPT,
+    "experiment-first": EXPERIMENT_FIRST_SYSTEM_PROMPT,
+}
+
+
 PYTHON_TOOL = {
     "type": "function",
     "function": {
@@ -86,6 +103,7 @@ class LlmReplAgent:
         client: ChatClient,
         workspace: PythonWorkspace,
         process_log: ProcessLog,
+        system_prompt: str = SYSTEM_PROMPT,
         color_permutation: ColorPermutation | None = None,
         config: LlmAgentConfig | None = None,
     ) -> None:
@@ -98,7 +116,7 @@ class LlmReplAgent:
             colors=color_permutation or ColorPermutation.identity(),
         )
         self.conversation = RollingConversation(
-            system_message={"role": "system", "content": SYSTEM_PROMPT},
+            system_message={"role": "system", "content": system_prompt},
             max_turns=self.config.max_context_turns,
         )
         self.actions = 0

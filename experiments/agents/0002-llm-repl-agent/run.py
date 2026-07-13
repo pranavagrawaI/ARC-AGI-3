@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -32,6 +33,7 @@ from llm_repl_agent import (
     MODEL_OUTPUT_CHAR_LIMIT,
     ModelBudgetExceeded,
     OpenAICompatibleChatClient,
+    POLICY_PROMPTS,
     ProcessLog,
     PythonWorkspace,
     model_request_options,
@@ -74,6 +76,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model")
     parser.add_argument("--endpoint")
     parser.add_argument("--model-profile", choices=("generic", "qwen3.6"))
+    parser.add_argument(
+        "--policy-prompt",
+        choices=tuple(POLICY_PROMPTS),
+        default="neutral",
+    )
     parser.add_argument("--operation-mode", type=operation_mode, default=OperationMode.OFFLINE)
     parser.add_argument("--env-seed", type=int, default=0)
     parser.add_argument("--model-seed", type=int, default=0)
@@ -95,6 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    policy_prompt = POLICY_PROMPTS[args.policy_prompt]
     try:
         model_environment = resolve_model_environment(
             os.environ,
@@ -135,6 +143,8 @@ def main() -> None:
         "env_seed": args.env_seed,
         "model_seed": args.model_seed,
         "model_request": request_options,
+        "policy_prompt_variant": args.policy_prompt,
+        "policy_prompt_sha256": sha256(policy_prompt.encode("utf-8")).hexdigest(),
         "max_actions": args.max_actions,
         "max_context_turns": args.max_context_turns,
         "max_model_rounds_per_action": args.max_model_rounds_per_action,
@@ -171,6 +181,7 @@ def main() -> None:
         client=client,
         workspace=workspace,
         process_log=process_log,
+        system_prompt=policy_prompt,
         color_permutation=colors,
         config=LlmAgentConfig(
             max_context_turns=args.max_context_turns,
