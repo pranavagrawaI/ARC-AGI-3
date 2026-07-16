@@ -293,7 +293,19 @@ class PythonWorkspaceTests(unittest.TestCase):
                 "import importlib.util, os\n"
                 "print('ARC_API_KEY' in os.environ, 'QWEN_API_KEY' in os.environ, "
                 "os.environ.get('HOME'), "
-                "importlib.util.find_spec('requests'))\n"
+                "importlib.util.find_spec('requests'), "
+                "importlib.util.find_spec('arc_agi'))\n"
+            )
+            scientific_python = workspace.execute(
+                "import numpy as np\n"
+                "from PIL import Image\n"
+                "values = np.arange(6).reshape(2, 3)\n"
+                "image = Image.fromarray(values.astype(np.uint8))\n"
+                "try:\n"
+                "    open(np.__file__, 'a').close()\n"
+                "except OSError as error:\n"
+                "    read_only = type(error).__name__\n"
+                "print(values.sum(), image.size, read_only)\n"
             )
 
             self.assertTrue(first.ok, first.traceback)
@@ -302,10 +314,18 @@ class PythonWorkspaceTests(unittest.TestCase):
             self.assertTrue(network.ok, network.traceback)
             self.assertEqual(network.stdout.strip(), "PermissionError 1")
             self.assertTrue(environment.ok, environment.traceback)
-            self.assertEqual(environment.stdout.strip(), "False False /workspace None")
+            self.assertEqual(environment.stdout.strip(), "False False /workspace None None")
+            self.assertTrue(scientific_python.ok, scientific_python.traceback)
+            self.assertEqual(
+                scientific_python.stdout.strip(),
+                "15 (3, 2) OSError",
+            )
             runtime = workspace.runtime_info()
-            self.assertEqual(runtime["executable"], "/usr/bin/python3.12")
+            self.assertEqual(runtime["executable"], "/runtime/bin/python3")
+            self.assertIn("numpy", runtime["top_level_modules"])
+            self.assertIn("PIL", runtime["top_level_modules"])
             self.assertNotIn("requests", runtime["top_level_modules"])
+            self.assertEqual(set(runtime["allowed_distributions"]), {"numpy", "pillow"})
             self.assertEqual((workspace.root / "notes.txt").read_text(), "42")
             self.assertEqual(evidence["notes.txt"]["text"], "42")
 
