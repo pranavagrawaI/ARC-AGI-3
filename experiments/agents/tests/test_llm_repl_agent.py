@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from io import BytesIO
 import json
 from pathlib import Path
 import struct
@@ -10,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
+from PIL import Image
 
 from experiments.harness import Decision, Observation, Transition
 
@@ -28,7 +30,12 @@ from llm_repl_agent.agent import (
 from llm_repl_agent.client import ChatResponse, OpenAICompatibleChatClient
 from llm_repl_agent.config import model_request_options, resolve_model_environment
 from llm_repl_agent.conversation import RollingConversation
-from llm_repl_agent.observations import ColorPermutation, OBSERVATION_FILE_CONTRACT
+from llm_repl_agent.observations import (
+    ColorPermutation,
+    OBSERVATION_FILE_CONTRACT,
+    pixels_to_png,
+    representation_descriptor,
+)
 from llm_repl_agent.process_log import annotation_template, measurement_summary, ProcessLog
 from llm_repl_agent.workspace import PythonResult, PythonWorkspace
 from probe_model import PNG_DATA_URL, valid_python_tool_call
@@ -105,6 +112,26 @@ class ColorPermutationTests(unittest.TestCase):
             [left.mapping[0], left.mapping[1], left.mapping[15]],
         )
         self.assertFalse(transformed.flags.writeable)
+
+    def test_render_descriptor_identifies_the_rendered_grid_layer(self) -> None:
+        pixels = np.asarray([
+            [[0, 0, 0], [0, 0, 0]],
+            [[9, 9, 9], [9, 9, 9]],
+        ], dtype=np.int8)
+        png = pixels_to_png(pixels, scale=2)
+        descriptor = representation_descriptor(pixels, png)
+        with Image.open(BytesIO(png)) as image:
+            rendered = np.asarray(image)
+        with Image.open(BytesIO(pixels_to_png(pixels[-1:], scale=2))) as image:
+            expected_last_layer = np.asarray(image)
+        with Image.open(BytesIO(pixels_to_png(pixels[:1], scale=2))) as image:
+            unexpected_first_layer = np.asarray(image)
+
+        self.assertEqual(descriptor["rendered_image"]["source_grid_layer"], 1)
+        self.assertEqual(descriptor["rendered_image"]["source_grid_scale"], 2)
+        self.assertEqual(descriptor["rendered_image"]["dtype"], str(rendered.dtype))
+        np.testing.assert_array_equal(rendered, expected_last_layer)
+        self.assertFalse(np.array_equal(rendered, unexpected_first_layer))
 
 
 class OpenAICompatibleClientTests(unittest.TestCase):
@@ -368,6 +395,11 @@ class LlmReplAgentTests(unittest.TestCase):
                 (workspace.root / "current_observation.json").read_text()
             )
             workspace_guide = (workspace.root / "WORKSPACE.md").read_text()
+            with Image.open(workspace.root / "current_frame.png") as rendered:
+                rendered_mode = rendered.mode
+                rendered_array = np.asarray(rendered)
+                rendered_shape = list(rendered_array.shape)
+                rendered_dtype = str(rendered_array.dtype)
 
         self.assertNotIn("current", prompt_record)
         file_metadata = {
@@ -379,6 +411,29 @@ class LlmReplAgentTests(unittest.TestCase):
         self.assertNotIn("pixels", prompt_record["current_metadata"])
         self.assertEqual(file_record["step"], prompt_record["step"])
         self.assertEqual(np.asarray(file_record["pixels"]).shape, (1, 6, 8))
+        representations = prompt_record["representations"]
+        self.assertEqual(representations["grid"], {
+            "path": "current_observation.json",
+            "json_pointer": "/pixels",
+            "encoding": "nested_integer_array",
+            "values": "integer_color_ids",
+            "json_value_type": "integer",
+            "axes": ["layer", "row", "column"],
+            "shape": [1, 6, 8],
+        })
+        self.assertIsInstance(file_record["pixels"][0][0][0], int)
+        self.assertEqual(representations["rendered_image"], {
+            "path": "current_frame.png",
+            "encoding": "rgb",
+            "axes": ["row", "column", "channel"],
+            "shape": [48, 64, 3],
+            "dtype": rendered_dtype,
+            "source_grid_layer": 0,
+            "source_grid_scale": 8,
+        })
+        self.assertEqual(rendered_mode, "RGB")
+        self.assertEqual(representations["rendered_image"]["shape"], rendered_shape)
+        self.assertEqual(representations["rendered_image"]["dtype"], rendered_dtype)
         self.assertIn(OBSERVATION_FILE_CONTRACT, SYSTEM_PROMPT)
         self.assertIn(OBSERVATION_FILE_CONTRACT, workspace_guide)
 
@@ -423,6 +478,9 @@ class LlmReplAgentTests(unittest.TestCase):
 
         self.assertEqual(decision.action, 1)
         self.assertEqual([len(request["messages"]) for request in client.requests], [2, 4, 5, 5])
+        for request in client.requests:
+            observation_text = request["messages"][1]["content"][0]["text"]
+            self.assertIn("representations", json.loads(observation_text))
         third_request = json.dumps(client.requests[2]["messages"])
         fourth_request = json.dumps(client.requests[3]["messages"])
         self.assertNotIn("first-result", third_request)

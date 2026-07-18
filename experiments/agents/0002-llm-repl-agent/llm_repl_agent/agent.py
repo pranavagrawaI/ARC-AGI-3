@@ -29,7 +29,8 @@ action IDs. A persistent isolated Python workspace is available through the pyth
 It contains current_observation.json, current_frame.png, all earlier public observations,
 and public_history.jsonl. {OBSERVATION_FILE_CONTRACT} Use the workspace freely for
 inspection, experiments, search, programs, notes, and bookkeeping. It starts empty on
-every independent run.
+every independent run. Each request includes a machine-readable representations object
+describing the grid and rendered image layouts.
 
 Learn from visible action/observation transitions. Do not assume that an action has a
 particular meaning before evidence supports it. Decide for yourself what representations,
@@ -350,6 +351,7 @@ class LlmReplAgent:
                 action_step=self.actions,
                 digest=self._current.digest,
                 metadata=self._current.metadata,
+                representations=self._current.representations,
             )
         return self._current
 
@@ -358,6 +360,7 @@ class LlmReplAgent:
         text = json.dumps({
             "step": self.actions,
             "current_metadata": current.metadata,
+            "representations": current.representations,
             "recent_transitions": recent,
             "full_history_file": "public_history.jsonl",
             "current_observation_file": "current_observation.json",

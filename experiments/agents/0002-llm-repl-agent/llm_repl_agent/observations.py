@@ -55,6 +55,7 @@ class ColorPermutation:
 class ModelObservation:
     step: int
     metadata: Mapping[str, Any]
+    representations: Mapping[str, Any]
     pixels: np.ndarray
     png_path: Path
     json_path: Path
@@ -107,6 +108,45 @@ def pixels_to_png(pixels: np.ndarray, *, scale: int = 8) -> bytes:
     return stream.getvalue()
 
 
+def representation_descriptor(pixels: np.ndarray, png: bytes) -> dict[str, Any]:
+    """Describe the two model-visible representations from their actual artifacts."""
+
+    grid = np.asarray(pixels)
+    if grid.ndim != 3:
+        raise ValueError("public pixel grid must have layer, row, and column axes")
+    with Image.open(BytesIO(png)) as rendered:
+        if rendered.mode != "RGB":
+            raise ValueError("rendered public frame must be RGB")
+        rendered_array = np.asarray(rendered)
+        render_mode = rendered.mode.lower()
+    render_height, render_width, _render_channels = rendered_array.shape
+    grid_height, grid_width = grid.shape[-2:]
+    row_scale, row_remainder = divmod(render_height, grid_height)
+    column_scale, column_remainder = divmod(render_width, grid_width)
+    if row_remainder or column_remainder or row_scale != column_scale:
+        raise ValueError("rendered image must be a uniform integer scaling of the grid")
+    return {
+        "grid": {
+            "path": "current_observation.json",
+            "json_pointer": "/pixels",
+            "encoding": "nested_integer_array",
+            "values": "integer_color_ids",
+            "json_value_type": "integer",
+            "axes": ["layer", "row", "column"],
+            "shape": list(grid.shape),
+        },
+        "rendered_image": {
+            "path": "current_frame.png",
+            "encoding": render_mode,
+            "axes": ["row", "column", "channel"],
+            "shape": list(rendered_array.shape),
+            "dtype": str(rendered_array.dtype),
+            "source_grid_layer": int(grid.shape[0] - 1),
+            "source_grid_scale": row_scale,
+        },
+    }
+
+
 class ObservationStore:
     """Materialize only public, run-local observations inside the Python workspace."""
 
@@ -135,6 +175,7 @@ class ObservationStore:
         encoded = json.dumps(record, separators=(",", ":"), sort_keys=True)
         json_path.write_text(encoded + "\n", encoding="utf-8")
         png = pixels_to_png(pixels)
+        representations = representation_descriptor(pixels, png)
         png_path.write_bytes(png)
         (self.root / "current_observation.json").write_text(
             encoded + "\n", encoding="utf-8"
@@ -144,6 +185,7 @@ class ObservationStore:
         return ModelObservation(
             step=step,
             metadata=metadata,
+            representations=representations,
             pixels=pixels,
             png_path=png_path,
             json_path=json_path,
