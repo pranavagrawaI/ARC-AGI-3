@@ -8,7 +8,12 @@ from .agent import (
     ModelBudgetExceeded,
 )
 from .client import ChatClient, ChatResponse, OpenAICompatibleChatClient
-from .config import ModelEnvironment, model_request_options, resolve_model_environment
+from .config import (
+    MODEL_PROFILES,
+    ModelEnvironment,
+    model_request_options,
+    resolve_model_environment,
+)
 from .observations import ColorPermutation
 from .process_log import measurement_summary, ProcessLog, write_annotation_template
 from .workspace import MODEL_OUTPUT_CHAR_LIMIT, PythonWorkspace
@@ -22,6 +27,7 @@ __all__ = [
     "LlmReplAgent",
     "ModelBudgetExceeded",
     "ModelEnvironment",
+    "MODEL_PROFILES",
     "MODEL_OUTPUT_CHAR_LIMIT",
     "model_request_options",
     "OpenAICompatibleChatClient",

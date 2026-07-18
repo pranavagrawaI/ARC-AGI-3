@@ -18,16 +18,23 @@ conventions without changing the environment's mechanics.
 
 ## Run
 
-For hosted development, put `QWEN_API_KEY`, `QWEN_MODEL`, and
-`OPENAI_BASE_URL` in the ignored repository `.env` (see `.env.example`). First
-run the single-request compatibility probe:
+For OpenRouter, put these values in the ignored repository `.env` (see
+`.env.example`):
 
-Model Studio and Large Model Inference must first be activated in the same
-region as the workspace endpoint and API key. Alibaba documents
-`403 AccessDenied.Unpurchased` as an activation/eligibility failure; a
-sub-workspace may also require explicit model-calling permission. See the
-[activation guide](https://www.alibabacloud.com/help/en/model-studio/activate-alibaba-cloud-model-studio)
-and [error-code guide](https://www.alibabacloud.com/help/en/model-studio/error-code).
+```dotenv
+OPENROUTER_API_KEY="..."
+OPENROUTER_MODEL="qwen/qwen3.6-27b"
+```
+
+The runner then uses `https://openrouter.ai/api/v1`, the dedicated OpenRouter
+key, and the `openrouter-qwen3.6` profile. `OPENROUTER_MODEL` takes precedence
+over old `QWEN_MODEL` settings, so the Alibaba configuration can remain in the
+file without its key being sent to OpenRouter. OpenRouter documents the
+[endpoint and authentication](https://openrouter.ai/docs/api/reference/overview),
+the [`qwen/qwen3.6-27b` model](https://openrouter.ai/qwen/qwen3.6-27b-20260422),
+and its [reasoning-token interface](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens).
+
+First run the single-request compatibility probe:
 
 ```bash
 UV_CACHE_DIR=/tmp/uv-cache \
@@ -57,12 +64,20 @@ prioritizes quick legal probes and learning from visible transitions over
 exhaustive description of the initial frame. The default `neutral` prompt is
 unchanged. Each manifest records the selected variant and prompt SHA-256.
 
-When `QWEN_MODEL` is present, the runner selects the explicit `qwen3.6`
-profile: thinking and preserved thinking enabled, `temperature=1.0`,
+When `OPENROUTER_MODEL` is present, the runner selects the explicit
+`openrouter-qwen3.6` profile: reasoning enabled and returned, `temperature=1.0`,
 `top_p=0.95`, `top_k=20`, `presence_penalty=0`, and
 `max_completion_tokens=4096`. Override the last value with
-`--max-completion-tokens`; the profile rejects `--max-tokens` because that does
-not cap thinking tokens.
+`--max-completion-tokens`; both hosted profiles reject the deprecated
+`--max-tokens` field. The direct `QWEN_MODEL` alternative retains its existing
+`qwen3.6` profile.
+
+For direct Alibaba Model Studio instead, set `QWEN_API_KEY`, `QWEN_MODEL`, and
+`OPENAI_BASE_URL`. Model Studio and Large Model Inference must first be
+activated in the same region as the workspace endpoint and API key. Alibaba's
+[activation guide](https://www.alibabacloud.com/help/en/model-studio/activate-alibaba-cloud-model-studio)
+and [error-code guide](https://www.alibabacloud.com/help/en/model-studio/error-code)
+describe those requirements.
 
 The model-call limit is hard. The reported-token limit refuses the next request
 after cumulative provider-reported usage reaches the threshold; a response may
@@ -86,8 +101,9 @@ uv run python experiments/agents/0002-llm-repl-agent/run.py \
   --game ls20 --max-actions 5
 ```
 
-Local endpoints never inherit hosted credentials from `QWEN_API_KEY` or
-`OPENAI_API_KEY`; they receive `EMPTY` unless `LOCAL_MODEL_API_KEY` is set.
+Local endpoints never inherit hosted credentials from `OPENROUTER_API_KEY`,
+`QWEN_API_KEY`, or `OPENAI_API_KEY`; they receive `EMPTY` unless
+`LOCAL_MODEL_API_KEY` is set.
 
 Add `--color-permutation-seed 17` for a deterministic display-color renaming.
 The actual game ID remains in the host-side `manifest.json` for experimental

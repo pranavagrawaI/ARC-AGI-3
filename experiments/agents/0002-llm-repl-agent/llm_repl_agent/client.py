@@ -118,6 +118,9 @@ class OpenAICompatibleChatClient:
             raise ModelRequestError(
                 f"model endpoint returned an invalid chat response: {body!r}"
             ) from error
+        reasoning = message.get("reasoning")
+        if "reasoning_content" not in message and isinstance(reasoning, str):
+            message["reasoning_content"] = reasoning
         usage = body.get("usage")
         return ChatResponse(
             message=message,

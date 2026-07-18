@@ -685,6 +685,8 @@ def _assistant_message(message: Mapping[str, Any]) -> dict[str, Any]:
         output["tool_calls"] = message["tool_calls"]
     if isinstance(message.get("reasoning_content"), str):
         output["reasoning_content"] = message["reasoning_content"]
+    if isinstance(message.get("reasoning_details"), list):
+        output["reasoning_details"] = message["reasoning_details"]
     return output
 
 

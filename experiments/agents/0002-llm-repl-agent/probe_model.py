@@ -71,8 +71,10 @@ def main() -> None:
     load_dotenv(REPO / ".env")
     try:
         environment = resolve_model_environment(os.environ)
-        if environment.profile != "qwen3.6":
-            raise ValueError("probe requires QWEN_MODEL so the qwen3.6 profile is explicit")
+        if environment.profile not in {"qwen3.6", "openrouter-qwen3.6"}:
+            raise ValueError(
+                "probe requires QWEN_MODEL or OPENROUTER_MODEL so a Qwen 3.6 profile is explicit"
+            )
         request_options = model_request_options(
             environment.profile,
             max_completion_tokens=args.max_completion_tokens,

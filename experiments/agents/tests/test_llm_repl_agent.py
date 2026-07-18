@@ -72,8 +72,8 @@ class ScriptedClient:
 
 
 class FakeHttpResponse:
-    def __init__(self) -> None:
-        self.body = json.dumps({
+    def __init__(self, body: dict[str, object] | None = None) -> None:
+        self.body = json.dumps(body or {
             "id": "chat-1",
             "choices": [{"message": {"role": "assistant", "content": "{}"}}],
             "usage": {"prompt_tokens": 3},
@@ -180,8 +180,125 @@ class OpenAICompatibleClientTests(unittest.TestCase):
         self.assertIs(body["enable_thinking"], True)
         self.assertIs(body["preserve_thinking"], True)
 
+    def test_posts_openrouter_reasoning_contract(self) -> None:
+        options = model_request_options("openrouter-qwen3.6")
+        client = OpenAICompatibleChatClient(
+            base_url="https://openrouter.ai/api/v1",
+            model="qwen/qwen3.6-27b",
+            api_key="test-key",
+            **options,
+            seed=9,
+        )
+        with patch("llm_repl_agent.client.urlopen", return_value=FakeHttpResponse()) as opened:
+            client.complete(messages=[{"role": "user", "content": "hello"}], tools=[])
+
+        body = json.loads(opened.call_args.args[0].data)
+        self.assertNotIn("max_tokens", body)
+        self.assertEqual(body["max_completion_tokens"], 4096)
+        self.assertEqual(body["temperature"], 1.0)
+        self.assertEqual(body["top_p"], 0.95)
+        self.assertEqual(body["top_k"], 20)
+        self.assertEqual(body["presence_penalty"], 0.0)
+        self.assertEqual(body["reasoning"], {"enabled": True, "exclude": False})
+        self.assertNotIn("enable_thinking", body)
+        self.assertNotIn("preserve_thinking", body)
+
+    def test_openrouter_profile_rejects_deprecated_max_tokens(self) -> None:
+        with self.assertRaisesRegex(ValueError, "max_completion_tokens"):
+            model_request_options("openrouter-qwen3.6", max_tokens=100)
+
+    def test_normalizes_openrouter_reasoning_for_existing_trace_consumers(self) -> None:
+        client = OpenAICompatibleChatClient(
+            base_url="https://openrouter.ai/api/v1",
+            model="qwen/qwen3.6-27b",
+            api_key="test-key",
+        )
+        response_body = {
+            "id": "chat-2",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning": "inspect, then act",
+                    "reasoning_details": [{"type": "reasoning.text", "text": "inspect"}],
+                },
+            }],
+        }
+
+        with patch(
+            "llm_repl_agent.client.urlopen",
+            return_value=FakeHttpResponse(response_body),
+        ):
+            result = client.complete(messages=[{"role": "user", "content": "hello"}], tools=[])
+
+        self.assertEqual(result.message["reasoning_content"], "inspect, then act")
+        self.assertEqual(result.message["reasoning"], "inspect, then act")
+        self.assertEqual(
+            result.message["reasoning_details"],
+            [{"type": "reasoning.text", "text": "inspect"}],
+        )
+
 
 class ModelEnvironmentTests(unittest.TestCase):
+    def test_openrouter_configuration_is_explicit_and_uses_only_its_key(self) -> None:
+        resolved = resolve_model_environment({
+            "OPENROUTER_API_KEY": "openrouter-secret",
+            "OPENROUTER_MODEL": "qwen/qwen3.6-27b",
+            "QWEN_API_KEY": "qwen-secret",
+            "QWEN_MODEL": "qwen3.6-27b",
+            "OPENAI_BASE_URL": "https://dashscope.invalid/compatible-mode/v1",
+        })
+
+        self.assertEqual(resolved.model, "qwen/qwen3.6-27b")
+        self.assertEqual(resolved.endpoint, "https://openrouter.ai/api/v1")
+        self.assertEqual(resolved.profile, "openrouter-qwen3.6")
+        self.assertEqual(resolved.api_key, "openrouter-secret")
+        self.assertEqual(resolved.api_key_source, "OPENROUTER_API_KEY")
+        self.assertNotIn("openrouter-secret", repr(resolved))
+
+    def test_openrouter_never_falls_back_to_an_alibaba_key(self) -> None:
+        with self.assertRaisesRegex(ValueError, "OPENROUTER_API_KEY"):
+            resolve_model_environment({
+                "OPENROUTER_MODEL": "qwen/qwen3.6-27b",
+                "QWEN_API_KEY": "qwen-secret",
+                "OPENAI_API_KEY": "generic-secret",
+            })
+
+    def test_openrouter_auto_profile_rejects_an_unmatched_model(self) -> None:
+        with self.assertRaisesRegex(ValueError, "qwen/qwen3.6-27b"):
+            resolve_model_environment({
+                "OPENROUTER_MODEL": "some/other-model",
+                "OPENROUTER_API_KEY": "openrouter-secret",
+            })
+
+    def test_openrouter_endpoint_rejects_an_alibaba_profile_and_key(self) -> None:
+        with self.assertRaisesRegex(ValueError, "OpenRouter endpoint"):
+            resolve_model_environment(
+                {
+                    "QWEN_MODEL": "qwen3.6-27b",
+                    "QWEN_API_KEY": "qwen-secret",
+                },
+                endpoint="https://openrouter.ai/api/v1",
+            )
+
+    def test_openrouter_key_requires_the_official_https_api_base(self) -> None:
+        with self.assertRaisesRegex(ValueError, "official HTTPS"):
+            resolve_model_environment(
+                {
+                    "OPENROUTER_MODEL": "qwen/qwen3.6-27b",
+                    "OPENROUTER_API_KEY": "openrouter-secret",
+                },
+                endpoint="http://openrouter.ai/api/v1",
+            )
+
+    def test_manual_openrouter_profile_requires_the_supported_model(self) -> None:
+        with self.assertRaisesRegex(ValueError, "qwen/qwen3.6-27b"):
+            resolve_model_environment(
+                {"OPENROUTER_API_KEY": "openrouter-secret"},
+                model="some/other-model",
+                profile="openrouter-qwen3.6",
+            )
+
     def test_qwen_names_take_precedence_without_exposing_key_in_repr(self) -> None:
         resolved = resolve_model_environment({
             "QWEN_API_KEY": "qwen-secret",
@@ -822,6 +939,10 @@ class LlmReplAgentTests(unittest.TestCase):
                 "role": "assistant",
                 "content": None,
                 "reasoning_content": "I should inspect the workspace first.",
+                "reasoning_details": [{
+                    "type": "reasoning.text",
+                    "text": "I should inspect the workspace first.",
+                }],
                 "tool_calls": [{
                     "id": "call-1",
                     "type": "function",
@@ -868,6 +989,13 @@ class LlmReplAgentTests(unittest.TestCase):
             self.assertEqual(
                 continued_assistant["reasoning_content"],
                 "I should inspect the workspace first.",
+            )
+            self.assertEqual(
+                continued_assistant["reasoning_details"],
+                [{
+                    "type": "reasoning.text",
+                    "text": "I should inspect the workspace first.",
+                }],
             )
             python_tool = next(item for item in events if item["type"] == "python_tool")
             self.assertTrue(python_tool["output_truncated"])

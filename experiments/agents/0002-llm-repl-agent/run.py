@@ -30,6 +30,7 @@ from llm_repl_agent import (
     ColorPermutation,
     LlmAgentConfig,
     LlmReplAgent,
+    MODEL_PROFILES,
     MODEL_OUTPUT_CHAR_LIMIT,
     ModelBudgetExceeded,
     OpenAICompatibleChatClient,
@@ -75,7 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--game", required=True, help="Host-only game id; never shown to the model.")
     parser.add_argument("--model")
     parser.add_argument("--endpoint")
-    parser.add_argument("--model-profile", choices=("generic", "qwen3.6"))
+    parser.add_argument("--model-profile", choices=MODEL_PROFILES)
     parser.add_argument(
         "--policy-prompt",
         choices=tuple(POLICY_PROMPTS),
