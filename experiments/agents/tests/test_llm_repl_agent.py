@@ -28,7 +28,7 @@ from llm_repl_agent.agent import (
 from llm_repl_agent.client import ChatResponse, OpenAICompatibleChatClient
 from llm_repl_agent.config import model_request_options, resolve_model_environment
 from llm_repl_agent.conversation import RollingConversation
-from llm_repl_agent.observations import ColorPermutation
+from llm_repl_agent.observations import ColorPermutation, OBSERVATION_FILE_CONTRACT
 from llm_repl_agent.process_log import annotation_template, measurement_summary, ProcessLog
 from llm_repl_agent.workspace import PythonResult, PythonWorkspace
 from probe_model import PNG_DATA_URL, valid_python_tool_call
@@ -348,6 +348,40 @@ class PythonWorkspaceTests(unittest.TestCase):
 
 
 class LlmReplAgentTests(unittest.TestCase):
+    def test_observation_prompt_and_file_have_an_unambiguous_shared_contract(self) -> None:
+        client = ScriptedClient([
+            response('{"action": 1, "data": null, "reason": "probe"}')
+        ])
+        with TemporaryDirectory() as directory, PythonWorkspace(timeout_seconds=5) as workspace:
+            with ProcessLog(Path(directory) / "process.jsonl") as process_log:
+                agent = LlmReplAgent(
+                    client=client,
+                    workspace=workspace,
+                    process_log=process_log,
+                )
+
+                agent.act(observation())
+
+            prompt_text = client.requests[0]["messages"][1]["content"][0]["text"]
+            prompt_record = json.loads(prompt_text)
+            file_record = json.loads(
+                (workspace.root / "current_observation.json").read_text()
+            )
+            workspace_guide = (workspace.root / "WORKSPACE.md").read_text()
+
+        self.assertNotIn("current", prompt_record)
+        file_metadata = {
+            key: value
+            for key, value in file_record.items()
+            if key not in {"pixels", "step"}
+        }
+        self.assertEqual(prompt_record["current_metadata"], file_metadata)
+        self.assertNotIn("pixels", prompt_record["current_metadata"])
+        self.assertEqual(file_record["step"], prompt_record["step"])
+        self.assertEqual(np.asarray(file_record["pixels"]).shape, (1, 6, 8))
+        self.assertIn(OBSERVATION_FILE_CONTRACT, SYSTEM_PROMPT)
+        self.assertIn(OBSERVATION_FILE_CONTRACT, workspace_guide)
+
     def test_drop_stale_python_context_keeps_only_latest_consumable_exchange(self) -> None:
         def tool_response(call_id: str, code: str) -> ChatResponse:
             return ChatResponse(

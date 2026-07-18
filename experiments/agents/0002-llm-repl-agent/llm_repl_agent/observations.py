@@ -19,6 +19,12 @@ from arcengine import GameAction
 from experiments.harness import Observation, Transition
 
 
+OBSERVATION_FILE_CONTRACT = (
+    "Observation JSON files are flat objects with top-level public metadata, step, and "
+    "pixels[layer][row][column]."
+)
+
+
 @dataclass(frozen=True)
 class ColorPermutation:
     """A run-local renaming of the sixteen public display colors."""
@@ -111,10 +117,12 @@ class ObservationStore:
         self.observations_dir.mkdir(parents=True, exist_ok=True)
         self.history_path = root / "public_history.jsonl"
         (root / "WORKSPACE.md").write_text(
-            "This workspace is new for this run. current_observation.json contains the "
-            "latest public frame and metadata. observations/ contains prior public frames. "
-            "public_history.jsonl contains executed actions and visible transitions. You may "
-            "create any additional code, notes, models, or search artifacts here.\n",
+            f"This workspace is new for this run. {OBSERVATION_FILE_CONTRACT} "
+            "current_observation.json contains the latest observation; observations/ "
+            "contains every run observation, including the current step. current_frame.png "
+            "is the latest rendered frame. public_history.jsonl contains executed actions "
+            "and visible transitions. You may create any additional code, notes, models, "
+            "or search artifacts here.\n",
             encoding="utf-8",
         )
 

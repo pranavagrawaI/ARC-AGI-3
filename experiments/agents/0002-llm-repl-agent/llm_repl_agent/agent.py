@@ -15,19 +15,21 @@ from .conversation import RollingConversation
 from .observations import (
     ColorPermutation,
     ModelObservation,
+    OBSERVATION_FILE_CONTRACT,
     ObservationStore,
 )
 from .process_log import ProcessLog
 from .workspace import PythonResult, PythonWorkspace
 
 
-SYSTEM_PROMPT = """You control an unfamiliar interactive visual system for this run only.
+SYSTEM_PROMPT = f"""You control an unfamiliar interactive visual system for this run only.
 
 At each step you receive the current rendered image, public status metadata, and the legal
 action IDs. A persistent isolated Python workspace is available through the python tool.
 It contains current_observation.json, current_frame.png, all earlier public observations,
-and public_history.jsonl. Use it freely for inspection, experiments, search, programs,
-notes, and bookkeeping. The workspace starts empty on every independent run.
+and public_history.jsonl. {OBSERVATION_FILE_CONTRACT} Use the workspace freely for
+inspection, experiments, search, programs, notes, and bookkeeping. It starts empty on
+every independent run.
 
 Learn from visible action/observation transitions. Do not assume that an action has a
 particular meaning before evidence supports it. Decide for yourself what representations,
@@ -35,7 +37,7 @@ algorithms, or plans are useful. There is no required internal vocabulary or pla
 method.
 
 When ready to act, respond with exactly one JSON object and no surrounding prose:
-{"action": <legal integer action id>, "data": <object or null>, "reason": <brief string>}
+{{"action": <legal integer action id>, "data": <object or null>, "reason": <brief string>}}
 For an action whose public requirement includes x and y, data must contain integer x and y
 coordinates inside the displayed frame. Use the python tool instead of returning the JSON
 object whenever more analysis is useful.
@@ -355,7 +357,7 @@ class LlmReplAgent:
         recent = self._history[-8:]
         text = json.dumps({
             "step": self.actions,
-            "current": current.metadata,
+            "current_metadata": current.metadata,
             "recent_transitions": recent,
             "full_history_file": "public_history.jsonl",
             "current_observation_file": "current_observation.json",
