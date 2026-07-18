@@ -375,6 +375,147 @@ class PythonWorkspaceTests(unittest.TestCase):
 
 
 class LlmReplAgentTests(unittest.TestCase):
+    def test_final_deliberation_round_requires_an_action_without_python(self) -> None:
+        def python_response(call_id: str) -> ChatResponse:
+            return ChatResponse(
+                message={
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": "python",
+                            "arguments": json.dumps({"code": "print('inspect')"}),
+                        },
+                    }],
+                },
+                usage={},
+                response_id=call_id,
+            )
+
+        client = ScriptedClient([
+            python_response("call-1"),
+            python_response("call-2"),
+            response('{"action": 1, "data": null, "reason": "probe"}'),
+        ])
+        with TemporaryDirectory() as directory, PythonWorkspace(timeout_seconds=5) as workspace:
+            log_path = Path(directory) / "process.jsonl"
+            with ProcessLog(log_path) as process_log:
+                agent = LlmReplAgent(
+                    client=client,
+                    workspace=workspace,
+                    process_log=process_log,
+                    config=LlmAgentConfig(max_model_rounds_per_action=3),
+                )
+
+                decision = agent.act(observation())
+
+            events = [json.loads(line) for line in log_path.read_text().splitlines()]
+
+        self.assertEqual(decision.action, 1)
+        self.assertEqual([len(request["tools"]) for request in client.requests], [1, 1, 0])
+        self.assertIn(
+            "final deliberation round",
+            client.requests[-1]["messages"][-1]["content"].lower(),
+        )
+        boundary = next(event for event in events if event["type"] == "action_required")
+        self.assertEqual(boundary["action_step"], 1)
+        self.assertEqual(boundary["model_round"], 3)
+
+    def test_final_deliberation_round_repairs_an_invalid_action_without_python(self) -> None:
+        python_response = ChatResponse(
+            message={
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "python",
+                        "arguments": json.dumps({"code": "print('inspect')"}),
+                    },
+                }],
+            },
+            usage={},
+            response_id="call-1",
+        )
+        client = ScriptedClient([
+            python_response,
+            response('{"action": 99, "data": null, "reason": "invalid"}'),
+            response('{"action": 1, "data": null, "reason": "probe"}'),
+        ])
+        with TemporaryDirectory() as directory, PythonWorkspace(timeout_seconds=5) as workspace:
+            log_path = Path(directory) / "process.jsonl"
+            with ProcessLog(log_path) as process_log:
+                agent = LlmReplAgent(
+                    client=client,
+                    workspace=workspace,
+                    process_log=process_log,
+                    config=LlmAgentConfig(
+                        max_model_rounds_per_action=2,
+                        max_decision_repairs=1,
+                    ),
+                )
+
+                decision = agent.act(observation())
+
+            events = [json.loads(line) for line in log_path.read_text().splitlines()]
+
+        self.assertEqual(decision.action, 1)
+        self.assertEqual([len(request["tools"]) for request in client.requests], [1, 0, 0])
+        repairs = [event for event in events if event["type"] == "decision_repair"]
+        self.assertEqual(len(repairs), 1)
+        self.assertEqual(repairs[0]["model_round"], 2)
+
+    def test_final_deliberation_round_rejects_unadvertised_python_without_executing(self) -> None:
+        unadvertised_python = ChatResponse(
+            message={
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "call-unadvertised",
+                    "type": "function",
+                    "function": {
+                        "name": "python",
+                        "arguments": json.dumps({
+                            "code": "open('should-not-exist.txt', 'w').write('executed')"
+                        }),
+                    },
+                }],
+            },
+            usage={},
+            response_id="call-unadvertised",
+        )
+        client = ScriptedClient([
+            unadvertised_python,
+            response('{"action": 1, "data": null, "reason": "probe"}'),
+        ])
+        with TemporaryDirectory() as directory, PythonWorkspace(timeout_seconds=5) as workspace:
+            log_path = Path(directory) / "process.jsonl"
+            with ProcessLog(log_path) as process_log:
+                agent = LlmReplAgent(
+                    client=client,
+                    workspace=workspace,
+                    process_log=process_log,
+                    config=LlmAgentConfig(
+                        max_model_rounds_per_action=1,
+                        max_decision_repairs=1,
+                    ),
+                )
+
+                decision = agent.act(observation())
+
+            events = [json.loads(line) for line in log_path.read_text().splitlines()]
+            file_was_created = (workspace.root / "should-not-exist.txt").exists()
+
+        self.assertEqual(decision.action, 1)
+        self.assertEqual([len(request["tools"]) for request in client.requests], [0, 0])
+        self.assertFalse(file_was_created)
+        self.assertFalse(any(event["type"] == "python_tool" for event in events))
+        repair = next(event for event in events if event["type"] == "decision_repair")
+        self.assertIn("Python is unavailable", repair["error"])
+
     def test_observation_prompt_and_file_have_an_unambiguous_shared_contract(self) -> None:
         client = ScriptedClient([
             response('{"action": 1, "data": null, "reason": "probe"}')

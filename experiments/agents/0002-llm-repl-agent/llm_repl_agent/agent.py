@@ -69,6 +69,15 @@ PYTHON_CONTEXT_OMISSION = {
 }
 
 
+ACTION_REQUIRED_MESSAGE = {
+    "role": "user",
+    "content": (
+        "This is the final deliberation round. The Python tool is unavailable. "
+        "Return exactly one legal action JSON object now."
+    ),
+}
+
+
 PYTHON_TOOL = {
     "type": "function",
     "function": {
@@ -157,17 +166,27 @@ class LlmReplAgent:
                     model_round=model_round,
                     python_calls_this_action=python_calls_this_action,
                 )
-            messages = self.conversation.messages() + turn
-            response = self._complete(messages=messages, tools=(PYTHON_TOOL,))
-            self.process_log.write(
-                "model_response",
-                action_step=self.actions + 1,
-                model_round=model_round,
-                request_messages=messages,
-                response=response.message,
-                response_id=response.response_id,
-                usage=response.usage,
-            )
+            action_required = model_round == self.config.max_model_rounds_per_action
+            if action_required:
+                turn.append(ACTION_REQUIRED_MESSAGE)
+                self.process_log.write(
+                    "action_required",
+                    action_step=self.actions + 1,
+                    model_round=model_round,
+                    reason="final_deliberation_round",
+                )
+                response, repairs = self._required_action_response(
+                    turn=turn,
+                    observation=observation,
+                    model_round=model_round,
+                    repairs=repairs,
+                )
+            else:
+                response = self._complete_policy_response(
+                    messages=self.conversation.messages() + turn,
+                    tools=(PYTHON_TOOL,),
+                    model_round=model_round,
+                )
             assistant = _assistant_message(response.message)
             turn.append(assistant)
             tool_calls = assistant.get("tool_calls")
@@ -198,23 +217,12 @@ class LlmReplAgent:
                     repairs=repairs,
                 )
             except DecisionFormatError as error:
-                repairs += 1
-                self.process_log.write(
-                    "decision_repair",
-                    action_step=self.actions + 1,
+                repairs = self._append_decision_repair(
+                    turn=turn,
+                    error=error,
                     model_round=model_round,
-                    repair=repairs,
-                    error=str(error),
+                    repairs=repairs,
                 )
-                if repairs > self.config.max_decision_repairs:
-                    raise
-                turn.append({
-                    "role": "user",
-                    "content": (
-                        f"Your proposed action was invalid: {error}. Return a corrected JSON "
-                        "action object using the current legal actions and coordinate bounds."
-                    ),
-                })
                 continue
 
             conversation_turn = turn
@@ -250,6 +258,90 @@ class LlmReplAgent:
         raise RuntimeError(
             f"model did not produce an action within {self.config.max_model_rounds_per_action} rounds"
         )
+
+    def _required_action_response(
+        self,
+        *,
+        turn: list[dict[str, Any]],
+        observation: Observation,
+        model_round: int,
+        repairs: int,
+    ) -> tuple[ChatResponse, int]:
+        while True:
+            response = self._complete_policy_response(
+                messages=self.conversation.messages() + turn,
+                tools=(),
+                model_round=model_round,
+            )
+            assistant = _assistant_message(response.message)
+            tool_calls = assistant.get("tool_calls")
+            try:
+                if isinstance(tool_calls, list) and tool_calls:
+                    raise DecisionFormatError(
+                        "Python is unavailable on the final deliberation round"
+                    )
+                self._decision_from_response(
+                    response,
+                    observation=observation,
+                    repairs=repairs,
+                )
+            except DecisionFormatError as error:
+                if not tool_calls:
+                    turn.append(assistant)
+                repairs = self._append_decision_repair(
+                    turn=turn,
+                    error=error,
+                    model_round=model_round,
+                    repairs=repairs,
+                )
+                continue
+            return response, repairs
+
+    def _complete_policy_response(
+        self,
+        *,
+        messages: Sequence[Mapping[str, Any]],
+        tools: Sequence[Mapping[str, Any]],
+        model_round: int,
+    ) -> ChatResponse:
+        response = self._complete(messages=messages, tools=tools)
+        self.process_log.write(
+            "model_response",
+            action_step=self.actions + 1,
+            model_round=model_round,
+            request_messages=messages,
+            response=response.message,
+            response_id=response.response_id,
+            usage=response.usage,
+        )
+        return response
+
+    def _append_decision_repair(
+        self,
+        *,
+        turn: list[dict[str, Any]],
+        error: DecisionFormatError,
+        model_round: int,
+        repairs: int,
+    ) -> int:
+        repairs += 1
+        self.process_log.write(
+            "decision_repair",
+            action_step=self.actions + 1,
+            model_round=model_round,
+            repair=repairs,
+            error=str(error),
+        )
+        if repairs > self.config.max_decision_repairs:
+            raise error
+        turn.append({
+            "role": "user",
+            "content": (
+                f"Your proposed action was invalid: {error}. Return a corrected JSON "
+                "action object using the current legal actions and coordinate bounds."
+            ),
+        })
+        return repairs
 
     def observe(self, transition: Transition) -> None:
         before = self._pending_before or self._observation(transition.before)
