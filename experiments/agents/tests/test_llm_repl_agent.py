@@ -478,9 +478,38 @@ class LlmReplAgentTests(unittest.TestCase):
 
         self.assertEqual(decision.action, 1)
         self.assertEqual([len(request["messages"]) for request in client.requests], [2, 4, 5, 5])
+        deliberation = []
         for request in client.requests:
             observation_text = request["messages"][1]["content"][0]["text"]
-            self.assertIn("representations", json.loads(observation_text))
+            observation_payload = json.loads(observation_text)
+            self.assertIn("representations", observation_payload)
+            deliberation.append(observation_payload["deliberation"])
+        self.assertEqual(deliberation, [
+            {
+                "max_model_rounds": 10,
+                "model_round": 1,
+                "python_calls_this_action": 0,
+                "remaining_rounds": 10,
+            },
+            {
+                "max_model_rounds": 10,
+                "model_round": 2,
+                "python_calls_this_action": 1,
+                "remaining_rounds": 9,
+            },
+            {
+                "max_model_rounds": 10,
+                "model_round": 3,
+                "python_calls_this_action": 2,
+                "remaining_rounds": 8,
+            },
+            {
+                "max_model_rounds": 10,
+                "model_round": 4,
+                "python_calls_this_action": 3,
+                "remaining_rounds": 7,
+            },
+        ])
         third_request = json.dumps(client.requests[2]["messages"])
         fourth_request = json.dumps(client.requests[3]["messages"])
         self.assertNotIn("first-result", third_request)
@@ -499,6 +528,78 @@ class LlmReplAgentTests(unittest.TestCase):
             "within_action",
             "action_complete",
         ])
+
+    def test_deliberation_counts_executed_python_calls_and_resets_per_action(self) -> None:
+        multi_tool_response = ChatResponse(
+            message={
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "python",
+                            "arguments": json.dumps({"code": "print('first')"}),
+                        },
+                    },
+                    {
+                        "id": "call-malformed",
+                        "type": "function",
+                        "function": {"name": "python", "arguments": "not-json"},
+                    },
+                    {
+                        "id": "call-2",
+                        "type": "function",
+                        "function": {
+                            "name": "python",
+                            "arguments": json.dumps({"code": "print('second')"}),
+                        },
+                    },
+                ],
+            },
+            usage={},
+        )
+        client = ScriptedClient([
+            multi_tool_response,
+            response('{"action": 1, "data": null, "reason": "first probe"}'),
+            response('{"action": 2, "data": null, "reason": "second probe"}'),
+        ])
+        before = observation(value=0)
+        after = observation(value=1)
+        with TemporaryDirectory() as directory, PythonWorkspace(timeout_seconds=5) as workspace:
+            with ProcessLog(Path(directory) / "process.jsonl") as process_log:
+                agent = LlmReplAgent(
+                    client=client,
+                    workspace=workspace,
+                    process_log=process_log,
+                    config=LlmAgentConfig(drop_stale_python_context=True),
+                )
+
+                first_decision = agent.act(before)
+                agent.observe(Transition(before, first_decision, after))
+                second_decision = agent.act(after)
+
+        first_request = json.loads(client.requests[0]["messages"][1]["content"][0]["text"])
+        after_tools = json.loads(client.requests[1]["messages"][1]["content"][0]["text"])
+        second_action_request = json.loads(
+            client.requests[2]["messages"][-1]["content"][0]["text"]
+        )
+        self.assertEqual(first_decision.action, 1)
+        self.assertEqual(second_decision.action, 2)
+        self.assertEqual(first_request["deliberation"]["python_calls_this_action"], 0)
+        self.assertEqual(after_tools["deliberation"], {
+            "max_model_rounds": 10,
+            "model_round": 2,
+            "python_calls_this_action": 2,
+            "remaining_rounds": 9,
+        })
+        self.assertEqual(second_action_request["deliberation"], {
+            "max_model_rounds": 10,
+            "model_round": 1,
+            "python_calls_this_action": 0,
+            "remaining_rounds": 10,
+        })
 
     def test_python_compaction_preserves_intervening_decision_repair(self) -> None:
         def tool_response(call_id: str, result: str) -> ChatResponse:
@@ -539,7 +640,16 @@ class LlmReplAgentTests(unittest.TestCase):
                 decision = agent.act(observation())
 
         final_request = json.dumps(client.requests[-1]["messages"])
+        deliberation = [
+            json.loads(request["messages"][1]["content"][0]["text"])["deliberation"]
+            for request in client.requests
+        ]
         self.assertEqual(decision.action, 1)
+        self.assertEqual(
+            [item["python_calls_this_action"] for item in deliberation],
+            [0, 1, 1, 2],
+        )
+        self.assertEqual([item["model_round"] for item in deliberation], [1, 2, 3, 4])
         self.assertNotIn("first-result", final_request)
         self.assertIn("second-result", final_request)
         self.assertIn("Your proposed action was invalid", final_request)

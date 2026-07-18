@@ -30,7 +30,8 @@ It contains current_observation.json, current_frame.png, all earlier public obse
 and public_history.jsonl. {OBSERVATION_FILE_CONTRACT} Use the workspace freely for
 inspection, experiments, search, programs, notes, and bookkeeping. It starts empty on
 every independent run. Each request includes a machine-readable representations object
-describing the grid and rendered image layouts.
+describing the grid and rendered image layouts, plus a deliberation object reporting the
+current per-action model round and Python-call counts.
 
 Learn from visible action/observation transitions. Do not assume that an action has a
 particular meaning before evidence supports it. Decide for yourself what representations,
@@ -141,10 +142,21 @@ class LlmReplAgent:
     def act(self, observation: Observation) -> Decision:
         current = self._observation(observation)
         self._pending_before = current
-        turn: list[dict[str, Any]] = [self._observation_message(current)]
+        turn: list[dict[str, Any]] = [self._observation_message(
+            current,
+            model_round=1,
+            python_calls_this_action=0,
+        )]
         repairs = 0
+        python_calls_this_action = 0
 
         for model_round in range(1, self.config.max_model_rounds_per_action + 1):
+            if model_round > 1:
+                turn[0] = self._observation_message(
+                    current,
+                    model_round=model_round,
+                    python_calls_this_action=python_calls_this_action,
+                )
             messages = self.conversation.messages() + turn
             response = self._complete(messages=messages, tools=(PYTHON_TOOL,))
             self.process_log.write(
@@ -160,11 +172,13 @@ class LlmReplAgent:
             turn.append(assistant)
             tool_calls = assistant.get("tool_calls")
             if isinstance(tool_calls, list) and tool_calls:
-                turn.extend(self._execute_tool_calls(
+                tool_messages, executed_python_calls = self._execute_tool_calls(
                     tool_calls,
                     action_step=self.actions + 1,
                     model_round=model_round,
-                ))
+                )
+                turn.extend(tool_messages)
+                python_calls_this_action += executed_python_calls
                 if self.config.drop_stale_python_context:
                     compacted = _latest_python_exchange(turn)
                     self._log_context_compaction(
@@ -355,10 +369,22 @@ class LlmReplAgent:
             )
         return self._current
 
-    def _observation_message(self, current: ModelObservation) -> dict[str, Any]:
+    def _observation_message(
+        self,
+        current: ModelObservation,
+        *,
+        model_round: int,
+        python_calls_this_action: int,
+    ) -> dict[str, Any]:
         recent = self._history[-8:]
         text = json.dumps({
             "step": self.actions,
+            "deliberation": {
+                "model_round": model_round,
+                "max_model_rounds": self.config.max_model_rounds_per_action,
+                "python_calls_this_action": python_calls_this_action,
+                "remaining_rounds": self.config.max_model_rounds_per_action - model_round + 1,
+            },
             "current_metadata": current.metadata,
             "representations": current.representations,
             "recent_transitions": recent,
@@ -379,8 +405,9 @@ class LlmReplAgent:
         *,
         action_step: int,
         model_round: int,
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], int]:
         messages: list[dict[str, Any]] = []
+        executed_python_calls = 0
         for index, tool_call in enumerate(tool_calls):
             tool_id = str(tool_call.get("id", f"tool-{model_round}-{index}"))
             function = tool_call.get("function")
@@ -399,6 +426,7 @@ class LlmReplAgent:
                         raise ValueError("python tool requires a string code field")
                     code = str(parsed["code"])
                     result = self.workspace.execute(code)
+                    executed_python_calls += 1
                     output = result.model_text()
                 except (json.JSONDecodeError, ValueError) as error:
                     code = None
@@ -433,7 +461,7 @@ class LlmReplAgent:
                 "name": "python",
                 "content": output,
             })
-        return messages
+        return messages, executed_python_calls
 
     def _log_workspace_changes(
         self,
