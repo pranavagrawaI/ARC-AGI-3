@@ -139,6 +139,21 @@ Each run writes:
 - `process-annotation.json`: a human annotation template for discovery times,
   representation latency/stability, and wasted-action categories.
 
+### Human-readable run replayer
+
+To inspect those artifacts without reading JSONL directly, run the tested,
+read-only replayer:
+
+```bash
+uv run python experiments/agents/0002-llm-repl-agent/output_viewer.py
+```
+
+Then open `http://127.0.0.1:8765/`. The left stage replays recorded observations
+with first, previous, play/pause, next, last, speed, and scrub controls. The
+right panel groups reasoning, Python probes, decisions, and observed transitions
+by attempted action. Arrow keys step through the run, Space toggles playback,
+and the frame-mode control switches between action inputs and results.
+
 The diagnostic rubric is applied after the run. It is not included in the policy
 prompt, because telling the policy which discoveries to report would itself be
 representation scaffolding.
