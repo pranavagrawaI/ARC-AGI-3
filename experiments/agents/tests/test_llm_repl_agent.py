@@ -348,6 +348,111 @@ class PythonWorkspaceTests(unittest.TestCase):
 
 
 class LlmReplAgentTests(unittest.TestCase):
+    def test_drop_stale_python_context_keeps_only_latest_consumable_exchange(self) -> None:
+        def tool_response(call_id: str, code: str) -> ChatResponse:
+            return ChatResponse(
+                message={
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": "python",
+                            "arguments": json.dumps({"code": code}),
+                        },
+                    }],
+                },
+                usage={},
+                response_id=call_id,
+            )
+
+        client = ScriptedClient([
+            tool_response("call-1", "saved = 41\nprint('first-result')"),
+            tool_response("call-2", "print('second-result', saved + 1)"),
+            tool_response("call-3", "print('third-result')"),
+            response('{"action": 1, "data": null, "reason": "probe"}'),
+        ])
+        with TemporaryDirectory() as directory, PythonWorkspace(timeout_seconds=5) as workspace:
+            log_path = Path(directory) / "process.jsonl"
+            with ProcessLog(log_path) as process_log:
+                agent = LlmReplAgent(
+                    client=client,
+                    workspace=workspace,
+                    process_log=process_log,
+                    config=LlmAgentConfig(drop_stale_python_context=True),
+                )
+
+                decision = agent.act(observation())
+
+            events = [json.loads(line) for line in log_path.read_text().splitlines()]
+
+        self.assertEqual(decision.action, 1)
+        self.assertEqual([len(request["messages"]) for request in client.requests], [2, 4, 5, 5])
+        third_request = json.dumps(client.requests[2]["messages"])
+        fourth_request = json.dumps(client.requests[3]["messages"])
+        self.assertNotIn("first-result", third_request)
+        self.assertIn("second-result", third_request)
+        self.assertIn("42", third_request)
+        self.assertNotIn("second-result", fourth_request)
+        self.assertIn("third-result", fourth_request)
+        self.assertIn("Earlier Python exchanges omitted", third_request)
+        persisted = json.dumps(agent.conversation.messages())
+        self.assertNotIn("Python exchanges omitted", persisted)
+        self.assertNotIn("third-result", persisted)
+        self.assertEqual(len(agent.conversation.messages()), 3)
+        compactions = [event for event in events if event["type"] == "context_compaction"]
+        self.assertEqual([event["phase"] for event in compactions], [
+            "within_action",
+            "within_action",
+            "action_complete",
+        ])
+
+    def test_python_compaction_preserves_intervening_decision_repair(self) -> None:
+        def tool_response(call_id: str, result: str) -> ChatResponse:
+            return ChatResponse(
+                message={
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": "python",
+                            "arguments": json.dumps({"code": f"print('{result}')"}),
+                        },
+                    }],
+                },
+                usage={},
+            )
+
+        client = ScriptedClient([
+            tool_response("call-1", "first-result"),
+            response('{"action": 99, "data": null, "reason": "invalid"}'),
+            tool_response("call-2", "second-result"),
+            response('{"action": 1, "data": null, "reason": "probe"}'),
+        ])
+        with TemporaryDirectory() as directory, PythonWorkspace(timeout_seconds=5) as workspace:
+            with ProcessLog(Path(directory) / "process.jsonl") as process_log:
+                agent = LlmReplAgent(
+                    client=client,
+                    workspace=workspace,
+                    process_log=process_log,
+                    config=LlmAgentConfig(
+                        drop_stale_python_context=True,
+                        max_decision_repairs=1,
+                    ),
+                )
+
+                decision = agent.act(observation())
+
+        final_request = json.dumps(client.requests[-1]["messages"])
+        self.assertEqual(decision.action, 1)
+        self.assertNotIn("first-result", final_request)
+        self.assertIn("second-result", final_request)
+        self.assertIn("Your proposed action was invalid", final_request)
+        self.assertIn('\\"action\\": 99', final_request)
+
     def test_selected_system_prompt_is_sent_in_the_first_model_request(self) -> None:
         client = ScriptedClient([
             response('{"action": 1, "data": null, "reason": "probe early"}')

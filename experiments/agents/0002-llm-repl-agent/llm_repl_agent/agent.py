@@ -59,6 +59,12 @@ POLICY_PROMPTS = {
 }
 
 
+PYTHON_CONTEXT_OMISSION = {
+    "role": "user",
+    "content": "Earlier Python exchanges omitted; workspace persists.",
+}
+
+
 PYTHON_TOOL = {
     "type": "function",
     "function": {
@@ -86,6 +92,7 @@ class LlmAgentConfig:
     max_decision_repairs: int = 2
     max_model_calls: int | None = None
     max_reported_tokens: int | None = None
+    drop_stale_python_context: bool = False
 
 
 class DecisionFormatError(ValueError):
@@ -155,6 +162,16 @@ class LlmReplAgent:
                     action_step=self.actions + 1,
                     model_round=model_round,
                 ))
+                if self.config.drop_stale_python_context:
+                    compacted = _latest_python_exchange(turn)
+                    self._log_context_compaction(
+                        before=turn,
+                        after=compacted,
+                        action_step=self.actions + 1,
+                        model_round=model_round,
+                        phase="within_action",
+                    )
+                    turn = compacted
                 continue
 
             try:
@@ -183,7 +200,20 @@ class LlmReplAgent:
                 })
                 continue
 
-            evicted = self.conversation.append(step=self.actions + 1, messages=turn)
+            conversation_turn = turn
+            if self.config.drop_stale_python_context:
+                conversation_turn = _without_python_exchanges(turn)
+                self._log_context_compaction(
+                    before=turn,
+                    after=conversation_turn,
+                    action_step=self.actions + 1,
+                    model_round=model_round,
+                    phase="action_complete",
+                )
+            evicted = self.conversation.append(
+                step=self.actions + 1,
+                messages=conversation_turn,
+            )
             if evicted:
                 self.process_log.write(
                     "context_eviction",
@@ -425,6 +455,30 @@ class LlmReplAgent:
         )
         self._workspace_evidence = current
 
+    def _log_context_compaction(
+        self,
+        *,
+        before: list[dict[str, Any]],
+        after: list[dict[str, Any]],
+        action_step: int,
+        model_round: int,
+        phase: str,
+    ) -> None:
+        discarded_messages = len(before) - len(after)
+        if discarded_messages <= 0:
+            return
+        self.process_log.write(
+            "context_compaction",
+            phase=phase,
+            action_step=action_step,
+            model_round=model_round,
+            discarded_messages=discarded_messages,
+            before_messages=len(before),
+            after_messages=len(after),
+            before_chars=len(json.dumps(before, ensure_ascii=False)),
+            after_chars=len(json.dumps(after, ensure_ascii=False)),
+        )
+
     def _decision_from_response(
         self,
         response: ChatResponse,
@@ -507,6 +561,47 @@ def _assistant_message(message: Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(message.get("reasoning_content"), str):
         output["reasoning_content"] = message["reasoning_content"]
     return output
+
+
+def _has_tool_calls(message: Mapping[str, Any]) -> bool:
+    return message.get("role") == "assistant" and bool(message.get("tool_calls"))
+
+
+def _latest_python_exchange(turn: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    tool_call_indices = [
+        index for index, message in enumerate(turn) if _has_tool_calls(message)
+    ]
+    if len(tool_call_indices) <= 1:
+        return turn
+    latest = tool_call_indices[-1]
+    latest_tool_ids = {
+        str(tool_call.get("id"))
+        for tool_call in turn[latest].get("tool_calls", [])
+        if isinstance(tool_call, Mapping)
+    }
+    compacted: list[dict[str, Any]] = []
+    for index, message in enumerate(turn):
+        if message == PYTHON_CONTEXT_OMISSION:
+            continue
+        if _has_tool_calls(message) and index != latest:
+            continue
+        if message.get("role") == "tool":
+            if str(message.get("tool_call_id")) not in latest_tool_ids:
+                continue
+        if index == latest:
+            compacted.append(dict(PYTHON_CONTEXT_OMISSION))
+        compacted.append(message)
+    return compacted
+
+
+def _without_python_exchanges(turn: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        message
+        for message in turn
+        if message.get("role") != "tool"
+        and not _has_tool_calls(message)
+        and message != PYTHON_CONTEXT_OMISSION
+    ]
 
 
 def _json_object(text: str) -> dict[str, Any]:

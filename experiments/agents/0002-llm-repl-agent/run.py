@@ -93,6 +93,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-decision-repairs", type=int, default=2)
     parser.add_argument("--max-model-calls", type=int, default=100)
     parser.add_argument("--max-reported-tokens", type=int, default=250_000)
+    parser.add_argument("--drop-stale-python-context", action="store_true")
     parser.add_argument("--workspace-timeout", type=float, default=20.0)
     parser.add_argument("--color-permutation-seed", type=int)
     parser.add_argument("--no-retrospective", action="store_true")
@@ -151,6 +152,9 @@ def main() -> None:
         "max_decision_repairs": args.max_decision_repairs,
         "max_model_calls": args.max_model_calls,
         "max_reported_tokens": args.max_reported_tokens,
+        "python_context_policy": (
+            "drop_stale" if args.drop_stale_python_context else "full"
+        ),
         "max_python_output_chars": MODEL_OUTPUT_CHAR_LIMIT,
         "workspace_timeout": args.workspace_timeout,
         "retrospective_enabled": not args.no_retrospective,
@@ -189,6 +193,7 @@ def main() -> None:
             max_decision_repairs=args.max_decision_repairs,
             max_model_calls=args.max_model_calls,
             max_reported_tokens=args.max_reported_tokens,
+            drop_stale_python_context=args.drop_stale_python_context,
         ),
     )
     result = None
