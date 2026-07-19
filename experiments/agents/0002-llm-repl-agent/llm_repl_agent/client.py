@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
 import json
 from typing import Any, Mapping, Protocol, Sequence
 from urllib.error import HTTPError, URLError
@@ -10,15 +11,25 @@ from urllib.request import Request, urlopen
 
 
 JsonObject = dict[str, Any]
+REQUEST_PAYLOAD_ENCODING = "json-utf8-sort-keys-compact-v1"
+
+
+def serialize_request_payload(payload: Mapping[str, Any]) -> bytes:
+    """Return the canonical bytes used both for transport and replay evidence."""
+
+    return json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
 
 @dataclass(frozen=True)
 class ChatResponse:
-    """One assistant response, preserved closely enough for tool continuation."""
+    """One assistant response plus credential-free transport evidence."""
 
     message: JsonObject
     usage: Mapping[str, Any]
     response_id: str | None = None
+    request_payload: Mapping[str, Any] | None = None
+    request_payload_sha256: str | None = None
+    request_payload_encoding: str | None = None
 
 
 class ChatClient(Protocol):
@@ -92,9 +103,11 @@ class OpenAICompatibleChatClient:
         if self.seed is not None:
             payload["seed"] = self.seed
         payload.update(self.extra_body)
+        payload_bytes = serialize_request_payload(payload)
+        payload_record = json.loads(payload_bytes.decode("utf-8"))
         request = Request(
             f"{self.base_url}/chat/completions",
-            data=json.dumps(payload).encode("utf-8"),
+            data=payload_bytes,
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
@@ -126,4 +139,7 @@ class OpenAICompatibleChatClient:
             message=message,
             usage=dict(usage) if isinstance(usage, Mapping) else {},
             response_id=str(body["id"]) if body.get("id") is not None else None,
+            request_payload=payload_record,
+            request_payload_sha256=sha256(payload_bytes).hexdigest(),
+            request_payload_encoding=REQUEST_PAYLOAD_ENCODING,
         )

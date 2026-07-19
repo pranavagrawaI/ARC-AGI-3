@@ -132,7 +132,11 @@ Each run writes:
 
 - `trace.jsonl`: public action/observation trace;
 - `process.jsonl`: model responses, Python calls, action/tool-indexed workspace
-  changes, repairs, evictions, decisions, and transitions;
+  changes, repairs, evictions, decisions, and transitions. Every successful
+  model response includes the complete credential-free request payload with
+  image data URLs redacted, the explicit request tools, the canonical payload
+  encoding, and a SHA-256 computed over the exact pre-redaction bytes sent on
+  the wire;
 - `workspace/`: the policy workspace snapshotted before retrospective measurement;
 - `manifest.json`: exact endpoint/model/seeds/budgets and aggregate token usage;
 - `scorecard.json`: post-run score evidence unavailable to the policy;

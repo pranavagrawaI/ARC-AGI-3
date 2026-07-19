@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from hashlib import sha256
 from io import BytesIO
 import json
 from pathlib import Path
@@ -135,6 +136,45 @@ class ColorPermutationTests(unittest.TestCase):
 
 
 class OpenAICompatibleClientTests(unittest.TestCase):
+    def test_response_evidence_hashes_the_entire_exact_wire_payload(self) -> None:
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "choose"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,exact-image-bytes"},
+                },
+            ],
+        }]
+        tools = [{"type": "function", "function": {"name": "python"}}]
+        client = OpenAICompatibleChatClient(
+            base_url="http://model.invalid/v1",
+            model="local-model",
+            api_key="test-key",
+            temperature=0.25,
+            max_tokens=123,
+            seed=9,
+            extra_body={"top_k": 20},
+        )
+
+        with patch("llm_repl_agent.client.urlopen", return_value=FakeHttpResponse()) as opened:
+            result = client.complete(messages=messages, tools=tools)
+
+        request = opened.call_args.args[0]
+        wire_payload = json.loads(request.data)
+        self.assertEqual(result.request_payload, wire_payload)
+        self.assertEqual(result.request_payload_sha256, sha256(request.data).hexdigest())
+        self.assertEqual(result.request_payload_encoding, "json-utf8-sort-keys-compact-v1")
+        self.assertEqual(wire_payload["messages"], messages)
+        self.assertEqual(wire_payload["tools"], tools)
+        self.assertEqual(wire_payload["tool_choice"], "auto")
+        self.assertEqual(wire_payload["model"], "local-model")
+        self.assertEqual(wire_payload["seed"], 9)
+        self.assertEqual(wire_payload["temperature"], 0.25)
+        self.assertEqual(wire_payload["max_tokens"], 123)
+        self.assertEqual(wire_payload["top_k"], 20)
+
     def test_posts_stateless_tool_enabled_chat_request(self) -> None:
         client = OpenAICompatibleChatClient(
             base_url="http://model.invalid/v1",
@@ -492,6 +532,68 @@ class PythonWorkspaceTests(unittest.TestCase):
 
 
 class LlmReplAgentTests(unittest.TestCase):
+    def test_process_log_commits_to_the_full_pre_redaction_request_payload(self) -> None:
+        client = OpenAICompatibleChatClient(
+            base_url="http://model.invalid/v1",
+            model="local-model",
+            api_key="secret-test-key",
+            temperature=0.25,
+            max_tokens=123,
+            seed=9,
+            extra_body={"top_k": 20},
+        )
+        response_body = {
+            "id": "chat-evidence",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": '{"action":1,"data":null,"reason":"probe"}',
+                },
+            }],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2},
+        }
+        with TemporaryDirectory() as directory, PythonWorkspace(timeout_seconds=5) as workspace:
+            log_path = Path(directory) / "process.jsonl"
+            with (
+                patch(
+                    "llm_repl_agent.client.urlopen",
+                    return_value=FakeHttpResponse(response_body),
+                ) as opened,
+                ProcessLog(log_path) as process_log,
+            ):
+                agent = LlmReplAgent(
+                    client=client,
+                    workspace=workspace,
+                    process_log=process_log,
+                )
+
+                decision = agent.act(observation())
+
+            log_text = log_path.read_text()
+            events = [json.loads(line) for line in log_text.splitlines()]
+
+        self.assertEqual(decision.action, 1)
+        request = opened.call_args.args[0]
+        wire_payload = json.loads(request.data)
+        event = next(item for item in events if item["type"] == "model_response")
+        self.assertEqual(event["request_payload_sha256"], sha256(request.data).hexdigest())
+        self.assertEqual(
+            event["request_payload_encoding"],
+            "json-utf8-sort-keys-compact-v1",
+        )
+        self.assertEqual(event["request_tools"], wire_payload["tools"])
+        self.assertEqual(event["request_payload"]["tools"], wire_payload["tools"])
+        self.assertEqual(event["request_payload"]["model"], "local-model")
+        self.assertEqual(event["request_payload"]["tool_choice"], "auto")
+        self.assertEqual(event["request_payload"]["temperature"], 0.25)
+        self.assertEqual(event["request_payload"]["max_tokens"], 123)
+        self.assertEqual(event["request_payload"]["seed"], 9)
+        self.assertEqual(event["request_payload"]["top_k"], 20)
+        full_url = wire_payload["messages"][1]["content"][1]["image_url"]["url"]
+        logged_url = event["request_payload"]["messages"][1]["content"][1]["image_url"]["url"]
+        self.assertEqual(logged_url, f"<image-data-url:{len(full_url)}-chars>")
+        self.assertNotIn("secret-test-key", log_text)
+
     def test_final_deliberation_round_requires_an_action_without_python(self) -> None:
         def python_response(call_id: str) -> ChatResponse:
             return ChatResponse(

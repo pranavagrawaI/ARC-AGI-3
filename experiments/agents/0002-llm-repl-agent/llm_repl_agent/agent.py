@@ -310,6 +310,7 @@ class LlmReplAgent:
             action_step=self.actions + 1,
             model_round=model_round,
             request_messages=messages,
+            **_request_evidence(response),
             response=response.message,
             response_id=response.response_id,
             usage=response.usage,
@@ -392,6 +393,7 @@ class LlmReplAgent:
             action_step=self.actions,
             model_round=1,
             request_messages=request_messages,
+            **_request_evidence(response),
             response=response.message,
             response_id=response.response_id,
             usage=response.usage,
@@ -660,6 +662,17 @@ class LlmReplAgent:
         for key, value in usage.items():
             if isinstance(value, int) and not isinstance(value, bool):
                 self._usage[key] = self._usage.get(key, 0) + value
+
+
+def _request_evidence(response: ChatResponse) -> dict[str, Any]:
+    payload = response.request_payload
+    tools = payload.get("tools") if isinstance(payload, Mapping) else None
+    return {
+        "request_payload": payload,
+        "request_payload_sha256": response.request_payload_sha256,
+        "request_payload_encoding": response.request_payload_encoding,
+        "request_tools": tools if isinstance(tools, list) else None,
+    }
 
 
 def _message_text(content: Any) -> str:
