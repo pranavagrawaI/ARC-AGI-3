@@ -39,3 +39,123 @@ _Avoid_: Trace field, admissible observation
 **Experiment**:
 An isolated agent implementation and research log under `/experiments`, used for integrated contestant or oracle-coach work after lesson 0049. Experiments are the default unit of new work unless the project explicitly returns to lesson mode.
 _Avoid_: Lesson, teaching brick
+
+**Program Identification Experiment**:
+A falsifiable contestant experiment that tests whether admissible interaction can recover an executable theory sufficient for a specified decision. It establishes feasibility for one bounded claim rather than specifying or building a complete agent architecture.
+_Avoid_: Full agent, source-code recovery, world-model manifesto
+
+**Working Theory**:
+An executable hypothesis provisionally used for prediction and planning because it is sufficiently plausible and useful, despite unresolved alternatives. Its unverified consequences remain explicit rather than being promoted to facts.
+_Avoid_: Known rule, ground truth, final model
+
+**Action Economy**:
+The requirement to balance progress, information, risk, and irreversible cost because every environment action consumes a scarce interaction budget. Information has value only when it can improve a consequential decision.
+_Avoid_: Exploration rate, information gain alone
+
+**Game Judgment**:
+The situated ability to choose the highest-leverage hypothesis, experiment, computation, reconstruction, plan, or action for improving the next real decision. It routes among game-building intuition, evidential correction, and action-economical play rather than following a fixed discovery procedure.
+_Avoid_: Fixed exploration policy, verification checklist, information gain alone
+
+**Executable Conjecture**:
+The smallest runnable externalization of an emerging causal explanation that can sharpen a prediction, expose missing state, compare alternatives, or improve a real decision. It is expected to be early, partial, provisional, and disposable; it earns elaboration or survival only through prospective usefulness and contact with public evidence.
+_Avoid_: Complete simulator requirement, retrospective code, polished reconstruction
+
+**Executable Reconstruction**:
+An evolving collection of executable conjectures about a game's decision-relevant hidden implementation. It may remain local or grow into a broader runnable theory for counterfactual prediction and planning; it need not reproduce the original source or model details irrelevant to current decisions.
+_Avoid_: Source-code recovery, verbal game summary, exact renderer clone
+
+**External Executable Reconstruction**:
+An executable reconstruction externalized into a runnable computational object that can combine inferred rules with candidate states, actions, or plans to generate unobserved consequences or preferences. The experiment contrasts permission and pressure for this external execution with equally precise internal or verbal reconstruction.
+_Avoid_: Mechanistic reasoning generally, pseudocode, descriptive evidence computation
+
+**Reconstruction Treatment Effect**:
+The outcome difference caused by assignment to permission and pressure for external executable reconstruction, estimated primarily by the matched enabled-versus-disabled prompt comparison regardless of activation or compliance.
+_Avoid_: Reconstruction activation, local reconstruction-content dependence, per-protocol contrast
+
+**Reconstruction Activation**:
+The enabled agent's creation and prospective use of an external executable reconstruction. Activation can be absent even when the enabled prompt was assigned and does not by itself establish local content dependence or benefit.
+_Avoid_: Treatment assignment, causal-use candidate alone, beneficial causal use
+
+**Local Reconstruction-Content Dependence**:
+Reproducible dependence of the model's immediate response signature at one selected decision point on the specific computed content of an external executable reconstruction, established through matched intact-versus-perturbed shadow requests. It does not establish a causal contribution to gameplay, delayed influence, benefit, or generality beyond that decision point.
+_Avoid_: Gameplay cause, treatment effect, activation, self-reported influence
+
+**Causal-Use Candidate**:
+An auditable prospective chain in which executable reconstruction content appears to discriminate among live alternatives and influence a real decision or the allocation of effort leading to one. It nominates an intervention point but does not establish counterfactual dependence.
+_Avoid_: Local content dependence, retrospective rationale, code execution alone
+
+**Local Content-Dependence Demonstration**:
+A passed reconstruction-content intervention in which perturbing one selected reconstruction result reproducibly changes the mechanically extracted immediate response signature while matched intact requests reproduce the original signature.
+_Avoid_: Gameplay cause, trace linkage, self-reported use, causal-use candidate
+
+**Beneficial Causal Use**:
+Counterfactual reconstruction-content dependence whose resulting decision change improves a frozen external outcome such as progress, action efficiency, decision-critical prediction, or risk relative to an appropriate counterfactual.
+_Avoid_: Causal influence alone, reconstruction quality by appearance
+
+**Scientist–Game Designer–Player**:
+An agent stance whose Game Designer responsibility is operationalized as Game Builder and Reverse Engineer: it invents source-level mechanisms from public transitions. The Scientist and Inventor forces those mechanisms to emit predictions and collide with evidence. The Player routes attention toward whichever mechanism, experiment, computation, or action has the highest value now. The responsibilities need not take turns or complete a fixed cycle.
+_Avoid_: Scientist-player, fixed discovery procedure, generic game-playing policy
+
+**Game-Design and Reverse-Engineering Prior Prompt**:
+A game-general cognitive router that evokes pretrained knowledge about how games are authored, implemented, debugged, communicated, investigated, and played. It seeds the act of implementation and early executable conjecture while forcing the contestant to invent the mechanism vocabulary from evidence. Its guidance is defeasible and opportunistic rather than a supplied ontology or discovery procedure.
+_Avoid_: Game walkthrough, LS20 prompt, mechanism menu, verification checklist
+
+**Model Theater**:
+The appearance of executable reconstruction without demonstrated local dependence of an immediate response on its prospective content. Creating or executing code, fitting history, narrating a model, or observing temporal alignment does not cross this boundary without a controlled content intervention.
+_Avoid_: Causal-use candidate, local content dependence, beneficial causal use
+
+**Contestant-Unseen**:
+An evaluation boundary under which an admissible contestant has not received the protected observations, game identity, source, prior traces, or artifacts before encountering them through permitted public interaction. It says nothing about researcher exposure.
+_Avoid_: Researcher-blind, globally unseen
+
+**Policy-Development Holdout**:
+Evaluation evidence that is not used to revise the treatment, runtime, budgets, measurements, exclusions, or acceptance rules after their declared freeze. Researchers may possess prior knowledge of the underlying game, but protected evidence from the holdout may not influence the frozen design generation.
+_Avoid_: Researcher-blind holdout, untouched game
+
+**Post-Freeze Within-Game Transfer Set**:
+Later levels of the same game that a fresh contestant enters only after learning through earlier levels under a frozen experimental design. Run-local memory persists across the level boundary because that transfer is being measured; development-run, cross-run, and cross-game artifacts do not.
+_Avoid_: Unseen levels, independent test games, researcher-blind holdout
+
+**Researcher-Blind Holdout**:
+Evaluation content whose protected observations, mechanics, and outcomes were unavailable to the researchers before the design and analysis contract was frozen. A policy-development holdout does not imply this stronger boundary.
+_Avoid_: Policy-development holdout, contestant-unseen
+
+**Request Payload Commitment**:
+A pre-redaction digest of the exact credential-free model request body sent at a decision point, used to verify that a later shadow-request source payload reconstructed the same input contract. It establishes input identity, not output reproducibility, local content dependence, or benefit.
+_Avoid_: Request hash, replay proof, deterministic replay
+
+**Capability Environment**:
+The coupled external environment through which one core model accesses reliable cognitive operations and continuity mechanisms while retaining authority over investigation, belief revision, tool selection, and environment action. Its treatment manifest distinguishes evidence operators, epistemic state, host-enforced decision protocols, context assembly, and generic workspace access rather than calling every mechanism a tool.
+_Avoid_: Tool bag, multi-agent system, capability tool as a uniform mechanism class
+
+**Evidence Operator**:
+A callable, deterministic operation over immutable admissible evidence, such as exact frame differencing or transition-history retrieval. It returns facts or derived measurements without assigning semantic meaning or revising beliefs.
+_Avoid_: Hypothesis generator, belief update, specialist agent
+
+**Epistemic Ledger**:
+A persistent, model-authored record of revisable claims with stable identities, optional evidence and counterevidence links, statuses, and revision or supersession history, kept distinct from immutable host-authored evidence. It preserves longitudinal belief provenance without requiring every tentative claim to carry structured assumptions, scope, or a falsification condition; local testability belongs to the action commitment when a claim drives a decision.
+_Avoid_: Evidence archive, conversational memory, ground-truth store
+
+**Decision Protocol**:
+A host-enforced contract governing what the model must commit before an environment action and how the observed successor is checked afterward. A testable commitment names the action, its purpose, the claim identities relied upon, and the expected observable consequence. The protocol constrains process without choosing the action or belief for the model, and a prediction mismatch does not by itself falsify every relied-upon claim.
+_Avoid_: Planner, policy, evidence operator
+
+**Observable Assertion**:
+A typed, mechanically evaluable prediction about permitted public before-and-after observations, selected and parameterized by the model before acting. Assertions may vary in specificity and carry optional explanatory prose; the host reports assertion results and mismatches without deciding which relied-upon claim should be revised.
+_Avoid_: Free-text prediction, supplied game ontology, automatic belief falsification
+
+**Reconciliation Gate**:
+A decision-protocol boundary that prevents the next environment action until the model dispositions each new observable-assertion mismatch. The model may revise or supersede claims, identify an assertion or grounding error, retain an unresolved anomaly, or record why no belief changes; the host preserves the disposition but does not diagnose the failure or require claim revision.
+_Avoid_: Automatic belief update, forced hypothesis rejection, nonblocking warning
+
+**Interface Readiness Gate**:
+A pre-live acceptance boundary establishing separately that host-owned capability contracts are deterministic and semantically neutral, the frozen core model can operate the exposed interface on bounded fixtures, and each included mechanism can prospectively enter a decision chain. Passing licenses matched live evaluation of that exact interface; it does not establish gameplay benefit.
+_Avoid_: Gameplay benchmark, tool availability check, post-hoc tutorial
+
+**Local Prospective Consequence**:
+A fixture-bound pre-successor chain in which a model state or intended decision is recorded, a capability is invoked, its output is observed, and a belief, prediction, or intended action changes before successor feedback. It establishes local interface uptake, not run-level mediation or benefit.
+_Avoid_: Tool call count, self-reported usefulness, gameplay treatment effect
+
+**Context Assembler**:
+The host mechanism that constructs the bounded packet for the next model decision from current observation, active beliefs, unresolved contradictions, recent continuity, and retrieved evidence. It manages attention without silently promoting beliefs to facts.
+_Avoid_: Full transcript, memory store, autonomous summarizer
