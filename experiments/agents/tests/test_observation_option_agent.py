@@ -62,12 +62,9 @@ from observation_option_agent import (
     GoalAwareSelector,
     GoalEvidenceRecord,
     GoalHypothesis,
-    GoalHypothesisBinder,
     GoalHypothesisGenerator,
     GoalHypothesisScorer,
     GoalHypothesisUpdater,
-    GoalLiveOutcomeUpdater,
-    GoalLiveSelector,
     GoalTestCandidateFactory,
     OptionApplicabilityEdge,
     OptionApplicabilityGraph,
@@ -140,10 +137,8 @@ from observation_option_agent import (
     cross_level_transfer_findings,
     execute_public_style_goal_test,
     forbidden_goal_hypothesis_findings,
-    forbidden_goal_live_binding_findings,
     m117_status,
     m12_status,
-    m126_status,
     promote_validated_template_instance,
     trace_leakage_findings,
 )
@@ -3444,159 +3439,6 @@ class ObservationOptionAgentTests(unittest.TestCase):
             forbidden_goal_hypothesis_findings({"source": "trace_corridor"}),
         )
 
-    def test_m126_binds_live_template_candidate_without_fixture_injection(self) -> None:
-        hypothesis = self._m126_level_transition_hypothesis()
-        live_candidate = self._m126_live_template_candidate()
-
-        binding = GoalHypothesisBinder().bind_existing(
-            hypothesis=hypothesis,
-            live_candidates=(live_candidate,),
-            fixture_candidate_id="candidate_goal_heldout_terminal_like",
-        )[0]
-
-        self.assertEqual(binding.binding_mode, "BIND_EXISTING_LIVE_CANDIDATE")
-        self.assertEqual(binding.candidate_id, "chain_level_1:self_option_template_000")
-        self.assertTrue(binding.binding_allowed)
-        self.assertTrue(binding.candidate_on_live_surface)
-        self.assertFalse(binding.fixture_candidate_used_as_live_candidate)
-        self.assertEqual(binding.binding_relevance_terms["terminal_directness"], 0.0)
-        self.assertGreater(
-            binding.binding_relevance_terms["decision_surface_expansion_support"],
-            0.0,
-        )
-        self.assertGreater(binding.goal_relevance_score, 0.0)
-
-    def test_m126_rejects_irrelevant_candidate_instead_of_overbinding(self) -> None:
-        hypothesis = self._m126_level_transition_hypothesis()
-        irrelevant = ChainCandidate(
-            candidate_id="candidate_noise_or_irrelevant",
-            candidate_type="single_option",
-            option_ids=("wander_option",),
-            start_state_class_id="L1_S0",
-            predicted_terminal_state_class_id=None,
-            predicted_progress_features={
-                "level_completion": False,
-                "stable_semantic_delta": False,
-                "new_option_enabled": False,
-                "new_state_class": False,
-                "uncertainty_reduction": False,
-                "volatile_visual_delta": True,
-            },
-            cost_features={"predicted_action_cost": 1, "empirical_consistency": 1.0},
-            risk_features={"guard_risk": 0},
-            provenance=({"kind": "noise_control_candidate"},),
-        )
-
-        binding = GoalHypothesisBinder().bind_existing(
-            hypothesis=hypothesis,
-            live_candidates=(irrelevant,),
-            fixture_candidate_id="candidate_goal_heldout_terminal_like",
-        )[0]
-
-        self.assertEqual(binding.binding_mode, "REJECTED_NO_GOAL_RELEVANCE")
-        self.assertFalse(binding.binding_allowed)
-        self.assertEqual(binding.goal_relevance_score, 0.0)
-
-    def test_m126_goal_live_selector_adds_goal_score_and_outcome_update(self) -> None:
-        hypothesis = self._m126_level_transition_hypothesis()
-        live_candidate = self._m126_live_template_candidate()
-        binding = GoalHypothesisBinder().bind_existing(
-            hypothesis=hypothesis,
-            live_candidates=(live_candidate,),
-            fixture_candidate_id="candidate_goal_heldout_terminal_like",
-        )[0]
-
-        ledger = GoalLiveSelector(
-            progress_model=LearnedProgressModel(ProgressHypothesisSet.from_m9_priors())
-        ).select(
-            round_index=0,
-            state_class_id="L1_S0",
-            candidates=(live_candidate,),
-            bindings=(binding,),
-            attempt_memory=AttemptMemory(),
-        )
-        selected = ledger.candidates[0]
-        update = GoalLiveOutcomeUpdater().classify(
-            hypothesis=hypothesis,
-            binding=binding,
-            candidate=selected,
-            execution={
-                "public_actions_executed": True,
-                "levels_before": 1,
-                "levels_after": 1,
-            },
-        )
-
-        self.assertEqual(ledger.selected_candidate_id, live_candidate.candidate_id)
-        self.assertGreater(selected.score_terms["goal_relevance_score"], 0.0)
-        self.assertEqual(update.outcome, "WEAK_SUPPORT")
-        self.assertTrue(update.public_actions_executed)
-
-    def test_m126_status_and_audit_catch_goal_binding_counterfeits(self) -> None:
-        common = dict(
-            fixture_candidate_injected=False,
-            binding_count=1,
-            honest_relevant_candidate_exists=True,
-            selected_binding_on_live_surface=True,
-            selected_candidate_actuated=True,
-            outcome_updated=True,
-            overbroad_binding=False,
-            irrelevant_candidate_bound=False,
-            trace_or_oracle_leakage=False,
-        )
-
-        self.assertEqual(m126_status(**common), "complete_with_known_limits")
-        self.assertEqual(
-            m126_status(**{**common, "overbroad_binding": True}),
-            "failed_overbroad_goal_binding",
-        )
-        self.assertIn(
-            "trace_corridor",
-            forbidden_goal_live_binding_findings({"source": "trace_corridor"}),
-        )
-
-    def _m126_level_transition_hypothesis(self) -> GoalHypothesis:
-        evidence = (
-            GoalEvidenceRecord(
-                evidence_id="terminal_000",
-                kind="TERMINAL_PUBLIC_EVIDENCE",
-                source_artifact="terminal-evidence-ledger.json",
-                public=True,
-                supports=("level_transition_triggering",),
-                contradicts=(),
-                payload={"levels_completed_increases": True},
-                provenance=({"kind": "public_terminal_transition"},),
-            ),
-        )
-        return next(
-            item for item in GoalHypothesisScorer().score(
-                GoalHypothesisGenerator().generate(evidence=evidence)
-            )
-            if item.goal_hypothesis_id == "goal_hyp_level_transition_000"
-        )
-
-    def _m126_live_template_candidate(self) -> ChainCandidate:
-        return ChainCandidate(
-            candidate_id="chain_level_1:self_option_template_000",
-            candidate_type="single_option",
-            option_ids=("level_1:self_option_template_000",),
-            start_state_class_id="L1_S0",
-            predicted_terminal_state_class_id="L1_S1",
-            predicted_progress_features={
-                "level_completion": False,
-                "stable_semantic_delta": False,
-                "new_option_enabled": False,
-                "new_state_class": True,
-                "uncertainty_reduction": False,
-                "volatile_visual_delta": False,
-            },
-            cost_features={"predicted_action_cost": 1, "empirical_consistency": 1.0},
-            risk_features={"guard_risk": 0},
-            provenance=({
-                "kind": "live_option_graph_prediction",
-                "source": "validated_cross_level_template",
-            },),
-        )
 
     def test_local_recovery_planner_finds_non_greedy_route_around_blocked_edge(
         self,

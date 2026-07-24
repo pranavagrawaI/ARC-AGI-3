@@ -214,15 +214,6 @@ from .milestone12r2a import (
     forbidden_local_geometry_findings,
     m12r2a_status,
 )
-from .milestone126 import (
-    GoalHypothesisBinder,
-    GoalLiveBinding,
-    GoalLiveOutcomeUpdater,
-    GoalLiveSelector,
-    GoalLiveUpdate,
-    forbidden_goal_live_binding_findings,
-    m126_status,
-)
 from .milestone1261 import (
     ActionEffectConstraint,
     ActionEffectConstraintModel,
@@ -332,11 +323,6 @@ __all__ = [
     "GoalHypothesisScorer",
     "GoalHypothesisUpdate",
     "GoalHypothesisUpdater",
-    "GoalHypothesisBinder",
-    "GoalLiveBinding",
-    "GoalLiveOutcomeUpdater",
-    "GoalLiveSelector",
-    "GoalLiveUpdate",
     "GoalSelectionLedger",
     "GoalTestCandidate",
     "GoalTestCandidateFactory",
@@ -424,7 +410,6 @@ __all__ = [
     "forbidden_frontier_findings",
     "forbidden_level_transition_findings",
     "forbidden_goal_hypothesis_findings",
-    "forbidden_goal_live_binding_findings",
     "forbidden_motor_constraint_findings",
     "generate_chain_candidates",
     "iter_trace_steps",
@@ -438,7 +423,6 @@ __all__ = [
     "m116_status",
     "m117_status",
     "m12_status",
-    "m126_status",
     "m1261_status",
     "nontriviality_criteria",
     "observation_from_self_execution",
