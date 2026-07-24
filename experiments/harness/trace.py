@@ -58,12 +58,31 @@ class JsonlTraceWriter:
             }
         )
 
+    def append_suppressed(self, step: int, transition: Transition) -> None:
+        if not transition.observation_suppressed:
+            raise ValueError("suppressed trace record requires a suppressed transition")
+        self._write(
+            {
+                "type": "suppressed_transition",
+                "step": step,
+                "action": transition.decision.action,
+                "action_data": transition.decision.data,
+                "reasoning": transition.decision.reasoning,
+                "levels_completed": transition.after.levels_completed,
+                "suppression_reason": "post_level_limit_observation",
+            }
+        )
+
     def finish(self, result: RunResult) -> None:
         self._write(
             {
                 "type": "end",
                 "actions": result.actions,
                 "stop_reason": result.stop_reason,
+                "level_action_counts": list(result.level_action_counts),
+                "completion_action_counts": list(result.completion_action_counts),
+                "reset_count": result.reset_count,
+                "game_over_count": result.game_over_count,
                 "levels_completed": result.final.levels_completed,
                 "state": result.final.state,
             }

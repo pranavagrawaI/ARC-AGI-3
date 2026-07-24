@@ -10,6 +10,7 @@ from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parents[3]
+AGENT_ROOT = Path(__file__).resolve().parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
@@ -30,8 +31,8 @@ def main() -> None:
     args = parser.parse_args()
 
     trace_path = args.trace or (
-        REPO
-        / "experiments/artifacts/0000-random-agent"
+        AGENT_ROOT
+        / "artifacts/recordings"
         / f"{args.game}-seed-{args.seed}.jsonl"
     )
     arcade = arc_agi.Arcade(operation_mode=OperationMode.OFFLINE)

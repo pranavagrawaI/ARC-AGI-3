@@ -42,6 +42,7 @@ class Transition:
     before: Observation
     decision: Decision
     after: Observation
+    observation_suppressed: bool = False
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,10 @@ class RunResult:
     transitions: tuple[Transition, ...]
     final: Observation
     stop_reason: str
+    level_action_counts: tuple[int, ...] = ()
+    completion_action_counts: tuple[int, ...] = ()
+    reset_count: int = 0
+    game_over_count: int = 0
 
     @property
     def actions(self) -> int:
@@ -70,5 +75,7 @@ class TraceSink(Protocol):
     def start(self, observation: Observation) -> None: ...
 
     def append(self, step: int, transition: Transition) -> None: ...
+
+    def append_suppressed(self, step: int, transition: Transition) -> None: ...
 
     def finish(self, result: RunResult) -> None: ...

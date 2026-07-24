@@ -26,6 +26,17 @@ state or oracle labels. `Decision.data` carries coordinates or other public inpu
 required by parameterized actions; the runner validates it against the selected
 ARC action before execution.
 
+Replay a saved trace or raw local recording with:
+
+```bash
+uv run python -m experiments.harness.viewer path/to/play-record.jsonl
+```
+
+The viewer opens a local Tk window with previous, next, play, and pause controls.
+It accepts both harness JSONL traces and raw ARC recording JSONL files. Agent
+recordings should live with the agent that produced or depends on them, under
+`experiments/agents/<agent>/artifacts/recordings/`.
+
 ## ARC-AGI-3 contract mapping
 
 This harness mirrors the public ARC-AGI-3 frame/action contract used by the local

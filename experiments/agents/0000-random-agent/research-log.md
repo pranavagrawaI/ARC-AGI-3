@@ -33,7 +33,7 @@ Measured on LS20 with seed 0 and a 500-action ceiling:
 - 0 levels completed;
 - action counts: A1=44, A2=31, A3=32, A4=28;
 - stopping reason: environment terminal state, not the harness action ceiling;
-- trace: `experiments/artifacts/0000-random-agent/ls20-seed-0.jsonl`.
+- trace: `experiments/agents/0000-random-agent/artifacts/recordings/ls20-seed-0.jsonl`.
 
 The trace contains 137 records: one initial observation, 135 transitions, and one
 end record. Its first observation exposes only the harness's five public fields;

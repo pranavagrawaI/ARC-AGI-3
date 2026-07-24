@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Any, Mapping, Protocol
 
 import numpy as np
 from arcengine import GameAction
@@ -16,14 +16,14 @@ TERMINAL_STATES = frozenset({"WIN", "GAME_OVER"})
 class Environment(Protocol):
     """The two environment operations required by the harness."""
 
-    def reset(self): ...
+    def reset(self) -> Any: ...
 
     def step(
         self,
         action: GameAction,
         data: dict[str, Any] | None = None,
         reasoning: dict[str, Any] | None = None,
-    ): ...
+    ) -> Any: ...
 
 
 class IllegalActionError(ValueError):
@@ -51,6 +51,9 @@ def run_episode(
     *,
     max_actions: int,
     trace: TraceSink | None = None,
+    level_action_budgets: tuple[int, ...] | None = None,
+    stop_after_levels: int | None = None,
+    stop_on_exceptions: Mapping[type[BaseException], str] | None = None,
 ) -> RunResult:
     """Run one reset-to-terminal interaction episode.
 
@@ -61,10 +64,24 @@ def run_episode(
 
     if max_actions < 0:
         raise ValueError("max_actions must be non-negative")
+    if level_action_budgets is not None:
+        if not level_action_budgets or any(limit < 0 for limit in level_action_budgets):
+            raise ValueError("level action budgets must be non-empty and non-negative")
+        if stop_after_levels is None:
+            stop_after_levels = len(level_action_budgets)
+        if len(level_action_budgets) != stop_after_levels:
+            raise ValueError("provide exactly one action budget per included level")
+    if stop_after_levels is not None and stop_after_levels < 1:
+        raise ValueError("stop_after_levels must be positive")
 
     initial = public_observation(env.reset())
     current = initial
     transitions: list[Transition] = []
+    level_action_counts = [0] * (stop_after_levels or 0)
+    completion_action_counts: list[int] = []
+    reset_count = 0
+    game_over_count = 0
+    last_levels_completed = initial.levels_completed
     if trace is not None:
         trace.start(initial)
 
@@ -75,11 +92,35 @@ def run_episode(
         if not current.available_actions:
             stop_reason = "no_available_actions"
             break
+        active_level = current.levels_completed - initial.levels_completed
+        if stop_after_levels is not None and active_level >= stop_after_levels:
+            stop_reason = "level_limit"
+            break
+        if (
+            level_action_budgets is not None
+            and level_action_counts[active_level] >= level_action_budgets[active_level]
+        ):
+            stop_reason = "level_action_budget"
+            break
         if len(transitions) >= max_actions:
             stop_reason = "action_budget"
             break
 
-        decision = agent.act(current)
+        try:
+            decision = agent.act(current)
+        except BaseException as error:
+            matched_reason = next(
+                (
+                    reason
+                    for error_type, reason in (stop_on_exceptions or {}).items()
+                    if isinstance(error, error_type)
+                ),
+                None,
+            )
+            if matched_reason is None:
+                raise
+            stop_reason = matched_reason
+            break
         if decision.action not in current.available_actions:
             raise IllegalActionError(
                 f"agent chose action {decision.action}; "
@@ -107,6 +148,49 @@ def run_episode(
                 ) from error
 
         next_frame = env.step(game_action, data=action_data, reasoning=reasoning)
+        if next_frame is None:
+            raise RuntimeError("environment step returned no frame")
+        if stop_after_levels is not None:
+            level_action_counts[active_level] += 1
+        raw_levels_completed = int(next_frame.levels_completed)
+        attempted_action_count = len(transitions) + 1
+        if raw_levels_completed > last_levels_completed:
+            completion_action_counts.extend(
+                [attempted_action_count]
+                * (raw_levels_completed - last_levels_completed)
+            )
+            last_levels_completed = raw_levels_completed
+        completed_in_run = raw_levels_completed - initial.levels_completed
+        if stop_after_levels is not None and completed_in_run >= stop_after_levels:
+            following = Observation(
+                pixels=current.pixels,
+                available_actions=(),
+                levels_completed=raw_levels_completed,
+                state=current.state,
+                full_reset=current.full_reset,
+            )
+            transition = Transition(
+                current,
+                decision,
+                following,
+                observation_suppressed=True,
+            )
+            transitions.append(transition)
+            if trace is not None:
+                trace.append_suppressed(len(transitions), transition)
+            current = following
+            stop_reason = "level_limit"
+            break
+
+        raw_state = (
+            next_frame.state.value
+            if hasattr(next_frame.state, "value")
+            else str(next_frame.state)
+        )
+        if bool(next_frame.full_reset):
+            reset_count += 1
+        if raw_state == "GAME_OVER":
+            game_over_count += 1
         following = public_observation(next_frame)
         transition = Transition(current, decision, following)
         agent.observe(transition)
@@ -120,6 +204,10 @@ def run_episode(
         transitions=tuple(transitions),
         final=current,
         stop_reason=stop_reason,
+        level_action_counts=tuple(level_action_counts),
+        completion_action_counts=tuple(completion_action_counts),
+        reset_count=reset_count,
+        game_over_count=game_over_count,
     )
     if trace is not None:
         trace.finish(result)
