@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+from base64 import b64decode
+from binascii import Error as Base64Error
 from datetime import datetime, timezone
+from hashlib import sha256
 import json
 from pathlib import Path
 from typing import Any, Mapping
+
+from .client import serialize_request_payload
 
 
 DISCOVERY_KINDS = (
@@ -49,11 +54,60 @@ class ProcessLog:
 
     def write(self, event_type: str, **payload: Any) -> int:
         self._event_index += 1
+        evidence = dict(payload)
+        request_payload = payload.get("request_payload")
+        commitment = payload.get("request_payload_sha256")
+        if event_type in {"model_response", "model_request_failed"} and isinstance(
+            request_payload, Mapping
+        ):
+            if not isinstance(commitment, str):
+                raise ValueError("model response evidence is missing its request commitment")
+            request_bytes = serialize_request_payload(request_payload)
+            actual = sha256(request_bytes).hexdigest()
+            if actual != commitment:
+                raise ValueError("model request payload does not match its commitment")
+            relative_path = Path("request-payloads") / f"{self._event_index:06d}.json"
+            archive_path = self.path.parent / relative_path
+            archive_path.parent.mkdir(parents=True, exist_ok=True)
+            archive_path.write_bytes(request_bytes)
+            evidence["request_payload_archive"] = relative_path.as_posix()
+            evidence["request_payload_archive_sha256"] = actual
+        response_body_raw = payload.get("response_body_raw")
+        response_body_base64 = payload.get("response_body_base64")
+        response_commitment = payload.get("response_body_sha256")
+        response_bytes: bytes | None = None
+        response_encoding: str | None = None
+        if isinstance(response_body_base64, str):
+            try:
+                response_bytes = b64decode(response_body_base64, validate=True)
+            except (Base64Error, ValueError) as error:
+                raise ValueError("model response base64 evidence is invalid") from error
+            response_encoding = "exact-transport-bytes-v1"
+        elif isinstance(response_body_raw, str):
+            response_bytes = response_body_raw.encode("utf-8")
+            response_encoding = "utf-8-exact-transport-v1"
+        if event_type in {"model_response", "model_request_failed"} and response_bytes is not None:
+            if not isinstance(response_commitment, str):
+                raise ValueError("model response evidence is missing its response commitment")
+            actual_response = sha256(response_bytes).hexdigest()
+            if actual_response != response_commitment:
+                raise ValueError("model response bytes do not match their commitment")
+            relative_response_path = (
+                Path("response-bodies") / f"{self._event_index:06d}.raw"
+            )
+            response_archive_path = self.path.parent / relative_response_path
+            response_archive_path.parent.mkdir(parents=True, exist_ok=True)
+            response_archive_path.write_bytes(response_bytes)
+            evidence["response_body_archive"] = relative_response_path.as_posix()
+            evidence["response_body_archive_sha256"] = actual_response
+            evidence["response_body_encoding"] = response_encoding
+            evidence.pop("response_body_raw", None)
+            evidence.pop("response_body_base64", None)
         record = {
             "event_index": self._event_index,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "type": event_type,
-            **_without_data_urls(payload),
+            **_without_data_urls(evidence),
         }
         self._stream.write(json.dumps(record, separators=(",", ":"), sort_keys=True))
         self._stream.write("\n")

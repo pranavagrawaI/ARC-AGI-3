@@ -10,7 +10,9 @@ from .agent import (
 from .client import ChatClient, ChatResponse, OpenAICompatibleChatClient
 from .config import (
     MODEL_PROFILES,
+    OPENROUTER_PROFILES,
     ModelEnvironment,
+    apply_openrouter_routing,
     model_request_options,
     resolve_model_environment,
 )
@@ -28,7 +30,9 @@ __all__ = [
     "ModelBudgetExceeded",
     "ModelEnvironment",
     "MODEL_PROFILES",
+    "OPENROUTER_PROFILES",
     "MODEL_OUTPUT_CHAR_LIMIT",
+    "apply_openrouter_routing",
     "model_request_options",
     "OpenAICompatibleChatClient",
     "POLICY_PROMPTS",

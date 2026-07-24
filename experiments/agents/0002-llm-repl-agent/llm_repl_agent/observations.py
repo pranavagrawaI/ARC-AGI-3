@@ -150,11 +150,20 @@ def representation_descriptor(pixels: np.ndarray, png: bytes) -> dict[str, Any]:
 class ObservationStore:
     """Materialize only public, run-local observations inside the Python workspace."""
 
-    def __init__(self, root: Path, *, colors: ColorPermutation) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        colors: ColorPermutation,
+        publish_dir: Path | None = None,
+    ) -> None:
         self.root = root
         self.colors = colors
+        self.publish_dir = publish_dir
         self.observations_dir = root / "observations"
         self.observations_dir.mkdir(parents=True, exist_ok=True)
+        if self.publish_dir is not None:
+            self.publish_dir.mkdir(parents=True, exist_ok=True)
         self.history_path = root / "public_history.jsonl"
         (root / "WORKSPACE.md").write_text(
             f"This workspace is new for this run. {OBSERVATION_FILE_CONTRACT} "
@@ -177,6 +186,11 @@ class ObservationStore:
         png = pixels_to_png(pixels)
         representations = representation_descriptor(pixels, png)
         png_path.write_bytes(png)
+        if self.publish_dir is not None:
+            published = self.publish_dir / png_path.name
+            temporary = published.with_name(f".{published.name}.tmp")
+            temporary.write_bytes(png)
+            temporary.replace(published)
         (self.root / "current_observation.json").write_text(
             encoded + "\n", encoding="utf-8"
         )

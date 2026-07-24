@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 import json
 from typing import Any, Mapping, Sequence
@@ -10,7 +11,7 @@ from arcengine import GameAction
 
 from experiments.harness import Decision, Observation, Transition
 
-from .client import ChatClient, ChatResponse
+from .client import ChatClient, ChatResponse, ModelRequestError
 from .conversation import RollingConversation
 from .observations import (
     ColorPermutation,
@@ -109,7 +110,44 @@ class LlmAgentConfig:
 
 
 class DecisionFormatError(ValueError):
-    pass
+    """Raised when a model response cannot be repaired into a legal action."""
+
+
+def parse_decision_message(
+    message: Mapping[str, Any],
+    *,
+    available_actions: tuple[int, ...],
+    frame_width: int,
+    frame_height: int,
+) -> tuple[int, dict[str, Any] | None, Any]:
+    """Apply the production gameplay parser without response-specific bookkeeping."""
+
+    content = _message_text(message.get("content"))
+    payload = _json_object(content)
+    action = payload.get("action")
+    if isinstance(action, bool) or not isinstance(action, int):
+        raise DecisionFormatError("action must be an integer")
+    if action not in available_actions:
+        raise DecisionFormatError(
+            f"action {action} is not legal; legal actions are {available_actions}"
+        )
+    raw_data = payload.get("data")
+    if raw_data is not None and not isinstance(raw_data, Mapping):
+        raise DecisionFormatError("data must be an object or null")
+    data = dict(raw_data) if isinstance(raw_data, Mapping) else None
+    game_action = GameAction.from_id(action)
+    if game_action.is_complex():
+        if data is None or not all(
+            isinstance(data.get(key), int) and not isinstance(data.get(key), bool)
+            for key in ("x", "y")
+        ):
+            raise DecisionFormatError(f"action {action} requires integer x and y data")
+        if not (0 <= data["x"] < frame_width and 0 <= data["y"] < frame_height):
+            raise DecisionFormatError(
+                f"coordinates {(data['x'], data['y'])} are outside "
+                f"width={frame_width}, height={frame_height}"
+            )
+    return action, data, payload.get("reason")
 
 
 class ModelBudgetExceeded(RuntimeError):
@@ -125,6 +163,7 @@ class LlmReplAgent:
         process_log: ProcessLog,
         system_prompt: str = SYSTEM_PROMPT,
         color_permutation: ColorPermutation | None = None,
+        live_observations_dir: Path | None = None,
         config: LlmAgentConfig | None = None,
     ) -> None:
         self.client = client
@@ -134,6 +173,7 @@ class LlmReplAgent:
         self.store = ObservationStore(
             workspace.root,
             colors=color_permutation or ColorPermutation.identity(),
+            publish_dir=live_observations_dir,
         )
         self.conversation = RollingConversation(
             system_message={"role": "system", "content": system_prompt},
@@ -143,9 +183,14 @@ class LlmReplAgent:
         self._current: ModelObservation | None = None
         self._pending_before: ModelObservation | None = None
         self._history: list[dict[str, Any]] = []
-        self._usage: dict[str, int] = {}
+        self._pending_human_feedback: list[dict[str, Any]] = []
+        self._usage: dict[str, Any] = {}
+        self._provider_usage: list[dict[str, Any]] = []
         self._reported_tokens_total = 0
         self._model_calls = 0
+        self._python_calls = 0
+        self._decision_repairs = 0
+        self._rounds_by_action: dict[int, int] = {}
         self._workspace_evidence = workspace.evidence_state()
 
     def act(self, observation: Observation) -> Decision:
@@ -186,9 +231,9 @@ class LlmReplAgent:
                     messages=self.conversation.messages() + turn,
                     tools=(PYTHON_TOOL,),
                     model_round=model_round,
+                    observation=observation,
                 )
             assistant = _assistant_message(response.message)
-            turn.append(assistant)
             tool_calls = assistant.get("tool_calls")
             if isinstance(tool_calls, list) and tool_calls:
                 tool_messages, executed_python_calls = self._execute_tool_calls(
@@ -196,6 +241,8 @@ class LlmReplAgent:
                     action_step=self.actions + 1,
                     model_round=model_round,
                 )
+                assistant["tool_calls"] = _replayable_tool_calls(tool_calls)
+                turn.append(assistant)
                 turn.extend(tool_messages)
                 python_calls_this_action += executed_python_calls
                 if self.config.drop_stale_python_context:
@@ -209,6 +256,8 @@ class LlmReplAgent:
                     )
                     turn = compacted
                 continue
+
+            turn.append(assistant)
 
             try:
                 decision = self._decision_from_response(
@@ -253,6 +302,9 @@ class LlmReplAgent:
                 data=decision.data,
                 reasoning=decision.reasoning,
             )
+            # Keep coach notes in every stateless deliberation request for this
+            # action, then consume them only after a valid action is chosen.
+            self._pending_human_feedback.clear()
             return decision
 
         raise RuntimeError(
@@ -272,6 +324,7 @@ class LlmReplAgent:
                 messages=self.conversation.messages() + turn,
                 tools=(),
                 model_round=model_round,
+                observation=observation,
             )
             assistant = _assistant_message(response.message)
             tool_calls = assistant.get("tool_calls")
@@ -303,8 +356,15 @@ class LlmReplAgent:
         messages: Sequence[Mapping[str, Any]],
         tools: Sequence[Mapping[str, Any]],
         model_round: int,
+        observation: Observation,
     ) -> ChatResponse:
+        action_step = self.actions + 1
+        self._rounds_by_action[action_step] = max(
+            model_round,
+            self._rounds_by_action.get(action_step, 0),
+        )
         response = self._complete(messages=messages, tools=tools)
+        height, width = observation.pixels.shape[-2:]
         self.process_log.write(
             "model_response",
             action_step=self.actions + 1,
@@ -314,6 +374,11 @@ class LlmReplAgent:
             response=response.message,
             response_id=response.response_id,
             usage=response.usage,
+            decision_state={
+                "available_actions": list(observation.available_actions),
+                "frame_width": width,
+                "frame_height": height,
+            },
         )
         return response
 
@@ -326,6 +391,7 @@ class LlmReplAgent:
         repairs: int,
     ) -> int:
         repairs += 1
+        self._decision_repairs += 1
         self.process_log.write(
             "decision_repair",
             action_step=self.actions + 1,
@@ -358,6 +424,26 @@ class LlmReplAgent:
         self._current = after
         self._pending_before = None
         self.process_log.write("transition", **history)
+
+    def add_human_feedback(self, text: str, *, after_step: int | None = None) -> None:
+        """Queue a human coach note for the next act() observation message."""
+
+        cleaned = text.strip()
+        if not cleaned:
+            raise ValueError("human feedback text must be nonempty")
+        step = self.actions if after_step is None else int(after_step)
+        note = {
+            "after_step": step,
+            "text": cleaned,
+            "channel": "human_coach",
+        }
+        self._pending_human_feedback.append(note)
+        self.process_log.write(
+            "human_feedback",
+            after_step=step,
+            text=cleaned,
+            channel="human_coach",
+        )
 
     def finalize(self, observation: Observation) -> Mapping[str, Any] | None:
         """Collect a retrospective after control has ended; this cannot affect score."""
@@ -407,12 +493,31 @@ class LlmReplAgent:
         return report
 
     @property
-    def usage(self) -> Mapping[str, int]:
-        return dict(self._usage)
+    def usage(self) -> Mapping[str, Any]:
+        return deepcopy(self._usage)
+
+    @property
+    def provider_usage(self) -> list[dict[str, Any]]:
+        return deepcopy(self._provider_usage)
 
     @property
     def model_calls(self) -> int:
         return self._model_calls
+
+    @property
+    def python_calls(self) -> int:
+        return self._python_calls
+
+    @property
+    def decision_repairs(self) -> int:
+        return self._decision_repairs
+
+    @property
+    def model_rounds_per_action(self) -> tuple[int, ...]:
+        return tuple(
+            self._rounds_by_action[action_step]
+            for action_step in sorted(self._rounds_by_action)
+        )
 
     def _complete(
         self,
@@ -431,7 +536,22 @@ class LlmReplAgent:
             )
             raise ModelBudgetExceeded(budget_reason)
         self._model_calls += 1
-        response = self.client.complete(messages=messages, tools=tools)
+        try:
+            response = self.client.complete(messages=messages, tools=tools)
+        except ModelRequestError as error:
+            self.process_log.write(
+                "model_request_failed",
+                actions=self.actions,
+                model_calls=self._model_calls,
+                error=str(error),
+                request_payload=error.request_payload,
+                request_payload_sha256=error.request_payload_sha256,
+                request_payload_encoding=error.request_payload_encoding,
+                response_body_raw=error.response_body_raw,
+                response_body_base64=error.response_body_base64,
+                response_body_sha256=error.response_body_sha256,
+            )
+            raise
         self._add_usage(response.usage)
         return response
 
@@ -471,20 +591,41 @@ class LlmReplAgent:
         python_calls_this_action: int,
     ) -> dict[str, Any]:
         recent = self._history[-8:]
-        text = json.dumps({
+        payload: dict[str, Any] = {
             "step": self.actions,
             "deliberation": {
                 "model_round": model_round,
                 "max_model_rounds": self.config.max_model_rounds_per_action,
                 "python_calls_this_action": python_calls_this_action,
-                "remaining_rounds": self.config.max_model_rounds_per_action - model_round + 1,
+                "remaining_rounds": self.config.max_model_rounds_per_action
+                - model_round
+                + 1,
             },
+            "environment_observation": {
+                "current_metadata": current.metadata,
+                "representations": current.representations,
+                "recent_transitions": recent,
+                "full_history_file": "public_history.jsonl",
+                "current_observation_file": "current_observation.json",
+            },
+            # Backward-compatible top-level mirrors for older prompts/tests.
             "current_metadata": current.metadata,
             "representations": current.representations,
             "recent_transitions": recent,
             "full_history_file": "public_history.jsonl",
             "current_observation_file": "current_observation.json",
-        }, indent=2, sort_keys=True)
+        }
+        if self._pending_human_feedback:
+            # Retain notes while this action may require tools or repairs.
+            payload["human_coach"] = {
+                "notes": list(self._pending_human_feedback),
+                "guidance": (
+                    "Optional human advice about the public game. Not ground truth. "
+                    "You still choose the next legal action."
+                ),
+            }
+
+        text = json.dumps(payload, indent=2, sort_keys=True)
         return {
             "role": "user",
             "content": [
@@ -521,6 +662,7 @@ class LlmReplAgent:
                     code = str(parsed["code"])
                     result = self.workspace.execute(code)
                     executed_python_calls += 1
+                    self._python_calls += 1
                     output = result.model_text()
                 except (json.JSONDecodeError, ValueError) as error:
                     code = None
@@ -613,32 +755,13 @@ class LlmReplAgent:
         observation: Observation,
         repairs: int,
     ) -> Decision:
-        content = _message_text(response.message.get("content"))
-        payload = _json_object(content)
-        action = payload.get("action")
-        if isinstance(action, bool) or not isinstance(action, int):
-            raise DecisionFormatError("action must be an integer")
-        if action not in observation.available_actions:
-            raise DecisionFormatError(
-                f"action {action} is not legal; legal actions are {observation.available_actions}"
-            )
-        raw_data = payload.get("data")
-        if raw_data is not None and not isinstance(raw_data, Mapping):
-            raise DecisionFormatError("data must be an object or null")
-        data = dict(raw_data) if isinstance(raw_data, Mapping) else None
-        game_action = GameAction.from_id(action)
-        if game_action.is_complex():
-            if data is None or not all(
-                isinstance(data.get(key), int) and not isinstance(data.get(key), bool)
-                for key in ("x", "y")
-            ):
-                raise DecisionFormatError(f"action {action} requires integer x and y data")
-            height, width = observation.pixels.shape[-2:]
-            if not (0 <= data["x"] < width and 0 <= data["y"] < height):
-                raise DecisionFormatError(
-                    f"coordinates {(data['x'], data['y'])} are outside width={width}, height={height}"
-                )
-        reason = payload.get("reason")
+        height, width = observation.pixels.shape[-2:]
+        action, data, reason = parse_decision_message(
+            response.message,
+            available_actions=observation.available_actions,
+            frame_width=width,
+            frame_height=height,
+        )
         return Decision(
             action=action,
             data=data,
@@ -651,6 +774,7 @@ class LlmReplAgent:
         )
 
     def _add_usage(self, usage: Mapping[str, Any]) -> None:
+        self._provider_usage.append(deepcopy(dict(usage)))
         total_tokens = usage.get("total_tokens")
         if isinstance(total_tokens, int) and not isinstance(total_tokens, bool):
             self._reported_tokens_total += total_tokens
@@ -659,9 +783,7 @@ class LlmReplAgent:
                 value = usage.get(key)
                 if isinstance(value, int) and not isinstance(value, bool):
                     self._reported_tokens_total += value
-        for key, value in usage.items():
-            if isinstance(value, int) and not isinstance(value, bool):
-                self._usage[key] = self._usage.get(key, 0) + value
+        _merge_numeric_usage(self._usage, usage)
 
 
 def _request_evidence(response: ChatResponse) -> dict[str, Any]:
@@ -672,7 +794,35 @@ def _request_evidence(response: ChatResponse) -> dict[str, Any]:
         "request_payload_sha256": response.request_payload_sha256,
         "request_payload_encoding": response.request_payload_encoding,
         "request_tools": tools if isinstance(tools, list) else None,
+        "response_metadata": response.response_metadata,
+        "response_body": response.response_body,
+        "response_body_sha256": response.response_body_sha256,
+        "response_body_raw": response.response_body_raw,
+        "response_body_base64": response.response_body_base64,
+        "response_body_encoding": "exact-transport-bytes-v1"
+        if response.response_body_base64 is not None
+        else None,
     }
+
+
+def _merge_numeric_usage(
+    target: dict[str, Any], source: Mapping[str, Any]
+) -> None:
+    """Aggregate numeric diagnostics recursively without coercing booleans or dropping floats."""
+
+    for key, value in source.items():
+        if isinstance(value, Mapping):
+            existing = target.get(key)
+            if existing is None:
+                existing = {}
+                target[key] = existing
+            if isinstance(existing, dict):
+                _merge_numeric_usage(existing, value)
+            continue
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            existing = target.get(key, 0)
+            if isinstance(existing, (int, float)) and not isinstance(existing, bool):
+                target[key] = existing + value
 
 
 def _message_text(content: Any) -> str:
@@ -701,6 +851,53 @@ def _assistant_message(message: Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(message.get("reasoning_details"), list):
         output["reasoning_details"] = message["reasoning_details"]
     return output
+
+
+def _replayable_tool_calls(
+    tool_calls: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Make tool arguments valid JSON before replaying an assistant message.
+
+    The unmodified provider response remains in process evidence, and tool
+    execution still receives the raw arguments. Only the subsequent request's
+    conversation copy is repaired to satisfy provider message validation.
+    """
+
+    replayable: list[dict[str, Any]] = []
+    for tool_call in tool_calls:
+        copied = deepcopy(dict(tool_call))
+        function = copied.get("function")
+        if isinstance(function, Mapping):
+            function_copy = dict(function)
+            arguments = function_copy.get("arguments")
+            if isinstance(arguments, str):
+                try:
+                    parsed_arguments = json.loads(
+                        arguments,
+                        parse_constant=_reject_non_json_constant,
+                    )
+                except (json.JSONDecodeError, ValueError):
+                    function_copy["arguments"] = "{}"
+                else:
+                    if not isinstance(parsed_arguments, Mapping):
+                        function_copy["arguments"] = "{}"
+            elif isinstance(arguments, Mapping):
+                try:
+                    function_copy["arguments"] = json.dumps(
+                        dict(arguments),
+                        allow_nan=False,
+                    )
+                except (TypeError, ValueError):
+                    function_copy["arguments"] = "{}"
+            else:
+                function_copy["arguments"] = "{}"
+            copied["function"] = function_copy
+        replayable.append(copied)
+    return replayable
+
+
+def _reject_non_json_constant(value: str) -> None:
+    raise ValueError(f"non-standard JSON constant: {value}")
 
 
 def _has_tool_calls(message: Mapping[str, Any]) -> bool:
