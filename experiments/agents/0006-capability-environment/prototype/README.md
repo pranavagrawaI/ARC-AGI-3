@@ -1,10 +1,12 @@
-# Crude 0006 potency prototype
+# Archived crude 0006 potency spike
 
 > THROWAWAY. This is intentionally nonconformant with the proposed v0 Evidence Operator contract.
 
 ## Status
 
-Issue #6 accepts this mechanism as a sufficiently strong model-facing path to its own empirical history. Closing that specification ticket establishes neither interface readiness nor gameplay benefit. Those tests remain deferred to #12 and #14. Failed provider attempts are operational diagnostics only and are excluded from version control.
+Issue #6 accepted this spike as evidence that the model can be given a sufficiently strong path to its own empirical history. It is no longer the implementation plan.
+
+The current authority is the lean sequence in issues #9, #16, and #11: freeze minimum matched-control invariants, specify one recorded-trace or tiny-environment vertical loop, then build and inspect that loop. Do not run this directory's live-pair launcher as the next experiment. The source remains only as a design-search archive until the thin prototype supplies evidence for fine-grained deletion.
 
 ## Question
 
@@ -25,47 +27,9 @@ The treatment reuses that runner but substitutes `PrototypeCapabilityAgent`, whi
 
 There is no content-addressed evidence, formal ledger, canonical query surface, or polished decision protocol. Those are withheld until this package shows potency.
 
-## One-command preflight
+## Archived scope
 
-From the repository root:
-
-```bash
-OPENROUTER_PROVIDER_ONLY=<pinned-provider> OPENROUTER_REASONING=on \
-uv run python3 experiments/agents/0006-capability-environment/prototype/run_micro_pair.py \
-  --model google/gemma-4-31b-it \
-  --model-profile openrouter-generic
-```
-
-Preflight writes a frozen `pair-plan.json` but performs no gameplay.
-
-## Explicit paid execution
-
-Repeat the printed command with:
-
-```text
---execute-gameplay --confirm execute-ls20-crude-0006-pair
-```
-
-Defaults freeze both members to the same game, environment seed, requested model seed, model request, 30-action ceiling, 60-call ceiling, context policy, and provider environment. Pair order is deterministically randomized from `--pair-order-seed`.
-
-Cost must be re-estimated from the pinned provider before execution; model calls and provider pricing determine actual spend.
-
-## Outputs
-
-```text
-pair-plan.json
-baseline/{manifest.json,process.jsonl,trace.jsonl,...}
-treatment/{manifest.json,process.jsonl,trace.jsonl,...}
-analysis.json
-human-review.json
-```
-
-`analysis.json` contains mechanical diagnostics only. `human-review.json` requires trace-cited judgments for:
-
-- preserved earlier evidence;
-- contradiction reconciliation;
-- informative probe choice;
-- avoidable actions.
+The spike contains a live-pair launcher and mechanical review scaffold. They are retained to preserve the design search, not authorized for execution. Endpoint viability, live pairing, and RHAE evaluation are downstream of a working offline vertical loop.
 
 ## Decision rule
 
