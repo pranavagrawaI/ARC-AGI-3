@@ -166,7 +166,7 @@ properties end to end; the unit tests carry the negative half an end-to-end run
 cannot reach.
 
 Frozen contract: `p9/CONTRACT.md`. Evidence: `p9/artifacts/*/evidence.json`.
-Tests: `experiments.agents.tests.test_p9_shared_arm` (31 tests).
+Tests: `experiments.agents.tests.test_p9_shared_arm` (42 tests).
 
 ### Delete-centric pass
 
@@ -246,6 +246,28 @@ The general lesson is the one worth keeping: an instrument that writes to the
 same path it measures will eventually report on itself. None of these were
 visible from reading the code; all three appeared only by running the verifier
 against a system it was supposed to condemn.
+
+### 0002-R is runnable
+
+`p9/run_arm.py` is `run.py`'s shape minus the 0002-specific authority, freeze and
+release-gate machinery. Live and offline share one code path; only the
+environment and the client differ, so the runner is covered by the test suite
+instead of being first exercised against a paid endpoint.
+
+Two things fell out of building it:
+
+1. **A hand-assembled pair is a mismatched pair.** The first control/treatment
+   comparison over two real run manifests reported an unauthorized difference on
+   `host_only.spec.max_actions` — because the two runs were launched with
+   different flags. The verifier was right and the operator was wrong. `--pair`
+   now derives both arms from one spec, making that class of error
+   unrepresentable rather than merely detectable.
+2. **Each run embeds its own arm manifest**, so two runs can be diffed after the
+   fact without rebuilding either arm. A comparison no longer depends on the
+   arms still existing.
+
+Every run also writes `friction.json` beside the process log, so a run is a
+measurement the moment it finishes.
 
 ### What this does not license
 

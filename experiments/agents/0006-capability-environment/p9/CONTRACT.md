@@ -189,8 +189,23 @@ runs is committed at `artifacts/p9-harness-friction/recorded-0002-runs.json`.
 Attribution is a heuristic over error text, reported as `interface` / `model` / `unclear`.
 The counts are evidence; the attribution is a reading of them.
 
+## 7. Running an arm
+
+`run_arm.py` makes 0002-R an experiment rather than a library. It writes the manifest,
+trace, workspace snapshot, scorecard, evidence hashes and friction report, and embeds the
+arm manifest in each run so pairs can be diffed after the fact.
+
+`--pair` derives both arms from one spec and emits `pair-diff.json`, failing on any
+unauthorized difference. Pairs are not assembled by hand: the first one here differed on
+`--max-actions` and the diff correctly rejected it. Deriving both arms from one spec makes
+that class of error unrepresentable.
+
+Offline mode replays a recording through the fixture policy and shares the live code path
+except for the environment and the client, so the runner is covered by the test suite
+rather than first exercised against a paid endpoint.
+
 ## What is not frozen here
 
-Live endpoint viability, budget authority artifacts, a release gate, historical-0002
-behavioral equivalence, and RHAE readiness. None of them is exercised by these prototypes
-and none is required by #9's resolution boundary.
+Budget authority artifacts, a release gate, historical-0002 behavioral equivalence, and
+RHAE readiness. The runner can reach a live endpoint but no live run has been made, so
+nothing here licenses a claim about behaviour, cost or latency against a real provider.

@@ -29,6 +29,7 @@ from p9 import (
     p9_2_context_loss,
     p9_3_failure_recovery,
     p9_4_harness_task,
+    run_arm,
 )
 from p9.arm_diff import compare_arms, flatten, is_authorized, normalize_request_payload
 from p9.arms import ArmSpec, control_spec, treatment_spec
@@ -364,6 +365,61 @@ class RetryingChatClientTests(unittest.TestCase):
             log = ProcessLog(Path(scratch) / "process.jsonl")
             with self.assertRaises(ValueError):
                 RetryingChatClient(_StubClient([]), process_log=log, max_retries=-1)
+
+
+class RunnerTests(unittest.TestCase):
+    """The runner runs offline end to end, so it is not first exercised live."""
+
+    def test_a_single_arm_run_produces_the_full_artifact_set(self) -> None:
+        with TemporaryDirectory(prefix="p9-run-") as scratch:
+            run_dir = Path(scratch) / "run"
+            self.assertEqual(
+                run_arm.main(["--offline", "--max-actions", "3", "--run-dir", str(run_dir)]), 0
+            )
+            for name in (
+                "manifest.json",
+                "process.jsonl",
+                "trace.jsonl",
+                "friction.json",
+                "process-annotation.json",
+            ):
+                self.assertTrue((run_dir / name).is_file(), name)
+            self.assertTrue((run_dir / "workspace").is_dir())
+            manifest = json.loads((run_dir / "manifest.json").read_text())
+            self.assertEqual(manifest["status"], "complete")
+            self.assertEqual(manifest["actions"], 3)
+            self.assertIn("arm_manifest", manifest)
+            self.assertTrue(manifest["evidence_hashes"])
+
+    def test_the_fixture_policy_finishes_the_task_through_the_runner(self) -> None:
+        with TemporaryDirectory(prefix="p9-run-") as scratch:
+            run_dir = Path(scratch) / "run"
+            run_arm.main(["--offline", "--max-actions", "3", "--run-dir", str(run_dir)])
+            index = json.loads((run_dir / "workspace" / "index.json").read_text())
+            self.assertEqual(sorted(index), ["00000", "00001", "00002"])
+
+    def test_a_pair_derives_both_arms_and_emits_an_authorized_diff(self) -> None:
+        with TemporaryDirectory(prefix="p9-pair-") as scratch:
+            root = Path(scratch) / "pair"
+            self.assertEqual(
+                run_arm.main(["--offline", "--pair", "--max-actions", "3", "--run-dir", str(root)]),
+                0,
+            )
+            diff = json.loads((root / "pair-diff.json").read_text())
+            self.assertEqual(diff["diff"]["unauthorized"], [])
+            self.assertGreater(diff["diff"]["shared_paths"], 0)
+            self.assertEqual(
+                json.loads((root / "control" / "manifest.json").read_text())["arm_id"],
+                "0002-R",
+            )
+
+    def test_a_live_run_without_a_game_is_refused(self) -> None:
+        with self.assertRaises(SystemExit):
+            run_arm.main(["--max-actions", "1"])
+
+    def test_the_control_arm_refuses_a_capability(self) -> None:
+        with self.assertRaises(SystemExit):
+            run_arm.main(["--offline", "--capability", "sentinel_probe_note"])
 
 
 class PrototypeTests(unittest.TestCase):

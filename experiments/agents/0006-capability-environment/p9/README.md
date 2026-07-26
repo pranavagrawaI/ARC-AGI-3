@@ -36,6 +36,35 @@ environment replays frames from `recordings/`.
 | **P9.4** `p9_4_harness_task.py` | Does the harness carry a **real task** to a correct answer under injected faults? | Yes, in all seven conditions. A reactive policy maintains `index.json` over every observation seen; the host grades it against digests it re-derives from the recorded frames, independent of any component under test. Eviction (3), interpreter timeout with restart, retryable transport failure, output truncation, malformed tool arguments, and all of them at once each leave the index complete and correct. |
 | **P9.3** `p9_3_failure_recovery.py` | Are the failure modes distinguishable, correctly routed, and retried only when safe? | Five tool signatures are distinct; syntax and runtime failures share a kind but name different exceptions. The timeout restarts the interpreter, loses in-memory state, keeps files and the read-only record, and says so. The illegal action returns to the model and is repaired. The retryable transport failure is retried once, logged twice host-side, and leaves no trace in any request the model saw; the fatal one is not retried. |
 
+## Running an arm
+
+`run_arm.py` is `run.py`'s shape minus the 0002-specific authority, freeze and
+release-gate machinery: manifest, trace, workspace snapshot, scorecard, evidence hashes,
+and a friction report.
+
+```
+# offline: no provider, no endpoint, no API key. Replays a recording through the
+# fixture policy. This is the path the test suite exercises.
+uv run python3 .../run_arm.py --offline --max-actions 4
+
+# a matched pair, with the arm diff emitted as pair-diff.json
+uv run python3 .../run_arm.py --offline --pair --max-actions 4
+
+# live
+uv run python3 .../run_arm.py --game ls20 --model <id> --max-actions 40
+```
+
+Live and offline share one code path; only the environment and the client differ. Offline
+exists so the runner is tested before a provider is involved — an untested runner is how a
+live run gets wasted.
+
+`--pair` derives both arms from one spec, so they cannot differ except by capability. That
+is not a convenience: the first hand-assembled pair here differed on `--max-actions`, and
+the arm diff correctly rejected it. A pair assembled by hand measures the operator.
+
+Each run's `manifest.json` embeds its `arm_manifest`, so two runs can be diffed after the
+fact without rebuilding either arm.
+
 ## Measuring where the harness defeats the model
 
 `harness_friction.py` reads a run's `process.jsonl` and classifies every tool failure by
@@ -162,6 +191,7 @@ only one copy now.
 | `task_policy.py` | Reactive policy with a real objective, and the host's ground truth for it. |
 | `evidence.py` | Check recording and evidence reports. |
 | `harness_friction.py` | Reads any run's process log and reports where the interface, not the game, defeated the model. |
+| `run_arm.py` | Runs one arm, or a matched pair, live or offline. |
 | `mutation_probe.py` | Breaks one property at a time and requires the suite to catch it. |
 
 The frozen contract these establish is in [`CONTRACT.md`](CONTRACT.md).
