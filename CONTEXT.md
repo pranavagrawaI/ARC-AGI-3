@@ -128,9 +128,117 @@ _Avoid_: Request hash, replay proof, deterministic replay
 The coupled external environment through which one core model accesses reliable cognitive operations and continuity mechanisms while retaining authority over investigation, belief revision, tool selection, and environment action. Its treatment manifest distinguishes evidence operators, epistemic state, host-enforced decision protocols, context assembly, and generic workspace access rather than calling every mechanism a tool.
 _Avoid_: Tool bag, multi-agent system, capability tool as a uniform mechanism class
 
+**0002-R**:
+The primary control for 0006 evaluation: a repaired but cognitively unchanged 0002-style agent using the same adequate generic Python substrate, core model, observations, budgets, and model-invisible audit plane as 0006. It disables all four explicit cognitive-affordance mechanisms while remaining free to invent analogous machinery through generic computation.
+_Avoid_: Historical 0002, Python-disabled control, no-tool control
+
+**Shared Python Substrate**:
+The frozen general-purpose computational environment provided identically to 0002-R and 0006, with exact observation access, unrestricted model-authored Python, workspace filesystem access, and explicit persistence and reset semantics. It supplies data and computation without OS process execution, semantic judgment, or treatment-only cognitive affordances.
+_Avoid_: Shell access, treatment mechanism, semantic toolkit, 0006 Python
+
 **Evidence Operator**:
-A callable, deterministic operation over immutable admissible evidence, such as exact frame differencing or transition-history retrieval. It returns facts or derived measurements without assigning semantic meaning or revising beliefs.
+A callable, deterministic operation over immutable admissible evidence, such as exact frame differencing or transition-history retrieval. It may perform geometric partitioning only from criteria explicitly supplied by the model; it neither chooses those criteria nor interprets the resulting regions. It returns facts or derived measurements without assigning semantic meaning, persistent identity, or belief status.
 _Avoid_: Hypothesis generator, belief update, specialist agent
+
+**Operator Coordinate Contract**:
+The model-facing coordinate language for Evidence Operators. Structured coordinates use named `{layer, x, y}` fields with a top-left origin, `x` increasing right, and `y` increasing down; positional coordinate tuples are prohibited. Raw arrays are the sole exception and satisfy `array[layer][y][x]`. Bounding boxes are half-open. A component centroid is the exact, unreduced mean of participating cell indices: coordinate sums over `component_size`, not a decimal approximation or a distinct object geometry.
+_Avoid_: Row-column operator schema, positional coordinate tuple, geometric object centroid
+
+**Derived Evidence**:
+A persisted, citable record of the complete logical result produced by one versioned deterministic Evidence Operator over explicitly named and content-committed occurrence evidence. Its content-addressed identity binds the frozen canonical operation, sources, and result; repeated invocation does not create corroborating evidence. Derived evidence records a computation, not an environmental occurrence or the model's interpretation, and v0 does not admit it as an operator input.
+_Avoid_: Environmental fact, invocation event, recomputed substitute, derived-on-derived input
+
+**Exact Evidence Retrieval**:
+Model-directed retrieval that returns occurrence records satisfying at least one explicit predicate under canonical equality, conjunctive filtering, a concrete immutable evidence frontier, and ascending occurrence order. The citable derivation's recoverable logical result is the complete ordered list of matching occurrence IDs. Pagination is a non-citable, snapshot-bound delivery projection with a model-selected bounded page size; cursors bind the derivation and offset, and transport choices never change evidence identity. The host performs no ranking, similarity judgment, wildcarding, coercion, partial-object matching, or semantic relevance selection.
+_Avoid_: Chronological browse without selector, ranked similarity, helpful-history retrieval
+
+**Observation Occurrence Coordinates**:
+The non-semantic retrieval fields attached to public observations: zero-based global step and the count of earlier observations whose public `full_reset` field was true. Public `levels_completed`, `state`, and `full_reset` retain their exact names and values. These coordinates locate evidence without asserting a level, attempt, or reset-delimited epoch ontology.
+_Avoid_: Attempt index, level index, reset epoch
+
+**Transition Occurrence**:
+The single public action-conditioned relation at global step `n ≥ 1`, binding the exact action to committed references for observation steps `n - 1` and `n`. Observation records remain the sole authority for frame and public-state facts; the transition does not duplicate them. It exposes no attempt, level, no-op, movement, or effect interpretation.
+_Avoid_: Effect event, attempt transition, interpreted interaction
+
+**Evidence Resolution**:
+Immutable delivery of the complete persisted canonical record named by an occurrence or derivation ID. Resolution creates no evidence, changes no model-visible record field, and cannot make derived evidence an accepted operator input. Repeated resolution adds only model-invisible invocation events; `not_found` is non-citable and does not establish durable absence.
+_Avoid_: Resolution derivation, access-based corroboration, recomputed record
+
+**Evidence Operator Outcome**:
+The common model-facing envelope classifying one logical attempt as `success`, factual `source_condition`, or non-evidential `failure`. Deriving operations may report either valid outcome only after atomically persisting the complete canonical derivation; later delivery interruption is transport failure, not reclassification. Failures use a frozen code registry, create no evidence, and trigger no host-authored logical retry.
+_Avoid_: Status-overloaded envelope, post-commit logical failure, automatic semantic retry
+
+**Admissible-Run Capacity Envelope**:
+The frozen joint bounds on source evidence, model/operator invocations, logical-result shapes and bytes, distinct derivations, and cumulative persisted derivation bytes that the implementation guarantees for every permitted run. Result bounds derive from source bounds and cover worst-case serialization jointly. Out-of-envelope sources are rejected before persistence; a persisted violation is an integrity failure, while any in-envelope resource failure is an implementation defect.
+_Avoid_: Per-query result ceiling, independent unsupported maxima, pagination as capacity control
+
+**Evidence Projection**:
+A non-citable delivery of a model-selected contiguous interval from one contract-declared logical array in a complete immutable evidence record. Field-aware locators and authenticated cursors bind the evidence ID, record and array commitments, target, component position where applicable, and offset. Projection arguments remain outside derivation identity and may neither truncate, reinterpret, nor independently evidence the committed result.
+_Avoid_: Byte pagination, host-selected preview, projection derivation
+
+**Canonical Evidence Commitment**:
+A full SHA-256 digest over a domain-separated RFC 8785 canonical object within the frozen UTF-8, integer-only logical JSON domain. Occurrence frontiers chain atomically persisted step bundles; derivations separately bind computation inputs and complete results, while computation commitments enforce one result per canonical computation. Audit, projection, invocation, and storage metadata remain outside logical identity.
+_Avoid_: Concatenated hash preimage, truncated digest, match-only query provenance
+
+**Evidence Operator Failure Surface**:
+The frozen code registry and validation precedence separating model-repairable contract failures, transient model-controlled retries, and treatment-integrity failures. A deriving timeout or persistence failure is transient only when non-commit is established; unknown commit state, persisted-integrity mismatch, or internal defect disables the affected subsystem pending model-invisible disposition. Post-commit delivery cannot reclassify a derivation.
+_Avoid_: Broad error class only, uncertain retry, post-commit logical failure
+
+**Deterministic Validation Precedence**:
+The three-phase rule that gives every request one reproducible outcome without letting invalid input probe source state: request-only schema, typed-ID role, and projection validation; then source resolution and integrity verification; then complete computation, uniqueness enforcement, atomic persistence, and delivery. Factual source conditions proceed through persistence as valid derived evidence rather than returning early.
+_Avoid_: Multi-error response, source inspection before request validity, unpersisted source condition
+
+**Projection Capacity Guarantee**:
+A contract-versioned numeric limit for each evidence-type and logical-array target, mechanically derived as the greatest positive item count whose every jointly admissible complete JCS outcome fits the frozen model-visible UTF-8 response-byte envelope. It covers envelopes, summaries, metadata, commitments, cursors, and worst admissible positions; unpageable, empty, source-condition, and failure outcomes must fit separately. Limits never adapt at runtime.
+_Avoid_: Token estimate, sampled item size, remaining-result exception, provider-specific limit
+
+**Closed-Input Operator Purity**:
+The capability-isolated rule that a deriving Evidence Operator is a deterministic function only of its frozen contract, canonical logical arguments, and complete verified role-bound source records. The reference evaluator is the production semantic authority; projection affects delivery only. Forbidden dependence, authority-boundary breach, or divergence from reference semantics is a treatment-integrity failure, while implementation authority remains audit-bound rather than part of evidence identity.
+_Avoid_: Context-sensitive operator, optimized semantic authority, implementation-bound derivation ID
+
+**Closed Occurrence Records**:
+The complete contract-bounded, run-scoped observation and transition records admitted from a fixed public-field allowlist into one contiguous append-only chain. Observation records solely own frame and public-state facts; transitions bind consecutive observations by ID and record commitment while owning only the legal action. Admission is relevance-independent; malformed allowlisted fields stop the chain, while unknown upstream metadata, storage concerns, interpretations, and game identity remain outside model-visible evidence.
+_Avoid_: Open metadata object, nonadjacent transition, selective occurrence admission
+
+**Non-Evidence Frontier Source**:
+The exact `{global_step, occurrence_prefix_commitment}` pair naming one atomically published, run-scoped occurrence prefix supplied as the sole tagged source to an exact query. It has no evidence ID, cannot be cited or resolved, and enters computation and derivation identity exactly once through the closed source union. Only the resulting query derivation is independently citable.
+_Avoid_: Frontier evidence namespace, resolvable archive coverage, duplicated frontier preimage
+
+**Closed Derived-Evidence Records**:
+The domain-separated persisted record for one content-addressed deterministic computation, containing one derivation evidence ID, computation commitment, frozen contract and operation, normalized non-source arguments, ordered role-bound sources, and the complete logical result with fully persisted committed arrays. Pre-commit failures create no record; source conditions do, and post-commit delivery failure cannot erase or reclassify them.
+_Avoid_: Separate derivation-ID field, implicit component-cell storage, projection-bound record
+
+**ID-Committed, Record-Resolved Query Projection**:
+An exact query commits only one operation-typed ordered array of matching occurrence IDs. Projection selects a contiguous positional slice, atomically verifies each canonical occurrence against the derivation's frontier, and delivers complete records without rerunning predicates or creating evidence. The query proves membership and order; each occurrence record remains the sole authority for its facts.
+_Avoid_: Duplicated query records, predicate rerun during projection, partial page
+
+**Namespace-Specific Evidence Resolution**:
+Resolution delivers transitions atomically without a projection, requires `pixels_by_cell` projection for observations, and requires an operation-declared logical-array target for derivations. Empty and source-condition derivations retain empty committed primary arrays, so their delivery does not require content-dependent rules; continuation cursors remain projection-only.
+_Avoid_: Synthetic one-item transition array, content-dependent projection default, byte pagination
+
+**Reference-Joined Transition Predicates**:
+Closed virtual query fields evaluated by traversing a transition's committed before/after references to canonical verified observation records. Complete reference-graph integrity is established before predicate evaluation; indexes may nominate candidates but never supply predicate truth. The join stores no copied facts, and the query result remains an ordered array of transition IDs.
+_Avoid_: Denormalized transition metadata, materialized predicate authority, semantic join
+
+**Canonical Evidence Ownership**:
+The rule that each semantic fact is persisted in one authoritative evidence record and every other structure carries only the minimal committed reference needed to bind it. Observations own public frame and state facts; transitions own action and adjacency; derivations own computed logical results. Projections, indexes, caches, and audit records are non-authoritative copies or access structures.
+_Avoid_: Duplicated authoritative metadata, cache as fact store, projection-owned fact
+
+**0006 v0 Evidence Operator Catalogue**:
+The closed model-visible set of six operations: evidence resolution, exact observation retrieval, exact transition retrieval, color-preserving cell location, coordinate-identical frame comparison, and model-parameterized connected-component segmentation. Typed predicates are closed; large results use citable complete derivations with non-citable pagination. Conformance repairs may preserve v0, but any new operation, predicate, accepted evidence input, semantic output, host-selected default, or logical-result change requires a successor contract, authority review, and renewed readiness testing.
+_Avoid_: Convenience expansion, implementation-time operation, semantic perception API
+
+**Atomic Frame Comparison**:
+A coordinate-aligned Evidence Operator derivation over exactly the model-selected observation layers. Every selected layer is compared completely or none is compared. Equal selected shapes yield exact color substitutions ordered by `layer, y, x`; absent or unequal selected layers yield a complete, structured incompatibility result. Source incompatibility is citable derived evidence, while malformed arguments produce only an audited validation failure.
+_Avoid_: Partial overlap diff, inferred displacement, interpreted change
+
+**Cell Location Result**:
+A color-preserving Evidence Operator derivation for explicitly selected public color IDs in one model-selected observation layer. A present layer yields every matching cell exactly once in `layer, y, x` order, including explicit zero counts for selected but absent colors. Source-layer absence is citable derived evidence; malformed identifiers or arguments are non-evidential validation failures.
+_Avoid_: Color inference, foreground mask, positional coordinate tuple
+
+**Parameterized Component Partition**:
+A deterministic partition of model-selected cells under model-specified color membership and four- or eight-neighbor adjacency within one layer. It reports complete cell membership, color composition, half-open geometry, and exact cell-index means in minimum-cell order. It supplies neither semantic interpretation, traversal identity, nor cross-frame correspondence.
+_Avoid_: Object detector, persistent component ID, host-selected connectivity
 
 **Epistemic Ledger**:
 A persistent, model-authored record of revisable claims with stable identities, optional evidence and counterevidence links, statuses, and revision or supersession history, kept distinct from immutable host-authored evidence. It preserves longitudinal belief provenance without requiring every tentative claim to carry structured assumptions, scope, or a falsification condition; local testability belongs to the action commitment when a claim drives a decision.
@@ -152,10 +260,30 @@ _Avoid_: Automatic belief update, forced hypothesis rejection, nonblocking warni
 A pre-live acceptance boundary establishing separately that host-owned capability contracts are deterministic and semantically neutral, the frozen core model can operate the exposed interface on bounded fixtures, and each included mechanism can prospectively enter a decision chain. Passing licenses matched live evaluation of that exact interface; it does not establish gameplay benefit.
 _Avoid_: Gameplay benchmark, tool availability check, post-hoc tutorial
 
+**Interface Debt**:
+The measurable cost introduced between a model's need for a capability and its successful cognitive use, spanning discoverability, specification, invocation, execution, interpretation, and integration. It includes avoidance when interface uncertainty or apparent cost suppresses an otherwise appropriate call, and its derived telemetry remains model-invisible.
+_Avoid_: Implementation noise, model incapability, tool-call count
+
 **Local Prospective Consequence**:
 A fixture-bound pre-successor chain in which a model state or intended decision is recorded, a capability is invoked, its output is observed, and a belief, prediction, or intended action changes before successor feedback. It establishes local interface uptake, not run-level mediation or benefit.
 _Avoid_: Tool call count, self-reported usefulness, gameplay treatment effect
 
+**Live Prospective Uptake**:
+An admissible live-play instance in which one capability mechanism makes a non-vacuous contribution to a model-authored belief, prediction, plan, or intended action before successor feedback. It is narrower than package-level orchestration and does not establish benefit.
+_Avoid_: Tool invocation, mandatory protocol compliance, package orchestration
+
+**Live Prospective Orchestration**:
+An admissible live-play decision chain in which at least two distinct capability mechanisms make linked, non-vacuous contributions to a model-authored belief, prediction, plan, or intended action before successor feedback. It establishes prospective multi-mechanism coordination, not that the coordination caused a run-level outcome.
+_Avoid_: Single-mechanism uptake, mandatory field completion, RHAE mediation
+
+**Acceptance Anomaly**:
+Observed evidence that cannot be honestly classified under the frozen validity rules, treatment and control contract, outcome profile, failure taxonomy, measurement assumptions, or authority boundaries, and could materially alter interpretation. It vetoes acceptance pending explicit human disposition without converting the anomaly into a component failure or erasing descriptive outcomes.
+_Avoid_: Surprising result, low score, unusual strategy, automatic failure
+
 **Context Assembler**:
 The host mechanism that constructs the bounded packet for the next model decision from current observation, active beliefs, unresolved contradictions, recent continuity, and retrieved evidence. It manages attention without silently promoting beliefs to facts.
 _Avoid_: Full transcript, memory store, autonomous summarizer
+
+**0006 Context Policy**:
+The frozen treatment policy executed by the Context Assembler: it supplies a deterministic mandatory packet plus only model-selected working claims and explicitly requested older evidence. Disabling it restores the exact 0002-R context lifecycle.
+_Avoid_: Semantic retriever, helpful-history selector, automatic tool router
