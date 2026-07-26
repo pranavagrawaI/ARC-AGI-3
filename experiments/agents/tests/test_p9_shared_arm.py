@@ -44,7 +44,9 @@ from p9.conversation import (
     omission_notice_text,
 )
 from p9.failures import (
+    FRICTION_KINDS,
     TOOL_FAILURE_KINDS,
+    classify_friction,
     classify_decision_error,
     classify_tool_result,
     classify_transport_error,
@@ -181,6 +183,62 @@ class FailureClassificationTests(unittest.TestCase):
     def test_only_a_retryable_transport_error_is_named_retryable(self) -> None:
         self.assertEqual(classify_transport_error(retryable=True), "transport_retryable")
         self.assertEqual(classify_transport_error(retryable=False), "transport_fatal")
+
+
+class FrictionClassificationTests(unittest.TestCase):
+    """The reader that turns a recorded run into a measurement."""
+
+    def test_a_successful_call_has_no_friction(self) -> None:
+        self.assertIsNone(classify_friction("print(1)", _tool_output()))
+
+    def test_a_constructed_observation_path_is_named_separately(self) -> None:
+        friction = classify_friction(
+            "open('observations/step-0007.json')",
+            _tool_output(
+                ok=False,
+                traceback="FileNotFoundError: No such file: 'observations/step-0007.json'",
+            ),
+        )
+        assert friction is not None
+        self.assertEqual(friction.kind, "constructed_observation_path_not_found")
+        self.assertEqual(friction.attributable_to, "interface")
+
+    def test_a_missing_package_is_interface_friction(self) -> None:
+        friction = classify_friction(
+            "import sklearn",
+            _tool_output(ok=False, traceback="ModuleNotFoundError: No module named 'sklearn'"),
+        )
+        assert friction is not None
+        self.assertEqual(friction.kind, "module_unavailable")
+        self.assertEqual(friction.attributable_to, "interface")
+
+    def test_a_guessed_schema_key_is_interface_friction(self) -> None:
+        friction = classify_friction(
+            "obs['current']", _tool_output(ok=False, traceback="KeyError: 'current'")
+        )
+        assert friction is not None
+        self.assertEqual(friction.kind, "observation_schema_key_guessed")
+
+    def test_a_timeout_is_not_blamed_on_the_interface(self) -> None:
+        friction = classify_friction(
+            "while True: pass", _tool_output(ok=False, timed_out=True)
+        )
+        assert friction is not None
+        self.assertEqual(friction.attributable_to, "model")
+
+    def test_every_kind_it_can_emit_is_declared(self) -> None:
+        cases = [
+            _tool_output(ok=False, traceback="FileNotFoundError: 'observations/step-1.json'"),
+            _tool_output(ok=False, traceback="FileNotFoundError: 'notes.md'"),
+            _tool_output(ok=False, traceback="ModuleNotFoundError: x"),
+            _tool_output(ok=False, traceback="KeyError: 'x'"),
+            _tool_output(ok=False, traceback="NameError: x"),
+            _tool_output(ok=False, timed_out=True),
+            _tool_output(ok=False),
+            _tool_output(ok=False, traceback="ValueError: x"),
+        ]
+        emitted = {classify_friction(None, case).kind for case in cases}
+        self.assertEqual(emitted, set(FRICTION_KINDS))
 
 
 class OmissionNoticeTests(unittest.TestCase):

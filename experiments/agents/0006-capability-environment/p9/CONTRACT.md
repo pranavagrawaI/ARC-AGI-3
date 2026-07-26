@@ -14,19 +14,25 @@ additions and no ARC-specific cognition.
 | Pointer-only omission notice | #9 requires omission to be explicit rather than silent. 0002 logs `context_eviction` host-side and tells the model nothing. | `conversation.py` |
 | Logged transport retry | #9 requires host logs sufficient to reconstruct every request. `OpenAICompatibleChatClient` retries transient failures with no record, so two requests for one round were unreconstructable. | `transport.py` |
 
-Two interface conventions are documented rather than fixed, because the code that creates
+Four interface conventions are documented rather than fixed, because the code that creates
 them is inside `participating_source_hashes()` and an edit would invalidate the 0002
-release gate. Both were observed defeating a model in practice, not derived from reading:
+release gate. Each was measured defeating a model, not derived from reading — the counts
+come from `harness_friction.py` over the 48 recorded 0002 runs.
 
-| Convention | What the model saw before | What it does now |
+| Convention | What the model saw before | Recorded failures |
 |---|---|---|
-| `sys.path` | Nothing. A model-written module simply failed to import — the worker runs `python3 -I`, so the workspace is off `sys.path`. | States `sys.path.insert(0, ".")` before importing your own module. |
-| Observation filenames | Only the glob `observations/step-*.json`. The width is hidden; the sole concrete filenames arrive via `recent_transitions`, empty at step 0 and holding just eight steps. Models construct `step-%04d.json` and get `FileNotFoundError`. | States `observations/step-NNNNN.json`, five digits, with a worked example. |
+| Observation filename width | the glob `observations/step-*.json`; the padding is hidden, and concrete filenames reach the model only via `recent_transitions` — empty at step 0, eight steps deep | **23 of 47** |
+| Available packages | nothing; `allowed_distributions` goes only into the host-only manifest | 7 |
+| Observation schema keys | "flat objects with top-level public metadata", never enumerated | 4 |
+| `sys.path` | nothing; the worker runs `python3 -I` | not separable from imports |
 
-Neither is advice — both are facts about the interface. The filename statement is pinned
-against the filenames `ObservationStore` actually writes, so the documentation cannot drift
-from the code, and two mutants guard it. Evidence:
-`artifacts/p9-1-cumulative-loop/evidence.json`, `findings`.
+None is advice — all four are facts about the interface. Each is **derived from the frozen
+source rather than transcribed**, so it cannot drift: the package list from
+`MODEL_RUNTIME_DISTRIBUTIONS`, the schema keys from `observation_metadata`, the filename
+width from a format string. P9.1 pins each against reality — it matches the documented
+width to the files actually written, imports every named package in the live sandbox,
+confirms an unnamed one fails, and compares the documented keys to a real observation file.
+Four mutants guard them. Evidence: `artifacts/p9-1-cumulative-loop/evidence.json`.
 
 ### Deviation from #9: no authoritative episode record
 
@@ -171,6 +177,17 @@ archive copy and the workspace copy of the same observation disagreeing byte-for
 Both are model-visible; disagreement gives the model two incompatible versions of one
 public fact with no way to tell. Now checked per condition and guarded by the
 `observation-projections-disagree` mutant.
+
+## 6. Measuring interface debt
+
+`harness_friction.py` reads any run's `process.jsonl` and classifies each tool failure by
+whether the model could have known better. It is the instrument that made §1's conventions
+findable: the filename defect was the largest single cause of tool failure across 48 runs
+and went unnoticed until someone read a transcript by eye. Baseline over the recorded 0002
+runs is committed at `artifacts/p9-harness-friction/recorded-0002-runs.json`.
+
+Attribution is a heuristic over error text, reported as `interface` / `model` / `unclear`.
+The counts are evidence; the attribution is a reading of them.
 
 ## What is not frozen here
 

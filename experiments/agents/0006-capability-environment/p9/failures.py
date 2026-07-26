@@ -110,6 +110,77 @@ def classify_transport_error(*, retryable: bool) -> str:
     return "transport_retryable" if retryable else "transport_fatal"
 
 
+FRICTION_KINDS = (
+    "constructed_observation_path_not_found",
+    "path_not_found",
+    "module_unavailable",
+    "observation_schema_key_guessed",
+    "stale_name",
+    "execution_timeout",
+    "tool_argument_validation",
+    "python_error",
+)
+
+# Which side a failure is attributable to. "interface" means the model could not
+# have known better from what the harness told it; "model" means the harness
+# stated what was needed. Attribution is a heuristic over error text, so a third
+# value exists rather than forcing every failure into one of the two.
+FRICTION_ATTRIBUTION = {
+    "constructed_observation_path_not_found": "interface",
+    "module_unavailable": "interface",
+    "observation_schema_key_guessed": "interface",
+    "tool_argument_validation": "model",
+    "execution_timeout": "model",
+    "path_not_found": "unclear",
+    "stale_name": "unclear",
+    "python_error": "model",
+}
+
+
+@dataclass(frozen=True)
+class Friction:
+    kind: str
+    attributable_to: str
+    detail: str
+
+
+def classify_friction(code: str | None, output: Mapping[str, Any]) -> Friction | None:
+    """Name why a failed tool call failed, and whose fault the harness can claim it is.
+
+    Reads only the code the model sent and the result it received, so it works over
+    any run directory that has a ``process.jsonl`` — including the recorded 0002
+    runs that predate this module.
+    """
+
+    if output.get("ok"):
+        return None
+    text = f"{output.get('traceback') or ''}{output.get('stderr') or ''}"
+    last = next(
+        (line.strip() for line in reversed(text.splitlines()) if line.strip()), ""
+    )
+    if output.get("timed_out"):
+        kind = "execution_timeout"
+    elif "FileNotFoundError" in text and "observations/step-" in text:
+        kind = "constructed_observation_path_not_found"
+    elif "FileNotFoundError" in text:
+        kind = "path_not_found"
+    elif "ModuleNotFoundError" in text or "ImportError" in text:
+        kind = "module_unavailable"
+    elif "KeyError" in text:
+        kind = "observation_schema_key_guessed"
+    elif "NameError" in text:
+        kind = "stale_name"
+    elif not output.get("traceback"):
+        kind = "tool_argument_validation"
+    else:
+        kind = "python_error"
+    return Friction(
+        kind=kind,
+        attributable_to=FRICTION_ATTRIBUTION[kind],
+        detail=last[:200],
+    )
+
+
 def failure_taxonomy() -> dict[str, Any]:
     """The model-visible/host-visible split each arm commits to."""
 

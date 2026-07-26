@@ -23,7 +23,15 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     __package__ = "p9"
 
-from p9.agent import IMPORT_CONVENTION, OBSERVATION_FILENAME_EXAMPLE, PATH_CONVENTION
+from p9.agent import (
+    AVAILABLE_IMPORTS,
+    IMPORT_CONVENTION,
+    OBSERVATION_FILENAME_EXAMPLE,
+    OBSERVATION_SCHEMA_KEYS,
+    PATH_CONVENTION,
+    RUNTIME_CONVENTION,
+    SCHEMA_CONVENTION,
+)
 from p9.arms import build_arm, control_spec
 from p9.evidence import Checks, artifacts_root
 from p9.failures import classify_tool_result
@@ -124,6 +132,15 @@ def main() -> int:
             )
             notebook = files.get("notebook.md", {}).get("text", "")
             contract = (workspace_root / "WORKSPACE.md").read_text(encoding="utf-8")
+            # Pin the stated conventions against the sandbox itself, not against a
+            # second copy of the same assumption.
+            named_imports = arm.workspace.execute(
+                "import " + ", ".join(AVAILABLE_IMPORTS) + "\nprint('NAMED_IMPORTS_OK')"
+            )
+            unnamed_import = arm.workspace.execute("import sklearn")
+            observed_schema_keys = sorted(
+                json.loads((workspace_root / "observations" / "step-00000.json").read_text())
+            )
 
     kinds = [classify_tool_result(item["output"]) for item in outputs]
     checks.record(
@@ -204,6 +221,33 @@ def main() -> int:
         {"convention": PATH_CONVENTION.strip()},
     )
 
+    checks.record(
+        "every_package_the_contract_names_actually_imports",
+        named_imports.ok and "NAMED_IMPORTS_OK" in named_imports.stdout,
+        {"named": list(AVAILABLE_IMPORTS), "stdout": named_imports.stdout.strip()},
+    )
+    checks.record(
+        "a_package_the_contract_does_not_name_actually_fails",
+        not unnamed_import.ok
+        and "ModuleNotFoundError" in (unnamed_import.traceback or ""),
+        {"probe": "sklearn"},
+    )
+    checks.record(
+        "the_runtime_convention_is_stated_in_the_contract",
+        RUNTIME_CONVENTION.strip() in contract,
+        {"convention": RUNTIME_CONVENTION.strip()},
+    )
+    checks.record(
+        "the_documented_observation_keys_match_a_real_observation_file",
+        observed_schema_keys == sorted(OBSERVATION_SCHEMA_KEYS),
+        {"observed": observed_schema_keys, "documented": sorted(OBSERVATION_SCHEMA_KEYS)},
+    )
+    checks.record(
+        "the_schema_convention_is_stated_in_the_contract",
+        SCHEMA_CONVENTION.strip() in contract,
+        {"convention": SCHEMA_CONVENTION.strip()},
+    )
+
     # Substrate finding: a model-written module is not importable by default.
     bare = outputs[2]["output"]
     checks.record(
@@ -226,6 +270,31 @@ def main() -> int:
         ],
         notebook=notebook,
         findings=[
+            {
+                "id": "available-packages-were-never-stated",
+                "observed": {"recorded_failures": 7, "example": "No module named 'sklearn'"},
+                "why_it_matters": (
+                    "The sandbox has numpy and Pillow only. The allowlist appears in the "
+                    "host-only manifest, never to the model, so the model discovers it by "
+                    "importing and failing."
+                ),
+                "disposition": (
+                    "Stated, derived from MODEL_RUNTIME_DISTRIBUTIONS so it cannot drift, "
+                    "and pinned by importing every named package in the live sandbox."
+                ),
+            },
+            {
+                "id": "observation-schema-keys-were-never-enumerated",
+                "observed": {"recorded_failures": 4, "example": "KeyError: 'current'"},
+                "why_it_matters": (
+                    "The contract said 'flat objects with top-level public metadata' "
+                    "without ever saying which keys that meant, so the model guessed."
+                ),
+                "disposition": (
+                    "Enumerated, derived from observation_metadata so it cannot drift, and "
+                    "pinned against a real observation file written during the run."
+                ),
+            },
             {
                 "id": "observation-filename-width-was-never-stated",
                 "observed": {

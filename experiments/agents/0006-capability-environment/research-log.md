@@ -31,8 +31,10 @@ none was visible from prose:
    deliberation round left one trace. Fixed by moving the retry loop into
    `transport.py` with the inner client at `rate_limit_retries=0`.
 
-Two more are documented rather than fixed, because the code creating them is
-frozen. Both were observed defeating a model, not derived from reading the source:
+Four more are documented rather than fixed, because the code creating them is
+frozen. All were *measured* defeating a model, not derived from reading the
+source — `harness_friction.py` over the 48 recorded runs finds 34 of 47 tool
+failures attributable to the interface:
 
 - **`sys.path`.** The worker runs `python3 -I`, so a model-written module is not
   importable without `sys.path.insert(0, ".")`, and nothing said so.
@@ -44,9 +46,27 @@ frozen. Both were observed defeating a model, not derived from reading the sourc
   `ObservationStore` actually writes**, so the contract cannot drift from the code;
   two mutants guard it.
 
-The pattern is worth naming: every path the model must *construct* rather than
-copy is a rediscovery cost, and a glob in the contract hides exactly the part that
-has to be guessed.
+- **Available packages** (7 failures). The sandbox has numpy and Pillow only. The
+  allowlist exists in `allowed_distributions` but goes into the host-only
+  manifest, never to the model, which discovers it by importing `sklearn` and
+  failing. Now stated, derived from `MODEL_RUNTIME_DISTRIBUTIONS`, and pinned by
+  importing every named package in the live sandbox.
+- **Observation schema keys** (4 failures). The contract said "flat objects with
+  top-level public metadata" and never said which keys. Now enumerated, derived
+  from `observation_metadata`, pinned against a real observation file.
+
+The pattern is worth naming: every name the model must *construct* rather than
+copy — a path, an import, a key — is a rediscovery cost, and a glob in the
+contract hides exactly the part that has to be guessed. Each statement is derived
+from the frozen source rather than transcribed, so documentation drift fails a
+check instead of silently misleading a model.
+
+**The instrument matters more than any one finding.** The filename defect was the
+single largest cause of tool failure across 48 runs and sat unread for months;
+it surfaced because a human happened to watch a transcript. `harness_friction.py`
+turns a run into a measurement, works on runs that predate it, and is what makes
+live runs worth doing. Baseline committed at
+`p9/artifacts/p9-harness-friction/recorded-0002-runs.json`.
 
 ### What the prototypes establish
 

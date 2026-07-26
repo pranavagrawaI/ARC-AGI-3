@@ -36,23 +36,51 @@ environment replays frames from `recordings/`.
 | **P9.4** `p9_4_harness_task.py` | Does the harness carry a **real task** to a correct answer under injected faults? | Yes, in all seven conditions. A reactive policy maintains `index.json` over every observation seen; the host grades it against digests it re-derives from the recorded frames, independent of any component under test. Eviction (3), interpreter timeout with restart, retryable transport failure, output truncation, malformed tool arguments, and all of them at once each leave the index complete and correct. |
 | **P9.3** `p9_3_failure_recovery.py` | Are the failure modes distinguishable, correctly routed, and retried only when safe? | Five tool signatures are distinct; syntax and runtime failures share a kind but name different exceptions. The timeout restarts the interpreter, loses in-memory state, keeps files and the read-only record, and says so. The illegal action returns to the model and is repaired. The retryable transport failure is retried once, logged twice host-side, and leaves no trace in any request the model saw; the fatal one is not retried. |
 
+## Measuring where the harness defeats the model
+
+`harness_friction.py` reads a run's `process.jsonl` and classifies every tool failure by
+whether the model could have known better from what the harness told it:
+
+```
+UV_CACHE_DIR=/tmp/uv-cache MPLCONFIGDIR=/tmp/mpl-cache uv run python3 \
+  experiments/agents/0006-capability-environment/p9/harness_friction.py
+```
+
+Over the 48 recorded 0002 runs — 595 actions, 593 tool calls, 47 failures — **34 of 47 are
+attributable to the interface** (`artifacts/p9-harness-friction/recorded-0002-runs.json`):
+
+| count | kind |
+|---|---|
+| **23** | `constructed_observation_path_not_found` — `observations/step-0007.json` |
+| 11 | `python_error` |
+| 7 | `module_unavailable` — `No module named 'sklearn'` |
+| 4 | `observation_schema_key_guessed` — `KeyError: 'current'` |
+| 2 | `tool_argument_validation` |
+
+It reads only `process.jsonl`, so it works on runs that predate every module here and on
+any future run. Attribution is a heuristic over error text and is labelled as such.
+
 ## Interface conventions the model had to guess
 
-Two facts about the harness were invisible and defeated a model in practice. Neither is
-fixable in code — both come from `participating_source_hashes()` — so both are stated in
-the contract and verified:
+Four facts about the harness were invisible. None is fixable in code — they all come from
+`participating_source_hashes()` — so each is stated in the contract, **derived from the
+frozen source so it cannot drift**, and pinned against the live sandbox:
 
-- **`sys.path`.** The worker runs `python3 -I`, so a model-written module will not import
-  without `sys.path.insert(0, ".")`.
-- **Observation filenames.** The model was shown only the glob `observations/step-*.json`.
-  The zero-padding width is exactly the part that must be guessed, and the only concrete
-  filenames arrive via `recent_transitions` — empty at step 0, eight steps deep. Models
-  construct `step-%04d.json` and get `FileNotFoundError`. Now stated as
-  `observations/step-NNNNN.json` with a worked example, **pinned against the filenames
-  `ObservationStore` actually writes** so it cannot drift, and guarded by two mutants.
+| Convention | What the model saw | Recorded failures |
+|---|---|---|
+| Observation filename width | the glob `observations/step-*.json` only | **23** |
+| Available packages | nothing; the allowlist is host-only | 7 |
+| Observation schema keys | "flat objects with top-level public metadata" | 4 |
+| `sys.path` | nothing; the worker runs `python3 -I` | — |
 
-The generalisable part: a glob in a contract hides precisely the thing the model has to
-construct.
+Each is derived rather than transcribed: the package list comes from
+`MODEL_RUNTIME_DISTRIBUTIONS`, the schema keys from `observation_metadata`, the filename
+width from a format string P9.1 checks against the files actually written. P9.1 also
+imports every named package in the live sandbox and confirms an unnamed one fails.
+
+The generalisable part: **a glob in a contract hides precisely the thing the model has to
+construct**, and anything the model must build a name for — a path, an import, a key — is a
+rediscovery cost until it is stated concretely.
 
 ## Testing the tests
 
@@ -133,6 +161,7 @@ only one copy now.
 | `fixtures.py` | Scripted model client and recorded environment. |
 | `task_policy.py` | Reactive policy with a real objective, and the host's ground truth for it. |
 | `evidence.py` | Check recording and evidence reports. |
+| `harness_friction.py` | Reads any run's process log and reports where the interface, not the game, defeated the model. |
 | `mutation_probe.py` | Breaks one property at a time and requires the suite to catch it. |
 
 The frozen contract these establish is in [`CONTRACT.md`](CONTRACT.md).

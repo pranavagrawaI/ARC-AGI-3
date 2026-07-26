@@ -25,7 +25,8 @@ from types import SimpleNamespace
 from typing import Any, Mapping
 
 from llm_repl_agent.agent import PYTHON_TOOL, LlmReplAgent
-from llm_repl_agent.observations import ModelObservation
+from llm_repl_agent.observations import ModelObservation, observation_metadata
+from llm_repl_agent.workspace import MODEL_RUNTIME_DISTRIBUTIONS
 
 from .capabilities import SENTINEL_NOTE, resolve_capabilities
 from .conversation import AnnouncedConversation
@@ -40,13 +41,45 @@ OBSERVATIONS_GLOB = "observations/step-*.json"
 OBSERVATION_STEP_DIGITS = 5
 OBSERVATION_FILENAME_EXAMPLE = f"observations/step-{7:0{OBSERVATION_STEP_DIGITS}d}.json"
 
+# Derived from the frozen allowlist, so the statement cannot drift from the sandbox.
+# 7 of 47 recorded tool failures were the model importing something that is not there.
+AVAILABLE_IMPORTS = tuple(sorted(roots[0] for roots in MODEL_RUNTIME_DISTRIBUTIONS.values()))
 
-ARM_SYSTEM_PROMPT_ADDENDUM = """
+
+def _observation_schema_keys() -> tuple[str, ...]:
+    """The top-level keys of an observation file, derived from the frozen transform.
+
+    4 of 47 recorded tool failures were the model guessing a key that is not there.
+    The contract described the file as "flat objects with top-level public metadata"
+    without ever saying which keys that meant.
+    """
+
+    import numpy as np
+
+    from experiments.harness import Observation
+
+    probe = Observation(
+        pixels=np.zeros((1, 1, 1), dtype=int),
+        available_actions=(1,),
+        levels_completed=0,
+        state="NOT_FINISHED",
+        full_reset=False,
+    )
+    return tuple(sorted({*observation_metadata(probe), "pixels", "step"}))
+
+
+OBSERVATION_SCHEMA_KEYS = _observation_schema_keys()
+
+
+ARM_SYSTEM_PROMPT_ADDENDUM = f"""
 If earlier turns leave this conversation you will be told which steps were dropped, and
 nothing will be substituted for them. Every public observation of this run stays in
 observations/step-NNNNN.json, where NNNNN is the step number padded with leading zeros to
 five digits — step 7 is observations/step-00007.json. Steps whose turns are gone are still
-there.
+there. Each of those files has exactly these top-level keys: {", ".join(OBSERVATION_SCHEMA_KEYS)}.
+
+The sandbox has the Python standard library plus {" and ".join(AVAILABLE_IMPORTS)} only.
+Nothing else is installed and there is no network, so an import of anything else will fail.
 
 The interpreter runs isolated, so the workspace directory is not on sys.path. To import a
 module you wrote, run sys.path.insert(0, ".") first. Names you define persist across python
@@ -65,7 +98,21 @@ PATH_CONVENTION = (
     f"five digits: step 7 is {OBSERVATION_FILENAME_EXAMPLE}.\n"
 )
 
-WORKSPACE_ADDENDUM = PATH_CONVENTION + IMPORT_CONVENTION
+SCHEMA_CONVENTION = (
+    "Each observation file has exactly these top-level keys: "
+    + ", ".join(OBSERVATION_SCHEMA_KEYS)
+    + ".\n"
+)
+
+RUNTIME_CONVENTION = (
+    "The sandbox has the Python standard library plus "
+    + " and ".join(AVAILABLE_IMPORTS)
+    + " only; nothing else is installed and there is no network.\n"
+)
+
+WORKSPACE_ADDENDUM = (
+    PATH_CONVENTION + SCHEMA_CONVENTION + RUNTIME_CONVENTION + IMPORT_CONVENTION
+)
 
 
 class SharedArmAgent(LlmReplAgent):
