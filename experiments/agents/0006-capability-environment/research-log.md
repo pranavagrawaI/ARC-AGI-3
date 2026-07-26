@@ -1,5 +1,241 @@
 # Research log: 0006 capability environment
 
+## 2026-07-26 — issue #9 built as four prototypes; three substrate gaps found
+
+Question: can the strong generic 0002-R control and a provisional treatment be
+built from one factory, and what does building it reveal about the invariants
+issue #9 assumed?
+
+Built in `p9/` as four small prototypes rather than a harness rewrite. Nothing
+under `llm_repl_agent/` or `experiments/harness/{runner,trace,types}.py` is
+modified — all of it is inside `participating_source_hashes()`, so an edit would
+invalidate the 0002 release gate. Every addition composes over those modules.
+
+### Gaps the candidate exposed
+
+Three of #9's interface-quality invariants did not hold on unmodified 0002, and
+none was visible from prose:
+
+1. **Authoritative episode data was model-writable.** `ObservationStore` writes
+   the public observations into `PythonWorkspace.root`, so the model can truncate
+   the only copy. Fixed by an append-only host-owned archive bound
+   read-only at `episode/` (`episode_archive.py`, `projected_workspace.py`).
+   P9.2 has the fixture model destroy the workspace copies first, then recover
+   every evicted step from `episode/`, whose write attempt returns `EROFS`.
+2. **Transcript eviction was silent to the model.** 0002 logs `context_eviction`
+   host-side only. Fixed by a pointer-only notice naming the dropped steps and
+   the authoritative paths, generated from a fixed template so the notice is a
+   pure function of the evicted step set (`conversation.py`).
+3. **Transport retries were unreconstructable.** `OpenAICompatibleChatClient`
+   retries transient failures with no record, so two requests for one
+   deliberation round left one trace. Fixed by moving the retry loop into
+   `transport.py` with the inner client at `rate_limit_retries=0`.
+
+Two more are documented rather than fixed, because the code creating them is
+frozen. Both were observed defeating a model, not derived from reading the source:
+
+- **`sys.path`.** The worker runs `python3 -I`, so a model-written module is not
+  importable without `sys.path.insert(0, ".")`, and nothing said so.
+- **Observation filename width.** The model is shown only the glob
+  `observations/step-*.json`. The zero-padding is hidden: concrete filenames reach
+  it solely through `recent_transitions`, which is empty at step 0 and carries the
+  last eight steps. Models construct `step-%04d.json` and get `FileNotFoundError`.
+  Now stated with a worked example and **pinned against the filenames
+  `ObservationStore` actually writes**, so the contract cannot drift from the code;
+  two mutants guard it.
+
+The pattern is worth naming: every path the model must *construct* rather than
+copy is a rediscovery cost, and a glob in the contract hides exactly the part that
+has to be guessed.
+
+### What the prototypes establish
+
+- **P9.0.** 95 of 104 manifest paths and 84/85 and 94/95 observed
+  request-payload paths are identical between arms; every difference is declared
+  by `sentinel_probe_note`. A third arm with one smuggled prompt sentence is
+  rejected on `model_visible.system_prompt.sha256`.
+- **P9.1.** A helper module and notebook authored at step 0 are reused at step 1
+  against an observation that did not exist when they were written.
+- **P9.2.** Above.
+- **P9.3.** Five tool-failure signatures are distinct; syntax and runtime
+  failures share a kind and are separated by the exception named in the
+  traceback. Timeout restarts the interpreter, loses in-memory state, keeps
+  files and the read-only record, and reports all three. The illegal action
+  returns to the model; the retryable transport failure is retried once and is
+  absent from every request the model saw; the fatal one is not retried.
+
+### Deleted after measurement: the executed-transition log
+
+`episode/history.jsonl` was built, then removed once existing runs were queried.
+Across 8 recorded 0002 runs (414 actions, 165 tool calls, 38-87 evictions each):
+`public_history.jsonl` was read **0 times**, though it is named in the system
+prompt and in every request's `full_history_file` field; `observations/` drew 405
+explicit `step-NNNNN` references but **96% of them point inside the transcript
+window**, only 4% past it. The same records are already injected inline as
+`recent_transitions` for the last 8 steps, so the file's sole unique content was
+the action taken more than 8 steps back. The agent never worked at that horizon.
+
+That null licenses "the file adds nothing to an agent operating inside an 8-step
+horizon" — not "long-horizon action history is worthless", which nothing tested.
+Deleting it is nonetheless the right call: the unique content is exactly what a
+0006 treatment should earn rather than inherit, and re-adding it is now a
+declared capability guarded by the
+`transition-log-reintroduced-into-the-substrate` mutant.
+
+Two things the deletion taught:
+
+1. **It cost prompt rather than saving it, until the advice came out.** Stating
+   that no action record exists ran longer than describing the file, and
+   "keep your own notes if you want a longer record" is host-authored policy of
+   exactly the kind the contract forbids. Cutting both took the payload delta
+   from +12.4%/+15.2% to +10.8%/+13.3%.
+2. **The arm verifier catches divergence, not drift.** A surface added to *both*
+   arms passes cleanly, so a re-added transition log was invisible to it. The
+   shared episode contract is now pinned against a literal in P9.0
+   (`FROZEN_EPISODE_CONTRACT`).
+
+### Removed after the escalation: the episode archive
+
+The read-only `episode/` archive is gone, and with it `episode_archive.py` and
+`projected_workspace.py`. It satisfied #9's "authoritative episode data"
+invariant and was the most carefully engineered part of the layer. It went
+because the escalation forced the question its own checks could not put:
+
+- **Availability was never the gap.** `ObservationStore` keeps every observation
+  in the workspace for the whole run; eviction does not delete them. The 17
+  post-eviction reads in recorded runs were served fine by unmodified 0002.
+- **Authority had no measured demand.** No recorded run shows a model corrupting
+  its own observations. The archive defended against an unobserved threat.
+- **P9.4 declined to defend it.** Pruning the archive did not fail the task,
+  because the policy falls back to the workspace copies. The task verifier was
+  telling the truth where the contract verifier could only restate the
+  requirement.
+
+Cost recovered: the prompt addendum fell from +816 to +532 characters, and the
+payload delta from +12.4%/+15.2% to **+5.5%/+7.6%**. 0002-R is now two additions
+over unmodified 0002: a pointer-only omission notice and a logged transport
+retry.
+
+**This is a stated deviation, not a silent drop.** `CONTRACT.md` records that
+0002-R does not provide authoritative episode data, and what that forecloses: a
+0006 claim of the form "the model reconstructed X from its record" cannot be
+defended against "the model wrote that record itself" on this substrate. If 0006
+needs the separation it must register the archive as a declared treatment
+capability, where the arm diff will show it doing work. P9.2 now measures the
+accepted risk — the observation files are model-writable and nothing restores
+them — rather than asserting it away.
+
+### Testing the tests
+
+Passing self-verifying prototypes establish nothing on their own, so
+`p9/mutation_probe.py` breaks one named property at a time and requires
+something to notice. Its first run exposed two vacuous claims:
+
+- **`EpisodeArchive.verify()` was never shown able to fail.** P9.1 and P9.2 both
+  asserted that the archive verifies; a `verify()` hardcoded to report a match
+  passed every prototype and every test. The tamper-detection claim was empty.
+  Fixed by direct archive tests that corrupt and delete observations and require
+  the mismatched record to be named.
+- **P9.3 read `workspace_restarted` off the raw tool record, not the
+  classifier**, so a classifier that stopped reporting restarts survived the
+  prototype. P9.3 now asserts through `classify_tool_result`.
+
+After the fix: 12/12 mutants caught, sources verified restored
+(`p9/artifacts/p9-mutation-probe/results.json`). The prototypes exercise
+properties end to end; the unit tests carry the negative half an end-to-end run
+cannot reach.
+
+Frozen contract: `p9/CONTRACT.md`. Evidence: `p9/artifacts/*/evidence.json`.
+Tests: `experiments.agents.tests.test_p9_shared_arm` (31 tests).
+
+### Delete-centric pass
+
+Four overdeletion passes across four axes (dead code, mechanisms, requirements,
+whole prototypes) with the suite as the verifier. Six deletions survived and were
+kept; the failure boundary was crossed nine times. Two results were worth more
+than the code they removed:
+
+1. **A fake deletion nearly licensed removing half the verifier.** The first
+   attempt at cutting P9.0's observed request-payload comparison only *inserted*
+   a line — it never removed the loop — and reported green. Redone properly it
+   was still green, which meant the verifier could not see its own strongest half
+   go missing. Strengthened rather than deleted: a mutant now diverges the arms
+   on a payload path the manifest has no entry for, and only the observed
+   comparison catches it.
+2. **The probe scored a stale patch as a survivor.** After the chain digest was
+   deleted, `archive-verify-always-reports-match` no longer matched any source
+   text and was silently counted as surviving. A probe that stops testing
+   something must fail loudly, not report a gap it is no longer measuring.
+
+`p9_1_cumulative_loop.py` looked deletable against the mutation probe. The
+escalation below overturned that: it catches an archive-pruning regression P9.4
+misses. It stays.
+
+### Escalation: a verifier that measures the harness, not the contract
+
+The delete-centric pass ended on a circularity. Requirement-level deletions all
+failed, but only because the prototypes' checks encode the requirements — a
+contract verifier can confirm a contract and nothing else. P9.4 replaces the
+success criterion: a reactive policy (it reads the conversation and decides from
+the last tool result, so it can be defeated) maintains an index of every
+observation seen, and the host grades the finished index against digests it
+computed itself. Seven conditions — clean, eviction, interpreter timeout,
+retryable transport failure, oversized output, malformed tool arguments, all at
+once — each complete correctly, and each asserts its fault actually fired.
+
+The task reads whichever observation directory exists, workspace or archive. That
+is deliberate: it measures whether the model can reach every past observation, not
+whether the archive exists. A task encoding the second would defend the
+requirement rather than test it.
+
+**P9.4 is orthogonal, not strictly stronger.** Under a mutant wiping
+model-authored files between actions, P9.1, P9.2 and P9.4 all fail. Under a mutant
+pruning the archive to its two newest observations, P9.1 and P9.2 fail and P9.4
+does not — it falls back to the workspace copies. This also answers the earlier
+REQUIRE question: **P9.1 is not redundant** and stays. An initial reading that it
+caught nothing unique came from a mutant tailored to P9.4's own artifact.
+
+**What the escalation bought.** Making the archive write an observation with
+different key ordering — so the model's two model-visible paths to one public fact
+return different bytes — passed every prototype, every unit test and every mutant.
+That is a defect the model could not detect either: two incompatible versions of
+one public fact, no way to tell which is authoritative. P9.4 now compares both
+projections per condition, and `observation-projections-disagree` guards the
+check. Final: 14/14 mutants caught.
+
+### The verifier's own defects
+
+Running the probe adversarially found more wrong with the verifier than with the
+code under test. Three, in order of severity:
+
+1. **It overwrote the evidence it exists to protect.** The probe runs prototypes
+   against deliberately broken source, and `Checks.finish` writes `evidence.json`
+   before raising, so every probe run replaced the committed artifacts with mutant
+   output. `p9-2-context-loss/evidence.json` sat on disk claiming `passed=false`.
+   Committing after any probe run would have shipped evidence asserting a
+   prototype fails. Prototypes now honour `P9_ARTIFACTS_DIR`; the probe redirects
+   to scratch.
+2. **A stale patch counted as a survivor.** A mutant whose target text no longer
+   existed was scored as surviving — understating coverage while hiding that the
+   probe had stopped testing anything. Stale is now a hard failure.
+3. **No concurrency lock.** Two runs restore from each other's stale snapshots and
+   can leave mutated source behind. It now refuses to start while another holds
+   `.mutation-probe.lock`.
+
+The general lesson is the one worth keeping: an instrument that writes to the
+same path it measures will eventually report on itself. None of these were
+visible from reading the code; all three appeared only by running the verifier
+against a system it was supposed to condemn.
+
+### What this does not license
+
+No gameplay, learning, or 0006-intervention claim: the model is a fixed script
+and the environment is a recording. No claim that the manifest covers every
+model↔harness crossing — the verifier's reach is the manifest plus the recorded
+payloads. No live endpoint, budget authority, release gate, or RHAE readiness.
+No security claim: the read-only bind constrains the sandboxed model, it does
+not make the sandbox a hostile-code boundary.
+
 ## 2026-07-25 — reusable 0002–0005 substrate and authority boundaries
 
 Question: which existing mechanisms can 0006 v0 reuse without changing their

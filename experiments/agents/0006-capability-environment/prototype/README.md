@@ -6,7 +6,7 @@
 
 Issue #6 accepted this spike as evidence that the model can be given a sufficiently strong path to its own empirical history. It is no longer the implementation plan.
 
-The current authority is the lean sequence in issues #9, #16, and #11: freeze minimum matched-control invariants, specify one recorded-trace or tiny-environment vertical loop, then build and inspect that loop. Do not run this directory's live-pair launcher as the next experiment. The source remains only as a design-search archive until the thin prototype supplies evidence for fine-grained deletion.
+The current authority is the lean sequence in issues #9, #16, and #11: freeze minimum matched-control invariants, specify one recorded-trace or tiny-environment vertical loop, then build and inspect that loop. The #9 half of that sequence is built in `../p9/`; its frozen contract is `../p9/CONTRACT.md`. Do not run this directory's live-pair launcher as the next experiment. The source remains only as a design-search archive until the thin prototype supplies evidence for fine-grained deletion.
 
 ## Question
 
