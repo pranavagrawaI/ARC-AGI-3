@@ -568,6 +568,7 @@ class ProbeTests(unittest.TestCase):
             run = Path(scratch) / "run"
             (run / "workspace").mkdir(parents=True)
             (run / "workspace" / HARNESS_NOTES_FILE).write_text(
+                "# my own working notes, ignored by the collector\n"
                 "WANT: a numeric readout of the budget bar\n"
                 "not a note at all\n"
                 "  FRICTION: recent_transitions repeats three times per turn\n"
@@ -577,6 +578,16 @@ class ProbeTests(unittest.TestCase):
             notes = collect_notes(run)
             self.assertEqual([n["kind"] for n in notes], ["WANT", "FRICTION", "WASTE"])
             self.assertEqual(notes[2]["note"], "the rendered PNG duplicates pixels[] exactly")
+
+    def test_harness_notes_live_in_the_file_the_harness_already_echoes(self) -> None:
+        # Two files meant two instructions, and two instructions collected nothing.
+        from p9.agent import NOTES_FILE
+        from p9.probe import HARNESS_NOTES_CONVENTION, HARNESS_NOTES_FILE, PLAY_ALONG_ROLE
+
+        self.assertEqual(HARNESS_NOTES_FILE, NOTES_FILE)
+        self.assertIn(NOTES_FILE, HARNESS_NOTES_CONVENTION)
+        self.assertIn(NOTES_FILE, PLAY_ALONG_ROLE)
+        self.assertNotIn("harness_notes.md", PLAY_ALONG_ROLE)
 
     def test_the_notes_channel_changes_the_prompt_so_a_mismatched_pair_cannot_compare(
         self,

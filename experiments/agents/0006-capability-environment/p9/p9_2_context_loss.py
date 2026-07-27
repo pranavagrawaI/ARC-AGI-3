@@ -24,7 +24,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     __package__ = "p9"
 
-from p9.agent import NOTES_CHAR_LIMIT, NOTES_FILE, OBSERVATIONS_GLOB
+from p9.agent import NOTES_FILE, OBSERVATIONS_GLOB
 from p9.arms import build_arm, control_spec
 from p9.conversation import OMISSION_NOTICE_TEMPLATE, omission_notice_text
 from p9.evidence import Checks, artifacts_root

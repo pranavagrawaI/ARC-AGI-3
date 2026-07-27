@@ -43,6 +43,8 @@ from pathlib import Path
 import re
 from typing import Any, Mapping, Sequence
 
+from .agent import NOTES_FILE
+
 
 # Both roles share this brief verbatim. The comparison between them is only
 # attributable to the role if everything else the model is told is identical.
@@ -76,10 +78,9 @@ note whether you could have known in advance from what you were told.
 You must still return a legal action each step, because that is how the loop advances.
 Choose freely; the score does not matter here.
 
-Keep a running record in your workspace — a file you append to — of everything worth
-reporting: what broke, what surprised you, what you had to discover by trial, what you
-wanted and could not find, and anything you worked around rather than used. You will be
-asked for that record at the end.
+Keep your record in NOTES.md, the file echoed back to you every request: what broke, what
+surprised you, what you had to discover by trial, what you wanted and could not find, and
+anything you worked around rather than used. You will be asked for it at the end.
 """
 
 
@@ -91,8 +92,9 @@ Play as well as you can. Genuinely try to understand the mechanics and make prog
 is your first job and it comes first: do not sacrifice a move, or spend a deliberation
 round, on testing the harness for its own sake. Do not deliberately send malformed input.
 
-Alongside that, notice the harness. As you use it to do real work, keep a running record in
-your workspace — a file you append to — of every point where it got in your way: something
+Alongside that, notice the harness. As you use it to do real work, keep your record in
+NOTES.md — the file echoed back to you every request — of every point where it got in your
+way: something
 you had to discover by trial, something you expected and could not find, something you
 worked around rather than used, something that cost you a round or a move, something that
 was tedious the tenth time. Note it and carry on playing; do not chase it.
@@ -108,13 +110,19 @@ record at the end.
 # play; this is meant to cost a model almost nothing while it works.
 NOTE_KINDS = ("WANT", "FRICTION", "WASTE")
 
-HARNESS_NOTES_FILE = "harness_notes.md"
+# Deliberately the file the harness already echoes back every request. The first live
+# attempt used a separate harness_notes.md and collected nothing: the play-along role
+# also asked for "a running record in your workspace", the model merged the two into
+# one file and filled it with game analysis. Two instructions about note-keeping
+# produced zero notes. One always-visible file is the fix - the model sees its own
+# notes and this format every turn instead of recalling a line from a long prompt.
+HARNESS_NOTES_FILE = NOTES_FILE
 
 HARNESS_NOTES_CONVENTION = f"""\
 One more thing, and it is secondary to playing. This harness is still being built, and you
 are the only one who can see it from the inside. Whenever you notice something about the
-harness itself — not the game — append a single line to {HARNESS_NOTES_FILE} in your
-workspace, using exactly one of these three prefixes:
+harness itself — not the game — add a single line to {HARNESS_NOTES_FILE}, the same file
+that is echoed back to you every request, starting with exactly one of these prefixes:
 
   WANT: something that is not there and would have made your work easier.
   FRICTION: something that is there but got in your way, with how it should have been.
@@ -122,7 +130,8 @@ workspace, using exactly one of these three prefixes:
 
 One or two lines, whenever it occurs to you, then carry on. Do not stop to investigate, do
 not write essays, and do not spend a move or a deliberation round on this. If nothing comes
-to mind, write nothing.
+to mind, write nothing. Everything else in that file is yours for whatever you like; only
+lines starting with those three prefixes are read as harness feedback.
 
 The third prefix is the one people never volunteer, so say it when you mean it: if part of
 what you are given is dead weight, that is worth more to us than another request.
