@@ -29,6 +29,7 @@ FRAME_TOOLS_SOURCE = '''\
 
     frames.steps()          -> [0, 1, 2, ...] every step on disk
     frames.load(3)          -> the whole observation dict for step 3
+                               (every function also accepts a file path)
     frames.grid(3)          -> the current layer as a 2-D numpy array
     frames.diff(3, 4)       -> what changed between two steps
     frames.where(3, value)  -> [(y, x), ...] cells holding a value
@@ -63,10 +64,23 @@ def path(step):
     return "%s/step-%05d.json" % (OBSERVATIONS, step)
 
 
-def load(step):
-    """The whole observation dict for a step."""
+def resolve(step_or_path):
+    """Accept a step number or a path to an observation file.
 
-    with open(path(step)) as handle:
+    The first live use of this helper called diff() with two file paths and failed;
+    the model then retried with step numbers. Taking either costs one line and
+    removes the failure, which is worth more than being strict about it.
+    """
+
+    if isinstance(step_or_path, str):
+        return step_or_path
+    return path(step_or_path)
+
+
+def load(step_or_path):
+    """The whole observation dict for a step number or a path."""
+
+    with open(resolve(step_or_path)) as handle:
         return json.load(handle)
 
 

@@ -161,6 +161,8 @@ def main() -> int:
                 "obs['pixels'] = [[[0]*4]*4, [[9]*4]*4]\n"
                 "open('observations/step-00099.json','w').write(json.dumps(obs))\n"
                 "print('LAST_LAYER', int(frames.grid(99)[0][0]))\n"
+                # A live model's first call passed file paths, not step numbers.
+                "print('BY_PATH', frames.diff('observations/step-00000.json', 1)['comparable'])\n"
             )
             named_imports = arm.workspace.execute(
                 "import " + ", ".join(AVAILABLE_IMPORTS) + "\nprint('NAMED_IMPORTS_OK')"
@@ -356,6 +358,11 @@ def main() -> int:
         and "DIFF_COMPARABLE True" in frame_tools_probe.stdout
         and "DIFF_KEYS" in frame_tools_probe.stdout,
         {"stdout": frame_tools_probe.stdout.strip()[:300], "stderr": frame_tools_probe.stderr[:200]},
+    )
+    checks.record(
+        "the_helper_accepts_a_file_path_as_well_as_a_step_number",
+        "BY_PATH True" in frame_tools_probe.stdout,
+        {"line": _line(frame_tools_probe.stdout, "BY_PATH")},
     )
     checks.record(
         "the_helper_reads_the_current_layer_of_a_multi_layer_frame",

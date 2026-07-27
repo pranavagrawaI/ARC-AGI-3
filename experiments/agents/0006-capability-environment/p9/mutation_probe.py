@@ -124,6 +124,14 @@ MUTANTS = (
         prototypes=("p9_2_context_loss.py",),
     ),
     Mutant(
+        name="frame-helper-rejects-a-path",
+        breaks="the helper accepts a file path as well as a step number",
+        filename="frame_tools.py",
+        before="    if isinstance(step_or_path, str):\n        return step_or_path",
+        after="    if False:\n        return step_or_path",
+        prototypes=("p9_1_cumulative_loop.py",),
+    ),
+    Mutant(
         name="frame-helper-reads-the-stale-layer",
         breaks="the helper reads the current layer of a multi-layer frame",
         filename="frame_tools.py",
