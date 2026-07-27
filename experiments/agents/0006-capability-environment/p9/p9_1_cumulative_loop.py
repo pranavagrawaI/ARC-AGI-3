@@ -35,6 +35,7 @@ from p9.agent import (
     RECENT_TRANSITIONS_LIMIT,
     RESERVED_WORKSPACE_ENTRIES,
     HISTORY_CONVENTION,
+    IMAGE_CONVENTION,
     WORKSPACE_CONTENTS_CONVENTION,
     OBSERVATION_SCHEMA_KEYS,
     PATH_CONVENTION,
@@ -259,6 +260,25 @@ def main() -> int:
     layered[CURRENT_LAYER_INDEX] = 7
     descriptor = representation_descriptor(layered, pixels_to_png(layered))
     rendered_layer = descriptor["rendered_image"]["source_grid_layer"]
+    from p9.annotated_frame import CELL_PIXELS, MARGIN, annotate, annotation_descriptor
+    from PIL import Image as _Image
+    from io import BytesIO as _BytesIO
+
+    probe_grid = np.zeros((1, 8, 8), dtype=int)
+    with _Image.open(_BytesIO(annotate(probe_grid))) as annotated_image:
+        annotated_size = annotated_image.size
+    checks.record(
+        "the_frame_the_model_sees_carries_its_coordinate_rulers",
+        annotated_size == (8 * CELL_PIXELS + MARGIN, 8 * CELL_PIXELS + MARGIN)
+        and 64 * CELL_PIXELS + MARGIN <= 512
+        and annotation_descriptor()["x_axis"].startswith("column")
+        and IMAGE_CONVENTION.strip() in contract,
+        {
+            "annotated_size": annotated_size,
+            "margin": MARGIN,
+            "full_frame_px": 64 * CELL_PIXELS + MARGIN,
+        },
+    )
     checks.record(
         "the_documented_current_layer_is_the_one_the_harness_renders",
         rendered_layer == len(layered) + CURRENT_LAYER_INDEX

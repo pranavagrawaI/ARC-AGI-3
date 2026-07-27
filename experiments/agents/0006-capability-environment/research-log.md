@@ -421,6 +421,37 @@ choosing to spend effort on us while being told the task comes first. That tensi
 is unresolved. The friction log and workaround detection need no cooperation at
 all, which is an argument for weighting them.
 
+### The image the model reasons over
+
+ACTION6 is the most-used action in the corpus — 165 of 596 decisions — and it takes
+grid coordinates while the model is shown a 512x512 render. It eyeballs the mapping,
+and the corpus shows the fingerprint: 16% of submitted coordinates land on the
+diagonal `x == y` against a 1.6% chance rate, 25% have both coordinates as multiples
+of four against 6%. Models snap to round numbers and to the middle. A play-along probe
+independently built its own ASCII renderer with rulers, saying neither the arrays nor
+the PNG were practical for precise spatial reasoning.
+
+The frame now carries rulers labelled in grid coordinates, ticks every cell, labels
+every five, gridlines every ten blended toward the complement of what lies under them.
+The first attempt blended toward white and was invisible on a white background — worth
+recording because it looked correct in code and failed only when rendered.
+
+This passes the triage test. It says nothing about what any object is, where the goal
+lies, or which cells matter; it makes legible a coordinate system the model is already
+required to use. Contrast the refused request for the controllable object's bounding
+box, which would hand over a game-specific prior.
+
+Only the current frame is sent as an image now. A request carried one per retained
+turn, six of them superseded; the rest are replaced by an explicit pointer to the file
+on disk rather than dropped silently. At steady state that is 48% fewer image bytes and
+one tile of image tokens instead of seven. Cell size is 7px so the annotated frame is
+472px and stays inside the 512 boundary most providers tile at.
+
+A measurement caution learned here: byte counts conflate text with images. Text bytes
+track tokens closely; image tokens track tiled resolution and ignore file size. An
+early reading of a five-request fixture suggested the change made things worse, because
+a short run never accumulates seven retained turns.
+
 ### What this does not license
 
 No gameplay, learning, or 0006-intervention claim: the model is a fixed script

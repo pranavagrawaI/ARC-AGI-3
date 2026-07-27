@@ -186,6 +186,33 @@ def main() -> int:
         bool(with_notice) and set(with_notice) <= set(notes_echoed),
         {"requests_echoing_notes": notes_echoed, "requests_with_omission_notice": sorted(with_notice)},
     )
+    images_per_request = [
+        sum(
+            1
+            for message in payload["messages"]
+            if isinstance(message.get("content"), list)
+            for part in message["content"]
+            if part.get("type") == "image_url"
+        )
+        for payload in payloads
+    ]
+    checks.record(
+        "exactly_one_frame_image_reaches_the_model_per_request",
+        set(images_per_request) == {1},
+        {"images_per_request": images_per_request},
+    )
+    checks.record(
+        "superseded_frames_are_replaced_by_a_pointer_not_dropped_silently",
+        any(
+            "frame image for this earlier step is omitted" in part.get("text", "")
+            for payload in payloads
+            for message in payload["messages"]
+            if isinstance(message.get("content"), list)
+            for part in message["content"]
+            if part.get("type") == "text"
+        ),
+        {"requests": len(payloads)},
+    )
     checks.record(
         "the_omission_was_stated_to_the_model_after_eviction",
         bool(with_notice) and all(len(items) == 1 for items in with_notice.values()),

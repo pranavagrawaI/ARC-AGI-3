@@ -116,6 +116,22 @@ MUTANTS = (
         prototypes=("p9_1_cumulative_loop.py",),
     ),
     Mutant(
+        name="superseded-frames-still-sent",
+        breaks="exactly one frame image reaches the model per request",
+        filename="agent.py",
+        before="            superseded_frame_note=SUPERSEDED_FRAME_NOTE,",
+        after="            superseded_frame_note=None,",
+        prototypes=("p9_2_context_loss.py",),
+    ),
+    Mutant(
+        name="coordinate-rulers-removed",
+        breaks="the frame the model sees carries its coordinate rulers",
+        filename="annotated_frame.py",
+        before="MARGIN = 24",
+        after="MARGIN = 0",
+        prototypes=("p9_1_cumulative_loop.py",),
+    ),
+    Mutant(
         name="notes-block-not-echoed",
         breaks="a conclusion written before an eviction is still in context after it",
         filename="agent.py",

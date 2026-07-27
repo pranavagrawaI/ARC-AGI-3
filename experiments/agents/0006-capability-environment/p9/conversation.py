@@ -66,9 +66,11 @@ class AnnouncedConversation(RollingConversation):
         system_message: Mapping[str, Any],
         max_turns: int = 6,
         observations_glob: str,
+        superseded_frame_note: str | None = None,
     ) -> None:
         super().__init__(system_message=system_message, max_turns=max_turns)
         self.observations_glob = observations_glob
+        self.superseded_frame_note = superseded_frame_note
         self._evicted_steps: list[int] = []
 
     def append(self, *, step: int, messages: list[dict[str, Any]]) -> tuple[int, ...]:
@@ -91,8 +93,30 @@ class AnnouncedConversation(RollingConversation):
             ),
         }
 
+    @staticmethod
+    def _without_superseded_frames(
+        message: Mapping[str, Any], note: str
+    ) -> dict[str, Any]:
+        content = message.get("content")
+        if not isinstance(content, list):
+            return dict(message)
+        rebuilt = []
+        for part in content:
+            if isinstance(part, Mapping) and part.get("type") == "image_url":
+                rebuilt.append({"type": "text", "text": note})
+            else:
+                rebuilt.append(part)
+        return {**message, "content": rebuilt}
+
     def messages(self) -> list[dict[str, Any]]:
         output = super().messages()
+        # Every retained turn carries its own frame image, all superseded by the
+        # current one. Replace them with a pointer rather than dropping them silently.
+        if self.superseded_frame_note is not None:
+            output = [output[0]] + [
+                self._without_superseded_frames(message, self.superseded_frame_note)
+                for message in output[1:]
+            ]
         notice = self.omission_notice()
         if notice is not None:
             output.insert(1, notice)

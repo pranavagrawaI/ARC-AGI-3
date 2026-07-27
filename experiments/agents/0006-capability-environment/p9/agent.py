@@ -20,6 +20,7 @@ from #9".
 
 from __future__ import annotations
 
+from base64 import b64encode
 import json
 from types import SimpleNamespace
 from typing import Any, Mapping
@@ -28,6 +29,7 @@ from llm_repl_agent.agent import PYTHON_TOOL, LlmReplAgent
 from llm_repl_agent.observations import ModelObservation, observation_metadata
 from llm_repl_agent.workspace import MODEL_RUNTIME_DISTRIBUTIONS
 
+from .annotated_frame import annotate, annotation_descriptor
 from .capabilities import SENTINEL_NOTE, resolve_capabilities
 from .conversation import AnnouncedConversation
 
@@ -60,6 +62,15 @@ OBSERVATION_IMAGE_EXAMPLE = f"observations/step-{7:0{OBSERVATION_STEP_DIGITS}d}.
 # agents carry the same thing. A play-along probe named its absence the single worst
 # thing about the harness, having lost its action semantics and map to an eviction and
 # had to rebuild them from files.
+# One image, not seven. A request carried one per retained turn, six of them
+# superseded frames; the current frame is the only one showing the present, and the
+# earlier ones remain on disk. Explicitly replaced rather than silently dropped.
+SUPERSEDED_FRAME_NOTE = (
+    "[the frame image for this earlier step is omitted; every frame remains on disk "
+    "as observations/step-NNNNN.png, and the current frame is shown with the newest "
+    "observation]"
+)
+
 NOTES_FILE = "NOTES.md"
 NOTES_CHAR_LIMIT = 4000
 
@@ -167,6 +178,14 @@ WORKSPACE_CONTENTS_CONVENTION = (
     + ". Everything else in it is yours.\n"
 )
 
+IMAGE_CONVENTION = (
+    "The image shows the current frame with grid coordinates on the top and left "
+    "margins: x is the column along the top, y is the row down the left, both 0-based "
+    "and exactly the numbers an action takes. Read coordinates off the rulers rather "
+    "than estimating them. Only the current frame is shown as an image; earlier frames "
+    "stay on disk as observations/step-NNNNN.png.\n"
+)
+
 NOTES_CONVENTION = (
     f"{NOTES_FILE} is yours. Whatever you put in it is echoed back to you in full at the "
     f"top of every request, so anything you write there survives conversation turns being "
@@ -197,6 +216,7 @@ RUNTIME_CONVENTION = (
 
 WORKSPACE_ADDENDUM = (
     WORKSPACE_CONTENTS_CONVENTION
+    + IMAGE_CONVENTION
     + NOTES_CONVENTION
     + LAYER_CONVENTION
     + PATH_CONVENTION
@@ -230,6 +250,7 @@ class SharedArmAgent(LlmReplAgent):
             system_message={"role": "system", "content": system_prompt},
             max_turns=self.config.max_context_turns,
             observations_glob=OBSERVATIONS_GLOB,
+            superseded_frame_note=SUPERSEDED_FRAME_NOTE,
         )
         with (self.workspace.root / "WORKSPACE.md").open("a", encoding="utf-8") as stream:
             stream.write(WORKSPACE_ADDENDUM)
@@ -257,6 +278,14 @@ class SharedArmAgent(LlmReplAgent):
         )
         payload = self._extend_payload(json.loads(message["content"][0]["text"]))
         message["content"][0]["text"] = json.dumps(payload, indent=2, sort_keys=True)
+        pixels = getattr(current, "pixels", None)
+        if pixels is not None:
+            annotated = annotate(pixels)
+            for part in message["content"]:
+                if part.get("type") == "image_url":
+                    part["image_url"] = {
+                        "url": "data:image/png;base64," + b64encode(annotated).decode("ascii")
+                    }
         return message
 
     # The frozen payload carries these both at top level and inside
@@ -292,6 +321,9 @@ class SharedArmAgent(LlmReplAgent):
 
     def _extend_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         payload["notes"] = self._read_notes()
+        representations = payload["environment_observation"].get("representations")
+        if isinstance(representations, dict) and "rendered_image" in representations:
+            representations["rendered_image"]["annotation"] = annotation_descriptor()
         for key in self.DUPLICATED_TOP_LEVEL_KEYS:
             # Only drop the mirror; the canonical copy lives under
             # environment_observation and must survive.

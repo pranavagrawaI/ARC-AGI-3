@@ -201,6 +201,39 @@ one line from the tail of a long prompt, and only prefixed lines are read as fee
 Whether that fixes it is untested: it is a hypothesis, and the next play-along run is the
 test.
 
+## The image the model reasons over
+
+ACTION6 is the most-used action in the recorded corpus — **165 of 596 decisions** — and it
+takes grid coordinates. The model is shown a 512x512 render and must submit 0..63 indices,
+so it eyeballs the mapping. The corpus shows what that produces:
+
+| pattern in submitted coordinates | observed | by chance |
+|---|---|---|
+| `x == y` (the diagonal) | **16%** | 1.6% |
+| both multiples of 4 | **25%** | 6% |
+| both multiples of 8 | **6%** | 1.6% |
+
+Models snap to round numbers and the middle — a 10x over-representation on the diagonal.
+A play-along probe reached the same conclusion from the inside and wrote its own ASCII
+renderer with rulers, saying neither the arrays nor the PNG were "practical for precise
+spatial reasoning".
+
+So the frame the model sees now carries its coordinate system: rulers on the top and left
+margins labelled in **grid** coordinates, ticks every cell, labels every 5, gridlines every
+10 blended toward the complement of what is under them so they stay visible on white and
+on black. The first version blended toward white and was invisible on a white background.
+
+This passes the triage test: it says nothing about what any object is or where the goal
+lies, only where the coordinate system is — which the model is already required to use.
+
+**One image, not seven.** A request carried one frame per retained turn, six superseded.
+Only the current frame is sent now; the others are replaced by an explicit pointer to
+`observations/step-NNNNN.png` rather than dropped silently. At steady state that is 48%
+fewer image bytes, and one tile of image tokens instead of seven.
+
+The cell size is 7px so a 64-cell grid plus margin is 472px, inside the 512 boundary most
+providers tile at — 536px would have risked four tiles where one will do.
+
 ## Measuring where the harness defeats the model
 
 `harness_friction.py` reads a run's `process.jsonl` and classifies every tool failure by
