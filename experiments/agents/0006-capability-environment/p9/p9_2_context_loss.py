@@ -24,7 +24,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     __package__ = "p9"
 
-from p9.agent import OBSERVATIONS_GLOB
+from p9.agent import NOTES_CHAR_LIMIT, NOTES_FILE, OBSERVATIONS_GLOB
 from p9.arms import build_arm, control_spec
 from p9.conversation import OMISSION_NOTICE_TEMPLATE, omission_notice_text
 from p9.evidence import Checks, artifacts_root
@@ -46,6 +46,7 @@ TRANSCRIPT_ONLY_MARKER = "TRANSCRIPT_ONLY_MARKER_9F2A"
 MARK = f"""\
 from pathlib import Path
 Path('notes.md').write_text('# notes\\n- authored at step 1\\n')
+Path('{NOTES_FILE}').write_text('CONCLUSION_FROM_STEP_1: action 1 moves up\\n')
 print('{TRANSCRIPT_ONLY_MARKER}')
 """
 
@@ -166,6 +167,25 @@ def main() -> int:
 
     notices = {index: _notices(payload) for index, payload in enumerate(payloads)}
     with_notice = {index: items for index, items in notices.items() if items}
+    # The notes block exists so a conclusion reached before an eviction is still in
+    # front of the model after it. Assert it in the payloads, not in the workspace.
+    notes_echoed = [
+        index
+        for index, payload in enumerate(payloads)
+        if any(
+            isinstance(part, dict)
+            and part.get("type") == "text"
+            and "CONCLUSION_FROM_STEP_1" in part.get("text", "")
+            for message in payload["messages"]
+            if isinstance(message.get("content"), list)
+            for part in message["content"]
+        )
+    ]
+    checks.record(
+        "a_conclusion_written_before_the_eviction_is_still_in_context_after_it",
+        bool(with_notice) and set(with_notice) <= set(notes_echoed),
+        {"requests_echoing_notes": notes_echoed, "requests_with_omission_notice": sorted(with_notice)},
+    )
     checks.record(
         "the_omission_was_stated_to_the_model_after_eviction",
         bool(with_notice) and all(len(items) == 1 for items in with_notice.values()),

@@ -54,7 +54,17 @@ OBSERVATION_IMAGE_EXAMPLE = f"observations/step-{7:0{OBSERVATION_STEP_DIGITS}d}.
 # The frozen system prompt says the workspace "starts empty on every independent
 # run". Five entries exist before the model's first call. A probe model noticed and
 # filed it as a doc inaccuracy; it is a contradiction in the model-visible contract.
+# A model-authored file the harness echoes back verbatim every request, so the model's
+# own conclusions survive transcript eviction. The host never reads, selects from, or
+# summarises it - it is a dumb echo, which is what keeps it generic. Production coding
+# agents carry the same thing. A play-along probe named its absence the single worst
+# thing about the harness, having lost its action semantics and map to an eviction and
+# had to rebuild them from files.
+NOTES_FILE = "NOTES.md"
+NOTES_CHAR_LIMIT = 4000
+
 RESERVED_WORKSPACE_ENTRIES = (
+    "NOTES.md",
     "WORKSPACE.md",
     "current_frame.png",
     "current_observation.json",
@@ -111,7 +121,9 @@ nothing will be substituted for them. The workspace is new for this run but not 
 already holds {", ".join(RESERVED_WORKSPACE_ENTRIES)}. recent_transitions in each request
 carries the most recent {RECENT_TRANSITIONS_LIMIT} only, while public_history.jsonl carries
 all of them, and the digest fields are opaque state identifiers rather than a hash you can
-recompute. pixels is indexed [layer][row][column], the layer count changes between steps,
+recompute. NOTES.md in your workspace is echoed back to you in full at the top of every
+request and survives dropped turns; the harness never reads or changes it. pixels is
+indexed [layer][row][column], the layer count changes between steps,
 and the current state is always the last layer: read pixels[-1], never pixels[0]. The
 rendered image shows that same last layer. Every public observation of this run stays in
 observations/step-NNNNN.json, where NNNNN is the step number padded with leading zeros to
@@ -155,6 +167,14 @@ WORKSPACE_CONTENTS_CONVENTION = (
     + ". Everything else in it is yours.\n"
 )
 
+NOTES_CONVENTION = (
+    f"{NOTES_FILE} is yours. Whatever you put in it is echoed back to you in full at the "
+    f"top of every request, so anything you write there survives conversation turns being "
+    f"dropped. The harness never reads, edits, summarises or acts on it. It is capped at "
+    f"{NOTES_CHAR_LIMIT} characters; past that you are shown the last "
+    f"{NOTES_CHAR_LIMIT} and told it was truncated.\n"
+)
+
 LAYER_CONVENTION = (
     "pixels is indexed [layer][row][column] and the number of layers changes between "
     "steps. The current state is always the LAST layer: use pixels[-1], not pixels[0]. "
@@ -177,6 +197,7 @@ RUNTIME_CONVENTION = (
 
 WORKSPACE_ADDENDUM = (
     WORKSPACE_CONTENTS_CONVENTION
+    + NOTES_CONVENTION
     + LAYER_CONVENTION
     + PATH_CONVENTION
     + SCHEMA_CONVENTION
@@ -218,6 +239,7 @@ class SharedArmAgent(LlmReplAgent):
         # Advertising a file that does not exist is the same class of defect as
         # not advertising one that does.
         (self.workspace.root / "public_history.jsonl").touch()
+        (self.workspace.root / NOTES_FILE).touch()
 
     # -- model-visible surface ------------------------------------------------
 
@@ -237,7 +259,44 @@ class SharedArmAgent(LlmReplAgent):
         message["content"][0]["text"] = json.dumps(payload, indent=2, sort_keys=True)
         return message
 
+    # The frozen payload carries these both at top level and inside
+    # environment_observation, labelled "backward-compatible top-level mirrors for
+    # older prompts/tests". 0002-R has no older prompt to be compatible with, and a
+    # play-along probe filed it as waste: "the request envelope is enormously
+    # redundant... scrolling past thousands of duplicated tokens to reach the one new
+    # thing got old by the third turn". Measured at 47% of the observation payload.
+    DUPLICATED_TOP_LEVEL_KEYS = (
+        "current_metadata",
+        "current_observation_file",
+        "full_history_file",
+        "recent_transitions",
+        "representations",
+    )
+
+    def _read_notes(self) -> dict[str, Any]:
+        """Echo the model's own notes back verbatim, truncation stated."""
+
+        path = self.workspace.root / NOTES_FILE
+        text = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
+        truncated = len(text) > NOTES_CHAR_LIMIT
+        return {
+            "file": NOTES_FILE,
+            "chars": len(text),
+            "limit": NOTES_CHAR_LIMIT,
+            "truncated": truncated,
+            # Keep the tail: the file is append-only in practice, so the newest
+            # conclusions are the ones worth preserving.
+            "showing": "last {} characters".format(NOTES_CHAR_LIMIT) if truncated else "all",
+            "content": text[-NOTES_CHAR_LIMIT:] if truncated else text,
+        }
+
     def _extend_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        payload["notes"] = self._read_notes()
+        for key in self.DUPLICATED_TOP_LEVEL_KEYS:
+            # Only drop the mirror; the canonical copy lives under
+            # environment_observation and must survive.
+            if key in payload and key in payload["environment_observation"]:
+                payload.pop(key)
         payload["environment_observation"]["observations_glob"] = OBSERVATIONS_GLOB
         if "sentinel_probe_note" in self.capability_names:
             payload["treatment"] = {"sentinel_probe_note": SENTINEL_NOTE}

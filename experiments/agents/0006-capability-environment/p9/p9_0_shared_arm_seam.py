@@ -62,11 +62,14 @@ FROZEN_OBSERVATION_KEYS = [
     "deliberation",
     "environment_observation",
     "full_history_file",
+    "notes",
     "observations_glob",
     "recent_transitions",
     "representations",
     "step",
 ]
+# Top level keeps only what is not already inside environment_observation.
+FROZEN_TOP_LEVEL_KEYS = ["deliberation", "environment_observation", "notes", "step"]
 
 
 PROBE_SCRIPT = (
@@ -153,6 +156,14 @@ def main() -> int:
                 "the_control_model_visible_surface_matches_the_frozen_literal",
                 observed_keys == sorted(FROZEN_OBSERVATION_KEYS),
                 {"observed": observed_keys, "expected": sorted(FROZEN_OBSERVATION_KEYS)},
+            )
+            payload_top_level = control_manifest["model_visible"][
+                "observation_message"
+            ]["payload_keys"]
+            checks.record(
+                "the_observation_payload_carries_no_duplicated_mirrors",
+                sorted(payload_top_level) == sorted(FROZEN_TOP_LEVEL_KEYS),
+                {"top_level": sorted(payload_top_level), "expected": FROZEN_TOP_LEVEL_KEYS},
             )
             checks.record(
                 "both_arms_report_identical_source_digests",

@@ -161,7 +161,9 @@ def main() -> int:
                     arm.agent._current, model_round=1, python_calls_this_action=0
                 )["content"][0]["text"]
             )
-            advertised_recent = len(probe_payload["recent_transitions"])
+            advertised_recent = len(
+                probe_payload["environment_observation"]["recent_transitions"]
+            )
             observation_digest = arm.agent._current.digest
             rendered_steps = sorted(
                 path.stem for path in (workspace_root / "observations").glob("step-*.png")

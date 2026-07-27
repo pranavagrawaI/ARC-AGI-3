@@ -103,6 +103,31 @@ record at the end.
 """
 
 
+# A standing, near-free channel for harness feedback from any run. One line, fixed
+# prefix, appended to a file that survives transcript eviction. Prose records derail
+# play; this is meant to cost a model almost nothing while it works.
+NOTE_KINDS = ("WANT", "FRICTION", "WASTE")
+
+HARNESS_NOTES_FILE = "harness_notes.md"
+
+HARNESS_NOTES_CONVENTION = f"""\
+One more thing, and it is secondary to playing. This harness is still being built, and you
+are the only one who can see it from the inside. Whenever you notice something about the
+harness itself — not the game — append a single line to {HARNESS_NOTES_FILE} in your
+workspace, using exactly one of these three prefixes:
+
+  WANT: something that is not there and would have made your work easier.
+  FRICTION: something that is there but got in your way, with how it should have been.
+  WASTE: something that is there and should not be — it costs you and gives nothing.
+
+One or two lines, whenever it occurs to you, then carry on. Do not stop to investigate, do
+not write essays, and do not spend a move or a deliberation round on this. If nothing comes
+to mind, write nothing.
+
+The third prefix is the one people never volunteer, so say it when you mean it: if part of
+what you are given is dead weight, that is worth more to us than another request.
+"""
+
 PROBE_STYLES = {"pure": PURE_PROBE_ROLE, "play-along": PLAY_ALONG_ROLE}
 
 # Kept for callers that predate the two styles.
@@ -198,6 +223,27 @@ def detect_workarounds(events: Sequence[Mapping[str, Any]]) -> list[Workaround]:
     return found
 
 
+NOTE_LINE = re.compile(r"^\s*(" + "|".join(NOTE_KINDS) + r")\s*:\s*(.+?)\s*$")
+
+
+def collect_notes(run_dir: Path) -> list[dict[str, str]]:
+    """Read the one-line harness notes a run's model left behind.
+
+    Reads the workspace snapshot, so it works on any completed run whether or not
+    the run was a probe.
+    """
+
+    path = run_dir / "workspace" / HARNESS_NOTES_FILE
+    if not path.is_file():
+        return []
+    notes = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        match = NOTE_LINE.match(line)
+        if match:
+            notes.append({"kind": match.group(1), "note": match.group(2)[:300]})
+    return notes
+
+
 def read_events(run_dir: Path) -> list[dict[str, Any]]:
     log = run_dir / "process.jsonl"
     if not log.is_file():
@@ -220,8 +266,9 @@ def probe_report(
     """Assemble the three signals without letting the model's word be the finding."""
 
     workarounds = detect_workarounds(read_events(run_dir))
+    notes = collect_notes(run_dir)
     return {
-        "schema": "p9-probe-report-v1",
+        "schema": "p9-probe-report-v2",
         "signals": {
             "failed": {
                 "source": "process log, objective",
@@ -237,7 +284,23 @@ def probe_report(
                 "source": "the model's own account; hypotheses, not findings",
                 "interview": interview,
             },
+            "noted_in_flight": {
+                "source": f"one-line notes the model left in {HARNESS_NOTES_FILE}",
+                "counts": {
+                    kind: sum(1 for note in notes if note["kind"] == kind)
+                    for kind in NOTE_KINDS
+                },
+                "items": notes,
+            },
         },
+        "triage_test": (
+            "For every WANT and FRICTION, ask whether granting it lowers the cost of "
+            "using the interface or lowers the difficulty of the task. The first is "
+            "harness work. The second is the experiment, and refusing it is correct — a "
+            "player asked for the controllable object's bounding box, which would hand "
+            "it a game-specific prior the contestant boundary forbids. A user optimises "
+            "for their own job, not for the thing being measured."
+        ),
         "reading_note": (
             "These three disagree by design. The log catches failures, workaround "
             "detection catches capabilities declined without failing, and the interview "

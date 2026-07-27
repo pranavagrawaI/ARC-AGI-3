@@ -41,7 +41,13 @@ from p9.arms import ARM_SYSTEM_PROMPT, ArmSpec, arm_manifest, build_arm, control
 from p9.capabilities import TREATMENT_CAPABILITIES, authorized_manifest_paths
 from p9.fixtures import RecordedEnvironment, default_recording, load_recorded_frames
 from p9.harness_friction import report as friction_report
-from p9.probe import EXIT_INTERVIEW, PROBE_STYLES, probe_report
+from p9.probe import (
+    EXIT_INTERVIEW,
+    HARNESS_NOTES_CONVENTION,
+    PROBE_STYLES,
+    collect_notes,
+    probe_report,
+)
 from p9.task_policy import TaskPolicy
 
 from llm_repl_agent.agent import DecisionFormatError, ModelBudgetExceeded
@@ -110,6 +116,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="pure hunts the interface and does not play; play-along plays for real",
     )
     parser.add_argument(
+        "--harness-notes",
+        action="store_true",
+        help=(
+            "ask the model for one-line WANT/FRICTION/WASTE notes about the harness "
+            "while it plays. A development instrument; always on under --probe"
+        ),
+    )
+    parser.add_argument(
         "--pair",
         action="store_true",
         help=(
@@ -150,6 +164,11 @@ def spec_from_args(args: argparse.Namespace) -> ArmSpec:
         workspace_timeout_seconds=args.workspace_timeout,
         color_permutation_seed=args.color_permutation_seed,
     )
+    notes_addendum = (
+        "\n\n" + HARNESS_NOTES_CONVENTION
+        if (args.harness_notes or args.probe)
+        else ""
+    )
     if args.probe:
         if args.arm != "control" or args.capability:
             raise SystemExit("--probe runs the control arm only")
@@ -168,8 +187,14 @@ def spec_from_args(args: argparse.Namespace) -> ArmSpec:
             max_decision_repairs=20 if args.probe_style == "pure" else control.max_decision_repairs,
             system_prompt=ARM_SYSTEM_PROMPT.rstrip()
             + "\n\n"
-            + PROBE_STYLES[args.probe_style],
+            + PROBE_STYLES[args.probe_style]
+            + notes_addendum,
         )
+    # The notes convention changes the system prompt, so it lands in the manifest's
+    # prompt digest. Two runs that disagree about it can never be compared by mistake:
+    # the arm diff rejects them on model_visible.system_prompt.sha256.
+    if notes_addendum:
+        control = replace(control, system_prompt=control.system_prompt + notes_addendum)
     if args.arm == "control":
         if args.capability:
             raise SystemExit("--capability requires --arm treatment")
@@ -283,6 +308,7 @@ def run_one(spec: ArmSpec, run_dir: Path, args: argparse.Namespace) -> dict[str,
         "arm_manifest": arm_manifest(arm),
         "probe": args.probe,
         "probe_style": args.probe_style if args.probe else None,
+        "harness_notes": bool(args.harness_notes or args.probe),
         "admissible_contestant_claim": not args.probe,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "status": "running",
@@ -337,6 +363,9 @@ def run_one(spec: ArmSpec, run_dir: Path, args: argparse.Namespace) -> dict[str,
 
     friction = friction_report([run_dir])
     write_json(run_dir / "friction.json", friction)
+    notes = collect_notes(run_dir)
+    if notes:
+        write_json(run_dir / "harness-notes.json", {"notes": notes})
     if args.probe:
         write_json(
             run_dir / "probe-report.json",
@@ -363,6 +392,7 @@ def run_one(spec: ArmSpec, run_dir: Path, args: argparse.Namespace) -> dict[str,
             "transport_attempts": arm.client.attempts,
             "transport_retries": arm.client.retries,
             "usage": dict(arm.agent.usage),
+            "harness_note_count": len(notes),
             "friction": {
                 "totals": friction["totals"],
                 "by_kind": friction["friction_by_kind"],

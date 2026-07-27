@@ -459,6 +459,36 @@ class RunnerTests(unittest.TestCase):
             run_arm.main(["--offline", "--capability", "sentinel_probe_note"])
 
 
+class NotesBlockTests(unittest.TestCase):
+    """The echo is verbatim and its truncation is explicit."""
+
+    def test_oversized_notes_keep_the_tail_and_say_so(self) -> None:
+        from p9.agent import NOTES_CHAR_LIMIT, SharedArmAgent
+
+        stub = SharedArmAgent.__new__(SharedArmAgent)
+        with TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            (root / "NOTES.md").write_text("x" * 10 + "y" * NOTES_CHAR_LIMIT, encoding="utf-8")
+            stub.workspace = type("W", (), {"root": root})()
+            echoed = stub._read_notes()
+        self.assertTrue(echoed["truncated"])
+        self.assertEqual(len(echoed["content"]), NOTES_CHAR_LIMIT)
+        self.assertTrue(echoed["content"].endswith("y"))
+        self.assertNotIn("x", echoed["content"])
+
+    def test_notes_within_the_limit_are_echoed_verbatim(self) -> None:
+        from p9.agent import SharedArmAgent
+
+        stub = SharedArmAgent.__new__(SharedArmAgent)
+        with TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            (root / "NOTES.md").write_text("action 1 moves up\n", encoding="utf-8")
+            stub.workspace = type("W", (), {"root": root})()
+            echoed = stub._read_notes()
+        self.assertFalse(echoed["truncated"])
+        self.assertEqual(echoed["content"], "action 1 moves up\n")
+
+
 class ProbeTests(unittest.TestCase):
     """Play-test mode: the signal the friction log structurally cannot see."""
 
@@ -481,7 +511,7 @@ class ProbeTests(unittest.TestCase):
         events = [{"type": "python_tool", "action_step": 1, "code": "print(sum(range(3)))"}]
         self.assertEqual(detect_workarounds(events), [])
 
-    def test_a_probe_run_is_marked_inadmissible_and_reports_three_signals(self) -> None:
+    def test_a_probe_run_is_marked_inadmissible_and_reports_every_signal(self) -> None:
         with TemporaryDirectory(prefix="p9-probe-") as scratch:
             run_dir = Path(scratch) / "run"
             self.assertEqual(
@@ -496,8 +526,12 @@ class ProbeTests(unittest.TestCase):
             self.assertFalse(manifest["admissible_contestant_claim"])
             report = json.loads((run_dir / "probe-report.json").read_text())
             self.assertEqual(
-                sorted(report["signals"]), ["failed", "reported", "worked_around"]
+                sorted(report["signals"]),
+                ["failed", "noted_in_flight", "reported", "worked_around"],
             )
+            # The triage test must travel with the report, or the notes become a
+            # wishlist that quietly erodes the contestant boundary.
+            self.assertIn("difficulty of the task", report["triage_test"])
 
     def test_the_probe_prompt_keeps_the_contract_under_test_intact(self) -> None:
         from p9.arms import ARM_SYSTEM_PROMPT
@@ -526,6 +560,32 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(pure.max_decision_repairs, 20)
         self.assertEqual(play.max_decision_repairs, control.max_decision_repairs)
         self.assertEqual(play.arm_id, "0002-R-probe-play-along")
+
+    def test_notes_are_parsed_by_kind_and_junk_is_ignored(self) -> None:
+        from p9.probe import HARNESS_NOTES_FILE, collect_notes
+
+        with TemporaryDirectory() as scratch:
+            run = Path(scratch) / "run"
+            (run / "workspace").mkdir(parents=True)
+            (run / "workspace" / HARNESS_NOTES_FILE).write_text(
+                "WANT: a numeric readout of the budget bar\n"
+                "not a note at all\n"
+                "  FRICTION: recent_transitions repeats three times per turn\n"
+                "WASTE: the rendered PNG duplicates pixels[] exactly\n",
+                encoding="utf-8",
+            )
+            notes = collect_notes(run)
+            self.assertEqual([n["kind"] for n in notes], ["WANT", "FRICTION", "WASTE"])
+            self.assertEqual(notes[2]["note"], "the rendered PNG duplicates pixels[] exactly")
+
+    def test_the_notes_channel_changes_the_prompt_so_a_mismatched_pair_cannot_compare(
+        self,
+    ) -> None:
+        parse = run_arm.build_parser().parse_args
+        plain = run_arm.spec_from_args(parse(["--offline"]))
+        noted = run_arm.spec_from_args(parse(["--offline", "--harness-notes"]))
+        self.assertNotEqual(plain.system_prompt, noted.system_prompt)
+        self.assertIn("WASTE:", noted.system_prompt)
 
     def test_probe_refuses_a_treatment_arm(self) -> None:
         with self.assertRaises(SystemExit):

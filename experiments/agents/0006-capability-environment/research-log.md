@@ -374,6 +374,31 @@ no measurable harm from eviction, and this player reports severe harm. The
 difference is that Gemma never worked at a horizon where it had conclusions worth
 losing. Capability determines whether a substrate weakness is even reachable.
 
+### Fixes scoped to 0002-R, and a measurement that corrected me
+
+The play-along probe's waste report — "the request envelope is enormously
+redundant... scrolling past thousands of duplicated tokens to reach the one new
+thing got old by the third turn" — is verified: five keys appear both at top level
+and inside `environment_observation`, **47% of the observation payload**. The frozen
+code labels them backward-compatible mirrors for older prompts; 0002-R has no older
+prompt. Removed in our layer, pinned by a frozen top-level key literal.
+
+`NOTES.md` is now echoed verbatim into every request, capped at 4000 characters with
+truncation stated, tail kept. The host never reads, selects from or summarises it —
+a dumb echo, which is what keeps it generic, and what production coding agents carry.
+Adding it to the control raises the bar 0006 must clear: a Context Assembler now has
+to be genuinely ARC-engineered to show an effect over a generic notes channel, rather
+than taking credit for "we gave the model notes".
+
+Cost: 0002-R is now **15.9% cheaper** than unmodified 0002, from +12.4% at its widest.
+
+**A claim I had been repeating without measuring.** I said images dominate the token
+bill. Measured on a real ls20 request: images are 19% of characters, text 81%. The
+duplication was the larger cost and it is now gone. The measurement also showed each
+request carries seven images — one per retained turn, six of them superseded frames.
+"How many images" is a sharper axis than "images or not", and neither is settled by
+argument.
+
 ### What this does not license
 
 No gameplay, learning, or 0006-intervention claim: the model is a fixed script

@@ -162,6 +162,28 @@ conclusions to eviction and having to re-derive them from files.
 It also reported re-measuring a room it had recorded before the drop and finding its own
 earlier note wrong: *"after a transcript drop, nothing I 'remember' should be trusted."*
 
+## Fixes taken from the probes, and what was refused
+
+Triage test for every request: **does granting it lower the cost of using the interface, or
+lower the difficulty of the task?** The first is harness work. The second is the experiment,
+and refusing it is correct.
+
+Taken:
+
+| fix | evidence |
+|---|---|
+| duplicated payload mirrors removed | 5 keys appeared twice per turn — **47% of the observation payload** |
+| `pixels[-1]`; layer count varies | 40/648 observations multi-layer while 404/591 tool calls index `pixels[0]` |
+| `NOTES.md` echoed verbatim every request | a player lost its conclusions to eviction and named this the single worst thing |
+| workspace isn't empty; transitions capped at 8; digests opaque; history file exists at step 0 | each found by a probe, each pinned |
+
+Refused, all for the same reason — they lower task difficulty, not interface cost:
+the controllable object's bounding box (a game-specific prior `CONTEXT.md` forbids), a
+semantic effect report, a numeric timer readout, batched moves.
+
+Net: 0002-R is **15.9% cheaper** than unmodified 0002 while carrying six documented
+conventions and a persistent notes channel. It started 12.4% more expensive.
+
 ## Measuring where the harness defeats the model
 
 `harness_friction.py` reads a run's `process.jsonl` and classifies every tool failure by
