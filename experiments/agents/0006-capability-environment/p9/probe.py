@@ -71,7 +71,10 @@ asked for that record at the end.
 
 
 EXIT_INTERVIEW = """\
-The run has ended. Nothing you say now can change the score, and this is not a test of how
+The run has ended. This is the final message: the Python tool is gone, you cannot run code
+or read files now, and there will be no further turn. Answer from your record and memory,
+and reply with the JSON object and nothing else — no preamble, no announcement of what you
+are about to do. Nothing you say now can change the score, and this is not a test of how
 well you played.
 
 You have just been a user of this harness. Report that experience in detail and be blunt.

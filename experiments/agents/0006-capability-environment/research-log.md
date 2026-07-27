@@ -302,6 +302,45 @@ The friction log reported `tool_failures: 0` on the run it had just been killed
 on, because it reads tool calls and this was transport. Three blind spots so far,
 each found by a different method, none by inspection.
 
+### The play-test, and a run I contaminated
+
+`--probe` against `moonshotai/kimi-k3` on ls20: 12 actions, 35 Python calls, $2.38.
+Four verified defects, one confabulation, and two bugs in my own probe code.
+
+**Verified and fixed:** the frozen prompt claims the workspace "starts empty" while
+five entries exist before the first call; `recent_transitions` is capped at 8 and
+never says so; the digest fields cannot be recomputed and never say so;
+`public_history.jsonl` was advertised from step 0 but created only on the first
+transition. All four are now stated in the 0002-R addendum, derived from the real
+values, and pinned in P9.1 — the workspace listing against what is actually there,
+the cap against a payload built from a longer history.
+
+**Confabulated:** the report's most alarming line said the deliberation counters
+were stale and unreliable. The payloads show round 1→0 calls, 2→2, 3→4, 4→5, 5→7,
+6→8, resetting cleanly per action. It is exactly right. The model read a correctly
+labelled `model_round=3` message and mistook it for a stale step-0 message. This is
+the strongest possible argument for keeping the interview as hypotheses: **the
+scariest claim was the false one**, and only checking payloads separated them.
+
+**Probing costs the prober.** Kimi spent its repair budget deliberately sending
+`"2"`, a missing `action` key, and `2.0` — and terminated its own run at action 5.
+A repair cap protects a contestant; in a play-test it forbids testing the very
+surface being tested. Probe mode now allows 20.
+
+**A run I contaminated.** The first probe attempt reported a schema-key mismatch
+that was real *in that run only*: I had launched the mutation probe concurrently,
+and its `observation-schema-keys-misstated` mutant was live while the run started.
+$0.91 of evidence retracted. I had identified this hazard earlier and added a lock
+that only prevented two probes racing each other — not a probe racing a live run.
+Both now hold mutually exclusive locks. The incidental consolation is that a live
+model independently detected an active mutant, which is the strongest evidence yet
+that the mutation probe tests something real.
+
+**Still open:** the probe reports the rendered PNG is an exact 8× upscale of
+`pixels[]`, carrying no information the grid lacks, while images dominate the token
+bill. Dropping it is an arm difference, not a contract fix, so it belongs in the
+capability registry as a measurable experiment.
+
 ### What this does not license
 
 No gameplay, learning, or 0006-intervention claim: the model is a fixed script

@@ -13,6 +13,7 @@ Run: ``uv run python3 experiments/agents/0006-capability-environment/p9/p9_1_cum
 
 from __future__ import annotations
 
+from hashlib import sha256
 import json
 from pathlib import Path
 import re
@@ -29,6 +30,10 @@ from p9.agent import (
     OBSERVATION_FILENAME_EXAMPLE,
     OBSERVATION_IMAGE_EXAMPLE,
     OBSERVATION_PATH_EXPRESSION,
+    RECENT_TRANSITIONS_LIMIT,
+    RESERVED_WORKSPACE_ENTRIES,
+    HISTORY_CONVENTION,
+    WORKSPACE_CONTENTS_CONVENTION,
     OBSERVATION_SCHEMA_KEYS,
     PATH_CONVENTION,
     RUNTIME_CONVENTION,
@@ -140,6 +145,22 @@ def main() -> int:
                 "import " + ", ".join(AVAILABLE_IMPORTS) + "\nprint('NAMED_IMPORTS_OK')"
             )
             unnamed_import = arm.workspace.execute("import sklearn")
+            # Pin "the workspace is not empty" against what is actually there before
+            # the model's first call, and the recent_transitions cap against a payload
+            # built from a history longer than the cap.
+            reserved_present = sorted(
+                path.name
+                for path in workspace_root.iterdir()
+                if path.name in RESERVED_WORKSPACE_ENTRIES
+            )
+            arm.agent._history = [{"step": n} for n in range(RECENT_TRANSITIONS_LIMIT + 4)]
+            probe_payload = json.loads(
+                arm.agent._observation_message(
+                    arm.agent._current, model_round=1, python_calls_this_action=0
+                )["content"][0]["text"]
+            )
+            advertised_recent = len(probe_payload["recent_transitions"])
+            observation_digest = arm.agent._current.digest
             rendered_steps = sorted(
                 path.stem for path in (workspace_root / "observations").glob("step-*.png")
             )
@@ -219,6 +240,26 @@ def main() -> int:
             "written_widths": sorted(written_widths),
             "documented": OBSERVATION_FILENAME_EXAMPLE,
         },
+    )
+    checks.record(
+        "the_contract_lists_exactly_what_the_workspace_already_contains",
+        reserved_present == sorted(RESERVED_WORKSPACE_ENTRIES)
+        and WORKSPACE_CONTENTS_CONVENTION.strip() in contract,
+        {"present": reserved_present, "documented": sorted(RESERVED_WORKSPACE_ENTRIES)},
+    )
+    checks.record(
+        "the_documented_recent_transitions_cap_is_the_real_one",
+        advertised_recent == RECENT_TRANSITIONS_LIMIT
+        and HISTORY_CONVENTION.strip() in contract,
+        {"documented": RECENT_TRANSITIONS_LIMIT, "observed": advertised_recent},
+    )
+    checks.record(
+        "the_digest_is_not_a_recomputable_hash_of_the_observation_file",
+        observation_digest
+        != sha256(
+            (workspace_observations and files.get("observations") or {}).get("text", "").encode()
+        ).hexdigest()[:16],
+        {"digest": observation_digest, "documented_as": "opaque state identifier"},
     )
     checks.record(
         "every_observation_has_a_rendered_image_beside_it",

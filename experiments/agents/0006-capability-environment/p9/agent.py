@@ -50,6 +50,20 @@ OBSERVATION_IMAGE_EXAMPLE = f"observations/step-{7:0{OBSERVATION_STEP_DIGITS}d}.
 # 'step_00036.json' - never a wrong width. Stating the pattern still leaves the model
 # assembling "step-" next to a format spec, so state the expression it will actually
 # write. P9.1 evaluates this string and requires the result to exist.
+# Play-test findings, all verified against payloads before being acted on.
+# The frozen system prompt says the workspace "starts empty on every independent
+# run". Five entries exist before the model's first call. A probe model noticed and
+# filed it as a doc inaccuracy; it is a contradiction in the model-visible contract.
+RESERVED_WORKSPACE_ENTRIES = (
+    "WORKSPACE.md",
+    "current_frame.png",
+    "current_observation.json",
+    "observations",
+    "public_history.jsonl",
+)
+# self._history[-8:] in the frozen agent. The field is named "recent" and the cap is
+# nowhere stated; a probe model found it by trial at step 9.
+RECENT_TRANSITIONS_LIMIT = 8
 OBSERVATION_PATH_EXPRESSION = (
     'f"observations/step-{step:0' + str(OBSERVATION_STEP_DIGITS) + 'd}.json"'
 )
@@ -86,7 +100,11 @@ OBSERVATION_SCHEMA_KEYS = _observation_schema_keys()
 
 ARM_SYSTEM_PROMPT_ADDENDUM = f"""
 If earlier turns leave this conversation you will be told which steps were dropped, and
-nothing will be substituted for them. Every public observation of this run stays in
+nothing will be substituted for them. The workspace is new for this run but not empty: it
+already holds {", ".join(RESERVED_WORKSPACE_ENTRIES)}. recent_transitions in each request
+carries the most recent {RECENT_TRANSITIONS_LIMIT} only, while public_history.jsonl carries
+all of them, and the digest fields are opaque state identifiers rather than a hash you can
+recompute. Every public observation of this run stays in
 observations/step-NNNNN.json, where NNNNN is the step number padded with leading zeros to
 five digits — step 7 is observations/step-00007.json. Steps whose turns are gone are still
 there, and each step is also rendered as an image beside it — step 7 is
@@ -122,6 +140,19 @@ SCHEMA_CONVENTION = (
     + ".\n"
 )
 
+WORKSPACE_CONTENTS_CONVENTION = (
+    "The workspace is new for this run but not empty: it already contains "
+    + ", ".join(RESERVED_WORKSPACE_ENTRIES)
+    + ". Everything else in it is yours.\n"
+)
+
+HISTORY_CONVENTION = (
+    f"recent_transitions in each request holds the most recent "
+    f"{RECENT_TRANSITIONS_LIMIT} transitions only; public_history.jsonl holds all of "
+    "them. The before_digest and after_digest fields are opaque identifiers for "
+    "comparing states, not a hash you can recompute from the files.\n"
+)
+
 RUNTIME_CONVENTION = (
     "The sandbox has the Python standard library plus "
     + " and ".join(AVAILABLE_IMPORTS)
@@ -129,7 +160,12 @@ RUNTIME_CONVENTION = (
 )
 
 WORKSPACE_ADDENDUM = (
-    PATH_CONVENTION + SCHEMA_CONVENTION + RUNTIME_CONVENTION + IMPORT_CONVENTION
+    WORKSPACE_CONTENTS_CONVENTION
+    + PATH_CONVENTION
+    + SCHEMA_CONVENTION
+    + HISTORY_CONVENTION
+    + RUNTIME_CONVENTION
+    + IMPORT_CONVENTION
 )
 
 
@@ -159,6 +195,12 @@ class SharedArmAgent(LlmReplAgent):
         )
         with (self.workspace.root / "WORKSPACE.md").open("a", encoding="utf-8") as stream:
             stream.write(WORKSPACE_ADDENDUM)
+        # Every observation payload advertises full_history_file from step 0, but
+        # ObservationStore creates it only on the first transition. A probe model
+        # checked and found it missing, then had to discover it appears later.
+        # Advertising a file that does not exist is the same class of defect as
+        # not advertising one that does.
+        (self.workspace.root / "public_history.jsonl").touch()
 
     # -- model-visible surface ------------------------------------------------
 

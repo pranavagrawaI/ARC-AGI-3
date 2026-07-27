@@ -86,6 +86,39 @@ the whole surface — which is the argument for the play-test probe.
 After the fixes: 68 tool calls in one run with zero filename failures, and two transport
 failures retried without touching the episode.
 
+## The play-test
+
+`--probe` gives the harness to a model as its first user. Run against `moonshotai/kimi-k3`
+on ls20: 12 actions, 35 Python calls, $2.38. It kept the running record it was asked to keep
+and filed seven claims. Every one was checked against the request payloads before being
+acted on:
+
+| claim | verdict |
+|---|---|
+| "workspace starts empty" is false — five entries exist at step 0 | **real**; the frozen prompt says otherwise |
+| `recent_transitions` is capped at 8, undocumented | **real**; found by trial at step 9 |
+| digests are not reproducible from the files | **real**; undocumented |
+| the PNG is an exact 8× upscale of the grid and adds no information | **real**; see below |
+| deliberation counters are stale and unreliable | **false — confabulated** |
+| `public_history.jsonl` is missing at step 0 | **real, now fixed** |
+| observation keys match the contract exactly | confirms an earlier finding was a test artifact |
+
+The false claim is the most useful result in the table. It was the most alarming line in the
+report — "counter semantics unclear/unreliable, treat with care" — and the payloads show the
+counters are exactly right at every round. That is why the interview is quarantined as
+hypotheses: **the scariest thing a tester tells you may be the one thing that is not true.**
+
+Probing costs the prober. Kimi spent its repair budget deliberately sending `"2"`, then a
+missing `action` key, then `2.0`, and terminated its own run at action 5. Probe mode now
+allows 20 repairs: a repair cap protects a contestant, but in a play-test it forbids testing
+the surface the play-test exists to test.
+
+**Open, not fixed:** if the rendered PNG really is an exact upscale of `pixels[]`, every
+request pays for an image carrying no information the grid lacks — and images dominate the
+token bill (2.16M prompt tokens for 44 actions). Dropping it is an arm difference, not a
+contract fix, so it belongs in the capability registry as a measurable experiment rather
+than a silent change.
+
 ## Measuring where the harness defeats the model
 
 `harness_friction.py` reads a run's `process.jsonl` and classifies every tool failure by

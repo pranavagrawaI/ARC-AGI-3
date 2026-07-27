@@ -108,6 +108,22 @@ MUTANTS = (
         prototypes=("p9_1_cumulative_loop.py",),
     ),
     Mutant(
+        name="workspace-contents-misstated",
+        breaks="the contract lists what the workspace already contains",
+        filename="agent.py",
+        before='    "public_history.jsonl",\n)\n# self._history[-8:]',
+        after=')\n# self._history[-8:]',
+        prototypes=("p9_1_cumulative_loop.py",),
+    ),
+    Mutant(
+        name="recent-transitions-cap-misstated",
+        breaks="the documented recent_transitions cap is the real one",
+        filename="agent.py",
+        before="RECENT_TRANSITIONS_LIMIT = 8",
+        after="RECENT_TRANSITIONS_LIMIT = 12",
+        prototypes=("p9_1_cumulative_loop.py",),
+    ),
+    Mutant(
         name="package-allowlist-misstated",
         breaks="the packages the contract names are the ones the sandbox has",
         filename="agent.py",
@@ -127,7 +143,7 @@ MUTANTS = (
         name="transport-retries-fatal-errors-too",
         breaks="only retryable transport failures are retried",
         filename="transport.py",
-        before='                if kind != "transport_retryable" or attempt >= self.max_retries:',
+        before="                if kind not in RETRIED_TRANSPORT_KINDS or attempt >= self.max_retries:",
         after="                if attempt >= self.max_retries:",
         prototypes=("p9_3_failure_recovery.py",),
     ),
@@ -220,6 +236,13 @@ _SCRATCH_ARTIFACTS = tempfile.mkdtemp(prefix="p9-probe-artifacts-")
 def main() -> int:
     # Two concurrent runs restore from each other's stale snapshots and can leave
     # mutated source behind; a test run alongside one fails for no real reason.
+    run_lock = P9_ROOT / ".arm-run.lock"
+    if run_lock.exists():
+        print(
+            f"a live arm run holds {run_lock}; mutating source now would contaminate it",
+            file=sys.stderr,
+        )
+        return 1
     if LOCK.exists():
         print(f"another mutation probe holds {LOCK}; refusing to run", file=sys.stderr)
         return 1

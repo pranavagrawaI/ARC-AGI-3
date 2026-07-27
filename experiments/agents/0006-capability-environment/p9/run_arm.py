@@ -151,6 +151,11 @@ def spec_from_args(args: argparse.Namespace) -> ArmSpec:
         return replace(
             control,
             arm_id="0002-R-probe",
+            # Kimi K3 spent its repair budget deliberately testing decision
+            # validation - string, missing key, float - and terminated its own run
+            # at action 5. A repair cap protects a contestant; for a play-test it
+            # forbids testing the surface it is there to test.
+            max_decision_repairs=20,
             system_prompt=ARM_SYSTEM_PROMPT.rstrip() + "\n\n" + PROBE_ROLE,
         )
     if args.arm == "control":
@@ -227,8 +232,24 @@ def build_live(args: argparse.Namespace):
     }
 
 
+RUN_LOCK = Path(__file__).resolve().parent / ".arm-run.lock"
+PROBE_LOCK = Path(__file__).resolve().parent / ".mutation-probe.lock"
+
+
 def run_one(spec: ArmSpec, run_dir: Path, args: argparse.Namespace) -> dict[str, Any]:
-    """Run one arm to completion and return its manifest."""
+    """Run one arm to completion and return its manifest.
+
+    A mutation probe rewrites this package's source in place. A live run that
+    imports it mid-mutation produces evidence about code that was never shipped -
+    this cost one paid probe run, where the model correctly reported a contract
+    defect that existed only inside an active mutant.
+    """
+
+    if PROBE_LOCK.exists():
+        raise SystemExit(
+            f"a mutation probe holds {PROBE_LOCK}; it rewrites source in place and "
+            "would contaminate this run"
+        )
 
     environment, client, environment_manifest = (
         build_offline(args) if args.offline else build_live(args)
@@ -239,6 +260,7 @@ def run_one(spec: ArmSpec, run_dir: Path, args: argparse.Namespace) -> dict[str,
     if run_dir.exists():
         raise SystemExit(f"run directory already exists: {run_dir}")
 
+    RUN_LOCK.write_text(str(os.getpid()), encoding="utf-8")
     arm = build_arm(spec, run_dir=run_dir, inner_client=client)
     manifest: dict[str, Any] = {
         "schema": "p9-arm-run-v1",
@@ -298,6 +320,7 @@ def run_one(spec: ArmSpec, run_dir: Path, args: argparse.Namespace) -> dict[str,
         except OSError:
             pass
         arm.close()
+        RUN_LOCK.unlink(missing_ok=True)
 
     friction = friction_report([run_dir])
     write_json(run_dir / "friction.json", friction)
@@ -348,16 +371,47 @@ def _exit_interview(arm) -> dict[str, Any] | None:
     messages = arm.agent.conversation.messages() + [
         {"role": "user", "content": EXIT_INTERVIEW}
     ]
-    try:
-        response = arm.client.complete(messages=messages, tools=())
-    except Exception as error:  # noqa: BLE001 - the interview must never fail a run
-        arm.process_log.write("probe_interview_failed", error=repr(error))
-        return None
-    content = response.message.get("content")
-    text = content if isinstance(content, str) else ""
-    try:
-        report = json.loads(text[text.index("{") : text.rindex("}") + 1])
-    except (ValueError, json.JSONDecodeError):
+    report: dict[str, Any] | None = None
+    text = ""
+    # The interview asks for far more output than a game turn, and a reasoning model
+    # can spend the whole per-turn completion budget thinking and return empty
+    # content. Observed live with kimi-k3 at the default 4096.
+    inner = arm.inner_client
+    original_budget = getattr(inner, "max_completion_tokens", None)
+    if isinstance(original_budget, int):
+        inner.max_completion_tokens = max(original_budget, 16384)
+    # One retry: the first attempt often returns a lead-in sentence because the model
+    # expects another turn. Observed live, 138 characters of "let me record this first".
+    for attempt in (1, 2):
+        try:
+            response = arm.client.complete(messages=messages, tools=())
+        except Exception as error:  # noqa: BLE001 - never fail a run over the interview
+            arm.process_log.write("probe_interview_failed", attempt=attempt, error=repr(error))
+            return None
+        content = response.message.get("content")
+        text = content if isinstance(content, str) else ""
+        try:
+            report = json.loads(text[text.index("{") : text.rindex("}") + 1])
+            break
+        except (ValueError, json.JSONDecodeError):
+            arm.process_log.write(
+                "probe_interview_unparsed", attempt=attempt, chars=len(text), text=text[:2000]
+            )
+            # An empty assistant turn is rejected by the provider ("message at
+            # position N with role 'assistant' must not be empty"), so only echo a
+            # non-empty reply back.
+            messages = messages + ([{"role": "assistant", "content": text}] if text else []) + [
+                {
+                    "role": "user",
+                    "content": (
+                        "That was not the JSON object. There is no tool and no further "
+                        "turn. Reply now with only the JSON object described above."
+                    ),
+                },
+            ]
+    if isinstance(original_budget, int):
+        inner.max_completion_tokens = original_budget
+    if report is None:
         report = {"unparsed": text}
     arm.process_log.write("probe_interview", report=report)
     return report
