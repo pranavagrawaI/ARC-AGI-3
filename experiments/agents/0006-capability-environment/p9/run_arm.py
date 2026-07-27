@@ -41,7 +41,7 @@ from p9.arms import ARM_SYSTEM_PROMPT, ArmSpec, arm_manifest, build_arm, control
 from p9.capabilities import TREATMENT_CAPABILITIES, authorized_manifest_paths
 from p9.fixtures import RecordedEnvironment, default_recording, load_recorded_frames
 from p9.harness_friction import report as friction_report
-from p9.probe import EXIT_INTERVIEW, PROBE_ROLE, probe_report
+from p9.probe import EXIT_INTERVIEW, PROBE_STYLES, probe_report
 from p9.task_policy import TaskPolicy
 
 from llm_repl_agent.agent import DecisionFormatError, ModelBudgetExceeded
@@ -104,6 +104,12 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--probe-style",
+        choices=sorted(PROBE_STYLES),
+        default="pure",
+        help="pure hunts the interface and does not play; play-along plays for real",
+    )
+    parser.add_argument(
         "--pair",
         action="store_true",
         help=(
@@ -150,13 +156,19 @@ def spec_from_args(args: argparse.Namespace) -> ArmSpec:
         # The contract under test must be identical; only the role is added.
         return replace(
             control,
-            arm_id="0002-R-probe",
+            arm_id=f"0002-R-probe-{args.probe_style}",
             # Kimi K3 spent its repair budget deliberately testing decision
             # validation - string, missing key, float - and terminated its own run
             # at action 5. A repair cap protects a contestant; for a play-test it
             # forbids testing the surface it is there to test.
-            max_decision_repairs=20,
-            system_prompt=ARM_SYSTEM_PROMPT.rstrip() + "\n\n" + PROBE_ROLE,
+            # Pure probing needs headroom: kimi-k3 spent the contestant budget
+            # deliberately sending "2", a missing key, and 2.0, and ended its own run
+            # at action 5. A play-along run is meant to feel what a contestant feels,
+            # so it keeps the contestant cap.
+            max_decision_repairs=20 if args.probe_style == "pure" else control.max_decision_repairs,
+            system_prompt=ARM_SYSTEM_PROMPT.rstrip()
+            + "\n\n"
+            + PROBE_STYLES[args.probe_style],
         )
     if args.arm == "control":
         if args.capability:
@@ -270,6 +282,7 @@ def run_one(spec: ArmSpec, run_dir: Path, args: argparse.Namespace) -> dict[str,
         "environment": environment_manifest,
         "arm_manifest": arm_manifest(arm),
         "probe": args.probe,
+        "probe_style": args.probe_style if args.probe else None,
         "admissible_contestant_claim": not args.probe,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "status": "running",

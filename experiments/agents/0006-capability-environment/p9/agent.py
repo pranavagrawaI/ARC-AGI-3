@@ -61,6 +61,13 @@ RESERVED_WORKSPACE_ENTRIES = (
     "observations",
     "public_history.jsonl",
 )
+# The layer count is not stable. Across the recorded corpus 40 of 648 observations
+# had more than one layer (2, 5, 6, 13, 15, 22), while 404 of 591 tool calls indexed
+# pixels[0]. pixels_to_png renders pixels[-1], so on those steps the model parses a
+# stale layer while the image it is shown displays a different one: no error, no log
+# entry, wrong state. A play-along probe caught it at step 9 of its own run.
+CURRENT_LAYER_INDEX = -1
+
 # self._history[-8:] in the frozen agent. The field is named "recent" and the cap is
 # nowhere stated; a probe model found it by trial at step 9.
 RECENT_TRANSITIONS_LIMIT = 8
@@ -104,7 +111,9 @@ nothing will be substituted for them. The workspace is new for this run but not 
 already holds {", ".join(RESERVED_WORKSPACE_ENTRIES)}. recent_transitions in each request
 carries the most recent {RECENT_TRANSITIONS_LIMIT} only, while public_history.jsonl carries
 all of them, and the digest fields are opaque state identifiers rather than a hash you can
-recompute. Every public observation of this run stays in
+recompute. pixels is indexed [layer][row][column], the layer count changes between steps,
+and the current state is always the last layer: read pixels[-1], never pixels[0]. The
+rendered image shows that same last layer. Every public observation of this run stays in
 observations/step-NNNNN.json, where NNNNN is the step number padded with leading zeros to
 five digits — step 7 is observations/step-00007.json. Steps whose turns are gone are still
 there, and each step is also rendered as an image beside it — step 7 is
@@ -146,6 +155,13 @@ WORKSPACE_CONTENTS_CONVENTION = (
     + ". Everything else in it is yours.\n"
 )
 
+LAYER_CONVENTION = (
+    "pixels is indexed [layer][row][column] and the number of layers changes between "
+    "steps. The current state is always the LAST layer: use pixels[-1], not pixels[0]. "
+    "The rendered image always shows that same last layer, and representations."
+    "rendered_image.source_grid_layer names which one it was.\n"
+)
+
 HISTORY_CONVENTION = (
     f"recent_transitions in each request holds the most recent "
     f"{RECENT_TRANSITIONS_LIMIT} transitions only; public_history.jsonl holds all of "
@@ -161,6 +177,7 @@ RUNTIME_CONVENTION = (
 
 WORKSPACE_ADDENDUM = (
     WORKSPACE_CONTENTS_CONVENTION
+    + LAYER_CONVENTION
     + PATH_CONVENTION
     + SCHEMA_CONVENTION
     + HISTORY_CONVENTION

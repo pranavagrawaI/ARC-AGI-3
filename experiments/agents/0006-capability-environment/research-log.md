@@ -341,6 +341,39 @@ that the mutation probe tests something real.
 bill. Dropping it is an arm difference, not a contract fix, so it belongs in the
 capability registry as a measurable experiment.
 
+### Play-along probe: the layer trap, and 0006 requested from the outside
+
+Same model, same budget, same ARC-AGI-3 brief verbatim; only the role differs.
+Pure and play-along found **almost disjoint sets**. The hunter enumerated what is
+discoverable — workspace contents, the transitions cap, digest opacity. The player
+found what bites, opening with "nothing crashed, but two things functionally broke
+my play", a sentence a pure prober cannot write because nothing is at stake for it.
+
+**The layer trap.** The player noticed its observation went from 1 layer to 6 and
+back at step 9. Verified, then checked against the corpus: 40 of 648 recorded
+observations are multi-layer (2, 5, 6, 13, 15, 22), and 404 of 591 recorded tool
+calls index `pixels[0]`, while `pixels_to_png` renders `pixels[-1]`. On those steps
+a model computes on a stale layer while the image it is shown displays a different
+one — no exception, no log entry, no way to notice. It sat in 48 runs of evidence
+and no instrument here could have found it, because it never fails. The contract
+now states that the layer count varies and the current state is `pixels[-1]`,
+derived from the renderer and pinned against `representation_descriptor`.
+
+**0006 requested from outside.** Unprompted, the player's `worst_single_thing` was
+"give the agent a pinned, harness-preserved notes/summary block that survives
+transcript omission" — the Context Assembler seam, asked for by a model that has
+never heard of 0006, arrived at by losing its own conclusions to eviction and
+having to rebuild them from files. It also reported that a note it had made before
+the drop was simply wrong when re-measured: "after a transcript drop, nothing I
+'remember' should be trusted." That is the strongest independent evidence so far
+that 0006's premise describes a real cost, and it came from an agent experiencing
+it rather than from an argument.
+
+Worth noting against the earlier eviction analysis: the recorded Gemma runs showed
+no measurable harm from eviction, and this player reports severe harm. The
+difference is that Gemma never worked at a horizon where it had conclusions worth
+losing. Capability determines whether a substrate weakness is even reachable.
+
 ### What this does not license
 
 No gameplay, learning, or 0006-intervention claim: the model is a fixed script

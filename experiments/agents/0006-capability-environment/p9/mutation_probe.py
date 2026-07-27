@@ -116,6 +116,14 @@ MUTANTS = (
         prototypes=("p9_1_cumulative_loop.py",),
     ),
     Mutant(
+        name="current-layer-index-misstated",
+        breaks="the documented current layer is the one the harness renders",
+        filename="agent.py",
+        before="CURRENT_LAYER_INDEX = -1",
+        after="CURRENT_LAYER_INDEX = 0",
+        prototypes=("p9_1_cumulative_loop.py",),
+    ),
+    Mutant(
         name="recent-transitions-cap-misstated",
         breaks="the documented recent_transitions cap is the real one",
         filename="agent.py",

@@ -30,6 +30,8 @@ from p9.agent import (
     OBSERVATION_FILENAME_EXAMPLE,
     OBSERVATION_IMAGE_EXAMPLE,
     OBSERVATION_PATH_EXPRESSION,
+    CURRENT_LAYER_INDEX,
+    LAYER_CONVENTION,
     RECENT_TRANSITIONS_LIMIT,
     RESERVED_WORKSPACE_ENTRIES,
     HISTORY_CONVENTION,
@@ -246,6 +248,24 @@ def main() -> int:
         reserved_present == sorted(RESERVED_WORKSPACE_ENTRIES)
         and WORKSPACE_CONTENTS_CONVENTION.strip() in contract,
         {"present": reserved_present, "documented": sorted(RESERVED_WORKSPACE_ENTRIES)},
+    )
+    # A multi-layer frame must resolve to the layer the harness actually renders.
+    import numpy as np
+    from llm_repl_agent.observations import pixels_to_png, representation_descriptor
+
+    layered = np.zeros((6, 4, 4), dtype=int)
+    layered[CURRENT_LAYER_INDEX] = 7
+    descriptor = representation_descriptor(layered, pixels_to_png(layered))
+    rendered_layer = descriptor["rendered_image"]["source_grid_layer"]
+    checks.record(
+        "the_documented_current_layer_is_the_one_the_harness_renders",
+        rendered_layer == len(layered) + CURRENT_LAYER_INDEX
+        and LAYER_CONVENTION.strip() in contract,
+        {
+            "documented_index": CURRENT_LAYER_INDEX,
+            "rendered_source_grid_layer": rendered_layer,
+            "layers": len(layered),
+        },
     )
     checks.record(
         "the_documented_recent_transitions_cap_is_the_real_one",

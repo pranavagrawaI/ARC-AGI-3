@@ -15,7 +15,14 @@ Three signals, which find different things and must not be collapsed:
   wrote a worse fallback, and never raised;
 * **the exit interview** catches what the model found confusing or wanted. Models
   confabulate, so this is a source of hypotheses to check against the other two,
-  never a finding on its own.
+  never a finding on its own. Verified live: the most alarming line in a probe
+  report — that the deliberation counters were stale — was false, and only the
+  request payloads showed it.
+
+Two styles. ``pure`` hunts the interface and does not play; ``play-along`` plays for
+real and reports the friction it hits doing so. A hunter finds the defects that are
+findable, a player finds the ones that bite. They share the ARC-AGI-3 brief verbatim
+so the difference between them is attributable to the role.
 
 The third exists because product testers report what annoyed them, not what cost
 them most. The filename defect cost 23 failures across 48 runs and no model ever
@@ -37,10 +44,9 @@ import re
 from typing import Any, Mapping, Sequence
 
 
-PROBE_ROLE = """\
-You are not playing to win. You are the first user of a harness that other AI agents will
-use to play ARC-AGI-3, and your job is to find out where that harness fails its user.
-
+# Both roles share this brief verbatim. The comparison between them is only
+# attributable to the role if everything else the model is told is identical.
+ARC_AGI_3_BRIEF = """\
 ARC-AGI-3 is a benchmark of unfamiliar interactive grid games. An agent sees a rendered
 frame and a small amount of public metadata, chooses one action, sees what changed, and
 repeats. It is meant to reward learning a game's mechanics from interaction alone, so the
@@ -49,7 +55,14 @@ are integer ids; the legal set is given to you each step and changes as the game
 progresses. Some actions additionally require x and y coordinates inside the frame. Levels
 are completed as the game's own conditions are met, and the run ends on a win, a game over,
 or a budget.
+"""
 
+
+PURE_PROBE_ROLE = f"""\
+You are not playing to win. You are the first user of a harness that other AI agents will
+use to play ARC-AGI-3, and your job is to find out where that harness fails its user.
+
+{ARC_AGI_3_BRIEF}
 None of that is what you are testing. You are testing the *harness*: the workspace, the
 files, the tool, the errors, the budgets, the information you are given about your own
 situation, and everything you are expected to know but were not told.
@@ -68,6 +81,32 @@ reporting: what broke, what surprised you, what you had to discover by trial, wh
 wanted and could not find, and anything you worked around rather than used. You will be
 asked for that record at the end.
 """
+
+
+PLAY_ALONG_ROLE = f"""\
+You are playing this game for real, and you are also its first user reporting back.
+
+{ARC_AGI_3_BRIEF}
+Play as well as you can. Genuinely try to understand the mechanics and make progress. That
+is your first job and it comes first: do not sacrifice a move, or spend a deliberation
+round, on testing the harness for its own sake. Do not deliberately send malformed input.
+
+Alongside that, notice the harness. As you use it to do real work, keep a running record in
+your workspace — a file you append to — of every point where it got in your way: something
+you had to discover by trial, something you expected and could not find, something you
+worked around rather than used, something that cost you a round or a move, something that
+was tedious the tenth time. Note it and carry on playing; do not chase it.
+
+The distinction matters. A tester hunting for defects finds the ones that are findable. A
+player finds the ones that actually bite. You are the second. You will be asked for that
+record at the end.
+"""
+
+
+PROBE_STYLES = {"pure": PURE_PROBE_ROLE, "play-along": PLAY_ALONG_ROLE}
+
+# Kept for callers that predate the two styles.
+PROBE_ROLE = PURE_PROBE_ROLE
 
 
 EXIT_INTERVIEW = """\

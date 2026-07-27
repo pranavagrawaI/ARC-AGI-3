@@ -491,7 +491,7 @@ class ProbeTests(unittest.TestCase):
                 0,
             )
             manifest = json.loads((run_dir / "manifest.json").read_text())
-            self.assertEqual(manifest["arm_id"], "0002-R-probe")
+            self.assertEqual(manifest["arm_id"], "0002-R-probe-pure")
             self.assertTrue(manifest["probe"])
             self.assertFalse(manifest["admissible_contestant_claim"])
             report = json.loads((run_dir / "probe-report.json").read_text())
@@ -507,6 +507,25 @@ class ProbeTests(unittest.TestCase):
         )
         self.assertIn(ARM_SYSTEM_PROMPT.rstrip(), spec.system_prompt)
         self.assertIn("You are not playing to win", spec.system_prompt)
+
+    def test_the_two_probe_styles_share_the_arc_brief_verbatim(self) -> None:
+        from p9.probe import ARC_AGI_3_BRIEF, PLAY_ALONG_ROLE, PURE_PROBE_ROLE
+
+        # The comparison is only attributable to the role if the brief is identical.
+        self.assertIn(ARC_AGI_3_BRIEF, PURE_PROBE_ROLE)
+        self.assertIn(ARC_AGI_3_BRIEF, PLAY_ALONG_ROLE)
+        self.assertNotEqual(PURE_PROBE_ROLE, PLAY_ALONG_ROLE)
+
+    def test_play_along_keeps_the_contestant_repair_budget(self) -> None:
+        parse = run_arm.build_parser().parse_args
+        pure = run_arm.spec_from_args(parse(["--offline", "--probe"]))
+        play = run_arm.spec_from_args(
+            parse(["--offline", "--probe", "--probe-style", "play-along"])
+        )
+        control = run_arm.spec_from_args(parse(["--offline"]))
+        self.assertEqual(pure.max_decision_repairs, 20)
+        self.assertEqual(play.max_decision_repairs, control.max_decision_repairs)
+        self.assertEqual(play.arm_id, "0002-R-probe-play-along")
 
     def test_probe_refuses_a_treatment_arm(self) -> None:
         with self.assertRaises(SystemExit):

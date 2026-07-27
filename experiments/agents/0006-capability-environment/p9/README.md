@@ -119,6 +119,49 @@ token bill (2.16M prompt tokens for 44 actions). Dropping it is an arm differenc
 contract fix, so it belongs in the capability registry as a measurable experiment rather
 than a silent change.
 
+## Pure probe vs play-along
+
+Both ran `moonshotai/kimi-k3` on ls20 for 12 actions, sharing `ARC_AGI_3_BRIEF` verbatim so
+the difference is attributable to the role. **They found almost disjoint sets.**
+
+| pure probe — hunts the interface | play-along — plays for real |
+|---|---|
+| workspace not actually empty | transcript omission destroyed hard-won conclusions |
+| `recent_transitions` capped at 8 | **the layer count changes mid-run** |
+| digests not reproducible | request envelope duplicates everything three times |
+| PNG is a redundant 8× upscale | no last-action-effect field; no player position; no numeric timer |
+
+A hunter enumerates what is *discoverable*. A player finds what *bites*. The play-along
+report's opening line — "nothing crashed, but two things functionally broke my play" — is a
+sentence a pure prober cannot write, because nothing was at stake for it.
+
+### The finding that justifies the whole exercise
+
+The play-along probe noticed that at step 9 its observation went from 1 layer to 6 and back.
+Verified, then checked against the historical corpus:
+
+- **40 of 648** recorded observations are multi-layer (2, 5, 6, 13, 15, 22 layers);
+- **404 of 591** recorded tool calls index `pixels[0]`;
+- `pixels_to_png` renders `pixels[-1]`.
+
+So on those steps a model parses a stale layer while the image it is shown displays a
+different one. No exception, no friction-log entry, no way to notice — the code simply
+computes on the wrong grid. This sat in 48 runs of evidence and no instrument could have
+found it, because it never fails.
+
+The contract now states that the layer count varies and the current state is `pixels[-1]`,
+derived from the renderer and pinned against `representation_descriptor`.
+
+### What the player asked for
+
+Unprompted, its `worst_single_thing` was: *"give the agent a pinned, harness-preserved
+notes/summary block that survives transcript omission."* That is 0006's Context Assembler,
+requested by a model that had never heard of 0006 — and arrived at by losing its own
+conclusions to eviction and having to re-derive them from files.
+
+It also reported re-measuring a room it had recorded before the drop and finding its own
+earlier note wrong: *"after a transcript drop, nothing I 'remember' should be trusted."*
+
 ## Measuring where the harness defeats the model
 
 `harness_friction.py` reads a run's `process.jsonl` and classifies every tool failure by
