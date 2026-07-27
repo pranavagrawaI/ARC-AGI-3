@@ -184,6 +184,23 @@ semantic effect report, a numeric timer readout, batched moves.
 Net: 0002-R is **15.9% cheaper** than unmodified 0002 while carrying six documented
 conventions and a persistent notes channel. It started 12.4% more expensive.
 
+## The notes channel collected nothing on its first run
+
+`--harness-notes` asks for one-line `WANT:` / `FRICTION:` / `WASTE:` notes while the model
+works. First live run: **zero notes.** The model wrote a `notes.md` full of game analysis
+and never touched `harness_notes.md`.
+
+The cause was the prompt, not the model. `PLAY_ALONG_ROLE` asked for "a running record in
+your workspace — a file you append to"; the notes convention asked for lines in
+`harness_notes.md`. Two instructions about note-keeping, one file created, zero notes
+collected. The model reasonably merged them and used the result for the game.
+
+Both now point at `NOTES.md` — the file the harness already echoes back in full every
+request. The model sees its own notes and the prefix format every turn instead of recalling
+one line from the tail of a long prompt, and only prefixed lines are read as feedback.
+Whether that fixes it is untested: it is a hypothesis, and the next play-along run is the
+test.
+
 ## Measuring where the harness defeats the model
 
 `harness_friction.py` reads a run's `process.jsonl` and classifies every tool failure by

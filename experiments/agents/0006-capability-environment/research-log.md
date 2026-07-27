@@ -399,6 +399,28 @@ request carries seven images — one per retained turn, six of them superseded f
 "How many images" is a sharper axis than "images or not", and neither is settled by
 argument.
 
+### The notes channel produced nothing, and why
+
+The one-line `WANT`/`FRICTION`/`WASTE` channel collected **zero notes** on its
+first live run. The model wrote `notes.md` full of game analysis and never created
+`harness_notes.md`.
+
+The prompt was at fault. `PLAY_ALONG_ROLE` asked for "a running record in your
+workspace — a file you append to"; the notes convention asked for prefixed lines in
+`harness_notes.md`. Two overlapping instructions about note-keeping produced one
+file, about the wrong subject. The instrument measured nothing and the failure was
+mine, not the model's.
+
+Both now point at `NOTES.md`, the file already echoed back in full every request,
+so the model sees its own notes and the format every turn rather than recalling a
+line from the tail of a long prompt. Only prefixed lines are read as feedback. This
+is a hypothesis — the next play-along run tests it, and it may fail for a new reason.
+
+Worth keeping in view: two of the three feedback signals depend on the model
+choosing to spend effort on us while being told the task comes first. That tension
+is unresolved. The friction log and workaround detection need no cooperation at
+all, which is an argument for weighting them.
+
 ### What this does not license
 
 No gameplay, learning, or 0006-intervention claim: the model is a fixed script
