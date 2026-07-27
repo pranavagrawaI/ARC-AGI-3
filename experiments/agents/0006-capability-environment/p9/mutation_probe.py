@@ -124,6 +124,14 @@ MUTANTS = (
         prototypes=("p9_2_context_loss.py",),
     ),
     Mutant(
+        name="components-capability-leaks-into-the-control",
+        breaks="the operator is registered, not shipped in the control",
+        filename="agent.py",
+        before='            components="connected_components" in self.capability_names',
+        after='            components=True',
+        prototypes=("p9_0_shared_arm_seam.py",),
+    ),
+    Mutant(
         name="guessed-helper-name-gives-no-guidance",
         breaks="a guessed helper name is answered with the real API",
         filename="frame_tools.py",

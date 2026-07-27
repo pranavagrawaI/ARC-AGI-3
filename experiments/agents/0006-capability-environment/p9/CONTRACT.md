@@ -107,7 +107,18 @@ paths and request-payload paths it may move. Anything else is unauthorized.
 Always authorized, for any arm: `arm_id`, `host_only.spec.arm_id`,
 `host_only.spec.treatment_capabilities`.
 
-Currently registered: `sentinel_probe_note`, which may move
+Registered: `connected_components`, which adds `frames.components()` and may move
+`model_visible.workspace.provided_helper_sha256` and `model_visible.treatment_capabilities`
+— and nothing else. The system prompt is byte-identical between the arms because the
+operator documents itself inside the helper; authorising a prompt difference would blunt the
+smuggled-prompt negative control. It is registered rather than shipped in the control because
+4 of 4 recorded `scipy` imports were `scipy.ndimage.label`, so the demand is real, but
+adjacency labelling is a theory of objectness this repository's own findings call
+insufficient (LR 0014, 0017, 0019). Denying it does not prevent it — a live model wrote BFS
+by hand — so the choice is whether it is visible and measurable or hidden in a dependency
+list.
+
+Also registered: `sentinel_probe_note`, which may move
 `model_visible.observation_message.payload_keys`,
 `model_visible.treatment_capabilities`, and
 `messages.*.content.*.observation_payload.treatment`. It exists to prove the verifier

@@ -30,6 +30,25 @@ class TreatmentCapability:
 
 
 TREATMENT_CAPABILITIES: dict[str, TreatmentCapability] = {
+    "connected_components": TreatmentCapability(
+        name="connected_components",
+        summary=(
+            "Adds frames.components() — connected runs of equal-valued cells. "
+            "Registered rather than shipped in the control: 4 of 4 recorded scipy "
+            "imports were scipy.ndimage.label, so the demand is real, but adjacency "
+            "labelling is a contested theory of objectness that this repository's own "
+            "findings call insufficient (LR 0014, 0017, 0019). It is here to be "
+            "measured against a control that lacks it."
+        ),
+        manifest_paths=(
+            "model_visible.workspace.provided_helper_sha256",
+            "model_visible.treatment_capabilities",
+        ),
+        # The prompt is byte-identical between the arms: the operator documents
+        # itself inside the helper. Authorising a prompt difference would blunt the
+        # smuggled-prompt negative control.
+        request_payload_paths=(),
+    ),
     "sentinel_probe_note": TreatmentCapability(
         name="sentinel_probe_note",
         summary="Adds one inert model-visible field; changes no other surface.",

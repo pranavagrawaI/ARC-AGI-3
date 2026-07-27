@@ -163,3 +163,72 @@ def diff(before, after, max_cells=MAX_LISTED_CELLS):
         "cells": cells,
     }
 '''
+
+
+COMPONENTS_SOURCE = '''
+
+def components(step_or_path, value=None, connectivity=4):
+    """Connected runs of equal-valued cells.
+
+    Provided only when the connected_components capability is enabled. Adjacency
+    labelling is one theory of objectness and this repository's own findings say it
+    is insufficient: composite objects were earned by co-motion rather than
+    adjacency (LR 0019), static components produced immortal ghost tracks (LR 0017)
+    and flickered under occlusion (LR 0014). It is here to be measured against a
+    control that lacks it, not because it is known to help.
+
+    Returns a list of {value, size, bbox, cells}, largest first.
+    """
+
+    g = grid(step_or_path)
+    rows, cols = g.shape
+    seen = np.zeros(g.shape, dtype=bool)
+    if connectivity == 8:
+        steps = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+    else:
+        steps = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+    out = []
+    for y0 in range(rows):
+        for x0 in range(cols):
+            if seen[y0, x0]:
+                continue
+            v = int(g[y0, x0])
+            if value is not None and v != value:
+                seen[y0, x0] = True
+                continue
+            stack = [(y0, x0)]
+            seen[y0, x0] = True
+            cells = []
+            while stack:
+                y, x = stack.pop()
+                cells.append((y, x))
+                for dy, dx in steps:
+                    ny, nx = y + dy, x + dx
+                    if 0 <= ny < rows and 0 <= nx < cols and not seen[ny, nx]:
+                        if int(g[ny, nx]) == v:
+                            seen[ny, nx] = True
+                            stack.append((ny, nx))
+            ys = [c[0] for c in cells]
+            xs = [c[1] for c in cells]
+            out.append({
+                "value": v,
+                "size": len(cells),
+                "bbox": {"y0": min(ys), "x0": min(xs), "y1": max(ys), "x1": max(xs)},
+                "cells": [(int(a), int(b)) for a, b in cells],
+            })
+    return sorted(out, key=lambda c: -c["size"])
+'''
+
+
+def frame_tools_source(*, components: bool = False) -> str:
+    """The helper written into a workspace, with or without the extra operator."""
+
+    source = FRAME_TOOLS_SOURCE
+    if components:
+        source = source.replace(
+            "    frames.where(3, value)  -> [(y, x), ...] cells holding a value",
+            "    frames.where(3, value)  -> [(y, x), ...] cells holding a value\n"
+            "    frames.components(3)    -> connected runs of equal-valued cells",
+        )
+        source += COMPONENTS_SOURCE
+    return source

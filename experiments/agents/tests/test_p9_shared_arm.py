@@ -459,6 +459,51 @@ class RunnerTests(unittest.TestCase):
             run_arm.main(["--offline", "--capability", "sentinel_probe_note"])
 
 
+class ConnectedComponentsCapabilityTests(unittest.TestCase):
+    """Registered, not shipped: the demand was real, the operator is contested."""
+
+    def test_the_control_helper_has_no_components_operator(self) -> None:
+        from p9.frame_tools import frame_tools_source
+
+        self.assertNotIn("def components", frame_tools_source())
+        self.assertIn("def components", frame_tools_source(components=True))
+
+    def test_the_capability_authorizes_no_prompt_difference(self) -> None:
+        # Authorising a prompt change would blunt the smuggled-prompt control.
+        from p9.capabilities import TREATMENT_CAPABILITIES
+
+        capability = TREATMENT_CAPABILITIES["connected_components"]
+        self.assertEqual(capability.request_payload_paths, ())
+        self.assertNotIn(
+            "model_visible.system_prompt.sha256", capability.manifest_paths
+        )
+        self.assertIn(
+            "model_visible.workspace.provided_helper_sha256", capability.manifest_paths
+        )
+
+    def test_a_pair_with_the_capability_differs_only_where_declared(self) -> None:
+        with TemporaryDirectory(prefix="p9-cc-") as scratch:
+            root = Path(scratch) / "pair"
+            self.assertEqual(
+                run_arm.main(
+                    [
+                        "--offline", "--pair", "--capability", "connected_components",
+                        "--max-actions", "3", "--run-dir", str(root),
+                    ]
+                ),
+                0,
+            )
+            diff = json.loads((root / "pair-diff.json").read_text())["diff"]
+            self.assertEqual(diff["unauthorized"], [])
+            self.assertEqual(diff["authorized_unused"], [])
+            control = json.loads((root / "control" / "manifest.json").read_text())
+            treatment = json.loads((root / "treatment" / "manifest.json").read_text())
+            self.assertEqual(
+                control["arm_manifest"]["model_visible"]["system_prompt"]["sha256"],
+                treatment["arm_manifest"]["model_visible"]["system_prompt"]["sha256"],
+            )
+
+
 class NotesBlockTests(unittest.TestCase):
     """The echo is verbatim and its truncation is explicit."""
 

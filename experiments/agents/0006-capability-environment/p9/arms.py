@@ -201,6 +201,9 @@ def arm_manifest(arm: Arm) -> dict[str, Any]:
                 "reserved_paths": sorted(
                     path.name for path in arm.workspace.root.iterdir()
                 ),
+                "provided_helper_sha256": sha256(
+                    agent.provided_helper.encode("utf-8")
+                ).hexdigest(),
                 "python_output_char_limit": MODEL_OUTPUT_CHAR_LIMIT,
                 "timeout_seconds": arm.workspace.timeout_seconds,
                 "allowed_distributions": sorted(

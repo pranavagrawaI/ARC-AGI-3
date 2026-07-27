@@ -31,7 +31,7 @@ from llm_repl_agent.workspace import MODEL_RUNTIME_DISTRIBUTIONS
 
 from .annotated_frame import annotate, annotation_descriptor
 from .capabilities import SENTINEL_NOTE, resolve_capabilities
-from .frame_tools import FRAME_TOOLS_FILE, FRAME_TOOLS_SOURCE, FRAME_TOOLS_USAGE
+from .frame_tools import FRAME_TOOLS_FILE, FRAME_TOOLS_USAGE, frame_tools_source
 from .conversation import AnnouncedConversation
 
 
@@ -276,8 +276,11 @@ class SharedArmAgent(LlmReplAgent):
         (self.workspace.root / NOTES_FILE).touch()
         # Both recorded models rewrote this every few turns and paid a deliberation
         # round each time. It is measurement over public files, not perception.
+        self.provided_helper = frame_tools_source(
+            components="connected_components" in self.capability_names
+        )
         (self.workspace.root / FRAME_TOOLS_FILE).write_text(
-            FRAME_TOOLS_SOURCE, encoding="utf-8"
+            self.provided_helper, encoding="utf-8"
         )
 
     # -- model-visible surface ------------------------------------------------

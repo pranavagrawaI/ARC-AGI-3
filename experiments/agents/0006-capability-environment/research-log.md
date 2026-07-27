@@ -508,6 +508,37 @@ Adoption is capability-dependent. Kimi used `frames.py` in 19 events, Gemma in 4
 Gemma playing rather than testing left zero harness notes; Kimi as tester left one.
 Both feedback channels depend on capability and on role, and neither is reliable.
 
+### Connected components: registered, not shipped
+
+Four of four recorded `scipy` imports were `scipy.ndimage.label`, four times, after
+the package allowlist was stated in both the prompt and `WORKSPACE.md`. That is not
+inattention, it is demand for one operator.
+
+It is registered as a treatment capability rather than added to the control. Three
+reasons, and the third is the one that decides it:
+
+1. Adjacency labelling is a theory of objectness this repository's own findings call
+   insufficient — composite objects are earned by co-motion rather than adjacency
+   (LR 0019), static components produced immortal ghost tracks (LR 0017) and
+   flickered under occlusion (LR 0014). Making the insufficient thing free while the
+   better thing stays expensive is a thumb on the scale.
+2. `MODEL_RUNTIME_DISTRIBUTIONS` is in frozen `workspace.py`, and its own comment
+   warns the list must stay small or it becomes an ARC-specific toolkit — which, when
+   4/4 of the demand is one ARC-shaped operator, is exactly what would happen.
+3. **Denying it does not prevent it.** A live model wrote "I don't have scipy, I'll
+   use a simple BFS" and did. Denial taxes adjacency objectness; it does not withhold
+   it. So the honest question is not whether the agent may have connected components
+   — it already does — but whether granting it is visible and measurable or hidden.
+
+The capability grants the operator in numpy, not the package. The system prompt is
+byte-identical between arms because the operator documents itself inside the helper,
+so the capability moves only `provided_helper_sha256` and the capability list.
+Authorising a prompt difference would have blunted the smuggled-prompt control.
+
+This also closed a gap in the manifest: a capability that changes only the provided
+helper was previously invisible to the arm diff, because the helper source was never
+hashed. It is now.
+
 ### What this does not license
 
 No gameplay, learning, or 0006-intervention claim: the model is a fixed script

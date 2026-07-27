@@ -289,6 +289,29 @@ separate times, which is a real limit on documentation as a fix.
 Adoption is capability-dependent: Kimi used `frames.py` in 19 events, Gemma in 4. Gemma,
 playing rather than testing, left zero harness notes where Kimi-as-tester left one.
 
+## A capability registered rather than shipped
+
+Four of four recorded `scipy` imports were `scipy.ndimage.label` — connected components,
+nothing else, four times after the allowlist was stated twice. Real demand for one operator.
+
+It is **registered as a treatment capability, not shipped in the control**:
+
+- adjacency labelling is a theory of objectness this repository's own findings call
+  insufficient — composite objects earned by co-motion not adjacency (LR 0019), immortal
+  ghost tracks (LR 0017), component flicker under occlusion (LR 0014);
+- denying it does not prevent it: a live model wrote `# I don't have scipy, I'll use a
+  simple BFS` and did exactly that. Denial taxes the operator, it does not withhold it;
+- so the real choice is whether granting it is **visible and measurable** or hidden in a
+  dependency list.
+
+`scipy` itself stays out — the capability grants the *operator*, implemented in numpy, not
+the package. The system prompt is byte-identical between arms; the operator documents itself
+inside `frames.py`, so the capability moves only the helper digest and the capability list.
+Authorising a prompt difference would have blunted the smuggled-prompt control.
+
+Verified: pair shares 92/101 manifest paths, zero unauthorized differences, zero unused
+authorizations, and a mutant that leaks the operator into the control is caught.
+
 ## Measuring where the harness defeats the model
 
 `harness_friction.py` reads a run's `process.jsonl` and classifies every tool failure by
