@@ -476,6 +476,38 @@ Deliberately not shipped: an ASCII renderer. A probe built one, but the coordina
 rulers now on the image address the same need, and adding a second rendering before
 knowing the first is insufficient would be pre-empting a measurement.
 
+### The ruled image against a pre-committed measure
+
+Gemma on cd82, 44 actions, 42 coordinate submissions, measured against the
+165-decision baseline on measures fixed before the run:
+
+| pattern | baseline | after | chance |
+|---|---|---|---|
+| `x == y` | 16% | **0%** | 1.6% |
+| both multiples of 4 | 25% | **12%** | 6% |
+| both multiples of 8 | 6% | **2%** | 1.6% |
+
+Zero diagonals where the baseline predicts about seven, p ≈ 0.0007. The round-number
+pull halved toward chance. The eyeballing fingerprint that motivated the work is gone.
+
+The result is attributable to the bundle, not to rulers. Nine conventions, a single
+ruled image, `frames.py` and the layer rule shipped together, and `frames.where()`
+returns exact cell coordinates on request — at least as plausible a cause as a
+readable image. Separating them requires a registered capability and a matched pair,
+which is what that machinery exists for and is the honest follow-up.
+
+**A negative result on documentation.** Tool failures were 6 of 66 against an 8%
+baseline: unchanged. Four were `scipy` imports, despite the package allowlist being
+stated in both the system prompt and `WORKSPACE.md`, verified present in this run's
+workspace. A weaker model ignored it four separate times. Stating a convention helps
+the attentive; it does not prevent the error, which is the argument for encoding
+conventions in tools wherever that is possible. `grid()` returning `pixels[-1]` is the
+model of that, and the package allowlist has no equivalent.
+
+Adoption is capability-dependent. Kimi used `frames.py` in 19 events, Gemma in 4.
+Gemma playing rather than testing left zero harness notes; Kimi as tester left one.
+Both feedback channels depend on capability and on role, and neither is reliable.
+
 ### What this does not license
 
 No gameplay, learning, or 0006-intervention claim: the model is a fixed script

@@ -106,6 +106,20 @@ def where(step, value):
     return [tuple(int(n) for n in cell) for cell in np.argwhere(grid(step) == value)]
 
 
+def __getattr__(name):
+    """Name what exists when something else is asked for.
+
+    A live model guessed frames.load_observation() and got Python's bare
+    AttributeError, which says what is missing but not what is available. Listing
+    the API in the error costs nothing and turns a dead end into a correction.
+    """
+
+    raise AttributeError(
+        "frames has no %r. Available: steps(), load(step_or_path), "
+        "grid(step_or_path), diff(before, after), where(step, value)." % (name,)
+    )
+
+
 def diff(before, after, max_cells=MAX_LISTED_CELLS):
     """What changed between two steps.
 

@@ -260,6 +260,35 @@ helper cannot hit the stale-layer trap that 404 of 591 recorded tool calls walke
 The helper is verified inside the sandbox where it actually runs, including on a
 multi-layer frame, and a mutant that makes it read `pixels[0]` is caught.
 
+## Did the ruled image change coordinate behaviour?
+
+Pre-committed measure, Gemma on cd82 at 44 actions, n=42 coordinate submissions against a
+165-decision baseline:
+
+| pattern | baseline | after | chance |
+|---|---|---|---|
+| `x == y` | 16% | **0%** | 1.6% |
+| both multiples of 4 | 25% | **12%** | 6% |
+| both multiples of 8 | 6% | **2%** | 1.6% |
+
+Zero diagonals in 42 clicks where the baseline rate predicts about seven — p ≈ 0.0007. The
+round-number pull halved toward chance. The eyeballing fingerprint is gone.
+
+**This measures the bundle, not the rulers.** Nine conventions, one image, ruled frames,
+`frames.py` and the layer rule all landed together, and `frames.where()` hands back exact
+cell coordinates on request — a competing explanation at least as plausible as the rulers.
+Separating them needs a registered capability and a matched pair.
+
+### What did not improve
+
+Tool failures were 6 of 66 (9%) against an 8% baseline — unchanged. Four were `scipy`
+imports, **despite the contract stating the allowlist in the system prompt and in
+`WORKSPACE.md`**. Stating a convention did not prevent a weaker model from ignoring it four
+separate times, which is a real limit on documentation as a fix.
+
+Adoption is capability-dependent: Kimi used `frames.py` in 19 events, Gemma in 4. Gemma,
+playing rather than testing, left zero harness notes where Kimi-as-tester left one.
+
 ## Measuring where the harness defeats the model
 
 `harness_friction.py` reads a run's `process.jsonl` and classifies every tool failure by

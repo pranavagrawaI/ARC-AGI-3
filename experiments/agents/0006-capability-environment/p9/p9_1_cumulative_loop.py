@@ -163,6 +163,10 @@ def main() -> int:
                 "print('LAST_LAYER', int(frames.grid(99)[0][0]))\n"
                 # A live model's first call passed file paths, not step numbers.
                 "print('BY_PATH', frames.diff('observations/step-00000.json', 1)['comparable'])\n"
+                "try:\n"
+                "    frames.load_observation\n"
+                "except AttributeError as error:\n"
+                "    print('GUESSED_NAME', 'Available:' in str(error))\n"
             )
             named_imports = arm.workspace.execute(
                 "import " + ", ".join(AVAILABLE_IMPORTS) + "\nprint('NAMED_IMPORTS_OK')"
@@ -358,6 +362,11 @@ def main() -> int:
         and "DIFF_COMPARABLE True" in frame_tools_probe.stdout
         and "DIFF_KEYS" in frame_tools_probe.stdout,
         {"stdout": frame_tools_probe.stdout.strip()[:300], "stderr": frame_tools_probe.stderr[:200]},
+    )
+    checks.record(
+        "a_guessed_helper_name_is_answered_with_the_real_api",
+        "GUESSED_NAME True" in frame_tools_probe.stdout,
+        {"line": _line(frame_tools_probe.stdout, "GUESSED_NAME")},
     )
     checks.record(
         "the_helper_accepts_a_file_path_as_well_as_a_step_number",

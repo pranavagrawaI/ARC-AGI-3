@@ -124,6 +124,14 @@ MUTANTS = (
         prototypes=("p9_2_context_loss.py",),
     ),
     Mutant(
+        name="guessed-helper-name-gives-no-guidance",
+        breaks="a guessed helper name is answered with the real API",
+        filename="frame_tools.py",
+        before='        "frames has no %r. Available: steps(), load(step_or_path), "',
+        after='        "frames has no %r. "',
+        prototypes=("p9_1_cumulative_loop.py",),
+    ),
+    Mutant(
         name="frame-helper-rejects-a-path",
         breaks="the helper accepts a file path as well as a step number",
         filename="frame_tools.py",
