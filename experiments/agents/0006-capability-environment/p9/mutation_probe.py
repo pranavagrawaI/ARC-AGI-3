@@ -124,6 +124,14 @@ MUTANTS = (
         prototypes=("p9_2_context_loss.py",),
     ),
     Mutant(
+        name="frame-helper-reads-the-stale-layer",
+        breaks="the helper reads the current layer of a multi-layer frame",
+        filename="frame_tools.py",
+        before='    return np.array(observation["pixels"][-1])',
+        after='    return np.array(observation["pixels"][0])',
+        prototypes=("p9_1_cumulative_loop.py",),
+    ),
+    Mutant(
         name="coordinate-rulers-removed",
         breaks="the frame the model sees carries its coordinate rulers",
         filename="annotated_frame.py",

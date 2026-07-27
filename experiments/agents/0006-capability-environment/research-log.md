@@ -452,6 +452,30 @@ track tokens closely; image tokens track tiled resolution and ignore file size. 
 early reading of a five-request fixture suggested the change made things worse, because
 a short run never accumulates seven retained turns.
 
+### Comparing frames
+
+`frames.py` now ships in every workspace: `steps()`, `load()`, `grid()`, `diff()`,
+`where()`. Both recorded models rewrote this code every few turns and paid a
+deliberation round each time — "a two-line numpy scan I must have written ten
+times", "I essentially rebuilt the inspection tooling the harness doesn't provide".
+
+It ships measurement, not perception. Loading a public file and subtracting two
+arrays is the same class of operation as `changed_pixels`, which the harness already
+computes and hands to the model unasked. Nothing in it says what an object is, which
+cells matter, or what a change means; the model still decides all of that. That is
+the line the triage test draws, and it is why the refused requests — the controllable
+object's bounding box, a semantic effect report — stay refused.
+
+`grid()` returns `pixels[-1]`, so anyone using the helper cannot hit the stale-layer
+trap that 404 of 591 recorded tool calls walked into. Documenting the rule helps a
+model that reads the contract; shipping it in the helper helps one that does not.
+The helper is verified inside the sandbox rather than as host code, including on a
+synthetic multi-layer frame, and a mutant that makes it read `pixels[0]` is caught.
+
+Deliberately not shipped: an ASCII renderer. A probe built one, but the coordinate
+rulers now on the image address the same need, and adding a second rendering before
+knowing the first is insufficient would be pre-empting a measurement.
+
 ### What this does not license
 
 No gameplay, learning, or 0006-intervention claim: the model is a fixed script

@@ -31,6 +31,7 @@ from llm_repl_agent.workspace import MODEL_RUNTIME_DISTRIBUTIONS
 
 from .annotated_frame import annotate, annotation_descriptor
 from .capabilities import SENTINEL_NOTE, resolve_capabilities
+from .frame_tools import FRAME_TOOLS_FILE, FRAME_TOOLS_SOURCE, FRAME_TOOLS_USAGE
 from .conversation import AnnouncedConversation
 
 
@@ -76,6 +77,7 @@ NOTES_CHAR_LIMIT = 4000
 
 RESERVED_WORKSPACE_ENTRIES = (
     "NOTES.md",
+    "frames.py",
     "WORKSPACE.md",
     "current_frame.png",
     "current_observation.json",
@@ -132,7 +134,9 @@ nothing will be substituted for them. The workspace is new for this run but not 
 already holds {", ".join(RESERVED_WORKSPACE_ENTRIES)}. recent_transitions in each request
 carries the most recent {RECENT_TRANSITIONS_LIMIT} only, while public_history.jsonl carries
 all of them, and the digest fields are opaque state identifiers rather than a hash you can
-recompute. NOTES.md in your workspace is echoed back to you in full at the top of every
+recompute. frames.py in your workspace loads and compares observations for you —
+`import sys; sys.path.insert(0, "."); import frames` then frames.diff(a, b) — and it reads
+the current layer correctly. NOTES.md in your workspace is echoed back to you in full at the top of every
 request and survives dropped turns; the harness never reads or changes it. pixels is
 indexed [layer][row][column], the layer count changes between steps,
 and the current state is always the last layer: read pixels[-1], never pixels[0]. The
@@ -178,6 +182,14 @@ WORKSPACE_CONTENTS_CONVENTION = (
     + ". Everything else in it is yours.\n"
 )
 
+FRAME_TOOLS_CONVENTION = (
+    f"{FRAME_TOOLS_FILE} is provided for loading and comparing observations: "
+    f"`{FRAME_TOOLS_USAGE}` then frames.steps(), frames.load(n), frames.grid(n), "
+    "frames.diff(a, b), frames.where(n, value). grid() returns the current layer "
+    "for you. Read it, edit it, replace it — it is an ordinary file in your "
+    "workspace.\n"
+)
+
 IMAGE_CONVENTION = (
     "The image shows the current frame with grid coordinates on the top and left "
     "margins: x is the column along the top, y is the row down the left, both 0-based "
@@ -216,6 +228,7 @@ RUNTIME_CONVENTION = (
 
 WORKSPACE_ADDENDUM = (
     WORKSPACE_CONTENTS_CONVENTION
+    + FRAME_TOOLS_CONVENTION
     + IMAGE_CONVENTION
     + NOTES_CONVENTION
     + LAYER_CONVENTION
@@ -261,6 +274,11 @@ class SharedArmAgent(LlmReplAgent):
         # not advertising one that does.
         (self.workspace.root / "public_history.jsonl").touch()
         (self.workspace.root / NOTES_FILE).touch()
+        # Both recorded models rewrote this every few turns and paid a deliberation
+        # round each time. It is measurement over public files, not perception.
+        (self.workspace.root / FRAME_TOOLS_FILE).write_text(
+            FRAME_TOOLS_SOURCE, encoding="utf-8"
+        )
 
     # -- model-visible surface ------------------------------------------------
 

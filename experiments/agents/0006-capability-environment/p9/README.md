@@ -234,6 +234,32 @@ fewer image bytes, and one tile of image tokens instead of seven.
 The cell size is 7px so a 64-cell grid plus margin is 472px, inside the 512 boundary most
 providers tile at — 536px would have risked four tiles where one will do.
 
+## Comparing frames
+
+`frames.py` is written into every workspace:
+
+```python
+import sys; sys.path.insert(0, "."); import frames
+frames.steps()          # every step on disk
+frames.grid(3)          # the current layer, as a 2-D array
+frames.diff(3, 4)       # changed count, bbox, value transitions, changed cells
+frames.where(3, value)  # every (y, x) holding a value
+```
+
+Both recorded models rewrote this every few turns — *"a two-line numpy scan I must have
+written ten times"*, *"I essentially rebuilt the inspection tooling the harness doesn't
+provide"* — and paid a deliberation round each time.
+
+It ships **measurement, not perception**: loading a public file and subtracting two arrays
+is the same class of operation as `changed_pixels`, which the harness already computes and
+hands over. Nothing in it says what an object is, which cells matter, or what a change
+means.
+
+`grid()` is the most valuable line in it — it returns `pixels[-1]`, so anyone using the
+helper cannot hit the stale-layer trap that 404 of 591 recorded tool calls walked into.
+The helper is verified inside the sandbox where it actually runs, including on a
+multi-layer frame, and a mutant that makes it read `pixels[0]` is caught.
+
 ## Measuring where the harness defeats the model
 
 `harness_friction.py` reads a run's `process.jsonl` and classifies every tool failure by

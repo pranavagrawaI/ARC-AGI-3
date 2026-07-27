@@ -34,6 +34,7 @@ from p9.agent import (
     LAYER_CONVENTION,
     RECENT_TRANSITIONS_LIMIT,
     RESERVED_WORKSPACE_ENTRIES,
+    FRAME_TOOLS_CONVENTION,
     HISTORY_CONVENTION,
     IMAGE_CONVENTION,
     WORKSPACE_CONTENTS_CONVENTION,
@@ -144,6 +145,23 @@ def main() -> int:
             contract = (workspace_root / "WORKSPACE.md").read_text(encoding="utf-8")
             # Pin the stated conventions against the sandbox itself, not against a
             # second copy of the same assumption.
+            # The helper runs in the sandbox, so verify it there - including on a
+            # multi-layer frame, the trap it exists to make unhittable.
+            frame_tools_probe = arm.workspace.execute(
+                "import sys, json; sys.path.insert(0, '.')\n"
+                "import frames, numpy as np\n"
+                "g = frames.grid(0)\n"
+                "print('STEPS', frames.steps())\n"
+                "print('GRID_SHAPE', g.shape)\n"
+                "d = frames.diff(0, 1)\n"
+                "print('DIFF_KEYS', sorted(d))\n"
+                "print('DIFF_COMPARABLE', d['comparable'])\n"
+                # a synthetic multi-layer observation: grid() must take the last layer
+                "obs = frames.load(0)\n"
+                "obs['pixels'] = [[[0]*4]*4, [[9]*4]*4]\n"
+                "open('observations/step-00099.json','w').write(json.dumps(obs))\n"
+                "print('LAST_LAYER', int(frames.grid(99)[0][0]))\n"
+            )
             named_imports = arm.workspace.execute(
                 "import " + ", ".join(AVAILABLE_IMPORTS) + "\nprint('NAMED_IMPORTS_OK')"
             )
@@ -333,6 +351,23 @@ def main() -> int:
     )
 
     checks.record(
+        "the_provided_frame_helper_runs_in_the_sandbox",
+        frame_tools_probe.ok
+        and "DIFF_COMPARABLE True" in frame_tools_probe.stdout
+        and "DIFF_KEYS" in frame_tools_probe.stdout,
+        {"stdout": frame_tools_probe.stdout.strip()[:300], "stderr": frame_tools_probe.stderr[:200]},
+    )
+    checks.record(
+        "the_helper_reads_the_current_layer_of_a_multi_layer_frame",
+        "LAST_LAYER 9" in frame_tools_probe.stdout,
+        {"line": _line(frame_tools_probe.stdout, "LAST_LAYER")},
+    )
+    checks.record(
+        "the_frame_helper_is_stated_in_the_contract",
+        FRAME_TOOLS_CONVENTION.strip() in contract,
+        {"convention": FRAME_TOOLS_CONVENTION.strip()[:120]},
+    )
+    checks.record(
         "every_package_the_contract_names_actually_imports",
         named_imports.ok and "NAMED_IMPORTS_OK" in named_imports.stdout,
         {"named": list(AVAILABLE_IMPORTS), "stdout": named_imports.stdout.strip()},
@@ -442,6 +477,10 @@ def main() -> int:
         ],
     )
     return 0
+
+
+def _line(text: str, prefix: str) -> str:
+    return next((line for line in text.splitlines() if line.startswith(prefix)), "")
 
 
 def _turn_steps(payload: dict) -> set[int]:
