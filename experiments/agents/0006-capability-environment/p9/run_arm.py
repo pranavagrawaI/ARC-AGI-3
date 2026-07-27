@@ -23,6 +23,7 @@ Offline (no provider, no endpoint)::
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from datetime import datetime, timezone
 import json
 import os
@@ -36,14 +37,15 @@ if __package__ in {None, ""}:
     __package__ = "p9"
 
 from p9.arm_diff import assert_authorized, compare_arms
-from p9.arms import ArmSpec, arm_manifest, build_arm, control_spec, treatment_spec
+from p9.arms import ARM_SYSTEM_PROMPT, ArmSpec, arm_manifest, build_arm, control_spec, treatment_spec
 from p9.capabilities import TREATMENT_CAPABILITIES, authorized_manifest_paths
 from p9.fixtures import RecordedEnvironment, default_recording, load_recorded_frames
 from p9.harness_friction import report as friction_report
+from p9.probe import EXIT_INTERVIEW, PROBE_ROLE, probe_report
 from p9.task_policy import TaskPolicy
 
 from llm_repl_agent.agent import DecisionFormatError, ModelBudgetExceeded
-from llm_repl_agent.client import OpenAICompatibleChatClient
+from llm_repl_agent.client import ModelRequestError, OpenAICompatibleChatClient
 from llm_repl_agent.config import (
     MODEL_PROFILES,
     OPENROUTER_PROFILES,
@@ -94,6 +96,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--offline-recording", type=Path)
     parser.add_argument(
+        "--probe",
+        action="store_true",
+        help=(
+            "play-test the harness: the model hunts for interface defects and is "
+            "interviewed at the end. Not a contestant claim."
+        ),
+    )
+    parser.add_argument(
         "--pair",
         action="store_true",
         help=(
@@ -134,6 +144,15 @@ def spec_from_args(args: argparse.Namespace) -> ArmSpec:
         workspace_timeout_seconds=args.workspace_timeout,
         color_permutation_seed=args.color_permutation_seed,
     )
+    if args.probe:
+        if args.arm != "control" or args.capability:
+            raise SystemExit("--probe runs the control arm only")
+        # The contract under test must be identical; only the role is added.
+        return replace(
+            control,
+            arm_id="0002-R-probe",
+            system_prompt=ARM_SYSTEM_PROMPT.rstrip() + "\n\n" + PROBE_ROLE,
+        )
     if args.arm == "control":
         if args.capability:
             raise SystemExit("--capability requires --arm treatment")
@@ -228,12 +247,15 @@ def run_one(spec: ArmSpec, run_dir: Path, args: argparse.Namespace) -> dict[str,
         "treatment_capabilities": list(spec.treatment_capabilities),
         "environment": environment_manifest,
         "arm_manifest": arm_manifest(arm),
+        "probe": args.probe,
+        "admissible_contestant_claim": not args.probe,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "status": "running",
     }
     write_json(run_dir / "manifest.json", manifest)
 
     result = None
+    interview: dict[str, Any] | None = None
     error: BaseException | None = None
     stop_reason: str | None = None
     snapshotted = False
@@ -248,8 +270,13 @@ def run_one(spec: ArmSpec, run_dir: Path, args: argparse.Namespace) -> dict[str,
                 stop_on_exceptions={
                     ModelBudgetExceeded: "model_budget_exhausted",
                     DecisionFormatError: "unrepaired_invalid_decision",
+                    # Losing every completed action to one bad response frame is a
+                    # worse outcome than a short run. Artifacts stay analysable.
+                    ModelRequestError: "transport_failure",
                 },
             )
+        if args.probe:
+            interview = _exit_interview(arm)
         arm.workspace.snapshot(run_dir / "workspace")
         snapshotted = True
         arm.process_log.write(
@@ -274,6 +301,11 @@ def run_one(spec: ArmSpec, run_dir: Path, args: argparse.Namespace) -> dict[str,
 
     friction = friction_report([run_dir])
     write_json(run_dir / "friction.json", friction)
+    if args.probe:
+        write_json(
+            run_dir / "probe-report.json",
+            probe_report(run_dir, interview=interview, friction=friction),
+        )
     write_annotation_template(
         run_dir / "process-annotation.json",
         actions=result.actions if result is not None else arm.agent.actions,
@@ -308,6 +340,27 @@ def run_one(spec: ArmSpec, run_dir: Path, args: argparse.Namespace) -> dict[str,
     if error is not None:
         raise error
     return manifest
+
+
+def _exit_interview(arm) -> dict[str, Any] | None:
+    """Ask the model what its experience of the harness was. Measurement only."""
+
+    messages = arm.agent.conversation.messages() + [
+        {"role": "user", "content": EXIT_INTERVIEW}
+    ]
+    try:
+        response = arm.client.complete(messages=messages, tools=())
+    except Exception as error:  # noqa: BLE001 - the interview must never fail a run
+        arm.process_log.write("probe_interview_failed", error=repr(error))
+        return None
+    content = response.message.get("content")
+    text = content if isinstance(content, str) else ""
+    try:
+        report = json.loads(text[text.index("{") : text.rindex("}") + 1])
+    except (ValueError, json.JSONDecodeError):
+        report = {"unparsed": text}
+    arm.process_log.write("probe_interview", report=report)
+    return report
 
 
 def _summary(manifest: Mapping[str, Any], run_dir: Path) -> dict[str, Any]:

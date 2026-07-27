@@ -65,6 +65,27 @@ the arm diff correctly rejected it. A pair assembled by hand measures the operat
 Each run's `manifest.json` embeds its `arm_manifest`, so two runs can be diffed after the
 fact without rebuilding either arm.
 
+## What live runs found
+
+Five live `ls20` runs against `google/gemma-4-31b-it`, read through `harness_friction.py`
+and the workaround detector. Each defect below was found by running, not by inspection,
+and none would have been caught by a check written in advance — the check would have
+encoded the same assumption the contract did.
+
+| found | how it surfaced | fixed by |
+|---|---|---|
+| model believed it had no per-step images | a hedge in code it wrote: `# Since I don't have the files explicitly` — **no error, nothing logged** | stating the rendered image path |
+| filename separator, not width | `step00000.json`, `step_00036.json` — width always right, separator wrong twice | stating the literal Python expression, pinned by evaluating it |
+| a whitespace response body killed a run | provider returned 1001 bytes of whitespace; the frozen client marks a JSON decode failure fatal; run died at action 12 of 44 | retrying malformed bodies in our wrapper, and stopping the episode instead of destroying it |
+
+Three blind spots, three different instruments. The workaround was invisible to the friction
+log (`ok=True`). The transport death was invisible to it too (it reads tool failures, and
+reported `tool_failures: 0` on a run that had just been killed). No single instrument sees
+the whole surface — which is the argument for the play-test probe.
+
+After the fixes: 68 tool calls in one run with zero filename failures, and two transport
+failures retried without touching the episode.
+
 ## Measuring where the harness defeats the model
 
 `harness_friction.py` reads a run's `process.jsonl` and classifies every tool failure by

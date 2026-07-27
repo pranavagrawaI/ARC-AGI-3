@@ -40,6 +40,19 @@ OBSERVATIONS_GLOB = "observations/step-*.json"
 # filenames by P9.1 so it cannot drift from ObservationStore.
 OBSERVATION_STEP_DIGITS = 5
 OBSERVATION_FILENAME_EXAMPLE = f"observations/step-{7:0{OBSERVATION_STEP_DIGITS}d}.json"
+# ObservationStore writes a rendered PNG beside every observation JSON. Nothing said
+# so, and a live model wrote a defensive fallback to current_frame.png with the
+# comment "Since I don't have the files explicitly". It never failed - it just
+# declined to use a capability it had, which no friction log can see.
+OBSERVATION_IMAGE_EXAMPLE = f"observations/step-{7:0{OBSERVATION_STEP_DIGITS}d}.png"
+# Three live runs: the width is always right now, the separator is not. Both residual
+# failures were composition errors in an f-string - 'step00000.json' and
+# 'step_00036.json' - never a wrong width. Stating the pattern still leaves the model
+# assembling "step-" next to a format spec, so state the expression it will actually
+# write. P9.1 evaluates this string and requires the result to exist.
+OBSERVATION_PATH_EXPRESSION = (
+    'f"observations/step-{step:0' + str(OBSERVATION_STEP_DIGITS) + 'd}.json"'
+)
 
 # Derived from the frozen allowlist, so the statement cannot drift from the sandbox.
 # 7 of 47 recorded tool failures were the model importing something that is not there.
@@ -76,7 +89,10 @@ If earlier turns leave this conversation you will be told which steps were dropp
 nothing will be substituted for them. Every public observation of this run stays in
 observations/step-NNNNN.json, where NNNNN is the step number padded with leading zeros to
 five digits — step 7 is observations/step-00007.json. Steps whose turns are gone are still
-there. Each of those files has exactly these top-level keys: {", ".join(OBSERVATION_SCHEMA_KEYS)}.
+there, and each step is also rendered as an image beside it — step 7 is
+{OBSERVATION_FILENAME_EXAMPLE} and {OBSERVATION_IMAGE_EXAMPLE}; in Python the path is
+{OBSERVATION_PATH_EXPRESSION}. Each JSON file has exactly
+these top-level keys: {", ".join(OBSERVATION_SCHEMA_KEYS)}.
 
 The sandbox has the Python standard library plus {" and ".join(AVAILABLE_IMPORTS)} only.
 Nothing else is installed and there is no network, so an import of anything else will fail.
@@ -95,7 +111,9 @@ IMPORT_CONVENTION = (
 
 PATH_CONVENTION = (
     "Observation files are observations/step-NNNNN.json with the step number padded to "
-    f"five digits: step 7 is {OBSERVATION_FILENAME_EXAMPLE}.\n"
+    f"five digits: step 7 is {OBSERVATION_FILENAME_EXAMPLE}. In Python that path is "
+    f"{OBSERVATION_PATH_EXPRESSION}. Every step is also rendered "
+    f"as an image at the same name: {OBSERVATION_IMAGE_EXAMPLE}.\n"
 )
 
 SCHEMA_CONVENTION = (

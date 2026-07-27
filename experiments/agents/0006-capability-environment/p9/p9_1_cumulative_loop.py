@@ -27,6 +27,8 @@ from p9.agent import (
     AVAILABLE_IMPORTS,
     IMPORT_CONVENTION,
     OBSERVATION_FILENAME_EXAMPLE,
+    OBSERVATION_IMAGE_EXAMPLE,
+    OBSERVATION_PATH_EXPRESSION,
     OBSERVATION_SCHEMA_KEYS,
     PATH_CONVENTION,
     RUNTIME_CONVENTION,
@@ -138,6 +140,9 @@ def main() -> int:
                 "import " + ", ".join(AVAILABLE_IMPORTS) + "\nprint('NAMED_IMPORTS_OK')"
             )
             unnamed_import = arm.workspace.execute("import sklearn")
+            rendered_steps = sorted(
+                path.stem for path in (workspace_root / "observations").glob("step-*.png")
+            )
             observed_schema_keys = sorted(
                 json.loads((workspace_root / "observations" / "step-00000.json").read_text())
             )
@@ -214,6 +219,29 @@ def main() -> int:
             "written_widths": sorted(written_widths),
             "documented": OBSERVATION_FILENAME_EXAMPLE,
         },
+    )
+    checks.record(
+        "every_observation_has_a_rendered_image_beside_it",
+        rendered_steps == [Path(name).stem for name in workspace_observations],
+        {"json": workspace_observations, "png": rendered_steps},
+    )
+    # Evaluate the expression the contract hands the model and require the result to
+    # exist. A documented pattern can be mis-composed; a documented expression cannot.
+    documented_path = eval(OBSERVATION_PATH_EXPRESSION, {"step": 0})  # noqa: S307
+    checks.record(
+        "the_documented_python_expression_resolves_to_a_real_file",
+        Path(documented_path).name in workspace_observations
+        and OBSERVATION_PATH_EXPRESSION in contract,
+        {
+            "expression": OBSERVATION_PATH_EXPRESSION,
+            "resolves_to": documented_path,
+            "files_written": workspace_observations,
+        },
+    )
+    checks.record(
+        "the_rendered_image_path_is_stated_in_the_contract",
+        OBSERVATION_IMAGE_EXAMPLE in contract,
+        {"example": OBSERVATION_IMAGE_EXAMPLE},
     )
     checks.record(
         "the_observation_path_convention_is_stated_in_the_contract",

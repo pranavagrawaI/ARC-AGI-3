@@ -44,6 +44,7 @@ from p9.conversation import (
     compact_steps,
     omission_notice_text,
 )
+from p9.probe import detect_workarounds
 from p9.failures import (
     FRICTION_KINDS,
     TOOL_FAILURE_KINDS,
@@ -183,7 +184,29 @@ class FailureClassificationTests(unittest.TestCase):
 
     def test_only_a_retryable_transport_error_is_named_retryable(self) -> None:
         self.assertEqual(classify_transport_error(retryable=True), "transport_retryable")
-        self.assertEqual(classify_transport_error(retryable=False), "transport_fatal")
+        self.assertEqual(
+            classify_transport_error(retryable=False, http_status=400), "transport_fatal"
+        )
+
+    def test_a_malformed_response_body_is_retryable_though_the_client_says_otherwise(
+        self,
+    ) -> None:
+        # Observed live: the provider returned 1001 bytes of whitespace, the frozen
+        # client marked it fatal, and the run died at action 12 of 44.
+        self.assertEqual(
+            classify_transport_error(
+                retryable=False, http_status=None, response_body="   \n   \n"
+            ),
+            "transport_malformed_response",
+        )
+
+    def test_an_http_error_with_a_body_stays_fatal(self) -> None:
+        self.assertEqual(
+            classify_transport_error(
+                retryable=False, http_status=400, response_body='{"error":"bad"}'
+            ),
+            "transport_fatal",
+        )
 
 
 class FrictionClassificationTests(unittest.TestCase):
@@ -347,6 +370,20 @@ class RetryingChatClientTests(unittest.TestCase):
                 3,
             )
 
+    def test_a_malformed_response_body_is_retried(self) -> None:
+        with TemporaryDirectory() as scratch:
+            failure = ModelRequestError(
+                "not json", retryable=False, response_body_raw="        "
+            )
+            client, inner, log = self._client([failure], scratch)
+            client.complete(messages=[], tools=[])
+            self.assertEqual(inner.calls, 2)
+            self.assertEqual(client.retries, 1)
+            kinds = [
+                event.get("failure_kind") for event in self._events(log)
+            ]
+            self.assertIn("transport_malformed_response", kinds)
+
     def test_a_fatal_failure_is_never_retried(self) -> None:
         with TemporaryDirectory() as scratch:
             failure = ModelRequestError("400", retryable=False, http_status=400)
@@ -420,6 +457,60 @@ class RunnerTests(unittest.TestCase):
     def test_the_control_arm_refuses_a_capability(self) -> None:
         with self.assertRaises(SystemExit):
             run_arm.main(["--offline", "--capability", "sentinel_probe_note"])
+
+
+class ProbeTests(unittest.TestCase):
+    """Play-test mode: the signal the friction log structurally cannot see."""
+
+    def test_hedging_in_model_code_is_detected(self) -> None:
+        events = [
+            {
+                "type": "python_tool",
+                "action_step": 3,
+                "code": (
+                    "# Since I don't have the files explicitly, I'll use current_frame.png\n"
+                    "img = open('current_frame.png')\n"
+                ),
+            }
+        ]
+        found = detect_workarounds(events)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].action_step, 3)
+
+    def test_clean_code_is_not_flagged(self) -> None:
+        events = [{"type": "python_tool", "action_step": 1, "code": "print(sum(range(3)))"}]
+        self.assertEqual(detect_workarounds(events), [])
+
+    def test_a_probe_run_is_marked_inadmissible_and_reports_three_signals(self) -> None:
+        with TemporaryDirectory(prefix="p9-probe-") as scratch:
+            run_dir = Path(scratch) / "run"
+            self.assertEqual(
+                run_arm.main(
+                    ["--offline", "--probe", "--max-actions", "3", "--run-dir", str(run_dir)]
+                ),
+                0,
+            )
+            manifest = json.loads((run_dir / "manifest.json").read_text())
+            self.assertEqual(manifest["arm_id"], "0002-R-probe")
+            self.assertTrue(manifest["probe"])
+            self.assertFalse(manifest["admissible_contestant_claim"])
+            report = json.loads((run_dir / "probe-report.json").read_text())
+            self.assertEqual(
+                sorted(report["signals"]), ["failed", "reported", "worked_around"]
+            )
+
+    def test_the_probe_prompt_keeps_the_contract_under_test_intact(self) -> None:
+        from p9.arms import ARM_SYSTEM_PROMPT
+
+        spec = run_arm.spec_from_args(
+            run_arm.build_parser().parse_args(["--offline", "--probe"])
+        )
+        self.assertIn(ARM_SYSTEM_PROMPT.rstrip(), spec.system_prompt)
+        self.assertIn("You are not playing to win", spec.system_prompt)
+
+    def test_probe_refuses_a_treatment_arm(self) -> None:
+        with self.assertRaises(SystemExit):
+            run_arm.main(["--offline", "--probe", "--arm", "treatment"])
 
 
 class PrototypeTests(unittest.TestCase):

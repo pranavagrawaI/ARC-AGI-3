@@ -92,6 +92,22 @@ MUTANTS = (
         prototypes=("p9_1_cumulative_loop.py",),
     ),
     Mutant(
+        name="documented-path-expression-is-wrong",
+        breaks="the Python expression the contract hands the model resolves to a real file",
+        filename="agent.py",
+        before="'f\"observations/step-{step:0' + str(OBSERVATION_STEP_DIGITS) + 'd}.json\"'",
+        after="'f\"observations/step_{step:0' + str(OBSERVATION_STEP_DIGITS) + 'd}.json\"'",
+        prototypes=("p9_1_cumulative_loop.py",),
+    ),
+    Mutant(
+        name="rendered-image-path-dropped-from-the-contract",
+        breaks="the model is told the per-step rendered images exist",
+        filename="agent.py",
+        before='f"as an image at the same name: {OBSERVATION_IMAGE_EXAMPLE}.\\n"',
+        after='f".\\n"',
+        prototypes=("p9_1_cumulative_loop.py",),
+    ),
+    Mutant(
         name="package-allowlist-misstated",
         breaks="the packages the contract names are the ones the sandbox has",
         filename="agent.py",
@@ -114,6 +130,14 @@ MUTANTS = (
         before='                if kind != "transport_retryable" or attempt >= self.max_retries:',
         after="                if attempt >= self.max_retries:",
         prototypes=("p9_3_failure_recovery.py",),
+    ),
+    Mutant(
+        name="malformed-response-bodies-treated-as-fatal-again",
+        breaks="a whitespace response body is retried instead of killing the run",
+        filename="failures.py",
+        before='    if http_status is None and response_body is not None:\n        return "transport_malformed_response"',
+        after='    if False:\n        return "transport_malformed_response"',
+        prototypes=(),
     ),
     Mutant(
         name="transport-retry-never-logged",

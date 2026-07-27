@@ -36,6 +36,7 @@ DECISION_FAILURE_KINDS = (
 
 TRANSPORT_FAILURE_KINDS = (
     "transport_retryable",
+    "transport_malformed_response",
     "transport_fatal",
 )
 
@@ -106,8 +107,33 @@ def classify_decision_error(message: str) -> str:
     return "decision_not_json"
 
 
-def classify_transport_error(*, retryable: bool) -> str:
-    return "transport_retryable" if retryable else "transport_fatal"
+def classify_transport_error(
+    *,
+    retryable: bool,
+    http_status: int | None = None,
+    response_body: str | None = None,
+) -> str:
+    """Name a transport failure, including one the frozen client mis-marks.
+
+    ``client.py`` raises a non-retryable error when the response body will not
+    parse as JSON. Observed live: OpenRouter returned 1001 bytes of whitespace and
+    the run died at action 12 of 44. A body that is not JSON means no completion
+    was produced at all, and a chat completion is stateless, so re-sending is
+    idempotent with respect to the environment — no action has been taken. That
+    makes it retryable, and the decision belongs here rather than in the client so
+    it is visible and logged.
+    """
+
+    if retryable:
+        return "transport_retryable"
+    if http_status is None and response_body is not None:
+        return "transport_malformed_response"
+    return "transport_fatal"
+
+
+RETRIED_TRANSPORT_KINDS = frozenset(
+    {"transport_retryable", "transport_malformed_response"}
+)
 
 
 FRICTION_KINDS = (
@@ -207,7 +233,7 @@ def failure_taxonomy() -> dict[str, Any]:
         "transport": {
             "kinds": list(TRANSPORT_FAILURE_KINDS),
             "returned_to_model": False,
-            "host_retries": "transport_retryable only",
+            "host_retries": "transport_retryable and transport_malformed_response",
             "discriminating_fields": ["retryable", "http_status"],
         },
     }

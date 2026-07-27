@@ -269,6 +269,39 @@ Two things fell out of building it:
 Every run also writes `friction.json` beside the process log, so a run is a
 measurement the moment it finishes.
 
+### Live runs on ls20
+
+Five runs against `google/gemma-4-31b-it`, the same model as 34 of the recorded
+baseline runs. Three defects, each found by running and each invisible to the
+instrument that should have caught it:
+
+1. **A capability the model declined to use.** It wrote a defensive fallback with
+   the comment `# Since I don't have the files explicitly` for per-step PNGs that
+   exist. `ok=True`, nothing logged, worse code written. The friction log
+   structurally cannot see this; the workaround detector was built for it and
+   catches the real specimen.
+2. **The separator, not the width.** Two residual failures across three runs were
+   `step00000.json` and `step_00036.json` — the padding was always right. Stating
+   the pattern still left the model composing `step-` beside a format spec. Fixed
+   by stating the literal Python expression, pinned by evaluating it and requiring
+   a file that was actually written. 68 tool calls since with zero failures.
+3. **A whitespace response body killed a run.** OpenRouter returned 1001 bytes of
+   whitespace; `client.py` marks a JSON decode failure non-retryable; the run died
+   at action 12 of 44. A body that will not parse means no completion was produced,
+   and a chat completion is stateless, so re-sending is idempotent. Now retried as
+   `transport_malformed_response`, and a transport failure stops the episode rather
+   than destroying it. Validated in the wild the next run: two retries, no loss.
+
+The third is only fixable because retry policy lives in `RetryingChatClient`
+rather than the frozen client. That wrapper was built to make retries
+*reconstructable*; it turned out to be the seam that let us overrule the client
+without touching `participating_source_hashes()`. Moving a decision somewhere it
+can be reasoned about paid off in a way that was not predicted.
+
+The friction log reported `tool_failures: 0` on the run it had just been killed
+on, because it reads tool calls and this was transport. Three blind spots so far,
+each found by a different method, none by inspection.
+
 ### What this does not license
 
 No gameplay, learning, or 0006-intervention claim: the model is a fixed script

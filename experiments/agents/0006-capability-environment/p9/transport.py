@@ -5,8 +5,11 @@ it does so with no record: the run evidence cannot show that two requests were
 sent for one deliberation round. This wrapper moves the retry loop out of the
 client (constructed with ``rate_limit_retries=0``) and logs every attempt.
 
-Only failures the client itself marked ``retryable`` are retried. Anything else
-propagates to the agent, which records ``model_request_failed`` and stops. No
+Failures the client marked ``retryable`` are retried, and so are malformed
+response bodies the client marks fatal — a body that will not parse as JSON means
+no completion was produced, and a chat completion is stateless, so re-sending is
+idempotent. That case cost a live run 12 actions of work before it was widened.
+Anything else propagates to the agent, which records ``model_request_failed`` and stops. No
 transport failure of either kind reaches the model: a transport failure is not
 model-repairable, and surfacing it would put host-authored infrastructure text
 into the model's context.
@@ -20,7 +23,7 @@ from typing import Any, Mapping, Sequence
 from llm_repl_agent.client import ChatClient, ChatResponse, ModelRequestError
 from llm_repl_agent.process_log import ProcessLog
 
-from .failures import classify_transport_error
+from .failures import RETRIED_TRANSPORT_KINDS, classify_transport_error
 
 
 class RetryingChatClient:
@@ -55,7 +58,7 @@ class RetryingChatClient:
 
     def policy(self) -> dict[str, Any]:
         return {
-            "retried_kinds": ["transport_retryable"],
+            "retried_kinds": sorted(RETRIED_TRANSPORT_KINDS),
             "max_retries": self.max_retries,
             "backoff_seconds": self.backoff_seconds,
             "model_visible": False,
@@ -77,7 +80,11 @@ class RetryingChatClient:
             try:
                 return self.inner.complete(messages=messages, tools=tools)
             except ModelRequestError as error:
-                kind = classify_transport_error(retryable=bool(error.retryable))
+                kind = classify_transport_error(
+                    retryable=bool(error.retryable),
+                    http_status=error.http_status,
+                    response_body=error.response_body_raw,
+                )
                 self.process_log.write(
                     "model_transport_attempt_failed",
                     attempt=attempt + 1,
@@ -87,7 +94,7 @@ class RetryingChatClient:
                     request_payload_sha256=error.request_payload_sha256,
                     response_body_sha256=error.response_body_sha256,
                 )
-                if kind != "transport_retryable" or attempt >= self.max_retries:
+                if kind not in RETRIED_TRANSPORT_KINDS or attempt >= self.max_retries:
                     raise
                 attempt += 1
                 self._retries += 1
