@@ -539,6 +539,42 @@ This also closed a gap in the manifest: a capability that changes only the provi
 helper was previously invisible to the arm diff, because the helper source was never
 hashed. It is now.
 
+### First live capability pair: a null with a design cause
+
+Gemma on cd82, both arms completing 44 actions. Pre-committed primary measure was
+adoption. The treatment arm called `components()` **zero times**, and neither arm
+ever opened `frames.py`.
+
+The cause was the design. To keep the system prompt byte-identical between arms —
+protecting the smuggled-prompt negative control — the operator was documented only
+inside the helper's docstring, while the contract enumerated five functions that did
+not include it. The treatment model held the capability and had no way to learn of
+it. A capability nobody is told about cannot be measured, and the constraint that
+made the arm diff strict is what made it invisible.
+
+Resolved by splitting the prompt hash: `system_prompt.sha256` covers the base
+contract and `system_prompt.capability_addendum_sha256` covers the capability's own
+text. A capability may move the second and never the first, so it documents itself
+while a smuggled edit to the contract underneath still fails. Verified: base hashes
+equal across arms, addendum hashes differing, `components(` present in the treatment
+system prompt and absent from the control, and P9.0's negative control still
+rejecting a smuggled change.
+
+The same pass closed a second coverage gap: `WORKSPACE.md` is now hashed into the
+manifest. A capability that changed only the workspace contract was previously
+invisible to the diff, exactly as the provided helper had been.
+
+**What the pair did replicate.** 86 further coordinate submissions across the two
+arms with zero diagonals and 0%/2% multiples of four against a 16%/25% baseline —
+128 clicks across three post-fix runs with no diagonal at all. Nothing else is
+interpretable: temperature is 1.0 and the arms differed 63 vs 18 tool calls, which is
+variance rather than effect.
+
+A live-operations finding: both arms of an earlier attempt died on provider 504s
+because the retry budget was reachable only by editing `ArmSpec`. `--transport-retries`
+and `--transport-backoff` now exist, and clearing the provider pin restores OpenRouter
+fallback that `allow_fallbacks=False` had disabled.
+
 ### What this does not license
 
 No gameplay, learning, or 0006-intervention claim: the model is a fixed script

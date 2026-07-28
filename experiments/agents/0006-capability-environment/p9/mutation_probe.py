@@ -124,6 +124,14 @@ MUTANTS = (
         prototypes=("p9_2_context_loss.py",),
     ),
     Mutant(
+        name="capability-addendum-folded-into-the-base-hash",
+        breaks="a smuggled edit to the base contract is still caught",
+        filename="arms.py",
+        before='                "sha256": sha256(base_prompt.encode("utf-8")).hexdigest(),',
+        after='                "sha256": sha256(addendum.encode("utf-8")).hexdigest(),',
+        prototypes=("p9_0_shared_arm_seam.py",),
+    ),
+    Mutant(
         name="components-capability-leaks-into-the-control",
         breaks="the operator is registered, not shipped in the control",
         filename="agent.py",

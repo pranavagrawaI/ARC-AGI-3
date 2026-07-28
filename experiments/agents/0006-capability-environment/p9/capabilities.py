@@ -27,6 +27,12 @@ class TreatmentCapability:
     summary: str
     manifest_paths: tuple[str, ...]
     request_payload_paths: tuple[str, ...]
+    # Documented in the prompt or not at all. A live pair shipped an operator that
+    # was described only inside the helper's docstring, neither arm ever opened the
+    # file, and it was used zero times. A capability nobody is told about cannot be
+    # measured. The addendum is hashed separately from the base prompt so a
+    # capability may move its own text and never the contract underneath it.
+    prompt_addendum: str = ""
 
 
 TREATMENT_CAPABILITIES: dict[str, TreatmentCapability] = {
@@ -48,6 +54,12 @@ TREATMENT_CAPABILITIES: dict[str, TreatmentCapability] = {
         # itself inside the helper. Authorising a prompt difference would blunt the
         # smuggled-prompt negative control.
         request_payload_paths=(),
+        prompt_addendum=(
+            "frames.components(step) is also available: it returns connected runs of "
+            "equal-valued cells as {value, size, bbox, cells}, largest first. It groups "
+            "by adjacency only — it says nothing about what any group is, does not track "
+            "anything across steps, and will split a multi-coloured shape."
+        ),
     ),
     "sentinel_probe_note": TreatmentCapability(
         name="sentinel_probe_note",
@@ -68,10 +80,19 @@ def resolve_capabilities(names: tuple[str, ...]) -> tuple[TreatmentCapability, .
     return tuple(TREATMENT_CAPABILITIES[name] for name in sorted(set(names)))
 
 
+def capability_prompt_addendum(names: tuple[str, ...]) -> str:
+    """The text appended to the shared contract by the enabled capabilities."""
+
+    parts = [c.prompt_addendum for c in resolve_capabilities(names) if c.prompt_addendum]
+    return ("\n\n" + "\n".join(parts)) if parts else ""
+
+
 def authorized_manifest_paths(names: tuple[str, ...]) -> frozenset[str]:
     paths = {"arm_id", "host_only.spec.arm_id", "host_only.spec.treatment_capabilities"}
     for capability in resolve_capabilities(names):
         paths.update(capability.manifest_paths)
+        if capability.prompt_addendum:
+            paths.add("model_visible.system_prompt.capability_addendum_sha256")
     return frozenset(paths)
 
 

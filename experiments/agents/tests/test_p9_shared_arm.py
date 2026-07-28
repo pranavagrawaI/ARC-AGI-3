@@ -468,17 +468,31 @@ class ConnectedComponentsCapabilityTests(unittest.TestCase):
         self.assertNotIn("def components", frame_tools_source())
         self.assertIn("def components", frame_tools_source(components=True))
 
-    def test_the_capability_authorizes_no_prompt_difference(self) -> None:
-        # Authorising a prompt change would blunt the smuggled-prompt control.
-        from p9.capabilities import TREATMENT_CAPABILITIES
+    def test_the_capability_documents_itself_without_moving_the_base_contract(
+        self,
+    ) -> None:
+        # A live pair used the operator zero times because it was documented only in
+        # the helper's docstring and neither arm ever opened the file. The addendum
+        # is hashed apart from the base so it can be visible without authorising a
+        # difference in the contract underneath it.
+        from p9.capabilities import TREATMENT_CAPABILITIES, authorized_manifest_paths
 
         capability = TREATMENT_CAPABILITIES["connected_components"]
-        self.assertEqual(capability.request_payload_paths, ())
-        self.assertNotIn(
-            "model_visible.system_prompt.sha256", capability.manifest_paths
-        )
+        self.assertTrue(capability.prompt_addendum)
+        self.assertIn("components(", capability.prompt_addendum)
+        authorized = authorized_manifest_paths(("connected_components",))
         self.assertIn(
-            "model_visible.workspace.provided_helper_sha256", capability.manifest_paths
+            "model_visible.system_prompt.capability_addendum_sha256", authorized
+        )
+        self.assertNotIn("model_visible.system_prompt.sha256", authorized)
+
+    def test_the_sentinel_still_moves_no_prompt_text(self) -> None:
+        from p9.capabilities import TREATMENT_CAPABILITIES, authorized_manifest_paths
+
+        self.assertEqual(TREATMENT_CAPABILITIES["sentinel_probe_note"].prompt_addendum, "")
+        self.assertNotIn(
+            "model_visible.system_prompt.capability_addendum_sha256",
+            authorized_manifest_paths(("sentinel_probe_note",)),
         )
 
     def test_a_pair_with_the_capability_differs_only_where_declared(self) -> None:

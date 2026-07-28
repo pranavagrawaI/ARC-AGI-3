@@ -93,6 +93,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-model-calls", type=int, default=100)
     parser.add_argument("--max-reported-tokens", type=int, default=250_000)
     parser.add_argument("--workspace-timeout", type=float, default=20.0)
+    # A live pair died on provider 504s with no way to be more patient: the retry
+    # budget was only reachable by editing ArmSpec.
+    parser.add_argument("--transport-retries", type=int, default=2)
+    parser.add_argument("--transport-backoff", type=float, default=0.0)
     parser.add_argument("--color-permutation-seed", type=int)
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument(
@@ -163,6 +167,8 @@ def spec_from_args(args: argparse.Namespace) -> ArmSpec:
         max_reported_tokens=args.max_reported_tokens,
         workspace_timeout_seconds=args.workspace_timeout,
         color_permutation_seed=args.color_permutation_seed,
+        transport_max_retries=args.transport_retries,
+        transport_backoff_seconds=args.transport_backoff,
     )
     notes_addendum = (
         "\n\n" + HARNESS_NOTES_CONVENTION

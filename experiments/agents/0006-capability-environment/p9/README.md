@@ -312,6 +312,38 @@ Authorising a prompt difference would have blunted the smuggled-prompt control.
 Verified: pair shares 92/101 manifest paths, zero unauthorized differences, zero unused
 authorizations, and a mutant that leaks the operator into the control is caught.
 
+## First live capability pair: a null, and why
+
+Gemma on cd82, control and treatment, 44 actions each, both completing. The
+pre-committed primary measure was adoption — does the treatment arm call
+`components()`?
+
+**It called it zero times.** And neither arm ever opened `frames.py`.
+
+The cause was my design, not the model. To keep the prompt byte-identical between arms —
+protecting the smuggled-prompt negative control — the operator was documented *only* in
+the helper's docstring. The contract enumerates five functions and `components()` was not
+among them. The treatment model had the operator and no way to learn it existed.
+
+**A capability nobody is told about cannot be measured.** The constraint that made the
+diff strict made the capability invisible.
+
+The fix keeps both: the system prompt hash is now split into the base contract and the
+capability's own addendum. A capability may move its addendum and never the base, so it
+can document itself while a smuggled edit to the contract underneath still fails. Verified:
+base hashes identical across the arms, addendum hashes differ, the treatment model's system
+prompt now contains `components(`, the control's does not, and P9.0's negative control
+still rejects a smuggled prompt change.
+
+### What the pair did replicate
+
+86 further coordinate submissions — 44 control, 42 treatment — with **zero diagonals** and
+0%/2% multiples of four, against the 16%/25% baseline. That is now 128 clicks across three
+post-fix runs with no diagonal at all.
+
+Nothing else in the pair is interpretable: temperature is 1.0, and the arms differed on
+tool calls 63 vs 18 and cost $0.382 vs $0.232 — variance, not effect.
+
 ## Measuring where the harness defeats the model
 
 `harness_friction.py` reads a run's `process.jsonl` and classifies every tool failure by

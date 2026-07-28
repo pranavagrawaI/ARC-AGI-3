@@ -30,7 +30,7 @@ from llm_repl_agent.observations import ModelObservation, observation_metadata
 from llm_repl_agent.workspace import MODEL_RUNTIME_DISTRIBUTIONS
 
 from .annotated_frame import annotate, annotation_descriptor
-from .capabilities import SENTINEL_NOTE, resolve_capabilities
+from .capabilities import SENTINEL_NOTE, capability_prompt_addendum, resolve_capabilities
 from .frame_tools import FRAME_TOOLS_FILE, FRAME_TOOLS_USAGE, frame_tools_source
 from .conversation import AnnouncedConversation
 
@@ -260,7 +260,10 @@ class SharedArmAgent(LlmReplAgent):
         self.capabilities = resolve_capabilities(tuple(treatment_capabilities))
         self.capability_names = tuple(capability.name for capability in self.capabilities)
         self.conversation = AnnouncedConversation(
-            system_message={"role": "system", "content": system_prompt},
+            system_message={
+                "role": "system",
+                "content": system_prompt + capability_prompt_addendum(self.capability_names),
+            },
             max_turns=self.config.max_context_turns,
             observations_glob=OBSERVATIONS_GLOB,
             superseded_frame_note=SUPERSEDED_FRAME_NOTE,
