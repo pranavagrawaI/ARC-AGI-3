@@ -9,6 +9,7 @@ prototype failure.
 
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 import sys
@@ -31,6 +32,7 @@ from p9 import (
     p9_4_harness_task,
     run_arm,
 )
+from p9 import freeze
 from p9.arm_diff import compare_arms, flatten, is_authorized, normalize_request_payload
 from p9.arms import ArmSpec, control_spec, treatment_spec
 from p9.capabilities import (
@@ -660,6 +662,90 @@ class ProbeTests(unittest.TestCase):
     def test_probe_refuses_a_treatment_arm(self) -> None:
         with self.assertRaises(SystemExit):
             run_arm.main(["--offline", "--probe", "--arm", "treatment"])
+
+
+class FreezeTests(unittest.TestCase):
+    """0002-R is pinned, and the pin can tell when it moves.
+
+    The first test is the freeze itself. The rest exist because a pin that cannot
+    fail is worse than none: it reports a stable baseline while the baseline drifts.
+    """
+
+    def test_control_has_not_moved(self) -> None:
+        report = freeze.verify()
+        self.assertTrue(report["pinned"], "0002-R is unpinned; run p9.freeze")
+        self.assertEqual(
+            report["drift"],
+            [],
+            "0002-R changed. Re-pin deliberately with a reason, or revert:\n"
+            + json.dumps(report["drift"], indent=2),
+        )
+
+    def test_a_changed_module_fails_the_runtime_pin(self) -> None:
+        moved = dict(freeze.FROZEN_RUNTIME_COMPONENTS)
+        moved["p9/agent.py"] = "0" * 64
+        with patch.object(freeze, "FROZEN_RUNTIME_COMPONENTS", moved):
+            with patch.object(freeze, "FROZEN_RUNTIME_DIGEST", "0" * 64):
+                report = freeze.verify()
+        kinds = [entry["digest"] for entry in report["drift"]]
+        self.assertIn("runtime", kinds)
+        entry = next(e for e in report["drift"] if e["digest"] == "runtime")
+        self.assertEqual(entry["moved"], ["p9/agent.py"])
+
+    def test_a_changed_contract_fails_the_manifest_pin(self) -> None:
+        with patch.object(freeze, "FROZEN_CONTROL_MANIFEST_DIGEST", "0" * 64):
+            report = freeze.verify()
+        self.assertIn("control_manifest", [e["digest"] for e in report["drift"]])
+
+    def test_the_manifest_digest_is_not_self_referential(self) -> None:
+        """The pin's first run caught this: it was pinning its own source.
+
+        ``host_only.source_sha256`` globs every p9 module, so it covers the mutation
+        probe, the prototypes and freeze.py. Leaving it in made the digest change
+        whenever a measuring tool did — including whenever the pin was re-pinned.
+        """
+
+        manifest = freeze.control_manifest()
+        self.assertNotIn("source_sha256", manifest.get("host_only", {}))
+        self.assertNotIn("run_dir", manifest.get("host_only", {}))
+
+    def test_the_manifest_digest_is_stable_across_constructions(self) -> None:
+        self.assertEqual(
+            freeze.control_manifest_digest(), freeze.control_manifest_digest()
+        )
+
+    def test_the_control_manifest_declares_no_capabilities(self) -> None:
+        """0002-R is the arm with nothing enabled; that is what makes it the control."""
+
+        manifest = freeze.control_manifest()
+        self.assertEqual(manifest["model_visible"]["treatment_capabilities"], [])
+        self.assertEqual(manifest["arm_id"], "0002-R")
+
+    def test_measuring_tools_are_not_frozen(self) -> None:
+        """Editing something that measures 0002-R must not read as 0002-R changing."""
+
+        for tool in ("mutation_probe.py", "harness_friction.py", "freeze.py"):
+            self.assertNotIn(tool, freeze.RUNTIME_MODULES)
+        for prototype in (name for name in freeze.RUNTIME_MODULES if name.startswith("p9_")):
+            self.fail(f"prototype {prototype} is frozen as part of the control")
+
+    def test_frozen_modules_are_the_arm_import_graph(self) -> None:
+        """The frozen set is what an arm imports, not a hand-kept list that rots."""
+
+        root = Path(freeze.__file__).parent
+        seen, stack = set(), ["arms.py"]
+        while stack:
+            name = stack.pop()
+            if name in seen or not (root / name).exists():
+                continue
+            seen.add(name)
+            tree = ast.parse((root / name).read_text())
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.level:
+                    if node.module:
+                        stack.append(node.module + ".py")
+                    stack.extend(alias.name + ".py" for alias in node.names)
+        self.assertEqual(sorted(seen), sorted(freeze.RUNTIME_MODULES))
 
 
 class PrototypeTests(unittest.TestCase):

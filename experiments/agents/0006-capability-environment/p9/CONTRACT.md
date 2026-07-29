@@ -215,8 +215,59 @@ Offline mode replays a recording through the fixture policy and shares the live 
 except for the environment and the client, so the runner is covered by the test suite
 rather than first exercised against a paid endpoint.
 
+## 8. The freeze
+
+`freeze.py` pins what 0002-R is, so that changing the control has to be deliberate.
+
+`participating_sources()` in `arms.py` digests modules at manifest time and proves the
+two arms of one pair executed identical code. That is not a freeze: it is recomputed
+every run and no expected value is stored, so an edit to `agent.py` could change the
+control while every check stayed green, and a later 0006 result would be measured
+against a moving baseline.
+
+Two pinned digests, and they are not independent nets:
+
+| digest | covers | role |
+|---|---|---|
+| `runtime_digest()` | the eight modules an arm imports, plus 0002's own `participating_source_hashes()` folded in as one entry | the detector |
+| `control_manifest_digest()` | every model↔harness crossing of the constructed control | classifies what the detector caught |
+
+The runtime digest is deliberately total — a comment fails it, because nothing
+distinguishes a comment from a behavioural change without reading it. The manifest
+digest rarely moves alone; it is kept because runtime alone says the control moved,
+and the pair says whether it moved somewhere the model can see. Verified: a comment
+appended to `agent.py` moves runtime only; editing a sentence of the system prompt in
+the same file moves both.
+
+The frozen set excludes the prototypes, the mutation probe, the friction reader and
+`freeze.py`. Those measure 0002-R; they are not part of it, and editing a measuring
+tool must not read as the control having changed. `test_frozen_modules_are_the_arm_import_graph`
+derives the set from `arms.py`'s own imports so the list cannot rot into a hand-kept
+fiction.
+
+The pin caught a real defect on its first run: `host_only.source_sha256` globs every p9
+module, so the manifest digest included `freeze.py` and changed whenever the pin itself
+was re-pinned. It is now dropped from the frozen manifest; code coverage belongs to the
+runtime digest, which names its inputs.
+
+**To change 0002-R:** run `python -m …p9.freeze`, read which components moved, and
+commit the new constants with a reason. The check runs in the ordinary test suite, so
+an undeclared change fails like any other regression.
+
 ## What is not frozen here
 
 Budget authority artifacts, a release gate, historical-0002 behavioral equivalence, and
-RHAE readiness. The runner can reach a live endpoint but no live run has been made, so
-nothing here licenses a claim about behaviour, cost or latency against a real provider.
+RHAE readiness.
+
+Live runs have been made — Gemma on ls20 and cd82, single runs and pairs — and they
+license claims about interface behaviour (adoption, friction kinds, coordinate
+submissions, transport failures) at n=1. They do not license any performance claim.
+Temperature is 1.0 and the control's own code-cell count varied 63 → 16 between two
+identically-configured runs; that variance swamps every between-arm number observed so
+far. One level has been completed across roughly 800 actions.
+
+One decision inside the frozen control is unmeasured: the annotated image is supplied
+unconditionally, and unlike a helper function it leaves no adoption signal — the model
+cannot decline it. The only test is an image-off arm compared across several runs,
+which no evidence here provides. It is frozen as a considered guess, not as a
+measured one.

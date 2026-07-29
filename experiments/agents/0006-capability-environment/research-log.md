@@ -575,6 +575,50 @@ because the retry budget was reachable only by editing `ArmSpec`. `--transport-r
 and `--transport-backoff` now exist, and clearing the provider pin restores OpenRouter
 fallback that `allow_fallbacks=False` had disabled.
 
+### Second live capability pair: adoption, and the capability answering back
+
+Same model, same game, same helper, 44 actions each arm. The only change since the
+null was 240 characters of prompt addendum. Measured by model-authored code cell:
+
+| | code cells | using `frames` | calling `components()` |
+|---|---|---|---|
+| control | 16 | 16 | 0 (absent) |
+| treatment | 75 | 75 | **8** |
+| *prior pair, docstring only* | *18* | *9* | *0* |
+
+**A capability documented only where the model would have to go looking does not
+exist.** Nothing about the operator changed between the two pairs — only whether the
+contract named it. This is a constraint on every capability 0006 registers later, and
+it is cheap to violate by accident, because documenting inside the artifact feels like
+documenting.
+
+A second reading of the same numbers: `frames` appears in **91 of 91** code cells
+across both arms. The helper is not optional tooling, it is the interface the model
+works through. That is the strongest evidence yet that shipping it into the control
+was right.
+
+**What the eight calls did.** Seven were the same undifferentiated listing, ~1,100
+characters each, dominated by one component of ~3,080 cells whose bounding box spans
+almost the whole grid — the background. Only the eighth filtered to something
+discriminating. The helper's own docstring warned that adjacency labelling is a
+contested theory of objectness; the live result is narrower and more useful than the
+warning: unfiltered connected components on an ARC frame is mostly a background
+detector, and the model spent seven rounds rediscovering that. This is an observation
+about the capability rather than about our prompt, which is what the pair was for.
+
+**The guard held.** Base system-prompt hash identical across arms (`a3dd2df3`),
+`capability_addendum_sha256` the only prompt difference, 93/103 shared manifest paths,
+zero unauthorized differences. The split hash did the job it was built for on its
+first live use.
+
+**Not licensed by this pair.** Cost \$0.97 vs \$0.48, 75 vs 16 code cells,
+null-action rate 15/44 vs 11/44, both arms level 0. All descriptive. The decisive
+evidence against reading any of it: the control's own code-cell count went 63 → 16
+between two identically-configured runs, variance that swamps every between-arm
+number here. One pair at temperature 1.0 measures adoption, not effect.
+
+`components()` earned its registration. It did not earn shipping in the control.
+
 ### What this does not license
 
 No gameplay, learning, or 0006-intervention claim: the model is a fixed script
