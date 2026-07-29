@@ -50,9 +50,11 @@ TREATMENT_CAPABILITIES: dict[str, TreatmentCapability] = {
             "model_visible.workspace.provided_helper_sha256",
             "model_visible.treatment_capabilities",
         ),
-        # The prompt is byte-identical between the arms: the operator documents
-        # itself inside the helper. Authorising a prompt difference would blunt the
-        # smuggled-prompt negative control.
+        # The first live pair documented this operator only inside the helper
+        # docstring and got zero adoption: neither arm ever opened frames.py. The
+        # prompt now carries an addendum, hashed separately from the shared base so
+        # a smuggled prompt difference is still caught. No observation payload
+        # differs, so request_payload_paths stays empty.
         request_payload_paths=(),
         prompt_addendum=(
             "frames.components(step) is also available: it returns connected runs of "
