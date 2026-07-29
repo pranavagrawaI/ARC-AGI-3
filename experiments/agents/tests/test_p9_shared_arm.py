@@ -401,9 +401,9 @@ class RetryingChatClientTests(unittest.TestCase):
 
     def test_a_negative_retry_budget_is_refused(self) -> None:
         with TemporaryDirectory() as scratch:
-            log = ProcessLog(Path(scratch) / "process.jsonl")
-            with self.assertRaises(ValueError):
-                RetryingChatClient(_StubClient([]), process_log=log, max_retries=-1)
+            with ProcessLog(Path(scratch) / "process.jsonl") as log:
+                with self.assertRaises(ValueError):
+                    RetryingChatClient(_StubClient([]), process_log=log, max_retries=-1)
 
 
 class RunnerTests(unittest.TestCase):
@@ -708,6 +708,21 @@ class FreezeTests(unittest.TestCase):
         manifest = freeze.control_manifest()
         self.assertNotIn("source_sha256", manifest.get("host_only", {}))
         self.assertNotIn("run_dir", manifest.get("host_only", {}))
+
+    def test_control_manifest_closes_the_constructed_arm(self) -> None:
+        """Reading the freeze must not leave its workspace worker and log open."""
+
+        class ConstructedArm:
+            closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        arm = ConstructedArm()
+        with patch("p9.arms.build_arm", return_value=arm):
+            with patch("p9.arms.arm_manifest", return_value={"host_only": {}}):
+                freeze.control_manifest()
+        self.assertTrue(arm.closed)
 
     def test_the_manifest_digest_is_stable_across_constructions(self) -> None:
         self.assertEqual(

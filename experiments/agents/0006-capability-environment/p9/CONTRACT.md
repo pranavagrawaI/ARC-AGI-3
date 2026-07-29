@@ -87,7 +87,6 @@ Everything in the manifest outside `treatment_capabilities`. Concretely, both ar
 - the system prompt (sha256), the tool list, and the observation-message shape;
 - the workspace: writable root, read-only projections, reserved paths, output char limit,
   timeout, package allowlist;
-- the episode archive schema and mount;
 - the context policy: turn limit, python-context policy, omission-notice template digest,
   and the commitment that no host-authored summary exists;
 - the failure taxonomy and the decision contract;

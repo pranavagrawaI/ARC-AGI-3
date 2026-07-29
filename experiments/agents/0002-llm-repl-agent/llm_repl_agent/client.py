@@ -220,7 +220,10 @@ class OpenAICompatibleChatClient:
                 response_bytes = response.read()
                 body = json.loads(response_bytes.decode("utf-8"))
         except HTTPError as error:
-            detail_bytes = error.read()
+            try:
+                detail_bytes = error.read()
+            finally:
+                error.close()
             detail = detail_bytes.decode("utf-8", errors="replace")
             raise ModelRequestError(
                 f"model endpoint returned HTTP {error.code}: {detail[:2000]}",

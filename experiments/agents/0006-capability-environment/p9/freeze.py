@@ -59,9 +59,11 @@ RUNTIME_MODULES = (
 # one digest keeps that true without duplicating 0002's list here, where it would rot.
 BASELINE_PROTOCOL_KEY = "0002-protocol"
 
-# Pinned 2026-07-29, after the second live capability pair. This is the 0002-R that
-# every 0006 comparison is measured against; moving it means the baseline moved.
-FROZEN_RUNTIME_DIGEST = "5b0837e5a42c9674465193b935890a1ae08ac85f780b51ecd14ec81eb58c9f6f"
+# Pinned 2026-07-29, after the second live capability pair and the final verifier
+# pass closed HTTP-error response handles. The model-visible manifest did not move.
+# This is the 0002-R every 0006 comparison is measured against; moving it means the
+# baseline moved.
+FROZEN_RUNTIME_DIGEST = "1db0308a4badf92dd7b7348f8091d9d02263116f992df49e0de0f4c3a2d86afc"
 FROZEN_CONTROL_MANIFEST_DIGEST = (
     "4482de944f17fdb26b76f66f23c95b7a73b0b1f2b602868d7f96445688abd5c6"
 )
@@ -70,7 +72,7 @@ FROZEN_CONTROL_MANIFEST_DIGEST = (
 # that says "something changed" and nothing else is what makes a freeze annoying
 # enough to be disabled.
 FROZEN_RUNTIME_COMPONENTS: dict[str, str] = {
-    "0002-protocol": "657a76bd1bf54480306bcfd5bf4efaf192581bdf5187e2eab0ab627b72a2a82f",
+    "0002-protocol": "5fc34b7a9927af0905810a6aed747b286da0d958e695bd1cd5a0a0d1cb6a9616",
     "p9/agent.py": "17ed0f1833486d34d76f1b363ec972f68273789133f206b265c4bae1dcabc7a7",
     "p9/annotated_frame.py": "3c9c0627e04ad6f20541bba535bc40b27e889669c9400c7dd2fd4818141084d1",
     "p9/arms.py": "20ae6eb68d52670a0a9a50e97c496a1d0b65d6407a283c0afd91c80fee13942f",
@@ -122,7 +124,10 @@ def control_manifest() -> dict[str, Any]:
             run_dir=Path(tmp) / "run",
             inner_client=_SilentClient(),
         )
-        manifest = arm_manifest(arm)
+        try:
+            manifest = arm_manifest(arm)
+        finally:
+            arm.close()
     host_only = manifest.get("host_only", {})
     host_only.pop("source_sha256", None)
     host_only.pop("run_dir", None)

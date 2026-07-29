@@ -87,8 +87,8 @@ MUTANTS = (
         name="observation-path-convention-dropped-from-the-contract",
         breaks="the model is told how to construct an observation filename",
         filename="agent.py",
-        before="    PATH_CONVENTION + SCHEMA_CONVENTION + RUNTIME_CONVENTION + IMPORT_CONVENTION",
-        after="    SCHEMA_CONVENTION + RUNTIME_CONVENTION + IMPORT_CONVENTION",
+        before="    + PATH_CONVENTION\n    + SCHEMA_CONVENTION",
+        after="    + SCHEMA_CONVENTION",
         prototypes=("p9_1_cumulative_loop.py",),
     ),
     Mutant(
@@ -111,8 +111,8 @@ MUTANTS = (
         name="workspace-contents-misstated",
         breaks="the contract lists what the workspace already contains",
         filename="agent.py",
-        before='    "public_history.jsonl",\n)\n# self._history[-8:]',
-        after=')\n# self._history[-8:]',
+        before="    WORKSPACE_CONTENTS_CONVENTION\n    + FRAME_TOOLS_CONVENTION",
+        after="    FRAME_TOOLS_CONVENTION",
         prototypes=("p9_1_cumulative_loop.py",),
     ),
     Mutant(

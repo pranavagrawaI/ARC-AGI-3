@@ -263,6 +263,7 @@ class OpenAICompatibleClientTests(unittest.TestCase):
         self.assertEqual(opened.call_count, 2)
         slept.assert_called_once_with(0)
         self.assertEqual(result.response_id, "chat-1")
+        self.assertTrue(overloaded.fp.closed)
 
     def test_retries_http200_provider_504_abort_body(self) -> None:
         aborted = {
@@ -369,6 +370,7 @@ class OpenAICompatibleClientTests(unittest.TestCase):
                 client.complete(messages=[{"role": "user", "content": "hello"}], tools=[])
         self.assertEqual(ctx.exception.http_status, 429)
         self.assertTrue(ctx.exception.retryable)
+        self.assertTrue(overloaded.fp.closed)
 
     def test_posts_qwen_thinking_and_sampling_contract(self) -> None:
         options = model_request_options("qwen3.6")
