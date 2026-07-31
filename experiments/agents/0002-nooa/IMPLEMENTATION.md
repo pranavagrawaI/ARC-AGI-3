@@ -44,7 +44,7 @@ Initial implementation:
 
 This layout is contingent. A future compatible in-process runtime may replace it without changing the contract if qualification still proves the same model-visible boundary.
 
-## Planned tree
+## Current tree
 
 ```text
 experiments/agents/0002-nooa/
@@ -60,16 +60,17 @@ experiments/agents/0002-nooa/
 │   ├── launcher.py
 │   └── llm.py
 ├── host/
-│   ├── runner.py
-│   ├── ipc.py
-│   └── parity.py
+│   ├── qualification.py
+│   └── runner.py
 ├── tests/
+│   ├── test_host.py
+│   └── test_qualification.py
 └── third_party/nooa/
     ├── LICENSE
     └── THIRD_PARTY_NOTICES.md
 ```
 
-Directories are created only when their first exercised artifact is written.
+The nested runtime also owns its Python 3.12 tests and lockfile.
 
 ## Copy-and-prune source
 
@@ -89,13 +90,15 @@ Do not copy the NOOA framework, harness, recorder, viewer, experiment fleet, ski
 
 ## First-green order
 
-1. Copy the three known-working ARC integration files with attribution and source markers.
-2. Make the copied launcher instantiate one temporary agent variant without changing its upstream behavior.
-3. Close one offline NOOA model→Python→result→action loop through the shared host.
-4. Add a failing test for one forbidden surface.
-5. Delete that surface and make the test pass.
-6. Repeat for runtime introspection, hidden events, memory, retrieval, summarization, reflection, skills, action batching, and host fallback.
-7. Replace broad copied modules with the smallest surviving skeleton only after deletion reveals the irreducible seams.
+The tracer bullet completed the source-copy, nested-runtime, cumulative-loop,
+forbidden-surface, and first parity slices. The remaining first-green work is:
+
+1. replace the offline fixture client with the copied provider adapter without
+   changing the audited model-visible surface;
+2. classify retryable pre-response and fatal/uncertain transport failures;
+3. commit provider request/response evidence without credentials or image bodies;
+4. finish the G3/G4/G5/G8 negative and mutation matrices;
+5. run G9 only after the offline report contains no unmatched affordance.
 
 Do not reimplement provider normalization, dispatch, yield semantics, or lifecycle from memory before the copied path has run.
 
@@ -160,13 +163,16 @@ The goal is not a polished adaptation of NVIDIA's ARC agent. It is the smallest 
 
 ## Current implementation limitations
 
-Until exercised, do not claim:
+Do not yet claim:
 
 - hostile-code security;
 - endpoint compatibility;
 - provider determinism;
-- clean crash recovery;
 - cross-platform Python/runtime compatibility;
-- that the proposed IPC and nested-project layout survived first contact.
+- complete G1–G8 qualification;
+- live usability or gameplay parity.
 
-These are engineering risks and qualification targets, not semantic clauses in `CONTRACT.md`.
+The Linux/WSL nested-project and IPC path has survived deterministic fixtures,
+including timeout and process-death cleanup. That is evidence for this substrate,
+not a cross-platform claim. These are engineering risks and qualification
+targets, not semantic clauses in `CONTRACT.md`.

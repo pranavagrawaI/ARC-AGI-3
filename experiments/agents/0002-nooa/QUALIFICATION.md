@@ -4,6 +4,46 @@ Status: executable qualification plan for the pre-freeze candidate. This file ma
 
 The stable authority boundary is in [`CONTRACT.md`](./CONTRACT.md). Engineering choices are in [`IMPLEMENTATION.md`](./IMPLEMENTATION.md). Upstream provenance is in [`SOURCE_MANIFEST.json`](./SOURCE_MANIFEST.json).
 
+## Current gate state
+
+The tracer bullet is a qualification instrument, not a qualified base.
+
+| Gate | State | Current evidence | Remaining load-bearing gap |
+|---|---|---|---|
+| G1 | partial | pinned upstream bytes, verbatim copies, notices, and selected forbidden imports are executable checks | complete import/file/introspection route matrix |
+| G2 | pass for offline fixture | cumulative memory/file loop crosses a real successor through the host IPC | repeat through the live provider adapter |
+| G3 | partial | complete-turn eviction and pointer-only omission are exercised | exhaustive hidden-event enumeration/dereference mutants |
+| G4 | partial | runtime names, globals, NOOA/undeclared imports, and out-of-workspace reads fail while NumPy/Pillow work | process environment/arguments, package discovery, parent-process, cache, and IPC route matrix |
+| G5 | partial | valid return stops later scripted model work and file mutation | explicit replacement-action and post-accept-hook mutants |
+| G6 | partial | syntax/runtime errors, malformed/illegal actions, output bounds, budgets, timeout restart, response timeout, process death, and tree cleanup are exercised | retryable versus fatal/uncertain provider transport |
+| G7 | partial | actual fixture messages/tools/observation/workspace are normalized against the frozen control constructor; unmatched fields fail | full instruction digests, errors, imports, omission, budgets, and actual provider payload |
+| G8 | partial | hidden-history and runtime-term reintroduction mutants fail parity | complete required mutant matrix |
+| G9 | blocked by design | none | provider adapter and G1–G8 closure |
+
+The next implementation decision is therefore narrow: finish the provider and
+transport/evidence seam, or finish the exhaustive offline negative matrices
+first. The current recommendation is the provider seam because it can expose
+request-shape and retry semantics that would otherwise force the matrices to be
+rewritten.
+
+### Reproduction
+
+From the repository root:
+
+```bash
+uv run --python 3.14 python -m unittest discover \
+  -s experiments/agents/0002-nooa/tests -v
+```
+
+From `experiments/agents/0002-nooa/nooa-runtime/`:
+
+```bash
+.venv/bin/python -m pytest -s tests -q
+```
+
+The timeout fixtures create nested workers; run them where the operating system
+process and Landlock guards are available.
+
 ## Shared paired-run specification
 
 A comparison constructs `0002-R` and `0002-NOOA` from one immutable paired-run specification. It must declare at least:

@@ -1,6 +1,6 @@
 # 0002-NOOA
 
-Status: contract written; implementation not started.
+Status: offline tracer bullet implemented; qualification is partial.
 
 `0002-NOOA` is the 0002 minimum Python REPL agent implemented using NOOA. It is a candidate base for the planned `0006-NOOA`, not a 0006 implementation and not the existing NVIDIA NOOA ARC agent under a new name.
 
@@ -39,3 +39,23 @@ otherwise
 NOOA requires Python `<3.14`, while this repository requires Python `>=3.14`. The NOOA agent will therefore run in a nested Python 3.12 project and communicate with the shared ARC host through narrow file IPC. NOOA will not be added to the root `pyproject.toml`.
 
 Features removed from this base but potentially useful later are recorded in [`../0006-nooa/NOOA_FEATURES.md`](../0006-nooa/NOOA_FEATURES.md). That inventory is not a treatment specification.
+
+## Current executable slice
+
+The host-side `NooaProcessAgent` starts one episode-scoped Python 3.12 worker,
+projects the frozen `0002-R` observation/workspace surface, and crosses a
+versioned append-only JSONL boundary. The worker exposes only generic persistent
+Python/files and one typed final action. Offline fixture tests currently exercise:
+
+- cumulative Python memory and model-authored files across environment actions;
+- exact current text/image observation crossings and a normalized `0002-R` parity report;
+- complete-turn eviction with a pointer-only omission notice;
+- generated-code import, object, filesystem, network, and runtime restrictions;
+- syntax/runtime/malformed-action repair, output bounds, timeout restart, budgets,
+  process death, and process-tree cleanup;
+- source-manifest verification and mutations that reintroduce hidden history or
+  runtime prompt terms.
+
+This does **not** yet license a live comparison. The provider adapter, transport
+classification/retries, full evidence commitments, the remaining mutation
+matrix, and G9 are still open. See [`QUALIFICATION.md`](./QUALIFICATION.md).
