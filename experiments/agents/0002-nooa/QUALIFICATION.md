@@ -6,8 +6,8 @@ The stable authority boundary is in [`CONTRACT.md`](./CONTRACT.md). Engineering 
 
 ## Current gate state
 
-The offline tracer is qualified through G8. G9 is authorized but has not been
-run against a live provider/game pair.
+The offline tracer is qualified through G8. Bounded live G9 passed on LS20
+through OpenRouter with Gemma.
 
 | Gate | State | Current evidence | Remaining load-bearing gap |
 |---|---|---|---|
@@ -19,11 +19,11 @@ run against a live provider/game pair.
 | G6 | pass offline | existing recovery matrix plus retryable/fatal/uncertain provider transport injection; fatal, uncertain, and exhausted-retryable paths carry exact attempt evidence and make no host action | repeat the success path in G9; no offline failure class remains open |
 | G7 | pass offline | a real constructed 0002-R fixture and the NOOA fixture run the same sequence; every crossing is value-diffed for instructions, observations/images, status, tools, context boundaries, decisions, and evidence; replay uses host-owned committed observations | inspect both live provider payloads in G9 |
 | G8 | pass offline | eight behavioral crossing mutants are rejected independently of wording; deletion probes kill namespace closure, omission, persistence, timeout restart, validation, and both temporal barriers | none offline |
-| G9 | authorized, not run | the offline pair runs both real harnesses from one spec; a shared neutral probe requires Python plus file reuse across two action points; live transport uses `/responses`, compares actual request projections, and exits nonzero on any failed capacity or arm | choose the live game/routing-model/wire-model/endpoint and run the bounded pair |
+| G9 | pass live | accepted run `g9-20260731T153745Z-d253eb4b`: both arms completed three LS20 actions, used Python across at least two action points, reused the committed probe file, stopped at the shared action budget, shut down cleanly, and matched every actual OpenRouter `/responses` projection | none for bounded LS20 interface usability; gameplay competence and cross-game generality remain outside this gate |
 
 The provider and transport/evidence seam, exhaustive negative/mutation matrices,
-and complete offline parity catalogue are green. The remaining judgment is the
-bounded live G9 choice; it can establish usability and incompatibilities only.
+complete offline parity catalogue, and bounded live usability pair are green.
+G9 establishes interface usability and observed incompatibilities only.
 
 ### Reproduction
 
@@ -51,8 +51,33 @@ uv run --python 3.14 python experiments/agents/0002-nooa/run_paired_probe.py \
 The timeout fixtures create nested workers; run them where the operating system
 process and Landlock guards are available.
 
-Current rerun (2026-07-31): 77 Python 3.12 runtime tests and 25 Python 3.14 host
+Current rerun (2026-07-31): 79 Python 3.12 runtime tests and 26 Python 3.14 host
 tests pass. The offline G9 runner regression is included in the host count.
+
+### Live G9 evidence
+
+The accepted run is
+[`g9-20260731T153745Z-d253eb4b`](./artifacts/paired-usability-probes/g9-20260731T153745Z-d253eb4b/summary.json),
+with paired-spec digest
+`c6d5ebb6639d10b7f5f486ce0e380459bb9ec33db04786470c18170a5e6ae0a5`.
+It used LS20 seed 0, routing model `openai/google/gemma-4-31b-it`, wire model
+`google/gemma-4-31b-it`, and `https://openrouter.ai/api/v1`. The control made
+seven provider crossings and the candidate five; every projected static or
+tool-conditional request field matched the frozen profile. A post-run scan
+found neither the inherited credential nor unredacted data-image bodies in the
+provider evidence.
+
+Two prior nonzero runs were rejected and retained as diagnostic evidence:
+
+- [`g9-20260731T152815Z-02b334c2`](./artifacts/paired-usability-probes/g9-20260731T152815Z-02b334c2/summary.json)
+  exposed Chat-style multimodal blocks crossing directly into `/responses`;
+- [`g9-20260731T153352Z-c9265982`](./artifacts/paired-usability-probes/g9-20260731T153352Z-c9265982/summary.json)
+  reached one action and exposed an unflattened NOOA `_batch` successor-history
+  item.
+
+Prospective regressions now require exact `input_text`/`input_image` projection,
+native successor-history flattening, numeric token-field preservation, and
+tool controls that are present exactly when tools are present.
 
 ## Shared paired-run specification
 

@@ -52,6 +52,7 @@ class PairedProbeRunnerTests(unittest.TestCase):
                     "stream": False,
                     "parallel_tool_calls": False,
                     "tool_choice": "auto",
+                    "tools": [{"type": "function", "name": "python"}],
                     "truncation": "disabled",
                 },
             }
@@ -160,7 +161,45 @@ class PairedProbeRunnerTests(unittest.TestCase):
         )
         image = client.actual_crossings[0]["request"]["body"]["input"][0]["content"][1]
         self.assertTrue(image["image_url"]["redacted"])
+        self.assertEqual(
+            client.actual_crossings[0]["request"]["body"]["max_output_tokens"],
+            4096,
+        )
+        self.assertEqual(response.response_body["usage"]["total_tokens"], 3)
         self.assertEqual(len(client.actual_crossings[0]["request"]["body_sha256"]), 64)
+
+    def test_provider_profile_omits_tool_controls_when_a_crossing_has_no_tools(
+        self,
+    ) -> None:
+        profile = ProviderRequestProfile.responses(
+            model="openai/provider/model",
+            wire_model="provider/model",
+            api_base="https://gateway.invalid/v1",
+            max_output_tokens=4096,
+            reasoning_effort="medium",
+            request_timeout_seconds=90.0,
+        )
+        crossing = {
+            "request": {
+                "url": "https://gateway.invalid/v1/responses",
+                "body": {
+                    "model": "provider/model",
+                    "input": [],
+                    "max_output_tokens": 4096,
+                    "reasoning": {"effort": "medium"},
+                    "stream": False,
+                    "truncation": "disabled",
+                },
+            }
+        }
+
+        report = _provider_profile_report(
+            profile,
+            control_crossings=[crossing],
+            candidate_crossings=[crossing],
+        )
+
+        self.assertTrue(report["success"])
 
     def test_control_responses_retries_only_proven_pre_connect_failures(self) -> None:
         profile = ProviderRequestProfile.responses(

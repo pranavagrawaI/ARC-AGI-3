@@ -485,7 +485,7 @@ def _provider_profile_report(
     control_crossings: list[dict[str, Any]],
     candidate_crossings: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    expected = {
+    expected_static = {
         "api_surface": profile.api_surface,
         "model": profile.wire_model,
         "max_output_tokens": profile.max_output_tokens,
@@ -493,24 +493,56 @@ def _provider_profile_report(
         "temperature": profile.temperature if profile.temperature is not None else "<omitted>",
         "seed": profile.seed if profile.seed is not None else "<omitted>",
         "stream": profile.stream,
-        "parallel_tool_calls": profile.parallel_tool_calls,
-        "tool_choice": profile.tool_choice,
         "truncation": profile.truncation,
     }
-    projections = {
-        "0002-R": [_crossing_profile(item) for item in control_crossings],
-        "0002-NOOA": [_crossing_profile(item) for item in candidate_crossings],
+    crossings = {
+        "0002-R": control_crossings,
+        "0002-NOOA": candidate_crossings,
     }
+    projections = {
+        arm: [_crossing_profile(item) for item in items]
+        for arm, items in crossings.items()
+    }
+    expected_projections: dict[str, list[dict[str, Any]]] = {}
+    for arm, items in crossings.items():
+        expected_projections[arm] = []
+        for item in items:
+            body = item.get("request", {}).get("body", {})
+            has_tools = isinstance(body, dict) and bool(body.get("tools"))
+            expected_projections[arm].append(
+                {
+                    **expected_static,
+                    "parallel_tool_calls": (
+                        profile.parallel_tool_calls if has_tools else "<omitted>"
+                    ),
+                    "tool_choice": profile.tool_choice if has_tools else "<omitted>",
+                }
+            )
     mismatches = [
-        {"arm": arm, "crossing": index, "expected": expected, "actual": actual}
+        {
+            "arm": arm,
+            "crossing": index,
+            "expected": expected_projections[arm][index],
+            "actual": actual,
+        }
         for arm, actuals in projections.items()
         for index, actual in enumerate(actuals)
-        if actual != expected
+        if actual != expected_projections[arm][index]
     ]
     return {
         "schema": "0002-nooa-g9-provider-profile-v1",
         "success": all(projections.values()) and not mismatches,
-        "expected": expected,
+        "expected": {
+            "static": expected_static,
+            "when_tools_present": {
+                "parallel_tool_calls": profile.parallel_tool_calls,
+                "tool_choice": profile.tool_choice,
+            },
+            "when_tools_absent": {
+                "parallel_tool_calls": "<omitted>",
+                "tool_choice": "<omitted>",
+            },
+        },
         "projections": projections,
         "mismatches": mismatches,
     }

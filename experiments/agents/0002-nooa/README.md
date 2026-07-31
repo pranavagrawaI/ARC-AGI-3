@@ -1,7 +1,7 @@
 # 0002-NOOA
 
-Status: provider-capable tracer passes offline G1–G8; bounded live G9 is ready
-but has not been run.
+Status: provider-capable tracer passes offline G1–G8 and bounded live G9 on
+LS20 through OpenRouter Gemma.
 
 `0002-NOOA` is the 0002 minimum Python REPL agent implemented using NOOA. It is a candidate base for the planned `0006-NOOA`, not a 0006 implementation and not the existing NVIDIA NOOA ARC agent under a new name.
 
@@ -56,6 +56,8 @@ Python/files and one typed final action. Offline fixture tests currently exercis
   process death, and process-tree cleanup;
 - an immutable Responses request profile with NOOA and LiteLLM hidden retries
   disabled;
+- explicit Chat-multimodal and NOOA successor-history projection onto the
+  Responses wire schema;
 - local-only LiteLLM import startup with implicit `.env` loading disabled;
 - canonical and actual HTTP crossing evidence with credential/image redaction;
 - retryable, fatal, and uncertain transport injection, including the temporal
@@ -76,8 +78,9 @@ evidence plus at least two actions, complete traces, clean shutdown, and exact
 actual `/responses` profile projections. A blocker returns a nonzero status.
 
 [`run_live_probe.py`](./run_live_probe.py) remains a bounded single-arm smoke
-helper and is not G9. Offline G1–G8 are now green, so the same-spec
-[`run_paired_probe.py`](./run_paired_probe.py) live pair is authorized. Choosing
-the game/routing-model/wire-model/endpoint and spending the bounded provider
-calls remains an explicit operator decision. See
-[`QUALIFICATION.md`](./QUALIFICATION.md).
+helper and is not G9. Offline G1–G8 and the same-spec
+[`run_paired_probe.py`](./run_paired_probe.py) live pair are green. The accepted
+G9 used LS20, `openai/google/gemma-4-31b-it` routing,
+`google/gemma-4-31b-it` on the wire, and OpenRouter's `/responses` endpoint.
+This establishes bounded interface usability, not gameplay competence or
+cross-game generality. See [`QUALIFICATION.md`](./QUALIFICATION.md).

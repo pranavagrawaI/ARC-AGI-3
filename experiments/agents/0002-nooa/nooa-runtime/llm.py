@@ -30,7 +30,7 @@ del _dependency_os
 import httpx
 from nooa.tracing._secret_scrubber import _is_sensitive_key, scrub_string
 from nooa.unifiedllm import RetryConfig
-from nooa.unifiedllm.unifiedllm import ResponsesClient
+from nooa.unifiedllm.unifiedllm import ResponsesClient as _NooaResponsesClient
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +118,97 @@ class ProviderRequestProfile:
             str,
         ):
             raise ValueError("reasoning_effort must be a string or null")
+
+
+def _responses_content(role: str, content: Any) -> Any:
+    """Project Chat-style multimodal blocks onto the Responses wire schema."""
+
+    if not isinstance(content, list):
+        return content
+    converted: list[dict[str, Any]] = []
+    for part in content:
+        if not isinstance(part, Mapping):
+            continue
+        kind = part.get("type")
+        if kind in {
+            "input_text",
+            "input_image",
+            "input_file",
+            "input_audio",
+            "input_video",
+            "output_text",
+        }:
+            converted.append(dict(part))
+        elif kind == "text":
+            converted.append(
+                {
+                    "type": "output_text" if role == "assistant" else "input_text",
+                    "text": str(part.get("text", "")),
+                }
+            )
+        elif kind == "image_url" and role == "user":
+            image = part.get("image_url")
+            url = image.get("url") if isinstance(image, Mapping) else None
+            if isinstance(url, str):
+                converted.append({"type": "input_image", "image_url": url})
+    return converted
+
+
+def _expand_response_batches(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    expanded: list[dict[str, Any]] = []
+    for message in messages:
+        batch = message.get("_batch")
+        if not isinstance(batch, list):
+            expanded.append(message)
+            continue
+        for raw_item in batch:
+            if not isinstance(raw_item, Mapping):
+                continue
+            item = dict(raw_item)
+            if item.get("type") == "function_call":
+                expanded.append(
+                    {
+                        "type": "function_call",
+                        "call_id": str(item.get("call_id", "")),
+                        "name": str(item.get("name", "")),
+                        "arguments": str(item.get("arguments", "")),
+                    }
+                )
+            elif item.get("type") == "message":
+                expanded.append(
+                    {
+                        "role": str(item.get("role", "assistant")),
+                        "content": item.get("content", ""),
+                    }
+                )
+            else:
+                expanded.append(item)
+    return expanded
+
+
+class ResponsesClient(_NooaResponsesClient):
+    """NOOA Responses client with an explicit Chat-to-Responses content crossing."""
+
+    def _transform_messages(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        transformed, instructions = super()._transform_messages(
+            _expand_response_batches(messages)
+        )
+        normalized: list[dict[str, Any]] = []
+        for message in transformed:
+            item = dict(message)
+            role = item.get("role")
+            if role in {"user", "assistant"}:
+                item["content"] = _responses_content(
+                    str(role),
+                    item.get("content"),
+                )
+            normalized.append(item)
+        return normalized, instructions
 
 
 def build_llm(

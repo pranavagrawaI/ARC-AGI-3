@@ -22,16 +22,29 @@ from llm_repl_agent.client import (
 from .qualification import ProviderRequestProfile
 
 
-_SENSITIVE_KEY_PARTS = ("api_key", "authorization", "credential", "secret", "token")
-_SENSITIVE_QUERY_KEYS = {
+_SENSITIVE_KEYS = {
     "access_key",
+    "access_token",
+    "api_key",
+    "authorization",
+    "cookie",
     "credential",
     "key",
+    "password",
+    "refresh_token",
     "secret",
+    "set_cookie",
     "sig",
     "signature",
     "token",
 }
+
+
+def _is_sensitive_audit_key(value: object) -> bool:
+    normalized = str(value).casefold().replace("-", "_")
+    return normalized in _SENSITIVE_KEYS or normalized.endswith(
+        ("_api_key", "_credential", "_password", "_secret")
+    )
 
 
 def _credential_marker(value: str) -> str:
@@ -49,10 +62,7 @@ def _redact_url(value: str) -> str:
         netloc = f"{_credential_marker(userinfo)}@{host}"
     query = []
     for key, item in parse_qsl(split.query, keep_blank_values=True):
-        sensitive = (
-            key.casefold() in _SENSITIVE_QUERY_KEYS
-            or any(part in key.casefold() for part in _SENSITIVE_KEY_PARTS)
-        )
+        sensitive = _is_sensitive_audit_key(key)
         query.append((key, _credential_marker(item) if sensitive else item))
     return urlunsplit((split.scheme, netloc, split.path, urlencode(query), split.fragment))
 
@@ -88,9 +98,7 @@ def _redact_for_audit(
     key: object | None = None,
     known_credentials: tuple[str, ...] = (),
 ) -> Any:
-    if key is not None and any(
-        part in str(key).casefold() for part in _SENSITIVE_KEY_PARTS
-    ):
+    if key is not None and _is_sensitive_audit_key(key):
         encoded = str(value).encode("utf-8")
         return {
             "redacted": True,

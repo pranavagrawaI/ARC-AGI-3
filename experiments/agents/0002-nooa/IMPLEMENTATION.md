@@ -113,9 +113,10 @@ forbidden-surface, and first parity slices. The remaining first-green work is:
   catalogue and rerun G1-G8.
 - [x] Construct and offline-test the paired 0002-R/0002-NOOA G9 runner after
   G1-G8 became green.
-- [ ] Run the bounded live pair after the operator chooses the explicit
-  game/model/endpoint. `run_live_probe.py` remains a single-arm smoke helper,
-  not G9.
+- [x] Run the bounded live pair after the operator chooses the explicit
+  game/model/endpoint. The accepted LS20/OpenRouter/Gemma run is
+  `g9-20260731T153745Z-d253eb4b`. `run_live_probe.py` remains a single-arm
+  smoke helper, not G9.
 
 Do not reimplement provider normalization, dispatch, yield semantics, or lifecycle from memory before the copied path has run.
 
@@ -183,12 +184,13 @@ The goal is not a polished adaptation of NVIDIA's ARC agent. It is the smallest 
 Do not yet claim:
 
 - hostile-code security;
-- endpoint compatibility;
+- endpoint compatibility beyond the exercised OpenRouter Responses profile;
 - provider determinism;
 - cross-platform Python/runtime compatibility;
-- live usability or gameplay parity.
+- gameplay parity or cross-game generality.
 
 The Linux/WSL nested-project and IPC path has survived deterministic fixtures,
-including timeout and process-death cleanup. That is evidence for this substrate,
-not a cross-platform claim. These are engineering risks and qualification
-targets, not semantic clauses in `CONTRACT.md`.
+including timeout and process-death cleanup, plus one bounded live LS20 pair.
+That is evidence for this substrate, not a cross-platform or general gameplay
+claim. These are engineering risks and qualification targets, not semantic
+clauses in `CONTRACT.md`.

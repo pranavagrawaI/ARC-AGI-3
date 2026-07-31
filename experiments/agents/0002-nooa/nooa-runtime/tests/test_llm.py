@@ -95,6 +95,87 @@ def test_build_llm_uses_the_frozen_profile_and_disables_every_hidden_retry() -> 
         client.close()
 
 
+def test_provider_adapter_converts_chat_multimodal_blocks_to_responses_input() -> None:
+    client = build_llm(_profile(), api_key="test-secret")
+    try:
+        transformed, instructions = client._transform_messages(
+            [
+                {"role": "system", "content": "system"},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "observe"},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "data:image/png;base64,aW1hZ2U="
+                            },
+                        },
+                    ],
+                },
+            ]
+        )
+    finally:
+        client.close()
+
+    assert instructions == "system"
+    assert transformed == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "observe"},
+                {
+                    "type": "input_image",
+                    "image_url": "data:image/png;base64,aW1hZ2U=",
+                },
+            ],
+        }
+    ]
+
+
+def test_provider_adapter_flattens_nooa_response_batches_for_the_successor() -> None:
+    client = build_llm(_profile(), api_key="test-secret")
+    try:
+        transformed, instructions = client._transform_messages(
+            [
+                {
+                    "_batch": [
+                        {
+                            "id": "provider-item-id",
+                            "type": "function_call",
+                            "call_id": "call-1",
+                            "name": "return_result",
+                            "arguments": '{"result":{"action":1}}',
+                            "status": "completed",
+                        }
+                    ],
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "return_result",
+                                "arguments": '{"result":{"action":1}}',
+                            },
+                        }
+                    ],
+                }
+            ]
+        )
+    finally:
+        client.close()
+
+    assert instructions is None
+    assert transformed == [
+        {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "return_result",
+            "arguments": '{"result":{"action":1}}',
+        }
+    ]
+
+
 def test_build_llm_never_discovers_credentials_or_falls_back(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
