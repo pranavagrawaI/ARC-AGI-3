@@ -55,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mode", type=_operation_mode, default=OperationMode.OFFLINE)
     parser.add_argument("--environment-seed", type=int, default=0)
     parser.add_argument("--model", required=True)
+    parser.add_argument("--wire-model", required=True)
     parser.add_argument("--api-base", required=True)
     parser.add_argument("--max-output-tokens", type=int, default=16_384)
     parser.add_argument("--reasoning-effort", default="medium")
@@ -81,6 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
 def _paired_spec(args: argparse.Namespace) -> PairedRunSpec:
     profile = ProviderRequestProfile.responses(
         model=args.model,
+        wire_model=args.wire_model,
         api_base=args.api_base,
         max_output_tokens=args.max_output_tokens,
         reasoning_effort=args.reasoning_effort,
@@ -130,7 +132,11 @@ def main() -> None:
     response_timeout = args.response_timeout_seconds
     if response_timeout is None:
         response_timeout = (
-            args.request_timeout_seconds * (args.transport_max_retries + 1) + 30.0
+            args.max_model_rounds_per_action
+            * args.request_timeout_seconds
+            * (args.transport_max_retries + 1)
+            + args.workspace_timeout_seconds
+            + 30.0
         )
 
     with NooaProcessAgent(

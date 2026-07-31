@@ -6,23 +6,24 @@ The stable authority boundary is in [`CONTRACT.md`](./CONTRACT.md). Engineering 
 
 ## Current gate state
 
-The tracer bullet is a qualification instrument, not a qualified base.
+The offline tracer is qualified through G8. G9 is authorized but has not been
+run against a live provider/game pair.
 
 | Gate | State | Current evidence | Remaining load-bearing gap |
 |---|---|---|---|
-| G1 | partial | pinned upstream bytes, copy-and-prune notices, provider pruning, and selected forbidden imports are executable checks | complete import/file/introspection route matrix |
+| G1 | pass offline | pinned source bytes and notices; pruned provider source; full generated-code import/file/runtime route matrix; forbidden-affordance mutations | repeat source commitments in the live pair |
 | G2 | pass for offline fixture | cumulative memory/file loop crosses a real successor through host IPC; provider mode uses the same long-lived control path | exercise a successor through the live provider adapter |
-| G3 | partial | complete-turn eviction and pointer-only omission are exercised | exhaustive hidden-event enumeration/dereference mutants |
-| G4 | partial | runtime names, globals, NOOA/undeclared imports, and out-of-workspace reads fail while NumPy/Pillow work | process environment/arguments, package discovery, parent-process, cache, and IPC route matrix |
-| G5 | partial | valid return stops later scripted model work and file mutation | explicit replacement-action and post-accept-hook mutants |
+| G3 | pass offline | forced eviction matches the 0002-R boundary; host retains audit events while generated code cannot enumerate framework history; omission-removal mutant fails | exercise eviction only if the bounded live run reaches it |
+| G4 | pass offline | namespace/helpers after initial start and timeout restart, garbage-collector enumeration, concurrency, processes, packages, source, caches, IPC/run artifacts, and outside-workspace reads are closed while generic Python, NumPy, and Pillow work | inspect live traces for an unclassified route |
+| G5 | pass offline | valid return stops later model/Python work; delayed background mutation, replacement, and post-accept workspace mutation are rejected; environment-step failure closes the pending action into host evidence | inspect the live successor boundary |
 | G6 | pass offline | existing recovery matrix plus retryable/fatal/uncertain provider transport injection; fatal, uncertain, and exhausted-retryable paths carry exact attempt evidence and make no host action | repeat the success path in G9; no offline failure class remains open |
-| G7 | partial | fixture parity remains clean; canonical requests are committed and paired with bytes crossing NOOA's owned HTTP client; credential/image redaction is executable | full instruction digests, errors, imports, omission, budgets, and one real-provider payload |
-| G8 | partial | hidden-history and runtime-term reintroduction mutants fail parity | complete required mutant matrix |
-| G9 | blocked by design | `run_live_probe.py` is an unexecuted single-arm provider smoke helper, not the required paired comparison | paired runner plus G1/G3/G4/G5/G7/G8 closure |
+| G7 | pass offline | a real constructed 0002-R fixture and the NOOA fixture run the same sequence; every crossing is value-diffed for instructions, observations/images, status, tools, context boundaries, decisions, and evidence; replay uses host-owned committed observations | inspect both live provider payloads in G9 |
+| G8 | pass offline | eight behavioral crossing mutants are rejected independently of wording; deletion probes kill namespace closure, omission, persistence, timeout restart, validation, and both temporal barriers | none offline |
+| G9 | authorized, not run | the offline pair runs both real harnesses from one spec; a shared neutral probe requires Python plus file reuse across two action points; live transport uses `/responses`, compares actual request projections, and exits nonzero on any failed capacity or arm | choose the live game/routing-model/wire-model/endpoint and run the bounded pair |
 
-The provider and transport/evidence seam is now implemented. The next stage is
-the exhaustive offline negative/mutation matrices and the complete G7 parity
-catalogue. G9 remains unauthorized until that rerun is green.
+The provider and transport/evidence seam, exhaustive negative/mutation matrices,
+and complete offline parity catalogue are green. The remaining judgment is the
+bounded live G9 choice; it can establish usability and incompatibilities only.
 
 ### Reproduction
 
@@ -39,12 +40,19 @@ From `experiments/agents/0002-nooa/nooa-runtime/`:
 .venv/bin/python -m pytest -s tests -q
 ```
 
+Offline paired-runner regression from the repository root:
+
+```bash
+uv run --python 3.14 python experiments/agents/0002-nooa/run_paired_probe.py \
+  --offline --max-actions 2 --max-model-calls 4 \
+  --max-model-rounds-per-action 2 --run-root /tmp/0002-nooa-g9-offline
+```
+
 The timeout fixtures create nested workers; run them where the operating system
 process and Landlock guards are available.
 
-Current rerun (2026-07-31): 61 Python 3.12 runtime tests and 13 Python 3.14 host
-tests pass. This is a suite result, not a claim that gates still marked partial
-have closed.
+Current rerun (2026-07-31): 77 Python 3.12 runtime tests and 25 Python 3.14 host
+tests pass. The offline G9 runner regression is included in the host count.
 
 ## Shared paired-run specification
 
@@ -220,6 +228,26 @@ At minimum, mutants that reintroduce any of the following must fail G1, G3, G4, 
 
 Mutants that remove omission notices, Python/files persistence, timeout/restart reporting, action validation, or the post-accept temporal barrier must fail G2, G3, G5, or G6.
 
+Current deletion-probe evidence (2026-07-31):
+
+| Removed mechanism | Independent gate result |
+|---|---|
+| sandbox namespace pruning | G4 produced three failures and exposed `self`, `CodeActStrategy`, and `variables()` |
+| pointer-only omission insertion | G3 failed because the eviction notice disappeared |
+| episode-scoped sandbox retention | G2 failed on the successor because Python memory was gone |
+| timeout `restart_empty` recovery | G6 failed because the killed worker could not accept the repair cell |
+| runtime action postcondition and final validation | the illegal-action fixture admitted action `99` instead of repairing |
+| accepted-workspace commitment | G5 admitted a post-accept file mutation |
+| pending-action guard | G5 failed; the worker's duplicate action-point identity remained only as a later backstop |
+
+Each source mutant was applied alone, its named test was observed failing, and
+the production implementation was restored before the full rerun. Eight
+wording-independent behavioral crossing mutants separately expose runtime
+introspection, hidden-history query, automatic retrieval, summarization,
+semantic skill text, history selection, action batching, and host force-advance.
+Each changes an actual instruction, observation, context, or tool crossing and
+G7 rejects it. Text sentinels remain only a secondary diagnostic.
+
 ## G9 — One bounded live usability probe
 
 After G1–G8 pass, run a small same-model, same-provider, same-game, same-budget pair. Inspect raw traces from both bases for:
@@ -232,6 +260,28 @@ After G1–G8 pass, run a small same-model, same-provider, same-game, same-budge
 - action-boundary violations.
 
 This licenses interface observations only. It does not establish gameplay superiority, causal treatment effect, or 0006 readiness.
+
+Both arms receive one neutral, spec-committed usability instruction in
+`NOTES.md`: use Python to create a probe file before action one, then read and
+update it after the first successor and before action two. A successful verdict
+requires both action boundaries, Python use at both, the persisted file, clean
+shutdown, complete traces, and no blocking stop. The instruction supplies no
+game semantics and is not part of the frozen base outside G9.
+
+The paired entry point is `run_paired_probe.py`. Its `--offline` mode is the
+runner regression and uses no provider. Live mode requires inherited
+`ARC_LLM_API_KEY`, explicit `--game`, `--model`, `--wire-model`, and
+`--api-base`, and creates a fresh same-seed game for each arm. `--model` is the
+NOOA/LiteLLM routing identifier; `--wire-model` is the exact model value both
+actual `/responses` payloads must carry. It never searches `.env` files.
+
+```bash
+ARC_LLM_API_KEY=... uv run --python 3.14 python \
+  experiments/agents/0002-nooa/run_paired_probe.py \
+  --game <game-id> --model <routing-model-id> --wire-model <wire-model-id> \
+  --api-base <provider-v1-base> \
+  --max-actions 3 --max-model-calls 12
+```
 
 ## Freeze boundary
 

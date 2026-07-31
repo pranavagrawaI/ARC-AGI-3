@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -28,6 +29,7 @@ for _source_root in (_BASELINE_AGENT_ROOT, _P9_PARENT):
 
 from llm_repl_agent.observations import ColorPermutation, ModelObservation, ObservationStore
 from p9.agent import NOTES_FILE, WORKSPACE_ADDENDUM
+from p9.annotated_frame import annotate, annotation_descriptor
 from p9.frame_tools import FRAME_TOOLS_FILE, frame_tools_source
 
 from .qualification import PairedRunSpec
@@ -82,6 +84,55 @@ def _read_tail(path: Path, *, limit: int = 4_000) -> str:
     return value[-limit:]
 
 
+def _workspace_commitment(root: Path) -> str:
+    """Commit the complete workspace state without following model-created links."""
+
+    records: list[dict[str, Any]] = []
+    for directory, dirnames, filenames in os.walk(root, followlinks=False):
+        base = Path(directory)
+        for name in sorted([*dirnames, *filenames]):
+            path = base / name
+            relative = path.relative_to(root).as_posix()
+            mode = os.lstat(path).st_mode
+            if stat.S_ISLNK(mode):
+                record = {
+                    "path": relative,
+                    "kind": "symlink",
+                    "target": os.readlink(path),
+                }
+            elif stat.S_ISDIR(mode):
+                record = {"path": relative, "kind": "directory"}
+            elif stat.S_ISREG(mode):
+                payload = path.read_bytes()
+                record = {
+                    "path": relative,
+                    "kind": "file",
+                    "bytes": len(payload),
+                    "sha256": sha256(payload).hexdigest(),
+                }
+            else:
+                record = {
+                    "path": relative,
+                    "kind": "special",
+                    "mode": stat.S_IFMT(mode),
+                }
+            records.append(record)
+    canonical = json.dumps(records, sort_keys=True, separators=(",", ":"))
+    return sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _host_observation_record(observation: Observation) -> dict[str, Any]:
+    """Serialize the authoritative public observation outside model visibility."""
+
+    return {
+        "pixels": observation.pixels.tolist(),
+        "available_actions": list(observation.available_actions),
+        "levels_completed": observation.levels_completed,
+        "state": observation.state,
+        "full_reset": observation.full_reset,
+    }
+
+
 class NooaProcessAgent:
     """Synchronous harness adapter around one long-lived Python 3.12 worker."""
 
@@ -113,9 +164,12 @@ class NooaProcessAgent:
         self.process_path = self.run_root / "process.jsonl"
         self.worker_stdout_path = self.run_root / "worker.stdout.log"
         self.worker_stderr_path = self.run_root / "worker.stderr.log"
+        self.model_frame_path = self.run_root / "model-frame.png"
+        self.host_observations = self.run_root / "host-observations"
         self.workspace = self.run_root / "workspace"
         self.requests_path.parent.mkdir(parents=True)
         self.requests_path.touch()
+        self.host_observations.mkdir()
         self.workspace.mkdir()
         self.observation_store = ObservationStore(
             self.workspace,
@@ -124,7 +178,13 @@ class NooaProcessAgent:
         with (self.workspace / "WORKSPACE.md").open("a", encoding="utf-8") as contract:
             contract.write(WORKSPACE_ADDENDUM)
         (self.workspace / "public_history.jsonl").touch()
-        (self.workspace / NOTES_FILE).touch()
+        notes_path = self.workspace / NOTES_FILE
+        notes_path.touch()
+        if self.paired_run_spec.usability_probe_instruction is not None:
+            notes_path.write_text(
+                self.paired_run_spec.usability_probe_instruction,
+                encoding="utf-8",
+            )
         (self.workspace / FRAME_TOOLS_FILE).write_text(
             frame_tools_source(components=False),
             encoding="utf-8",
@@ -134,6 +194,7 @@ class NooaProcessAgent:
         self._current_projection: ModelObservation | None = None
         self._history: list[dict[str, Any]] = []
         self._pending_decision: Decision | None = None
+        self._accepted_workspace_commitment: str | None = None
         self._closed = False
         self._response_offset = 0
         self._worker_stdout = self.worker_stdout_path.open("w", encoding="utf-8")
@@ -148,6 +209,8 @@ class NooaProcessAgent:
             str(self.responses_path),
             "--workspace",
             str(self.workspace),
+            "--model-frame",
+            str(self.model_frame_path),
             "--provider" if provider_mode else "--offline-fixture",
             "--serve",
         ]
@@ -187,18 +250,29 @@ class NooaProcessAgent:
                 "environment-action budget exhausted "
                 f"({self._step}/{self.paired_run_spec.max_actions})"
             )
+        host_observation_path = self.host_observations / f"step-{self._step:05d}.json"
+        host_observation_bytes = json.dumps(
+            _host_observation_record(observation),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        host_observation_path.write_bytes(host_observation_bytes)
+        host_observation_commitment = sha256(host_observation_bytes).hexdigest()
         if self._current_projection is None:
             self._current_projection = self.observation_store.write_observation(
                 observation,
                 step=self._step,
             )
         current = self._current_projection
+        self.model_frame_path.write_bytes(annotate(current.pixels))
         height, width = observation.pixels.shape[-2:]
         coordinate_actions = [
             action
             for action in observation.available_actions
             if GameAction.from_id(action).is_complex()
         ]
+        representations = json.loads(json.dumps(current.representations))
+        representations["rendered_image"]["annotation"] = annotation_descriptor()
         request: dict[str, Any] = {
             "protocol": PROTOCOL,
             "run_id": self.run_id,
@@ -206,7 +280,7 @@ class NooaProcessAgent:
             "observation": {
                 "step": self._step,
                 "current_metadata": current.metadata,
-                "representations": current.representations,
+                "representations": representations,
                 "recent_transitions": self._history[
                     -self.paired_run_spec.max_recent_transitions:
                 ],
@@ -229,6 +303,10 @@ class NooaProcessAgent:
         self._write_process(
             "action_request",
             action_point_id=self._step,
+            host_observation={
+                "path": host_observation_path.relative_to(self.run_root).as_posix(),
+                "sha256": host_observation_commitment,
+            },
             request_sha256=sha256(
                 json.dumps(request, sort_keys=True, separators=(",", ":")).encode("utf-8")
             ).hexdigest(),
@@ -300,9 +378,11 @@ class NooaProcessAgent:
             data=data,
             reasoning=reasoning,
         )
+        workspace_commitment = _workspace_commitment(self.workspace)
         self._write_process(
             "decision_validated",
             action_point_id=self._step,
+            workspace_commitment=workspace_commitment,
             decision={
                 "action": decision.action,
                 "data": dict(decision.data) if decision.data else None,
@@ -312,7 +392,32 @@ class NooaProcessAgent:
             },
         )
         self._pending_decision = decision
+        self._accepted_workspace_commitment = workspace_commitment
         return decision
+
+    def record_execution_failure(
+        self,
+        decision: Decision,
+        error: BaseException,
+    ) -> None:
+        """Close an accepted action when the host cannot produce its successor."""
+
+        if self._pending_decision is None:
+            raise NooaWorkerError("execution failure has no pending action")
+        if decision != self._pending_decision:
+            raise NooaWorkerError("execution failure does not match the pending action")
+        self._write_process(
+            "host_execution_failure",
+            action_point_id=self._step,
+            decision={
+                "action": decision.action,
+                "data": dict(decision.data) if decision.data else None,
+                "reasoning": dict(decision.reasoning) if decision.reasoning else None,
+            },
+            error={"type": type(error).__name__, "message": str(error)},
+        )
+        self._pending_decision = None
+        self._accepted_workspace_commitment = None
 
     def observe(self, transition: Transition) -> None:
         if self._pending_decision is None:
@@ -321,6 +426,17 @@ class NooaProcessAgent:
             raise NooaWorkerError("observe transition does not match the pending action")
         if self._current_projection is None:
             raise NooaWorkerError("observe has no projected before observation")
+        actual_workspace_commitment = _workspace_commitment(self.workspace)
+        if actual_workspace_commitment != self._accepted_workspace_commitment:
+            self._write_process(
+                "temporal_seam_violation",
+                action_point_id=self._step,
+                accepted_workspace_commitment=self._accepted_workspace_commitment,
+                actual_workspace_commitment=actual_workspace_commitment,
+            )
+            raise NooaWorkerError(
+                "workspace changed after action acceptance before its successor"
+            )
         after = self.observation_store.write_observation(
             transition.after,
             step=self._step + 1,
@@ -339,6 +455,7 @@ class NooaProcessAgent:
         )
         self._current_projection = after
         self._pending_decision = None
+        self._accepted_workspace_commitment = None
         self._step += 1
 
     def _wait_for_response(self, action_point_id: int) -> dict[str, Any]:

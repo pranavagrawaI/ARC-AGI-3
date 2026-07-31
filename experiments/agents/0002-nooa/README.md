@@ -1,6 +1,7 @@
 # 0002-NOOA
 
-Status: provider-capable tracer implemented; offline qualification is partial.
+Status: provider-capable tracer passes offline G1–G8; bounded live G9 is ready
+but has not been run.
 
 `0002-NOOA` is the 0002 minimum Python REPL agent implemented using NOOA. It is a candidate base for the planned `0006-NOOA`, not a 0006 implementation and not the existing NVIDIA NOOA ARC agent under a new name.
 
@@ -55,15 +56,28 @@ Python/files and one typed final action. Offline fixture tests currently exercis
   process death, and process-tree cleanup;
 - an immutable Responses request profile with NOOA and LiteLLM hidden retries
   disabled;
+- local-only LiteLLM import startup with implicit `.env` loading disabled;
 - canonical and actual HTTP crossing evidence with credential/image redaction;
 - retryable, fatal, and uncertain transport injection, including the temporal
   barrier that keeps fatal/uncertain failures out of NOOA's repair loop and
   end-to-end evidence that no failed transport path creates a host action;
-- source-manifest verification and mutations that reintroduce hidden history or
-  runtime prompt terms.
+- source-manifest verification and behavioral crossing mutations for every
+  forbidden affordance;
+- exhaustive process/environment/package/cache/IPC isolation probes,
+  restarted-worker pruning, concurrency closure, accepted-action workspace
+  commitments, explicit host execution-failure records, and deletion mutants;
+- a per-crossing actual-fixture parity catalogue sourced from host-owned
+  observation commitments and an offline-tested
+  [`run_paired_probe.py`](./run_paired_probe.py) entry point for G9.
 
-[`run_live_probe.py`](./run_live_probe.py) is a bounded single-arm provider
-smoke helper, not the paired G9 comparison. This does **not** yet license
-running it. The remaining G3/G4/G5/G7/G8 matrices must close, G1-G8 must be
-rerun, and the same-spec 0002-R/0002-NOOA paired runner must be constructed.
-See [`QUALIFICATION.md`](./QUALIFICATION.md).
+The G9 runner commits one neutral capability instruction to both arms: use
+Python and reuse one file across the first successor. Its verdict requires that
+evidence plus at least two actions, complete traces, clean shutdown, and exact
+actual `/responses` profile projections. A blocker returns a nonzero status.
+
+[`run_live_probe.py`](./run_live_probe.py) remains a bounded single-arm smoke
+helper and is not G9. Offline G1–G8 are now green, so the same-spec
+[`run_paired_probe.py`](./run_paired_probe.py) live pair is authorized. Choosing
+the game/routing-model/wire-model/endpoint and spending the bounded provider
+calls remains an explicit operator decision. See
+[`QUALIFICATION.md`](./QUALIFICATION.md).

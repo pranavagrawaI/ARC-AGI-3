@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -38,9 +39,10 @@ def _request(action_point_id: int, code: str) -> dict[str, object]:
 
 def _provider_profile() -> dict[str, object]:
     return {
-        "schema": "0002-nooa-provider-request-v1",
+        "schema": "0002-nooa-provider-request-v2",
         "api_surface": "responses",
         "model": "openai/openai/gpt-5.6-sol",
+        "wire_model": "openai/gpt-5.6-sol",
         "api_base": "https://gateway.invalid/v1",
         "max_output_tokens": 16_384,
         "reasoning_effort": "medium",
@@ -55,6 +57,59 @@ def _provider_profile() -> dict[str, object]:
         "nooa_max_retries": 0,
         "nooa_rate_limit_extra_retries": 0,
         "litellm_num_retries": 0,
+    }
+
+
+@pytest.mark.parametrize("module_name", ["agent", "llm", "launcher"])
+def test_fresh_runtime_import_is_local_only_and_skips_dotenv(
+    tmp_path: Path,
+    module_name: str,
+) -> None:
+    runtime_root = Path(__file__).resolve().parents[1]
+    (tmp_path / ".env").write_text("NOOA_DOTENV_SENTINEL=loaded\n")
+    (tmp_path / "sitecustomize.py").write_text(
+        "import httpx\n"
+        "def forbidden_get(*args, **kwargs):\n"
+        "    raise RuntimeError('network touched during import')\n"
+        "httpx.get = forbidden_get\n"
+    )
+    environment = dict(os.environ)
+    for name in (
+        "LITELLM_LOCAL_MODEL_COST_MAP",
+        "LITELLM_MODE",
+        "NOOA_DOTENV_SENTINEL",
+    ):
+        environment.pop(name, None)
+    environment["PYTHONPATH"] = os.pathsep.join(
+        (str(tmp_path), str(runtime_root))
+    )
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                f"import json, os; import {module_name}; "
+                "print(json.dumps({"
+                "'cost_map': os.environ.get('LITELLM_LOCAL_MODEL_COST_MAP'), "
+                "'mode': os.environ.get('LITELLM_MODE'), "
+                "'dotenv': os.environ.get('NOOA_DOTENV_SENTINEL')}))"
+            ),
+        ],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "network touched during import" not in completed.stderr
+    assert json.loads(completed.stdout) == {
+        "cost_map": "True",
+        "mode": "PRODUCTION",
+        "dotenv": None,
     }
 
 

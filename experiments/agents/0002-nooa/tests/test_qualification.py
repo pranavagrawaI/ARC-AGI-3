@@ -12,11 +12,33 @@ sys.path.insert(0, str(CONTROL_ROOT))
 from host.qualification import (  # noqa: E402
     PairedRunSpec,
     ProviderRequestProfile,
+    detect_unmatched_model_affordances,
     verify_source_manifest,
 )
 
 
 class PairedRunSpecTests(unittest.TestCase):
+    def test_forbidden_affordance_text_sentinels_cover_every_category(self) -> None:
+        mutants = {
+            "runtime_introspection": "Expose the NOOA provider client.",
+            "hidden_history_query": "Call trajectory() for hidden event history.",
+            "automatic_retrieval": "Enable MemorySkill automatic retrieval.",
+            "summarization_or_reflection": "Run a generic summarization reflection pass.",
+            "semantic_skill_text": "Load an ARC solver skill with world-model coaching.",
+            "history_selection": "Select relevant history using automatic history selection.",
+            "action_batching": "Use submit_actions for an action batch.",
+            "host_force_advance": "The host may force-advance the game.",
+        }
+
+        for expected, mutation in mutants.items():
+            with self.subTest(expected=expected):
+                self.assertIn(
+                    expected,
+                    detect_unmatched_model_affordances(
+                        {"messages": [{"role": "system", "content": mutation}]}
+                    ),
+                )
+
     def test_pinned_upstream_and_verbatim_copies_match_the_source_manifest(
         self,
     ) -> None:
@@ -64,6 +86,7 @@ class PairedRunSpecTests(unittest.TestCase):
     def test_live_provider_profile_freezes_every_static_provider_request_field(self) -> None:
         profile = ProviderRequestProfile.responses(
             model="openai/openai/gpt-5.6-sol",
+            wire_model="openai/gpt-5.6-sol",
             api_base="https://gateway.invalid/v1",
             max_output_tokens=16_384,
             reasoning_effort="medium",
@@ -94,12 +117,13 @@ class PairedRunSpecTests(unittest.TestCase):
                 "parallel_tool_calls": False,
                 "reasoning_effort": "medium",
                 "request_timeout_seconds": 180.0,
-                "schema": "0002-nooa-provider-request-v1",
+                "schema": "0002-nooa-provider-request-v2",
                 "seed": None,
                 "stream": False,
                 "temperature": None,
                 "tool_choice": "auto",
                 "truncation": "disabled",
+                "wire_model": "openai/gpt-5.6-sol",
             },
         )
         with self.assertRaises(FrozenInstanceError):
@@ -108,6 +132,7 @@ class PairedRunSpecTests(unittest.TestCase):
     def test_provider_spec_rejects_a_profile_projection_that_does_not_match(self) -> None:
         profile = ProviderRequestProfile.responses(
             model="openai/openai/gpt-5.6-sol",
+            wire_model="openai/gpt-5.6-sol",
             api_base="https://gateway.invalid/v1",
             max_output_tokens=16_384,
             reasoning_effort="medium",

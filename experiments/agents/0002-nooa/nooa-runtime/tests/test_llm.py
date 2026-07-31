@@ -29,9 +29,10 @@ from llm import (
 
 def _profile(**overrides: object) -> dict[str, object]:
     profile: dict[str, object] = {
-        "schema": "0002-nooa-provider-request-v1",
+        "schema": "0002-nooa-provider-request-v2",
         "api_surface": "responses",
         "model": "openai/openai/gpt-5.6-sol",
+        "wire_model": "openai/gpt-5.6-sol",
         "api_base": "https://gateway.invalid/v1",
         "max_output_tokens": 16_384,
         "reasoning_effort": "medium",

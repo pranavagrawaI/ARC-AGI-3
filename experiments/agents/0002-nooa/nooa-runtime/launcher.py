@@ -11,10 +11,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
 from typing import Any
+
+# NOOA imports LiteLLM. Force its bundled registry and suppress its implicit
+# dotenv loader before the dependency can execute either import-time path.
+os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
+os.environ["LITELLM_MODE"] = "PRODUCTION"
 
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
@@ -122,29 +128,55 @@ class _FixtureLLM(FakeLLMClient):
         output_model: type[Any] | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
-        self.audit_calls.append(
-            json.loads(
-                json.dumps(
-                    {
-                        "messages": messages,
-                        "tools": [
-                            {
-                                "name": tool.name,
-                                "description": tool.description,
-                                "parameters": tool.get_parameter_schema(strict=True),
-                            }
-                            for tool in tools or ()
-                        ],
-                    }
-                )
+        canonical_request = {
+            "messages": messages,
+            "tools": [
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.get_parameter_schema(strict=True),
+                }
+                for tool in tools or ()
+            ],
+        }
+        canonical_bytes = json.dumps(
+            canonical_request,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        audit = json.loads(
+            json.dumps(
+                {
+                    **canonical_request,
+                    "canonical_request": canonical_request,
+                    "canonical_request_sha256": sha256(canonical_bytes).hexdigest(),
+                    "canonicalization": "json-utf8-sort-keys-compact-v1",
+                    "actual_provider_crossings": [],
+                }
             )
         )
-        return await super().acall(
+        self.audit_calls.append(audit)
+        response = await super().acall(
             messages,
             tools=tools,
             output_model=output_model,
             **kwargs,
         )
+        audit["outcome"] = {
+            "kind": "success",
+            "response": {
+                "assistant_message": response.assistant_message,
+                "tool_calls": [
+                    {
+                        "id": tool_call.id,
+                        "name": tool_call.name,
+                        "arguments": tool_call.arguments,
+                    }
+                    for tool_call in response.tool_calls
+                ],
+            },
+        }
+        return response
 
 
 def _fixture_client(records: list[dict[str, Any]]) -> _FixtureLLM:
@@ -191,6 +223,7 @@ async def run_offline_fixture(
     requests_path: Path,
     responses_path: Path,
     workspace: Path,
+    model_frame_path: Path | None = None,
 ) -> int:
     """Execute deterministic scripted model cells over the real control path."""
 
@@ -209,6 +242,9 @@ async def run_offline_fixture(
     control = NooaControlAgent(
         llm=client,
         workspace=str(workspace.resolve()),
+        model_frame_path=(
+            str(model_frame_path.resolve()) if model_frame_path is not None else None
+        ),
         **_runtime_options(requests[0] if requests else None),
     )
     original_cwd = Path.cwd()
@@ -247,6 +283,7 @@ async def serve_offline_fixture(
     requests_path: Path,
     responses_path: Path,
     workspace: Path,
+    model_frame_path: Path | None = None,
     *,
     poll_interval: float = 0.01,
     _provider_mode: bool = False,
@@ -306,6 +343,11 @@ async def serve_offline_fixture(
                     control = NooaControlAgent(
                         llm=client,
                         workspace=str(workspace.resolve()),
+                        model_frame_path=(
+                            str(model_frame_path.resolve())
+                            if model_frame_path is not None
+                            else None
+                        ),
                         **_runtime_options(request),
                     )
                 elif request.get("paired_run_spec") != active_spec:
@@ -362,6 +404,7 @@ async def serve_provider(
     requests_path: Path,
     responses_path: Path,
     workspace: Path,
+    model_frame_path: Path | None = None,
     *,
     api_key: str | None,
     poll_interval: float = 0.01,
@@ -372,6 +415,7 @@ async def serve_provider(
         requests_path,
         responses_path,
         workspace,
+        model_frame_path,
         poll_interval=poll_interval,
         _provider_mode=True,
         _api_key=api_key,
@@ -383,6 +427,7 @@ def main() -> None:
     parser.add_argument("--requests", type=Path, required=True)
     parser.add_argument("--responses", type=Path, required=True)
     parser.add_argument("--workspace", type=Path, required=True)
+    parser.add_argument("--model-frame", type=Path)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--offline-fixture", action="store_true")
     mode.add_argument("--provider", action="store_true")
@@ -396,12 +441,20 @@ def main() -> None:
                 args.requests,
                 args.responses,
                 args.workspace,
+                args.model_frame,
                 api_key=os.environ.get("ARC_LLM_API_KEY"),
             )
         )
     else:
         operation = serve_offline_fixture if args.serve else run_offline_fixture
-        completed = asyncio.run(operation(args.requests, args.responses, args.workspace))
+        completed = asyncio.run(
+            operation(
+                args.requests,
+                args.responses,
+                args.workspace,
+                args.model_frame,
+            )
+        )
     print(json.dumps({"protocol": PROTOCOL, "completed": completed}))
 
 

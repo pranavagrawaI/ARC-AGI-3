@@ -30,6 +30,23 @@ class IllegalActionError(ValueError):
     pass
 
 
+def _record_execution_failure(
+    agent: Agent,
+    decision: Any,
+    error: BaseException,
+) -> None:
+    callback = getattr(agent, "record_execution_failure", None)
+    if not callable(callback):
+        return
+    try:
+        callback(decision, error)
+    except BaseException as callback_error:
+        error.add_note(
+            "agent execution-failure callback also failed: "
+            f"{type(callback_error).__name__}: {callback_error}"
+        )
+
+
 def public_observation(frame) -> Observation:
     """Copy a raw ARC frame into the only representation an agent receives."""
 
@@ -147,9 +164,13 @@ def run_episode(
                     f"invalid data for action {decision.action}: {error}"
                 ) from error
 
-        next_frame = env.step(game_action, data=action_data, reasoning=reasoning)
-        if next_frame is None:
-            raise RuntimeError("environment step returned no frame")
+        try:
+            next_frame = env.step(game_action, data=action_data, reasoning=reasoning)
+            if next_frame is None:
+                raise RuntimeError("environment step returned no frame")
+        except BaseException as error:
+            _record_execution_failure(agent, decision, error)
+            raise
         if stop_after_levels is not None:
             level_action_counts[active_level] += 1
         raw_levels_completed = int(next_frame.levels_completed)

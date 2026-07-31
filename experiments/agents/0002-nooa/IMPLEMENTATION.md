@@ -54,6 +54,7 @@ experiments/agents/0002-nooa/
 ├── IMPLEMENTATION.md
 ├── SOURCE_MANIFEST.json
 ├── run_live_probe.py
+├── run_paired_probe.py
 ├── nooa-runtime/
 │   ├── pyproject.toml
 │   ├── uv.lock
@@ -62,9 +63,11 @@ experiments/agents/0002-nooa/
 │   └── llm.py
 ├── host/
 │   ├── qualification.py
+│   ├── responses_client.py
 │   └── runner.py
 ├── tests/
 │   ├── test_host.py
+│   ├── test_paired_probe.py
 │   └── test_qualification.py
 └── third_party/nooa/
     ├── LICENSE
@@ -105,11 +108,14 @@ forbidden-surface, and first parity slices. The remaining first-green work is:
   and uncertain outcomes cannot enter NOOA's generation-repair loop, and prove
   fatal, uncertain, and exhausted-retryable outcomes produce no host-selected
   action with exact attempt evidence.
-- [ ] Finish the G3/G4/G5/G8 negative and mutation matrices.
-- [ ] Extend G7 from the exercised provider crossing to the complete parity
+- [x] Finish the G3/G4/G5/G8 negative and mutation matrices.
+- [x] Extend G7 from the exercised provider crossing to the complete parity
   catalogue and rerun G1-G8.
-- [ ] Construct and run the paired 0002-R/0002-NOOA G9 probe only after G1-G8
-  are green. `run_live_probe.py` is a single-arm provider smoke helper, not G9.
+- [x] Construct and offline-test the paired 0002-R/0002-NOOA G9 runner after
+  G1-G8 became green.
+- [ ] Run the bounded live pair after the operator chooses the explicit
+  game/model/endpoint. `run_live_probe.py` remains a single-arm smoke helper,
+  not G9.
 
 Do not reimplement provider normalization, dispatch, yield semantics, or lifecycle from memory before the copied path has run.
 
@@ -180,7 +186,6 @@ Do not yet claim:
 - endpoint compatibility;
 - provider determinism;
 - cross-platform Python/runtime compatibility;
-- complete G1–G8 qualification;
 - live usability or gameplay parity.
 
 The Linux/WSL nested-project and IPC path has survived deterministic fixtures,

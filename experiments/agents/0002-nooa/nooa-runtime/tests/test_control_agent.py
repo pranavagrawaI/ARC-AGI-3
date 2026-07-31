@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -250,14 +251,20 @@ async def test_context_evicts_complete_action_turns_with_only_a_pointer_notice()
                 "second",
             ),
             _execute(
+                "retained_marker = 3\n"
                 "return_result({'action': 1, 'data': None, 'reason': 'third'})",
                 "third",
+            ),
+            _execute("print(variables())", "hidden-history-query"),
+            _execute(
+                "return_result({'action': 1, 'data': None, 'reason': 'fourth'})",
+                "fourth",
             ),
         ]
     )
     agent = NooaControlAgent(llm=llm, max_context_turns=1)
 
-    for step in range(3):
+    for step in range(4):
         await agent.choose_action(
             PublicActionPoint(
                 observation={"step": step},
@@ -271,6 +278,9 @@ async def test_context_evicts_complete_action_turns_with_only_a_pointer_notice()
     assert "observations/step-*.json" in visible
     assert "retained_marker" in visible
     assert "old_private_marker" not in visible
+    assert "NameError: name 'variables' is not defined" in visible
+    host_audit_events = list(agent.event_manager._backend.all_events())
+    assert "old_private_marker" in repr(host_audit_events)
 
 
 @pytest.mark.asyncio
@@ -420,6 +430,9 @@ async def test_timeout_restarts_memory_preserves_files_and_requires_model_repair
                 "assert action_point['observation']['step'] == 1\n"
                 "assert tuple(action_point['legal_actions']) == (1,)\n"
                 "assert open('durable.txt').read() == 'kept'\n"
+                "for leaked_name in ('self', 'CodeActStrategy', 'variables'):\n"
+                "    if leaked_name in dir():\n"
+                "        raise AssertionError('FRAMEWORK_RESTART_LEAK')\n"
                 "return_result({'action': 1, 'data': None, 'reason': 'restarted'})",
                 "repair",
             ),
@@ -441,6 +454,38 @@ async def test_timeout_restarts_memory_preserves_files_and_requires_model_repair
     assert decision.reason == "restarted"
     feedback = json.dumps(llm.last_messages).lower()
     assert "was restarted, so variables/functions defined in earlier cells are gone" in feedback
+    assert "framework_restart_leak" not in feedback
+
+
+@pytest.mark.asyncio
+async def test_background_worker_cannot_outlive_action_acceptance(tmp_path: Path) -> None:
+    llm = FakeLLMClient(
+        scripted_responses=[
+            _execute(
+                "import threading, time\n"
+                "def delayed_mutation():\n"
+                "    time.sleep(0.05)\n"
+                "    open('post-accept.txt', 'w').write('mutated')\n"
+                "threading.Thread(target=delayed_mutation).start()\n"
+                "return_result({'action': 1, 'data': None, 'reason': 'unsafe'})",
+                "background-worker",
+            ),
+            _execute(
+                "return_result({'action': 1, 'data': None, 'reason': 'repaired'})",
+                "repair",
+            ),
+        ]
+    )
+    agent = NooaControlAgent(llm=llm, workspace=str(tmp_path))
+
+    decision = await agent.choose_action(
+        PublicActionPoint(observation={"step": 0}, legal_actions=(1,))
+    )
+    await asyncio.sleep(0.1)
+
+    assert decision.reason == "repaired"
+    assert llm.call_count == 2
+    assert not (tmp_path / "post-accept.txt").exists()
 
 
 @pytest.mark.asyncio
@@ -508,7 +553,9 @@ async def test_generated_python_cannot_reference_the_nooa_agent() -> None:
 
     assert decision.action == 1
     assert llm.call_count == 2
-    assert "RUNTIME_ACCESS_DENIED" in json.dumps(llm.last_messages)
+    feedback = json.dumps(llm.last_messages)
+    assert "NameError" in feedback
+    assert "sandbox self-proxy" not in feedback
 
 
 @pytest.mark.asyncio
@@ -530,7 +577,32 @@ async def test_generated_python_cannot_reach_hidden_objects_through_globals() ->
 
     assert decision.action == 1
     assert llm.call_count == 2
-    assert "RUNTIME_ACCESS_DENIED" in json.dumps(llm.last_messages)
+    feedback = json.dumps(llm.last_messages)
+    assert "globals() is forbidden" in feedback
+    assert "sandbox self-proxy" not in feedback
+
+
+@pytest.mark.asyncio
+async def test_generic_object_introspection_remains_available_after_runtime_pruning() -> None:
+    llm = FakeLLMClient(
+        scripted_responses=[
+            _execute(
+                "payload = {'answer': 42}\n"
+                "assert getattr(payload, 'get')('answer') == 42\n"
+                "assert 'get' in dir(payload)\n"
+                "return_result({'action': 1, 'data': None, 'reason': 'generic'})",
+                "generic-introspection",
+            )
+        ]
+    )
+    agent = NooaControlAgent(llm=llm)
+
+    decision = await agent.choose_action(
+        PublicActionPoint(observation={"step": 0}, legal_actions=(1,))
+    )
+
+    assert decision.reason == "generic"
+    assert llm.call_count == 1
 
 
 @pytest.mark.asyncio
@@ -552,7 +624,7 @@ async def test_generated_python_cannot_import_the_nooa_runtime() -> None:
 
     assert decision.action == 1
     assert llm.call_count == 2
-    feedback = json.dumps(llm.last_messages)
+    feedback = json.dumps(llm.last_messages[-1])
     assert "nooa" in feedback
     assert "is restricted" in feedback
 
@@ -689,3 +761,157 @@ async def test_os_sandbox_denies_files_outside_the_run_workspace(tmp_path: Path)
     feedback = json.dumps(llm.last_messages)
     assert "PermissionError" in feedback
     assert "must-not-cross" not in feedback
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("artifact", ("ipc/requests.jsonl", "process.jsonl"))
+async def test_generated_python_cannot_read_sibling_ipc_or_run_artifacts(
+    tmp_path: Path,
+    artifact: str,
+) -> None:
+    run_root = tmp_path / "run"
+    workspace = run_root / "workspace"
+    workspace.mkdir(parents=True)
+    Image.new("RGB", (1, 1)).save(workspace / "current_frame.png")
+    protected = run_root / artifact
+    protected.parent.mkdir(parents=True, exist_ok=True)
+    protected.write_text("HIDDEN_RUN_RECORD")
+    llm = FakeLLMClient(
+        scripted_responses=[
+            _execute(f"print(open({str(protected)!r}).read())", "sibling-read"),
+            _execute(
+                "return_result({'action': 1, 'data': None, 'reason': 'repaired'})",
+                "repair",
+            ),
+        ]
+    )
+    agent = NooaControlAgent(llm=llm, workspace=str(workspace))
+
+    decision = await agent.choose_action(
+        PublicActionPoint(observation={"step": 0}, legal_actions=(1,))
+    )
+
+    feedback = json.dumps(llm.last_messages[-1])
+    assert decision.reason == "repaired"
+    assert llm.call_count == 2
+    assert "PermissionError" in feedback
+    assert "HIDDEN_RUN_RECORD" not in feedback
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("route", "probe", "leak_marker"),
+    [
+        (
+            "framework namespace",
+            "try:\n"
+            "    CodeActStrategy\n"
+            "except NameError:\n"
+            "    pass\n"
+            "else:\n"
+            "    raise AssertionError('FRAMEWORK_NAMESPACE_LEAK')",
+            "FRAMEWORK_NAMESPACE_LEAK",
+        ),
+        (
+            "framework introspection helper",
+            "try:\n"
+            "    variables()\n"
+            "except NameError:\n"
+            "    pass\n"
+            "else:\n"
+            "    raise AssertionError('FRAMEWORK_HELPER_LEAK')",
+            "FRAMEWORK_HELPER_LEAK",
+        ),
+        (
+            "process arguments",
+            "from pathlib import Path\n"
+            "Path('/proc/self/cmdline').read_bytes()\n"
+            "raise AssertionError('PROCESS_ARGUMENT_LEAK')",
+            "PROCESS_ARGUMENT_LEAK",
+        ),
+        (
+            "process environment",
+            "from pathlib import Path\n"
+            "Path('/proc/self/environ').read_bytes()\n"
+            "raise AssertionError('PROCESS_ENVIRONMENT_LEAK')",
+            "PROCESS_ENVIRONMENT_LEAK",
+        ),
+        (
+            "parent process",
+            "from pathlib import Path\n"
+            "Path('/proc/1/cmdline').read_bytes()\n"
+            "raise AssertionError('PARENT_PROCESS_LEAK')",
+            "PARENT_PROCESS_LEAK",
+        ),
+        (
+            "NOOA package discovery",
+            "import pkgutil\n"
+            "if any(item.name == 'nooa' for item in pkgutil.iter_modules()):\n"
+            "    raise AssertionError('NOOA_PACKAGE_DISCOVERY_LEAK')",
+            "NOOA_PACKAGE_DISCOVERY_LEAK",
+        ),
+        (
+            "garbage-collector object enumeration",
+            "import gc\n"
+            "runtime_objects = [repr(type(item)) for item in gc.get_objects() "
+            "if 'nooa' in repr(type(item)).lower()]\n"
+            "if runtime_objects:\n"
+            "    raise AssertionError('GC_RUNTIME_LEAK')",
+            "GC_RUNTIME_LEAK",
+        ),
+        (
+            "NOOA source file",
+            "from pathlib import Path\n"
+            f"Path({str(Path(__file__).parents[1] / 'agent.py')!r}).read_bytes()\n"
+            "raise AssertionError('NOOA_SOURCE_LEAK')",
+            "NOOA_SOURCE_LEAK",
+        ),
+        (
+            "host cache",
+            "from pathlib import Path\n"
+            "tuple(Path('/home/hipra/.cache').iterdir())\n"
+            "raise AssertionError('HOST_CACHE_LEAK')",
+            "HOST_CACHE_LEAK",
+        ),
+    ],
+)
+async def test_generated_python_cannot_reach_runtime_or_process_surfaces(
+    route: str,
+    probe: str,
+    leak_marker: str,
+) -> None:
+    llm = FakeLLMClient(
+        scripted_responses=[
+            _execute(probe, f"probe-{route}"),
+            _execute(
+                "return_result({'action': 1, 'data': None, 'reason': 'repaired'})",
+                f"repair-{route}",
+            ),
+        ]
+    )
+    agent = NooaControlAgent(llm=llm)
+
+    decision = await agent.choose_action(
+        PublicActionPoint(observation={"step": 0}, legal_actions=(1,))
+    )
+
+    execution_feedback = json.dumps(llm.last_messages[-1])
+    assert decision.reason == "repaired"
+    assert llm.call_count == 2
+    assert leak_marker not in execution_feedback
+    if route in {
+        "framework namespace",
+        "framework introspection helper",
+        "NOOA package discovery",
+    }:
+        assert "ResultStatus.COMPLETE" in execution_feedback
+    else:
+        assert any(
+            marker in execution_feedback
+            for marker in (
+                "RUNTIME_ACCESS_DENIED",
+                "PermissionError",
+                "is restricted",
+                "is blocked",
+            )
+        ), execution_feedback

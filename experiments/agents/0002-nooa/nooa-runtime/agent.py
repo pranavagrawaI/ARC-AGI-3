@@ -9,23 +9,33 @@ verbatim copy of the upstream ARC agent.
 
 from __future__ import annotations
 
+import os as _dependency_os
 from typing import Annotated, Any
+
+# NOOA imports LiteLLM. Force its bundled registry and suppress its implicit
+# dotenv loader before the dependency can execute either import-time path.
+_dependency_os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
+_dependency_os.environ["LITELLM_MODE"] = "PRODUCTION"
+del _dependency_os
 
 from nooa import hidden
 
 with hidden:
     import ast
     import base64
+    from importlib.util import find_spec
     from importlib import metadata as importlib_metadata
     import json
     import os
+    from pathlib import Path
+    import sysconfig
 
     from nooa import Agent, EventQuery
     from nooa.config import CodeActConfig
     from nooa.config.truncation_config import CaptureConfig, TruncationConfig
     from nooa.runtime.restrictions import DEFAULT_BLOCKED_MODULES, RestrictionsConfig
     from nooa.runtime.method_wrapper import create_agent_method_wrapper
-    from nooa.runtime.sandbox.config import SandboxConfig
+    from nooa.runtime.sandbox.config import FileRule, SandboxConfig
     from nooa.strategies import CodeActStrategy
     from nooa.strategies.codeact import _ReturnResultSignal
     from nooa.strategy_validation import InvariantError
@@ -35,14 +45,19 @@ with hidden:
     _BLOCKED_RUNTIME_MODULES = frozenset(
         {
             "ctypes",
+            "_thread",
+            "concurrent",
+            "gc",
             "importlib",
             "inspect",
             "litellm",
+            "multiprocessing",
             "openai",
             "os",
             "site",
             "subprocess",
             "sys",
+            "threading",
         }
     )
     _DECLARED_DISTRIBUTION_ROOTS = frozenset({"PIL", "numpy"})
@@ -57,6 +72,57 @@ with hidden:
         | _UNDECLARED_DISTRIBUTION_ROOTS
         | {"agent", "nooa"},
     )
+    _FRAMEWORK_NAMESPACE_NAMES = frozenset(
+        {
+            "Agent",
+            "Audio",
+            "CodeActStrategy",
+            "CompositeStrategy",
+            "EventQuery",
+            "File",
+            "Image",
+            "Media",
+            "NooaControlAgent",
+            "PredictStrategy",
+            "PublicActionPoint",
+            "PurePythonStrategy",
+            "ReflexionStrategy",
+            "TemplateStrategy",
+            "Video",
+            "_call",
+            "doc",
+            "help",
+            "methods",
+            "self",
+            "show",
+            "strategy",
+            "variables",
+        }
+    )
+
+    def _sandbox_read_allowlist() -> tuple[FileRule, ...]:
+        """Return only the runtime files needed by generic Python and declared packages."""
+
+        paths = {
+            Path(sysconfig.get_path("stdlib")),
+            Path("/lib"),
+            Path("/lib64"),
+        }
+        for import_root in _DECLARED_DISTRIBUTION_ROOTS:
+            spec = find_spec(import_root)
+            if spec is None or spec.origin is None:
+                raise RuntimeError(f"declared distribution is unavailable: {import_root}")
+            paths.add(Path(spec.origin).parent)
+        numpy_libs = Path(find_spec("numpy").origin).parent.parent / "numpy.libs"
+        if numpy_libs.exists():
+            paths.add(numpy_libs)
+        return tuple(
+            FileRule(path=str(path), access="read")
+            for path in sorted(paths)
+            if path.exists()
+        )
+
+    _CONTROL_SANDBOX_READS = _sandbox_read_allowlist()
 
     class _PythonCodeRequest(BaseModel):
         model_config = ConfigDict(extra="forbid")
@@ -69,6 +135,7 @@ with hidden:
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
             self._persistent_executor: Any = None
+            self._pruned_worker_pid: int | None = None
 
         def _create_sandbox_executor(
             self, runtime: Any, call: Any, builtins: dict[str, Any]
@@ -93,6 +160,7 @@ with hidden:
             session: Any,
         ) -> None:
             await super()._run_prefill(runtime, call, builtins, session)
+            await self._prune_restarted_worker(session.sandbox_executor)
             action_point = call.session_locals.get("action_point")
             if action_point is None:
                 raise RuntimeError("public action point missing from the generated-code call")
@@ -102,6 +170,32 @@ with hidden:
             )
             if result.error is not None:
                 raise RuntimeError(f"failed to seed public action point: {result.error}")
+
+        async def _prune_restarted_worker(self, executor: Any) -> None:
+            """Remove framework bindings once from every sandbox worker generation."""
+
+            process = executor._proc
+            if (
+                process is not None
+                and process.is_alive()
+                and process.pid == self._pruned_worker_pid
+            ):
+                return
+            retained = {"return_result"}
+            prune_source = (
+                "for _name in tuple(globals()):\n"
+                f"    if not _name.startswith('__') and _name not in {retained!r}:\n"
+                "        globals().pop(_name, None)\n"
+                "del _name"
+            )
+            pruned = await executor.run_cell(prune_source, execution_count=0)
+            if pruned.error is not None:
+                raise RuntimeError(f"failed to prune sandbox namespace: {pruned.error}")
+            process = executor._proc
+            pid = process.pid if process is not None else None
+            if type(pid) is not int:
+                raise RuntimeError("sandbox worker has no process identity after pruning")
+            self._pruned_worker_pid = pid
 
         async def _seed_public_action_point(
             self,
@@ -182,6 +276,7 @@ class NooaControlAgent(Agent):
     _deliberate: Annotated[Any, hidden]
     _control_strategy: Annotated[Any, hidden]
     _workspace: Annotated[str, hidden]
+    _model_frame_path: Annotated[str, hidden]
     _max_context_turns: Annotated[int, hidden]
     _visible_turns: Annotated[list[tuple[int, list[dict[str, Any]]]], hidden]
     _evicted_steps: Annotated[list[int], hidden]
@@ -198,6 +293,7 @@ class NooaControlAgent(Agent):
         self,
         *args: Any,
         workspace: str | None = None,
+        model_frame_path: str | None = None,
         max_context_turns: int = 6,
         max_model_rounds_per_action: int = 10,
         max_decision_repairs: int = 2,
@@ -227,6 +323,10 @@ class NooaControlAgent(Agent):
         self._python_state = {}
         workspace = workspace or os.getcwd()
         self._workspace = workspace
+        self._model_frame_path = model_frame_path or os.path.join(
+            workspace,
+            "current_frame.png",
+        )
         self._max_context_turns = max_context_turns
         self._visible_turns = []
         self._evicted_steps = []
@@ -261,6 +361,8 @@ class NooaControlAgent(Agent):
                 execution_backend="sandbox",
                 sandbox=SandboxConfig(
                     workspace=workspace,
+                    allow=_CONTROL_SANDBOX_READS,
+                    system_paths=False,
                     network=False,
                     max_memory_mb=512,
                     max_cpu_seconds=max(1, int(workspace_timeout_seconds)),
@@ -294,61 +396,12 @@ class NooaControlAgent(Agent):
         self._control_strategy = control_strategy
         self.context_manager.set_dynamic_protected("state", "'Python/files session active.'")
 
-        async def reject_runtime_references(context: Any, next_handler: Any) -> Any:
-            try:
-                tree = ast.parse(context.code)
-            except (SyntaxError, TypeError):
-                return await next_handler(context)
-            forbidden_names = {"self", "__builtins__", "_call"}
-            forbidden_calls = {
-                "compile",
-                "delattr",
-                "dir",
-                "eval",
-                "exec",
-                "getattr",
-                "globals",
-                "help",
-                "locals",
-                "setattr",
-                "vars",
-                "__import__",
-            }
-            forbidden_attributes = {
-                "context_manager",
-                "event_manager",
-                "events",
-                "llm",
-                "provider",
-                "runtime",
-            }
-            denied = any(
-                (isinstance(node, ast.Name) and node.id in forbidden_names)
-                or (
-                    isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Name)
-                    and node.func.id in forbidden_calls
-                )
-                or (
-                    isinstance(node, ast.Attribute)
-                    and node.attr in forbidden_attributes
-                )
-                for node in ast.walk(tree)
-            )
-            if denied:
-                context.code = (
-                    "raise PermissionError('RUNTIME_ACCESS_DENIED: generated-code "
-                    "introspection is outside the public interface')"
-                )
-            return await next_handler(context)
-
-        self.event_manager.intercept("execute_python", reject_runtime_references)
-
         async def reseed_current_action_point(context: Any, next_handler: Any) -> Any:
             executor = control_strategy._persistent_executor
             action_point = self._python_state.get("action_point")
             if executor is None or action_point is None:
                 raise RuntimeError("generated-code worker has no current action point")
+            await control_strategy._prune_restarted_worker(executor)
             seeded = await control_strategy._seed_public_action_point(
                 executor,
                 action_point,
@@ -419,8 +472,7 @@ Plain text does not finish an action point."""
             action_point = self._python_state.get("action_point")
             if action_point is None:
                 raise RuntimeError("public action point missing before model call")
-            frame_path = os.path.join(self._workspace, "current_frame.png")
-            with open(frame_path, "rb") as frame:
+            with open(self._model_frame_path, "rb") as frame:
                 image_url = "data:image/png;base64," + base64.b64encode(frame.read()).decode(
                     "ascii"
                 )

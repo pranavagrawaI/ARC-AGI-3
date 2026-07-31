@@ -17,8 +17,15 @@ from dataclasses import asdict, dataclass, fields, is_dataclass
 from enum import StrEnum
 from hashlib import sha256
 import json
+import os as _dependency_os
 from typing import Any, Mapping
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+# NOOA imports LiteLLM. Force its bundled registry and suppress its implicit
+# dotenv loader before the dependency can execute either import-time path.
+_dependency_os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
+_dependency_os.environ["LITELLM_MODE"] = "PRODUCTION"
+del _dependency_os
 
 import httpx
 from nooa.tracing._secret_scrubber import _is_sensitive_key, scrub_string
@@ -33,6 +40,7 @@ class ProviderRequestProfile:
     schema: str
     api_surface: str
     model: str
+    wire_model: str
     api_base: str
     max_output_tokens: int
     reasoning_effort: str | None
@@ -64,7 +72,7 @@ class ProviderRequestProfile:
 
     def validate(self) -> None:
         fixed = {
-            "schema": "0002-nooa-provider-request-v1",
+            "schema": "0002-nooa-provider-request-v2",
             "api_surface": "responses",
             "stream": False,
             "drop_params": True,
@@ -83,10 +91,13 @@ class ProviderRequestProfile:
         }
         if drift:
             raise ValueError(f"unsupported provider request profile: {drift!r}")
-        if not isinstance(self.model, str) or not isinstance(self.api_base, str):
-            raise ValueError("provider model and api_base must be strings")
-        if not self.model or not self.api_base:
-            raise ValueError("provider model and api_base must be non-empty")
+        if not all(
+            isinstance(value, str)
+            for value in (self.model, self.wire_model, self.api_base)
+        ):
+            raise ValueError("provider models and api_base must be strings")
+        if not self.model or not self.wire_model or not self.api_base:
+            raise ValueError("provider models and api_base must be non-empty")
         if type(self.max_output_tokens) is not int or self.max_output_tokens <= 0:
             raise ValueError("max_output_tokens must be a positive integer")
         if (
@@ -575,8 +586,10 @@ class AuditedProviderClient:
                 "kind": "success",
                 "response": redact_for_audit(
                     {
+                        "assistant_message": getattr(response, "assistant_message", None),
                         "content": getattr(response, "content", None),
                         "raw_response": getattr(response, "raw_response", None),
+                        "tool_calls": getattr(response, "tool_calls", None),
                         "usage": getattr(response, "usage", None),
                     },
                     known_credentials=self.known_credentials,
