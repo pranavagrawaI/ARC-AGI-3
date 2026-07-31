@@ -10,14 +10,20 @@ from pathlib import Path
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, ClassVar
 
 
 @dataclass(frozen=True)
 class PairedRunSpec:
     """The settings that must not drift independently between the two bases."""
 
+    model_profile: str
+    provider_endpoint_profile: str
+    model_seed: int | None
+    environment_profile: str
+    environment_seed: int
     max_context_turns: int
+    max_recent_transitions: int
     max_model_rounds_per_action: int
     max_decision_repairs: int
     max_model_calls: int
@@ -25,11 +31,106 @@ class PairedRunSpec:
     workspace_timeout_seconds: float
     max_actions: int
     transport_max_retries: int
+    transition_observation_policy: str
+    include_changed_pixel_counts: bool
+    observation_representations: tuple[str, ...]
+    coordinate_convention: str
+    allowed_python_policy: str
+    allowed_distributions: tuple[str, ...]
+    host_workspace_files: tuple[str, ...]
+    omission_notice_schema: str
+    public_status_fields: tuple[str, ...]
+    request_profile: str
+    legal_event_schema: str
+    final_action_schema: str
+    host_workspace_initialization: tuple[str, ...]
+
+    _SUPPORTED_SURFACE: ClassVar[dict[str, Any]] = {
+        "model_profile": "offline-fixture",
+        "provider_endpoint_profile": "offline-fixture",
+        "model_seed": None,
+        "environment_profile": "offline-public-observation-fixture",
+        "environment_seed": 0,
+        "max_recent_transitions": 8,
+        "transition_observation_policy": (
+            "before-and-after-file-pointers-with-public-metadata"
+        ),
+        "include_changed_pixel_counts": True,
+        "observation_representations": (
+            "nested-integer-grid",
+            "rendered-png",
+        ),
+        "coordinate_convention": "zero-based-top-left-x-column-y-row",
+        "allowed_python_policy": "python-3.12-stdlib-minus-restricted-v1",
+        "allowed_distributions": ("numpy", "Pillow"),
+        "host_workspace_files": (
+            "WORKSPACE.md",
+            "NOTES.md",
+            "frames.py",
+            "public_history.jsonl",
+            "observations/",
+            "current_observation.json",
+            "current_frame.png",
+        ),
+        "omission_notice_schema": "pointer-only-unsummarized-v1",
+        "public_status_fields": (
+            "available_actions",
+            "full_reset",
+            "levels_completed",
+            "state",
+        ),
+        "request_profile": "offline-tool-calling-fixture-v1",
+        "legal_event_schema": "integer-id-with-optional-xy-v1",
+        "final_action_schema": "action-int-data-object-or-null-reason-string-v1",
+        "host_workspace_initialization": (
+            "WORKSPACE.md=p9-neutral-workspace-contract-v1",
+            "NOTES.md=empty",
+            "frames.py=p9-frame-tools-components-false-v1",
+            "public_history.jsonl=empty",
+            "observations/=empty-directory",
+            "current_observation.json=exact-current-public-observation",
+            "current_frame.png=exact-current-rendered-public-observation",
+        ),
+    }
+
+    def __post_init__(self) -> None:
+        drift = {
+            field: {"supported": supported, "received": getattr(self, field)}
+            for field, supported in self._SUPPORTED_SURFACE.items()
+            if getattr(self, field) != supported
+        }
+        if drift:
+            raise ValueError(
+                "unsupported paired-run surface drift: "
+                + json.dumps(drift, sort_keys=True)
+            )
+        positive = (
+            "max_context_turns",
+            "max_model_rounds_per_action",
+            "max_model_calls",
+            "max_reported_tokens",
+            "workspace_timeout_seconds",
+            "max_actions",
+        )
+        if any(getattr(self, field) <= 0 for field in positive):
+            raise ValueError("paired-run positive budgets must be greater than zero")
+        if self.max_decision_repairs < 0 or self.transport_max_retries < 0:
+            raise ValueError("paired-run retry budgets must not be negative")
 
     @classmethod
     def initial(cls) -> "PairedRunSpec":
         return cls(
+            model_profile=cls._SUPPORTED_SURFACE["model_profile"],
+            provider_endpoint_profile=cls._SUPPORTED_SURFACE[
+                "provider_endpoint_profile"
+            ],
+            model_seed=cls._SUPPORTED_SURFACE["model_seed"],
+            environment_profile=cls._SUPPORTED_SURFACE["environment_profile"],
+            environment_seed=cls._SUPPORTED_SURFACE["environment_seed"],
             max_context_turns=6,
+            max_recent_transitions=cls._SUPPORTED_SURFACE[
+                "max_recent_transitions"
+            ],
             max_model_rounds_per_action=10,
             max_decision_repairs=2,
             max_model_calls=100,
@@ -37,6 +138,39 @@ class PairedRunSpec:
             workspace_timeout_seconds=20.0,
             max_actions=500,
             transport_max_retries=2,
+            transition_observation_policy=cls._SUPPORTED_SURFACE[
+                "transition_observation_policy"
+            ],
+            include_changed_pixel_counts=cls._SUPPORTED_SURFACE[
+                "include_changed_pixel_counts"
+            ],
+            observation_representations=cls._SUPPORTED_SURFACE[
+                "observation_representations"
+            ],
+            coordinate_convention=cls._SUPPORTED_SURFACE[
+                "coordinate_convention"
+            ],
+            allowed_python_policy=cls._SUPPORTED_SURFACE[
+                "allowed_python_policy"
+            ],
+            allowed_distributions=cls._SUPPORTED_SURFACE[
+                "allowed_distributions"
+            ],
+            host_workspace_files=cls._SUPPORTED_SURFACE[
+                "host_workspace_files"
+            ],
+            omission_notice_schema=cls._SUPPORTED_SURFACE[
+                "omission_notice_schema"
+            ],
+            public_status_fields=cls._SUPPORTED_SURFACE[
+                "public_status_fields"
+            ],
+            request_profile=cls._SUPPORTED_SURFACE["request_profile"],
+            legal_event_schema=cls._SUPPORTED_SURFACE["legal_event_schema"],
+            final_action_schema=cls._SUPPORTED_SURFACE["final_action_schema"],
+            host_workspace_initialization=cls._SUPPORTED_SURFACE[
+                "host_workspace_initialization"
+            ],
         )
 
     def control_overrides(self) -> dict[str, int | float]:
@@ -53,10 +187,10 @@ class PairedRunSpec:
             "workspace_timeout_seconds": self.workspace_timeout_seconds,
         }
 
-    def as_record(self) -> dict[str, int | float]:
+    def as_record(self) -> dict[str, Any]:
         """Return the canonical IPC/audit projection of the shared settings."""
 
-        return asdict(self)
+        return json.loads(json.dumps(asdict(self), sort_keys=True))
 
 
 def verify_source_manifest() -> dict[str, Any]:
@@ -109,9 +243,13 @@ def verify_source_manifest() -> dict[str, Any]:
                 )
 
     for destination in ("nooa-runtime/agent.py", "nooa-runtime/launcher.py"):
-        first_lines = (control_root / destination).read_text(encoding="utf-8").splitlines()[:2]
+        first_lines = (
+            (control_root / destination).read_text(encoding="utf-8").splitlines()[:12]
+        )
         if not any("SPDX-FileCopyrightText" in line for line in first_lines):
             mismatches.append(f"derived source lacks copyright notice: {destination}")
+        if not any("Derived by copy-and-prune" in line for line in first_lines):
+            mismatches.append(f"derived source lacks modification notice: {destination}")
 
     return {
         "schema": "0002-nooa-source-verification-v1",
@@ -199,7 +337,21 @@ def qualify_model_visible_parity(
     lowered_system = str(system.get("content", "")).lower()
     leaked_terms = [
         term
-        for term in ("nooa", "agent instance", "self.", "context_manager", "event_manager")
+        for term in (
+            "nooa",
+            "agent instance",
+            "self.",
+            "runtime",
+            "provider",
+            "controller",
+            "context",
+            "trace",
+            "ipc",
+            "process",
+            "host",
+            "context_manager",
+            "event_manager",
+        )
         if term in lowered_system
     ]
     if leaked_terms:

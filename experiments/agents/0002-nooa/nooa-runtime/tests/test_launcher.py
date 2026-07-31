@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from launcher import run_offline_fixture
+from launcher import _FixtureLLM, run_offline_fixture
 
 
 PROTOCOL = "0002-nooa-ipc-v1"
@@ -32,6 +32,20 @@ def _request(action_point_id: int, code: str) -> dict[str, object]:
         "legal_actions": [1, 2],
         "fixture_python_cells": [code],
     }
+
+
+@pytest.mark.asyncio
+async def test_fixture_audit_snapshots_messages_at_the_model_crossing() -> None:
+    client = _FixtureLLM()
+    client.enqueue(
+        ["return_result({'action': 1, 'data': None, 'reason': 'fixture'})"]
+    )
+    messages = [{"role": "user", "content": "before"}]
+
+    await client.acall(messages, tools=[])
+    messages[0]["content"] = "after"
+
+    assert client.audit_calls[0]["messages"][0]["content"] == "before"
 
 
 @pytest.mark.asyncio

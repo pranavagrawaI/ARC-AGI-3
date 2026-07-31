@@ -70,6 +70,18 @@ def _redact_images(value: Any) -> Any:
     return {key: _redact_images(item) for key, item in value.items()}
 
 
+def _read_tail(path: Path, *, limit: int = 4_000) -> str:
+    if not path.exists():
+        return ""
+    byte_limit = limit * 4
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        size = handle.tell()
+        handle.seek(max(0, size - byte_limit))
+        value = handle.read(byte_limit).decode("utf-8", errors="replace")
+    return value[-limit:]
+
+
 class NooaProcessAgent:
     """Synchronous harness adapter around one long-lived Python 3.12 worker."""
 
@@ -88,6 +100,8 @@ class NooaProcessAgent:
         self.requests_path = self.run_root / "ipc" / "requests.jsonl"
         self.responses_path = self.run_root / "ipc" / "responses.jsonl"
         self.process_path = self.run_root / "process.jsonl"
+        self.worker_stdout_path = self.run_root / "worker.stdout.log"
+        self.worker_stderr_path = self.run_root / "worker.stderr.log"
         self.workspace = self.run_root / "workspace"
         self.requests_path.parent.mkdir(parents=True)
         self.requests_path.touch()
@@ -114,6 +128,9 @@ class NooaProcessAgent:
         self._pending_decision: Decision | None = None
         self._closed = False
         self._response_offset = 0
+        self._worker_stdout = self.worker_stdout_path.open("w", encoding="utf-8")
+        self._worker_stderr = self.worker_stderr_path.open("w", encoding="utf-8")
+        self._worker_logs_closed = False
         self._process = subprocess.Popen(
             [
                 str(self.runtime_root / ".venv" / "bin" / "python"),
@@ -129,8 +146,8 @@ class NooaProcessAgent:
             ],
             cwd=self.runtime_root,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=self._worker_stdout,
+            stderr=self._worker_stderr,
             text=True,
             start_new_session=True,
         )
@@ -181,7 +198,9 @@ class NooaProcessAgent:
                 "step": self._step,
                 "current_metadata": current.metadata,
                 "representations": current.representations,
-                "recent_transitions": self._history[-8:],
+                "recent_transitions": self._history[
+                    -self.paired_run_spec.max_recent_transitions:
+                ],
                 "full_history_file": "public_history.jsonl",
                 "current_observation_file": "current_observation.json",
                 "observations_glob": "observations/step-*.json",
@@ -203,12 +222,26 @@ class NooaProcessAgent:
             request=request,
         )
         response = self._wait_for_response(self._step)
+        audit = response.get("audit")
         self._write_process(
             "model_crossing",
             action_point_id=self._step,
-            audit=_redact_images(response.get("audit", {})),
+            audit=_redact_images(audit if isinstance(audit, dict) else {}),
             worker_decision=response.get("decision"),
         )
+        model_calls = audit.get("model_calls") if isinstance(audit, dict) else None
+        if (
+            not isinstance(model_calls, list)
+            or not model_calls
+            or any(
+                not isinstance(call, dict)
+                or not isinstance(call.get("messages"), list)
+                or not call["messages"]
+                or not isinstance(call.get("tools"), list)
+                for call in model_calls
+            )
+        ):
+            raise NooaWorkerError("worker response has no valid model-call audit")
         payload = response.get("decision")
         if not isinstance(payload, dict):
             raise NooaWorkerError("worker response has no decision object")
@@ -221,6 +254,23 @@ class NooaProcessAgent:
             raise NooaWorkerError("worker decision data must be an object or null")
         if not isinstance(reason, str):
             raise NooaWorkerError("worker decision reason must be a string")
+        if action in coordinate_actions:
+            if (
+                not isinstance(data, dict)
+                or any(
+                    not isinstance(data.get(axis), int)
+                    or isinstance(data.get(axis), bool)
+                    for axis in ("x", "y")
+                )
+            ):
+                raise NooaWorkerError(
+                    f"action {action} requires integer x and y data"
+                )
+            if not (0 <= data["x"] < width and 0 <= data["y"] < height):
+                raise NooaWorkerError(
+                    f"action {action} coordinates {(data['x'], data['y'])} are outside "
+                    f"width={width}, height={height}"
+                )
         reasoning = {"reason": reason}
         decision = Decision(
             action=action,
@@ -273,7 +323,8 @@ class NooaProcessAgent:
         pending = ""
         while time.monotonic() < deadline:
             if self._process.poll() is not None:
-                stderr = self._process.stderr.read() if self._process.stderr else ""
+                self._close_worker_logs()
+                stderr = _read_tail(self.worker_stderr_path)
                 raise NooaWorkerError(
                     f"worker exited {self._process.returncode} before response: {stderr.strip()}"
                 )
@@ -288,7 +339,16 @@ class NooaProcessAgent:
                 if lines and not lines[-1].endswith("\n"):
                     pending = lines.pop()
                 for line in lines:
-                    response = json.loads(line)
+                    try:
+                        response = json.loads(line)
+                    except json.JSONDecodeError as error:
+                        raise NooaWorkerError(
+                            f"worker wrote malformed response JSON: {error}"
+                        ) from error
+                    if not isinstance(response, dict):
+                        raise NooaWorkerError(
+                            "worker response JSON must be an object"
+                        )
                     identity = (response.get("run_id"), response.get("action_point_id"))
                     expected = (self.run_id, action_point_id)
                     if identity != expected or response.get("protocol") != PROTOCOL:
@@ -305,18 +365,15 @@ class NooaProcessAgent:
         if self._closed:
             return
         self._closed = True
-        stderr = ""
         if self._process.poll() is None:
             _append_jsonl(self.requests_path, {"protocol": PROTOCOL, "kind": "stop"})
         try:
-            _, stderr = self._process.communicate(timeout=5)
+            self._process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             self._kill_worker_tree()
             self._process.wait(timeout=5)
-            stderr = "worker tree killed after shutdown timeout"
-            for pipe in (self._process.stdout, self._process.stderr):
-                if pipe is not None:
-                    pipe.close()
+        self._close_worker_logs()
+        stderr = _read_tail(self.worker_stderr_path)
         self._write_process(
             "worker_stopped",
             returncode=self._process.returncode,
@@ -333,6 +390,13 @@ class NooaProcessAgent:
             except ProcessLookupError:
                 return
         self._process.kill()
+
+    def _close_worker_logs(self) -> None:
+        if self._worker_logs_closed:
+            return
+        self._worker_logs_closed = True
+        self._worker_stdout.close()
+        self._worker_stderr.close()
 
     def __enter__(self) -> "NooaProcessAgent":
         return self

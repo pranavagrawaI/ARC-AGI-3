@@ -1,6 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Versioned append-only file bridge for the nested Python 3.12 control."""
+"""Versioned append-only file bridge for the nested Python 3.12 control.
+
+Derived by copy-and-prune from NVIDIA NOOA's pinned
+``examples/arc_agi_3/launcher.py``; provenance is recorded in
+``../SOURCE_MANIFEST.json``.
+"""
 
 from __future__ import annotations
 
@@ -117,17 +122,21 @@ class _FixtureLLM(FakeLLMClient):
         **kwargs: Any,
     ) -> LLMResponse:
         self.audit_calls.append(
-            {
-                "messages": messages,
-                "tools": [
+            json.loads(
+                json.dumps(
                     {
-                        "name": tool.name,
-                        "description": tool.description,
-                        "parameters": tool.get_parameter_schema(strict=True),
+                        "messages": messages,
+                        "tools": [
+                            {
+                                "name": tool.name,
+                                "description": tool.description,
+                                "parameters": tool.get_parameter_schema(strict=True),
+                            }
+                            for tool in tools or ()
+                        ],
                     }
-                    for tool in tools or ()
-                ],
-            }
+                )
+            )
         )
         return await super().acall(
             messages,

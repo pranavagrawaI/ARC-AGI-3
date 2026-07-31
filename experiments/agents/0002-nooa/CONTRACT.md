@@ -115,7 +115,10 @@ The model-visible final answer has the same semantic shape as 0002-R:
 ```
 
 - `action` is one currently legal integer input-event ID.
-- `data` is `null` unless the public event contract requires an object such as integer `x` and `y` coordinates.
+- The model is instructed to use `null` unless the public event contract requires
+  an object. To match frozen `0002-R` exactly, the parser also accepts and preserves
+  an object for a simple action, and permits additional keys for a coordinate action;
+  required integer `x` and `y` values and bounds are still enforced.
 - `reason` is non-authoritative prose. It is not a required prediction, claim, or reconciliation record.
 - Exactly one environment action is admitted per successor observation.
 - The action is validated against the current public legal-action set and coordinate bounds.

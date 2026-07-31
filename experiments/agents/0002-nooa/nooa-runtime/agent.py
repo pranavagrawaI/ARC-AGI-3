@@ -96,10 +96,20 @@ with hidden:
             action_point = call.session_locals.get("action_point")
             if action_point is None:
                 raise RuntimeError("public action point missing from the generated-code call")
-            source = "action_point = " + repr(action_point.model_dump(mode="python"))
-            result = await session.sandbox_executor.run_cell(source, execution_count=0)
+            result = await self._seed_public_action_point(
+                session.sandbox_executor,
+                action_point,
+            )
             if result.error is not None:
                 raise RuntimeError(f"failed to seed public action point: {result.error}")
+
+        async def _seed_public_action_point(
+            self,
+            executor: Any,
+            action_point: Any,
+        ) -> Any:
+            source = "action_point = " + repr(action_point.model_dump(mode="python"))
+            return await executor.run_cell(source, execution_count=0)
 
         def _build_execute_python_tool(self) -> Tool:
             tool = super()._build_execute_python_tool()
@@ -135,7 +145,7 @@ class ActionDecision(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     action: int
-    data: dict[str, int] | None
+    data: dict[str, Any] | None
     reason: str
 
 
@@ -334,6 +344,23 @@ class NooaControlAgent(Agent):
 
         self.event_manager.intercept("execute_python", reject_runtime_references)
 
+        async def reseed_current_action_point(context: Any, next_handler: Any) -> Any:
+            executor = control_strategy._persistent_executor
+            action_point = self._python_state.get("action_point")
+            if executor is None or action_point is None:
+                raise RuntimeError("generated-code worker has no current action point")
+            seeded = await control_strategy._seed_public_action_point(
+                executor,
+                action_point,
+            )
+            if seeded.error is not None:
+                raise RuntimeError(
+                    f"failed to refresh public action point: {seeded.error}"
+                )
+            return await next_handler(context)
+
+        self.event_manager.intercept("execute_python", reseed_current_action_point)
+
         async def persist_before_inline_return(context: Any, next_handler: Any) -> Any:
             """Preserve assignments made in the same cell as its final return_result."""
 
@@ -388,8 +415,7 @@ action point is available as `action_point`. Use `execute_python(code)` for gene
 and relative workspace files. Variables and files persist across action points for this run.
 Finish with `return_result({"action": integer, "data": null-or-object, "reason": string})`.
 Only currently legal action IDs are accepted. Integer event IDs carry no semantic meaning.
-Runtime, provider, controller, event, context, trace, IPC, process, and host objects are not
-part of the generated-Python interface. Plain text does not finish an action point."""
+Plain text does not finish an action point."""
             action_point = self._python_state.get("action_point")
             if action_point is None:
                 raise RuntimeError("public action point missing before model call")

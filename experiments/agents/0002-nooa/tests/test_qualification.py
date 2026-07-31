@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 import sys
 import unittest
@@ -37,6 +37,23 @@ class PairedRunSpecTests(unittest.TestCase):
                 "workspace_timeout_seconds": 20.0,
             },
         )
+        self.assertEqual(spec.max_recent_transitions, 8)
+        self.assertEqual(
+            spec.host_workspace_files,
+            (
+                "WORKSPACE.md",
+                "NOTES.md",
+                "frames.py",
+                "public_history.jsonl",
+                "observations/",
+                "current_observation.json",
+                "current_frame.png",
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "unsupported paired-run surface drift"):
+            replace(spec, max_recent_transitions=0)
+        with self.assertRaisesRegex(ValueError, "unsupported paired-run surface drift"):
+            replace(spec, allowed_distributions=("scipy",))
         with self.assertRaises(FrozenInstanceError):
             spec.max_actions = 1  # type: ignore[misc]
 

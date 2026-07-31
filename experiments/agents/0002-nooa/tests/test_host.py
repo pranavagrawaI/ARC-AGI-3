@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -17,12 +18,12 @@ from host.qualification import PairedRunSpec, qualify_model_visible_parity  # no
 from experiments.harness import Observation, Transition  # noqa: E402
 
 
-def observation(step: int) -> Observation:
+def observation(step: int, *, available_actions: tuple[int, ...] = (1, 2)) -> Observation:
     pixels = np.array([[[step, 0], [0, 0]]], dtype=int)
     pixels.setflags(write=False)
     return Observation(
         pixels=pixels,
-        available_actions=(1, 2),
+        available_actions=available_actions,
         levels_completed=step,
         state="NOT_FINISHED",
         full_reset=False,
@@ -53,6 +54,8 @@ class NooaProcessAgentTests(unittest.TestCase):
                 run_root=run_root,
                 fixture_policy=lambda step, _observation: fixtures[step],
             ) as agent:
+                self.assertIsNone(agent._process.stdout)
+                self.assertIsNone(agent._process.stderr)
                 first = agent.act(before)
                 self.assertEqual(first.action, 1)
                 agent.observe(Transition(before=before, decision=first, after=after))
@@ -83,6 +86,8 @@ class NooaProcessAgentTests(unittest.TestCase):
                 1,
             )
             self.assertTrue((run_root / "workspace" / "current_frame.png").is_file())
+            self.assertTrue((run_root / "worker.stdout.log").is_file())
+            self.assertTrue((run_root / "worker.stderr.log").is_file())
             self.assertTrue(
                 (run_root / "workspace" / "observations" / "step-00001.json").is_file()
             )
@@ -155,6 +160,151 @@ class NooaProcessAgentTests(unittest.TestCase):
                     for mismatch in rejected["unmatched_affordances"]
                 )
             )
+
+    def test_host_rejects_a_decision_without_model_crossing_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            agent = NooaProcessAgent(
+                runtime_root=RUNTIME_ROOT,
+                run_root=Path(directory) / "run",
+                fixture_policy=lambda _step, _observation: [
+                    "return_result({'action': 1, 'data': None, 'reason': 'fixture'})"
+                ],
+            )
+            response = {
+                "decision": {"action": 1, "data": None, "reason": "unaudited"},
+                "audit": {"model_calls": []},
+            }
+            try:
+                with patch.object(agent, "_wait_for_response", return_value=response):
+                    with self.assertRaisesRegex(NooaWorkerError, "model-call audit"):
+                        agent.act(observation(0))
+            finally:
+                try:
+                    agent.close()
+                except NooaWorkerError:
+                    pass
+
+    def test_host_preserves_simple_action_data_like_the_frozen_control(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            agent = NooaProcessAgent(
+                runtime_root=RUNTIME_ROOT,
+                run_root=Path(directory) / "run",
+                fixture_policy=lambda _step, _observation: [
+                    "return_result({'action': 1, 'data': None, 'reason': 'fixture'})"
+                ],
+            )
+            response = {
+                "decision": {
+                    "action": 1,
+                    "data": {"unused": "preserved"},
+                    "reason": "control parity",
+                },
+                "audit": {
+                    "model_calls": [
+                        {"messages": [{"role": "user", "content": "x"}], "tools": []}
+                    ]
+                },
+            }
+            try:
+                with patch.object(agent, "_wait_for_response", return_value=response):
+                    decision = agent.act(observation(0))
+                    self.assertEqual(decision.data, {"unused": "preserved"})
+            finally:
+                try:
+                    agent.close()
+                except NooaWorkerError:
+                    pass
+
+    def test_host_rejects_invalid_coordinates_from_the_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            agent = NooaProcessAgent(
+                runtime_root=RUNTIME_ROOT,
+                run_root=Path(directory) / "run",
+                fixture_policy=lambda _step, _observation: [
+                    "return_result({'action': 6, 'data': {'x': 0, 'y': 0}, "
+                    "'reason': 'fixture'})"
+                ],
+            )
+            response = {
+                "decision": {
+                    "action": 6,
+                    "data": {"x": 2, "y": 0},
+                    "reason": "bad",
+                },
+                "audit": {
+                    "model_calls": [
+                        {"messages": [{"role": "user", "content": "x"}], "tools": []}
+                    ]
+                },
+            }
+            try:
+                with patch.object(agent, "_wait_for_response", return_value=response):
+                    with self.assertRaisesRegex(NooaWorkerError, "outside width=2"):
+                        agent.act(observation(0, available_actions=(6,)))
+            finally:
+                try:
+                    agent.close()
+                except NooaWorkerError:
+                    pass
+
+    def test_host_rejects_missing_coordinates_from_the_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            agent = NooaProcessAgent(
+                runtime_root=RUNTIME_ROOT,
+                run_root=Path(directory) / "run",
+                fixture_policy=lambda _step, _observation: [
+                    "return_result({'action': 6, 'data': {'x': 0, 'y': 0}, "
+                    "'reason': 'fixture'})"
+                ],
+            )
+            response = {
+                "decision": {
+                    "action": 6,
+                    "data": {"x": 0},
+                    "reason": "missing y",
+                },
+                "audit": {
+                    "model_calls": [
+                        {"messages": [{"role": "user", "content": "x"}], "tools": []}
+                    ]
+                },
+            }
+            try:
+                with patch.object(agent, "_wait_for_response", return_value=response):
+                    with self.assertRaisesRegex(
+                        NooaWorkerError,
+                        "requires integer x and y",
+                    ):
+                        agent.act(observation(0, available_actions=(6,)))
+            finally:
+                try:
+                    agent.close()
+                except NooaWorkerError:
+                    pass
+
+    def test_host_classifies_a_non_object_response(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            agent = NooaProcessAgent(
+                runtime_root=RUNTIME_ROOT,
+                run_root=Path(directory) / "run",
+                fixture_policy=lambda _step, _observation: [
+                    "return_result({'action': 1, 'data': None, 'reason': 'fixture'})"
+                ],
+            )
+            with agent.responses_path.open("a", encoding="utf-8") as handle:
+                handle.write("[]\n")
+                handle.flush()
+            try:
+                with self.assertRaisesRegex(
+                    NooaWorkerError,
+                    "response JSON must be an object",
+                ):
+                    agent._wait_for_response(0)
+            finally:
+                try:
+                    agent.close()
+                except NooaWorkerError:
+                    pass
 
     def test_response_timeout_terminates_the_worker_tree_without_leaking_timeout(
         self,

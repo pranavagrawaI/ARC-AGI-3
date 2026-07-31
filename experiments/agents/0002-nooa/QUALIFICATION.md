@@ -72,6 +72,7 @@ These are test and experiment defaults, not identity:
 | Setting | Initial default |
 |---|---:|
 | Retained conversation turns | 6 |
+| Retained public transitions | 8 |
 | Model rounds per action | 10 |
 | Decision repairs | 2 |
 | Total model calls | 100 |

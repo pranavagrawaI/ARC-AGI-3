@@ -107,6 +107,24 @@ def test_host_rejects_an_action_outside_the_current_public_legal_set() -> None:
         )
 
 
+def test_simple_action_data_matches_the_frozen_control_parser() -> None:
+    action_point = PublicActionPoint(
+        observation={"step": 0},
+        legal_actions=(1,),
+    )
+
+    decision = validate_decision(
+        action_point,
+        ActionDecision(
+            action=1,
+            data={"unused": "preserved"},
+            reason="control-compatible payload",
+        ),
+    )
+
+    assert decision.data == {"unused": "preserved"}
+
+
 @pytest.mark.asyncio
 async def test_illegal_final_action_is_visible_and_requires_model_repair() -> None:
     llm = _RecordingFakeLLM(
@@ -156,6 +174,27 @@ def test_host_rejects_missing_or_out_of_bounds_coordinates(
             action_point,
             ActionDecision(action=6, data=data, reason="invalid coordinates"),
         )
+
+
+def test_coordinate_action_extra_data_matches_the_frozen_control_parser() -> None:
+    action_point = PublicActionPoint(
+        observation={"step": 0},
+        legal_actions=(6,),
+        coordinate_actions=(6,),
+        frame_width=8,
+        frame_height=6,
+    )
+
+    decision = validate_decision(
+        action_point,
+        ActionDecision(
+            action=6,
+            data={"x": 2, "y": 2, "extra": "preserved"},
+            reason="control-compatible payload",
+        ),
+    )
+
+    assert decision.data == {"x": 2, "y": 2, "extra": "preserved"}
 
 
 @pytest.mark.asyncio
@@ -378,6 +417,8 @@ async def test_timeout_restarts_memory_preserves_files_and_requires_model_repair
                 "    pass\n"
                 "else:\n"
                 "    raise AssertionError('memory survived timeout restart')\n"
+                "assert action_point['observation']['step'] == 1\n"
+                "assert tuple(action_point['legal_actions']) == (1,)\n"
                 "assert open('durable.txt').read() == 'kept'\n"
                 "return_result({'action': 1, 'data': None, 'reason': 'restarted'})",
                 "repair",
@@ -603,11 +644,22 @@ async def test_model_visible_prompt_does_not_advertise_runtime_objects() -> None
     await agent.choose_action(PublicActionPoint(observation={"step": 0}, legal_actions=(1,)))
 
     visible = json.dumps(llm.last_messages).lower()
-    assert "nooa" not in visible
-    assert "agent instance" not in visible
-    assert "self." not in visible
-    assert "context_manager" not in visible
-    assert "event_manager" not in visible
+    for forbidden in (
+        "nooa",
+        "agent instance",
+        "self.",
+        "runtime",
+        "provider",
+        "controller",
+        "context",
+        "trace",
+        "ipc",
+        "process",
+        "host",
+        "context_manager",
+        "event_manager",
+    ):
+        assert forbidden not in visible
 
 
 @pytest.mark.asyncio
