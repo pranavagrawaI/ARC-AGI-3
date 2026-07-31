@@ -184,6 +184,53 @@ class NooaProcessAgentTests(unittest.TestCase):
                 except NooaWorkerError:
                     pass
 
+    def test_host_surfaces_structured_provider_transport_failure_without_an_action(self) -> None:
+        for disposition, attempts in (("fatal", 1), ("uncertain", 1), ("retryable", 3)):
+            with self.subTest(disposition=disposition):
+                with tempfile.TemporaryDirectory() as directory:
+                    agent = NooaProcessAgent(
+                        runtime_root=RUNTIME_ROOT,
+                        run_root=Path(directory) / "run",
+                        fixture_policy=lambda _step, _observation: [
+                            "return_result({'action': 1, 'data': None, "
+                            "'reason': 'must not run'})"
+                        ],
+                    )
+                    response = {
+                        "error": {
+                            "kind": "provider_transport",
+                            "disposition": disposition,
+                            "attempts": attempts,
+                        },
+                        "audit": {
+                            "model_calls": [
+                                {
+                                    "messages": [
+                                        {"role": "user", "content": "x"}
+                                    ],
+                                    "tools": [],
+                                }
+                            ]
+                        },
+                    }
+                    try:
+                        with patch.object(
+                            agent,
+                            "_wait_for_response",
+                            return_value=response,
+                        ):
+                            with self.assertRaisesRegex(
+                                NooaWorkerError,
+                                f"provider transport {disposition} after {attempts} attempt",
+                            ):
+                                agent.act(observation(0))
+                        self.assertIsNone(agent._pending_decision)
+                    finally:
+                        try:
+                            agent.close()
+                        except NooaWorkerError:
+                            pass
+
     def test_host_preserves_simple_action_data_like_the_frozen_control(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             agent = NooaProcessAgent(

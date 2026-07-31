@@ -13,6 +13,110 @@ from tempfile import TemporaryDirectory
 from typing import Any, ClassVar
 
 
+@dataclass(frozen=True, slots=True)
+class ProviderRequestProfile:
+    """Credential-free commitment to every static provider request field."""
+
+    schema: str
+    api_surface: str
+    model: str
+    api_base: str
+    max_output_tokens: int
+    reasoning_effort: str | None
+    request_timeout_seconds: float
+    temperature: float | None
+    seed: int | None
+    stream: bool
+    drop_params: bool
+    parallel_tool_calls: bool
+    tool_choice: str
+    truncation: str
+    nooa_max_retries: int
+    nooa_rate_limit_extra_retries: int
+    litellm_num_retries: int
+
+    @classmethod
+    def responses(
+        cls,
+        *,
+        model: str,
+        api_base: str,
+        max_output_tokens: int,
+        reasoning_effort: str | None,
+        request_timeout_seconds: float,
+        temperature: float | None = None,
+        seed: int | None = None,
+    ) -> "ProviderRequestProfile":
+        return cls(
+            schema="0002-nooa-provider-request-v1",
+            api_surface="responses",
+            model=model,
+            api_base=api_base,
+            max_output_tokens=max_output_tokens,
+            reasoning_effort=reasoning_effort,
+            request_timeout_seconds=request_timeout_seconds,
+            temperature=temperature,
+            seed=seed,
+            stream=False,
+            drop_params=True,
+            parallel_tool_calls=False,
+            tool_choice="auto",
+            truncation="disabled",
+            nooa_max_retries=0,
+            nooa_rate_limit_extra_retries=0,
+            litellm_num_retries=0,
+        )
+
+    def __post_init__(self) -> None:
+        fixed = {
+            "schema": "0002-nooa-provider-request-v1",
+            "api_surface": "responses",
+            "stream": False,
+            "drop_params": True,
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "truncation": "disabled",
+            "nooa_max_retries": 0,
+            "nooa_rate_limit_extra_retries": 0,
+            "litellm_num_retries": 0,
+        }
+        drift = {
+            field: {"required": required, "received": getattr(self, field)}
+            for field, required in fixed.items()
+            if type(getattr(self, field)) is not type(required)
+            or getattr(self, field) != required
+        }
+        if drift:
+            raise ValueError(
+                "unsupported provider request profile: "
+                + json.dumps(drift, sort_keys=True)
+            )
+        if not isinstance(self.model, str) or not isinstance(self.api_base, str):
+            raise ValueError("provider model and api_base must be strings")
+        if not self.model or not self.api_base:
+            raise ValueError("provider model and api_base must be non-empty")
+        if type(self.max_output_tokens) is not int or self.max_output_tokens <= 0:
+            raise ValueError("max_output_tokens must be a positive integer")
+        if (
+            isinstance(self.request_timeout_seconds, bool)
+            or not isinstance(self.request_timeout_seconds, (int, float))
+            or self.request_timeout_seconds <= 0
+        ):
+            raise ValueError("request_timeout_seconds must be positive")
+        if self.seed is not None and type(self.seed) is not int:
+            raise ValueError("seed must be an integer or null")
+        if self.reasoning_effort is not None and not isinstance(
+            self.reasoning_effort,
+            str,
+        ):
+            raise ValueError("reasoning_effort must be a string or null")
+        if self.temperature is not None and (
+            isinstance(self.temperature, bool)
+            or not isinstance(self.temperature, (int, float))
+        ):
+            raise ValueError("temperature must be numeric or null")
+
+
 @dataclass(frozen=True)
 class PairedRunSpec:
     """The settings that must not drift independently between the two bases."""
@@ -44,6 +148,7 @@ class PairedRunSpec:
     legal_event_schema: str
     final_action_schema: str
     host_workspace_initialization: tuple[str, ...]
+    provider_request_profile: ProviderRequestProfile | None = None
 
     _SUPPORTED_SURFACE: ClassVar[dict[str, Any]] = {
         "model_profile": "offline-fixture",
@@ -97,6 +202,15 @@ class PairedRunSpec:
         drift = {
             field: {"supported": supported, "received": getattr(self, field)}
             for field, supported in self._SUPPORTED_SURFACE.items()
+            if field
+            not in {
+                "model_profile",
+                "provider_endpoint_profile",
+                "model_seed",
+                "environment_profile",
+                "environment_seed",
+                "request_profile",
+            }
             if getattr(self, field) != supported
         }
         if drift:
@@ -116,6 +230,41 @@ class PairedRunSpec:
             raise ValueError("paired-run positive budgets must be greater than zero")
         if self.max_decision_repairs < 0 or self.transport_max_retries < 0:
             raise ValueError("paired-run retry budgets must not be negative")
+        profile = self.provider_request_profile
+        if profile is None:
+            expected_projection = {
+                field: self._SUPPORTED_SURFACE[field]
+                for field in (
+                    "model_profile",
+                    "provider_endpoint_profile",
+                    "model_seed",
+                    "environment_profile",
+                    "environment_seed",
+                    "request_profile",
+                )
+            }
+            message = "unsupported paired-run surface drift"
+        else:
+            expected_projection = {
+                "model_profile": profile.model,
+                "provider_endpoint_profile": profile.api_base,
+                "model_seed": profile.seed,
+                "request_profile": profile.schema,
+            }
+            message = "provider profile projection drift"
+            if not self.environment_profile:
+                raise ValueError("provider run environment_profile must be non-empty")
+            if type(self.environment_seed) is not int:
+                raise ValueError("provider run environment_seed must be an integer")
+        projection_drift = {
+            field: {"expected": expected, "received": getattr(self, field)}
+            for field, expected in expected_projection.items()
+            if getattr(self, field) != expected
+        }
+        if projection_drift:
+            raise ValueError(
+                message + ": " + json.dumps(projection_drift, sort_keys=True)
+            )
 
     @classmethod
     def initial(cls) -> "PairedRunSpec":
@@ -172,6 +321,29 @@ class PairedRunSpec:
                 "host_workspace_initialization"
             ],
         )
+
+    @classmethod
+    def provider(
+        cls,
+        profile: ProviderRequestProfile,
+        *,
+        environment_profile: str,
+        environment_seed: int,
+    ) -> "PairedRunSpec":
+        """Build the live-provider variant while retaining all shared budgets."""
+
+        offline = cls.initial()
+        values = asdict(offline)
+        values.update(
+            model_profile=profile.model,
+            provider_endpoint_profile=profile.api_base,
+            model_seed=profile.seed,
+            environment_profile=environment_profile,
+            environment_seed=environment_seed,
+            request_profile=profile.schema,
+            provider_request_profile=profile,
+        )
+        return cls(**values)
 
     def control_overrides(self) -> dict[str, int | float]:
         """Project only fields accepted by the frozen 0002-R arm factory."""
@@ -242,7 +414,11 @@ def verify_source_manifest() -> dict[str, Any]:
                     f"expected {expected}, got {copied}"
                 )
 
-    for destination in ("nooa-runtime/agent.py", "nooa-runtime/launcher.py"):
+    for destination in (
+        "nooa-runtime/agent.py",
+        "nooa-runtime/launcher.py",
+        "nooa-runtime/llm.py",
+    ):
         first_lines = (
             (control_root / destination).read_text(encoding="utf-8").splitlines()[:12]
         )

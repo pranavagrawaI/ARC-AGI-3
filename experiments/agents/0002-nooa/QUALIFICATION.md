@@ -10,21 +10,19 @@ The tracer bullet is a qualification instrument, not a qualified base.
 
 | Gate | State | Current evidence | Remaining load-bearing gap |
 |---|---|---|---|
-| G1 | partial | pinned upstream bytes, verbatim copies, notices, and selected forbidden imports are executable checks | complete import/file/introspection route matrix |
-| G2 | pass for offline fixture | cumulative memory/file loop crosses a real successor through the host IPC | repeat through the live provider adapter |
+| G1 | partial | pinned upstream bytes, copy-and-prune notices, provider pruning, and selected forbidden imports are executable checks | complete import/file/introspection route matrix |
+| G2 | pass for offline fixture | cumulative memory/file loop crosses a real successor through host IPC; provider mode uses the same long-lived control path | exercise a successor through the live provider adapter |
 | G3 | partial | complete-turn eviction and pointer-only omission are exercised | exhaustive hidden-event enumeration/dereference mutants |
 | G4 | partial | runtime names, globals, NOOA/undeclared imports, and out-of-workspace reads fail while NumPy/Pillow work | process environment/arguments, package discovery, parent-process, cache, and IPC route matrix |
 | G5 | partial | valid return stops later scripted model work and file mutation | explicit replacement-action and post-accept-hook mutants |
-| G6 | partial | syntax/runtime errors, malformed/illegal actions, output bounds, budgets, timeout restart, response timeout, process death, and tree cleanup are exercised | retryable versus fatal/uncertain provider transport |
-| G7 | partial | actual fixture messages/tools/observation/workspace are normalized against the frozen control constructor; unmatched fields fail | full instruction digests, errors, imports, omission, budgets, and actual provider payload |
+| G6 | pass offline | existing recovery matrix plus retryable/fatal/uncertain provider transport injection; fatal, uncertain, and exhausted-retryable paths carry exact attempt evidence and make no host action | repeat the success path in G9; no offline failure class remains open |
+| G7 | partial | fixture parity remains clean; canonical requests are committed and paired with bytes crossing NOOA's owned HTTP client; credential/image redaction is executable | full instruction digests, errors, imports, omission, budgets, and one real-provider payload |
 | G8 | partial | hidden-history and runtime-term reintroduction mutants fail parity | complete required mutant matrix |
-| G9 | blocked by design | none | provider adapter and G1–G8 closure |
+| G9 | blocked by design | `run_live_probe.py` is an unexecuted single-arm provider smoke helper, not the required paired comparison | paired runner plus G1/G3/G4/G5/G7/G8 closure |
 
-The next implementation decision is therefore narrow: finish the provider and
-transport/evidence seam, or finish the exhaustive offline negative matrices
-first. The current recommendation is the provider seam because it can expose
-request-shape and retry semantics that would otherwise force the matrices to be
-rewritten.
+The provider and transport/evidence seam is now implemented. The next stage is
+the exhaustive offline negative/mutation matrices and the complete G7 parity
+catalogue. G9 remains unauthorized until that rerun is green.
 
 ### Reproduction
 
@@ -43,6 +41,10 @@ From `experiments/agents/0002-nooa/nooa-runtime/`:
 
 The timeout fixtures create nested workers; run them where the operating system
 process and Landlock guards are available.
+
+Current rerun (2026-07-31): 61 Python 3.12 runtime tests and 13 Python 3.14 host
+tests pass. This is a suite result, not a claim that gates still marked partial
+have closed.
 
 ## Shared paired-run specification
 

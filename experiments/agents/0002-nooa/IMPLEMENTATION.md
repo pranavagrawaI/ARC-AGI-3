@@ -53,6 +53,7 @@ experiments/agents/0002-nooa/
 ├── QUALIFICATION.md
 ├── IMPLEMENTATION.md
 ├── SOURCE_MANIFEST.json
+├── run_live_probe.py
 ├── nooa-runtime/
 │   ├── pyproject.toml
 │   ├── uv.lock
@@ -93,12 +94,22 @@ Do not copy the NOOA framework, harness, recorder, viewer, experiment fleet, ski
 The tracer bullet completed the source-copy, nested-runtime, cumulative-loop,
 forbidden-surface, and first parity slices. The remaining first-green work is:
 
-1. replace the offline fixture client with the copied provider adapter without
-   changing the audited model-visible surface;
-2. classify retryable pre-response and fatal/uncertain transport failures;
-3. commit provider request/response evidence without credentials or image bodies;
-4. finish the G3/G4/G5/G8 negative and mutation matrices;
-5. run G9 only after the offline report contains no unmatched affordance.
+- [x] Replace the offline fixture client with the copied-and-pruned Responses
+  adapter without changing the audited model-visible surface.
+- [x] Freeze the credential-free provider request profile in `PairedRunSpec`.
+- [x] Disable both NOOA retry budgets and LiteLLM retries; keep the bounded
+  transport loop explicit and audited.
+- [x] Record canonical and actual HTTP crossings with credential/image
+  commitments instead of credential/image bodies.
+- [x] Inject retryable, fatal, and uncertain transport failures; prove fatal
+  and uncertain outcomes cannot enter NOOA's generation-repair loop, and prove
+  fatal, uncertain, and exhausted-retryable outcomes produce no host-selected
+  action with exact attempt evidence.
+- [ ] Finish the G3/G4/G5/G8 negative and mutation matrices.
+- [ ] Extend G7 from the exercised provider crossing to the complete parity
+  catalogue and rerun G1-G8.
+- [ ] Construct and run the paired 0002-R/0002-NOOA G9 probe only after G1-G8
+  are green. `run_live_probe.py` is a single-arm provider smoke helper, not G9.
 
 Do not reimplement provider normalization, dispatch, yield semantics, or lifecycle from memory before the copied path has run.
 

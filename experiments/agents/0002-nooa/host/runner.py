@@ -90,12 +90,23 @@ class NooaProcessAgent:
         *,
         runtime_root: Path,
         run_root: Path,
-        fixture_policy: FixturePolicy,
+        fixture_policy: FixturePolicy | None = None,
         paired_run_spec: PairedRunSpec | None = None,
         response_timeout: float = 30.0,
     ) -> None:
         self.runtime_root = runtime_root.resolve()
         self.run_root = run_root.resolve()
+        self.fixture_policy = fixture_policy
+        self.paired_run_spec = paired_run_spec or PairedRunSpec.initial()
+        provider_mode = self.paired_run_spec.provider_request_profile is not None
+        if provider_mode == (fixture_policy is not None):
+            raise ValueError(
+                "exactly one model source is required: fixture_policy for offline runs "
+                "or provider_request_profile for provider runs"
+            )
+        if response_timeout <= 0:
+            raise ValueError("response_timeout must be positive")
+        self.response_timeout = response_timeout
         self.run_root.mkdir(parents=True, exist_ok=False)
         self.requests_path = self.run_root / "ipc" / "requests.jsonl"
         self.responses_path = self.run_root / "ipc" / "responses.jsonl"
@@ -119,9 +130,6 @@ class NooaProcessAgent:
             encoding="utf-8",
         )
         self.run_id = uuid4().hex
-        self.fixture_policy = fixture_policy
-        self.paired_run_spec = paired_run_spec or PairedRunSpec.initial()
-        self.response_timeout = response_timeout
         self._step = 0
         self._current_projection: ModelObservation | None = None
         self._history: list[dict[str, Any]] = []
@@ -131,19 +139,20 @@ class NooaProcessAgent:
         self._worker_stdout = self.worker_stdout_path.open("w", encoding="utf-8")
         self._worker_stderr = self.worker_stderr_path.open("w", encoding="utf-8")
         self._worker_logs_closed = False
+        command = [
+            str(self.runtime_root / ".venv" / "bin" / "python"),
+            str(self.runtime_root / "launcher.py"),
+            "--requests",
+            str(self.requests_path),
+            "--responses",
+            str(self.responses_path),
+            "--workspace",
+            str(self.workspace),
+            "--provider" if provider_mode else "--offline-fixture",
+            "--serve",
+        ]
         self._process = subprocess.Popen(
-            [
-                str(self.runtime_root / ".venv" / "bin" / "python"),
-                str(self.runtime_root / "launcher.py"),
-                "--requests",
-                str(self.requests_path),
-                "--responses",
-                str(self.responses_path),
-                "--workspace",
-                str(self.workspace),
-                "--offline-fixture",
-                "--serve",
-            ],
+            command,
             cwd=self.runtime_root,
             stdin=subprocess.DEVNULL,
             stdout=self._worker_stdout,
@@ -190,7 +199,7 @@ class NooaProcessAgent:
             for action in observation.available_actions
             if GameAction.from_id(action).is_complex()
         ]
-        request = {
+        request: dict[str, Any] = {
             "protocol": PROTOCOL,
             "run_id": self.run_id,
             "action_point_id": self._step,
@@ -210,8 +219,12 @@ class NooaProcessAgent:
             "frame_width": int(width),
             "frame_height": int(height),
             "paired_run_spec": self.paired_run_spec.as_record(),
-            "fixture_python_cells": self.fixture_policy(self._step, observation),
         }
+        if self.fixture_policy is not None:
+            request["fixture_python_cells"] = self.fixture_policy(
+                self._step,
+                observation,
+            )
         _append_jsonl(self.requests_path, request)
         self._write_process(
             "action_request",
@@ -242,6 +255,16 @@ class NooaProcessAgent:
             )
         ):
             raise NooaWorkerError("worker response has no valid model-call audit")
+        transport_error = response.get("error")
+        if (
+            isinstance(transport_error, dict)
+            and transport_error.get("kind") == "provider_transport"
+        ):
+            raise NooaWorkerError(
+                "provider transport "
+                f"{transport_error.get('disposition')} after "
+                f"{transport_error.get('attempts')} attempt(s)"
+            )
         payload = response.get("decision")
         if not isinstance(payload, dict):
             raise NooaWorkerError("worker response has no decision object")

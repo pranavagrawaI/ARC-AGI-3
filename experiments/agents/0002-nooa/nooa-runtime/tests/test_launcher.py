@@ -8,11 +8,13 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image
 
-from launcher import _FixtureLLM, run_offline_fixture
+from launcher import _FixtureLLM, _provider_client, run_offline_fixture, serve_provider
+from llm import AuditedProviderClient, InjectedTransportFailure, TransportDisposition
 
 
 PROTOCOL = "0002-nooa-ipc-v1"
@@ -34,6 +36,28 @@ def _request(action_point_id: int, code: str) -> dict[str, object]:
     }
 
 
+def _provider_profile() -> dict[str, object]:
+    return {
+        "schema": "0002-nooa-provider-request-v1",
+        "api_surface": "responses",
+        "model": "openai/openai/gpt-5.6-sol",
+        "api_base": "https://gateway.invalid/v1",
+        "max_output_tokens": 16_384,
+        "reasoning_effort": "medium",
+        "request_timeout_seconds": 180.0,
+        "temperature": None,
+        "seed": None,
+        "stream": False,
+        "drop_params": True,
+        "parallel_tool_calls": False,
+        "tool_choice": "auto",
+        "truncation": "disabled",
+        "nooa_max_retries": 0,
+        "nooa_rate_limit_extra_retries": 0,
+        "litellm_num_retries": 0,
+    }
+
+
 @pytest.mark.asyncio
 async def test_fixture_audit_snapshots_messages_at_the_model_crossing() -> None:
     client = _FixtureLLM()
@@ -46,6 +70,117 @@ async def test_fixture_audit_snapshots_messages_at_the_model_crossing() -> None:
     messages[0]["content"] = "after"
 
     assert client.audit_calls[0]["messages"][0]["content"] == "before"
+
+
+def test_provider_client_is_constructed_only_from_the_ipc_profile_and_explicit_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = SimpleNamespace(
+        _http=SimpleNamespace(
+            httpx_async=SimpleNamespace(event_hooks={"request": [], "response": []})
+        )
+    )
+    built: list[tuple[object, object]] = []
+
+    def fake_build(profile: object, *, api_key: object) -> object:
+        built.append((profile, api_key))
+        return provider
+
+    monkeypatch.setattr("launcher.build_llm", fake_build)
+    request = {
+        "paired_run_spec": {
+            "provider_request_profile": _provider_profile(),
+            "transport_max_retries": 2,
+        }
+    }
+
+    client = _provider_client(request, api_key="explicit-secret")
+
+    assert client.provider is provider
+    assert client.transport_max_retries == 2
+    assert client.known_credentials == ("explicit-secret",)
+    assert built == [(_provider_profile(), "explicit-secret")]
+
+
+@pytest.mark.parametrize("profile", [None, {}, "not-an-object"])
+def test_provider_client_rejects_missing_profile(profile: object) -> None:
+    request = {
+        "paired_run_spec": {
+            "provider_request_profile": profile,
+            "transport_max_retries": 2,
+        }
+    }
+    with pytest.raises(ValueError, match="provider_request_profile"):
+        _provider_client(request, api_key="explicit-secret")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("disposition", "expected_calls"),
+    [
+        (TransportDisposition.FATAL, 1),
+        (TransportDisposition.UNCERTAIN, 1),
+        (TransportDisposition.RETRYABLE, 3),
+    ],
+)
+async def test_provider_serve_returns_transport_failure_evidence_without_an_action(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    disposition: TransportDisposition,
+    expected_calls: int,
+) -> None:
+    class FailureProvider:
+        _http = None
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def acall(self, *_args: object, **_kwargs: object) -> object:
+            self.calls += 1
+            raise InjectedTransportFailure(disposition)
+
+        async def aclose(self) -> None:
+            return None
+
+    provider = FailureProvider()
+    audited = AuditedProviderClient(provider, _provider_profile(), transport_max_retries=2)
+    monkeypatch.setattr("launcher._provider_client", lambda *_args, **_kwargs: audited)
+    requests = tmp_path / "requests.jsonl"
+    responses = tmp_path / "responses.jsonl"
+    workspace = tmp_path / "workspace"
+    _write_frame(workspace)
+    request = _request(0, "unused fixture cell")
+    request.pop("fixture_python_cells")
+    request["paired_run_spec"] = {
+        "provider_request_profile": _provider_profile(),
+        "transport_max_retries": 2,
+    }
+    stop = {"protocol": PROTOCOL, "kind": "stop"}
+    requests.write_text(json.dumps(request) + "\n" + json.dumps(stop) + "\n")
+
+    completed = await serve_provider(
+        requests,
+        responses,
+        workspace,
+        api_key="explicit-secret",
+    )
+
+    assert completed == 0
+    assert provider.calls == expected_calls
+    response = json.loads(responses.read_text())
+    assert "decision" not in response
+    assert response["error"] == {
+        "kind": "provider_transport",
+        "disposition": disposition.value,
+        "attempts": expected_calls,
+    }
+    model_call = response["audit"]["model_calls"][0]
+    assert model_call["outcome"]["disposition"] == disposition.value
+    assert len(model_call["attempts"]) == expected_calls
+    assert all(
+        attempt["outcome"] == f"{disposition.value}_failure"
+        for attempt in model_call["attempts"]
+    )
 
 
 @pytest.mark.asyncio

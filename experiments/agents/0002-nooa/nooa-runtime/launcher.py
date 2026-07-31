@@ -19,6 +19,7 @@ from typing import Any
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
 from agent import NooaControlAgent, PublicActionPoint
+from llm import AuditedProviderClient, ProviderTransportAbort, build_llm
 
 PROTOCOL = "0002-nooa-ipc-v1"
 
@@ -153,6 +154,30 @@ def _fixture_client(records: list[dict[str, Any]]) -> _FixtureLLM:
     return client
 
 
+def _provider_client(
+    request: dict[str, Any],
+    *,
+    api_key: str | None,
+) -> AuditedProviderClient:
+    spec = request.get("paired_run_spec")
+    if not isinstance(spec, dict):
+        raise ValueError("paired_run_spec must be an object")
+    profile = spec.get("provider_request_profile")
+    if not isinstance(profile, dict) or not profile:
+        raise ValueError("provider_request_profile must be a non-empty object")
+    retries = spec.get("transport_max_retries")
+    if type(retries) is not int or retries < 0:
+        raise ValueError("transport_max_retries must be a non-negative integer")
+    provider = build_llm(profile, api_key=api_key)
+    return AuditedProviderClient(
+        provider,
+        profile,
+        transport_max_retries=retries,
+        require_actual_crossings=True,
+        known_credentials=(api_key,) if api_key else (),
+    )
+
+
 def _append_response(path: Path, record: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     encoded = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
@@ -224,12 +249,14 @@ async def serve_offline_fixture(
     workspace: Path,
     *,
     poll_interval: float = 0.01,
+    _provider_mode: bool = False,
+    _api_key: str | None = None,
 ) -> int:
-    """Serve incrementally appended requests while preserving one control process."""
+    """Serve appended requests while preserving one control process and client."""
 
     requests_path.parent.mkdir(parents=True, exist_ok=True)
     requests_path.touch(exist_ok=True)
-    client = _FixtureLLM()
+    client: Any = None if _provider_mode else _FixtureLLM()
     workspace.mkdir(parents=True, exist_ok=True)
     control: NooaControlAgent | None = None
     original_cwd = Path.cwd()
@@ -269,7 +296,11 @@ async def serve_offline_fixture(
                 if identity in seen:
                     raise ValueError(f"duplicate action point: {identity!r}")
                 seen.add(identity)
-                client.enqueue(_fixture_cells(request))
+                if _provider_mode:
+                    if client is None:
+                        client = _provider_client(request, api_key=_api_key)
+                else:
+                    client.enqueue(_fixture_cells(request))
                 if control is None:
                     active_spec = request.get("paired_run_spec")
                     control = NooaControlAgent(
@@ -280,15 +311,33 @@ async def serve_offline_fixture(
                 elif request.get("paired_run_spec") != active_spec:
                     raise ValueError("paired_run_spec changed inside one worker run")
                 call_offset = len(client.audit_calls)
-                decision = await control.choose_action(
-                    PublicActionPoint(
-                        observation=request.get("observation", {}),
-                        legal_actions=tuple(request.get("legal_actions", ())),
-                        coordinate_actions=tuple(request.get("coordinate_actions", ())),
-                        frame_width=request.get("frame_width"),
-                        frame_height=request.get("frame_height"),
+                try:
+                    decision = await control.choose_action(
+                        PublicActionPoint(
+                            observation=request.get("observation", {}),
+                            legal_actions=tuple(request.get("legal_actions", ())),
+                            coordinate_actions=tuple(request.get("coordinate_actions", ())),
+                            frame_width=request.get("frame_width"),
+                            frame_height=request.get("frame_height"),
+                        )
                     )
-                )
+                except ProviderTransportAbort as error:
+                    _append_response(
+                        responses_path,
+                        {
+                            "protocol": PROTOCOL,
+                            "run_id": run_id,
+                            "action_point_id": action_point_id,
+                            "error": {
+                                "kind": "provider_transport",
+                                "disposition": error.disposition.value,
+                                "attempts": error.attempts,
+                            },
+                            "audit": {"model_calls": client.audit_calls[call_offset:]},
+                            "complete": True,
+                        },
+                    )
+                    continue
                 _append_response(
                     responses_path,
                     {
@@ -304,7 +353,29 @@ async def serve_offline_fixture(
     finally:
         if control is not None:
             await control.aclose()
+        if _provider_mode and client is not None:
+            await client.aclose()
         os.chdir(original_cwd)
+
+
+async def serve_provider(
+    requests_path: Path,
+    responses_path: Path,
+    workspace: Path,
+    *,
+    api_key: str | None,
+    poll_interval: float = 0.01,
+) -> int:
+    """Serve the explicit provider profile; credentials are never read by llm.py."""
+
+    return await serve_offline_fixture(
+        requests_path,
+        responses_path,
+        workspace,
+        poll_interval=poll_interval,
+        _provider_mode=True,
+        _api_key=api_key,
+    )
 
 
 def main() -> None:
@@ -312,13 +383,25 @@ def main() -> None:
     parser.add_argument("--requests", type=Path, required=True)
     parser.add_argument("--responses", type=Path, required=True)
     parser.add_argument("--workspace", type=Path, required=True)
-    parser.add_argument("--offline-fixture", action="store_true")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--offline-fixture", action="store_true")
+    mode.add_argument("--provider", action="store_true")
     parser.add_argument("--serve", action="store_true")
     args = parser.parse_args()
-    if not args.offline_fixture:
-        parser.error("only the offline fixture launcher is implemented")
-    operation = serve_offline_fixture if args.serve else run_offline_fixture
-    completed = asyncio.run(operation(args.requests, args.responses, args.workspace))
+    if args.provider:
+        if not args.serve:
+            parser.error("provider mode requires --serve")
+        completed = asyncio.run(
+            serve_provider(
+                args.requests,
+                args.responses,
+                args.workspace,
+                api_key=os.environ.get("ARC_LLM_API_KEY"),
+            )
+        )
+    else:
+        operation = serve_offline_fixture if args.serve else run_offline_fixture
+        completed = asyncio.run(operation(args.requests, args.responses, args.workspace))
     print(json.dumps({"protocol": PROTOCOL, "completed": completed}))
 
 

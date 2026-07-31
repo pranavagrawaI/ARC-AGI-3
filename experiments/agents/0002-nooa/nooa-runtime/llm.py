@@ -1,126 +1,591 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""LLM + embedding builders for the ARC-AGI-3 solver example.
+"""One explicit, frozen NOOA provider boundary for 0002-NOOA.
 
-Configured purely from the environment (see repo-root ``.env``)::
-
-    ARC_LLM_MODEL=openai/openai/gpt-5.4
-    ARC_LLM_BASE_URL=https://inference-api.nvidia.com/v1
-    ARC_LLM_API_KEY=...
-    MEM_EMBED_MODEL=openai/azure/openai/text-embedding-3-large
-    MEM_EMBED_BASE_URL=https://inference-api.nvidia.com/v1
-    MEM_EMBED_API_KEY=...
-    MEM_EMBED_DIMS=1024
-
-Follows ``examples/memory_bench/llm.py``; falls back to ``FakeLLMClient`` /
-hashing embeddings when credentials are absent so smoke tests run offline.
+Derived by copy-and-prune from the pinned NVIDIA NOOA ARC example recorded in
+``../SOURCE_MANIFEST.json``. Configuration and credentials are arguments: this
+module does not discover ``.env`` files, ambient variables, embeddings, memory,
+fallback clients, or retry policy.
 """
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
+import base64
+import binascii
+from collections.abc import Iterable
+from dataclasses import asdict, dataclass, fields, is_dataclass
+from enum import StrEnum
+from hashlib import sha256
+import json
+from typing import Any, Mapping
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from nooa_memory.config import EmbeddingConfig
-
-from nooa.unifiedllm import CompletionClient, FakeLLMClient, RetryConfig
+import httpx
+from nooa.tracing._secret_scrubber import _is_sensitive_key, scrub_string
+from nooa.unifiedllm import RetryConfig
 from nooa.unifiedllm.unifiedllm import ResponsesClient
 
 
-def _load_dotenv() -> None:
-    """Minimal .env loader (no dependency): real environment wins via setdefault."""
-    for d in [Path.cwd(), *Path(__file__).resolve().parents]:
-        f = d / ".env"
-        if f.exists():
-            for line in f.read_text().splitlines():
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                os.environ.setdefault(k.strip(), v.strip().strip("\"'"))
-            return
+@dataclass(frozen=True, slots=True)
+class ProviderRequestProfile:
+    """Static provider fields committed by a paired run before execution."""
 
+    schema: str
+    api_surface: str
+    model: str
+    api_base: str
+    max_output_tokens: int
+    reasoning_effort: str | None
+    request_timeout_seconds: float
+    temperature: float | None
+    seed: int | None
+    stream: bool
+    drop_params: bool
+    parallel_tool_calls: bool
+    tool_choice: str
+    truncation: str
+    nooa_max_retries: int
+    nooa_rate_limit_extra_retries: int
+    litellm_num_retries: int
 
-_load_dotenv()
+    @classmethod
+    def from_record(cls, record: Mapping[str, Any]) -> "ProviderRequestProfile":
+        expected = {field.name for field in fields(cls)}
+        received = set(record)
+        extra = sorted(received - expected)
+        missing = sorted(expected - received)
+        if extra:
+            raise ValueError(f"unknown provider request fields: {extra!r}")
+        if missing:
+            raise ValueError(f"missing provider request fields: {missing!r}")
+        profile = cls(**dict(record))
+        profile.validate()
+        return profile
 
-
-def has_llm_creds() -> bool:
-    return all(os.environ.get(k) for k in ("ARC_LLM_MODEL", "ARC_LLM_BASE_URL", "ARC_LLM_API_KEY"))
-
-
-def has_embedding_creds() -> bool:
-    return bool(os.environ.get("MEM_EMBED_API_KEY"))
+    def validate(self) -> None:
+        fixed = {
+            "schema": "0002-nooa-provider-request-v1",
+            "api_surface": "responses",
+            "stream": False,
+            "drop_params": True,
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "truncation": "disabled",
+            "nooa_max_retries": 0,
+            "nooa_rate_limit_extra_retries": 0,
+            "litellm_num_retries": 0,
+        }
+        drift = {
+            key: {"required": required, "received": getattr(self, key)}
+            for key, required in fixed.items()
+            if type(getattr(self, key)) is not type(required)
+            or getattr(self, key) != required
+        }
+        if drift:
+            raise ValueError(f"unsupported provider request profile: {drift!r}")
+        if not isinstance(self.model, str) or not isinstance(self.api_base, str):
+            raise ValueError("provider model and api_base must be strings")
+        if not self.model or not self.api_base:
+            raise ValueError("provider model and api_base must be non-empty")
+        if type(self.max_output_tokens) is not int or self.max_output_tokens <= 0:
+            raise ValueError("max_output_tokens must be a positive integer")
+        if (
+            isinstance(self.request_timeout_seconds, bool)
+            or not isinstance(self.request_timeout_seconds, (int, float))
+            or self.request_timeout_seconds <= 0
+        ):
+            raise ValueError("request_timeout_seconds must be positive")
+        if self.temperature is not None and (
+            isinstance(self.temperature, bool)
+            or not isinstance(self.temperature, (int, float))
+        ):
+            raise ValueError("temperature must be numeric or null")
+        if self.seed is not None and type(self.seed) is not int:
+            raise ValueError("seed must be an integer or null")
+        if self.reasoning_effort is not None and not isinstance(
+            self.reasoning_effort,
+            str,
+        ):
+            raise ValueError("reasoning_effort must be a string or null")
 
 
 def build_llm(
-    max_tokens: int | None = None,
-    reasoning_effort: str | None = None,
-    request_timeout: float | None = 180.0,
-):
-    """Real gateway client when ARC_LLM_* is set, else a FakeLLMClient."""
-    if not has_llm_creds():
-        return FakeLLMClient()
-    extra: dict[str, object] = {}
-    if max_tokens is not None:
-        extra["max_tokens"] = max_tokens
-    if request_timeout is not None:
-        # Hard per-request HTTP timeout: a gateway request that hangs would otherwise
-        # block the solving loop forever (litellm calls aren't cancellation-responsive).
-        extra["timeout"] = request_timeout
-    model = "openai/" + os.environ["ARC_LLM_MODEL"]  # litellm needs the provider prefix
-    reasoning_model = "nemotron" in model.lower()
-    # Reasoning-effort routing (verified live against the gateway 2026-07-16):
-    #  * Anthropic Opus 4.8+ uses the *adaptive* thinking API — thinking.type=adaptive
-    #    + output_config.effort. litellm's reasoning_effort maps to the OLD
-    #    thinking.type=enabled, which Opus 4.8 REJECTS ("not supported for this model;
-    #    use thinking.type.adaptive and output_config.effort"), and drop_params then
-    #    silently drops it -> reasoning_tokens=0, NO thinking. So send the adaptive
-    #    params raw via extra_body (CompletionClient forwards **config to litellm).
-    #  * gpt-5.x (Responses API) and everything else keep plain reasoning_effort.
-    if reasoning_effort:
-        if "anthropic" in model.lower():
-            extra["extra_body"] = {
-                "thinking": {"type": "adaptive"},
-                "output_config": {"effort": reasoning_effort},
-            }
-        else:
-            extra["reasoning_effort"] = reasoning_effort
-    # gpt-5.x on this gateway must use the Responses API (like the reference profiles'
-    # use_responses_api profiles): chat-completions with tools + reasoning_effort
-    # gets rerouted gateway-side with a mangled model id → 403 key_model_access_denied.
-    # (Observed live when this matched only "gpt-5.5": a gpt-5.6-sol fleet 403'd on
-    # every call. gpt-5.4 / 5.5 / 5.6-sol are all verified working via Responses.)
-    use_responses = os.environ.get("ARC_LLM_USE_RESPONSES", "1" if "gpt-5" in model else "0") == "1"
-    client_cls = ResponsesClient if use_responses else CompletionClient
-    kwargs = dict(
-        model=model,
-        api_base=os.environ["ARC_LLM_BASE_URL"],
-        api_key=os.environ["ARC_LLM_API_KEY"],
-        retry_config=RetryConfig(retry_on_empty_content=not reasoning_model),
-        drop_params=True,  # the gateway rejects some params on the reasoning route
-        **extra,
-    )
-    return client_cls(**kwargs)
+    profile_record: Mapping[str, Any],
+    *,
+    api_key: str | None,
+) -> ResponsesClient:
+    """Construct the pinned NOOA Responses client with no implicit fallback.
 
-
-def llm_uri() -> str:
-    """Model identifier recorded in run outputs."""
-    return os.environ.get("ARC_LLM_MODEL", "fake-llm")
-
-
-def build_embedding_config(force: str = "auto") -> EmbeddingConfig:
-    """Gateway embeddings when keys are set, else the deterministic hashing embedder.
-
-    ``force`` ∈ {"auto", "litellm", "hashing"}.
+    NOOA has separate ordinary and rate-limit retry budgets, while LiteLLM also
+    accepts its own retry setting. All three are fixed to zero here. Any bounded
+    recovery belongs to the audited transport wrapper above this client.
     """
-    want_real = force == "litellm" or (force == "auto" and has_embedding_creds())
-    if want_real:
-        dims = os.environ.get("MEM_EMBED_DIMS")
-        return EmbeddingConfig(
-            backend="litellm",
-            model=os.environ.get("MEM_EMBED_MODEL", "openai/azure/openai/text-embedding-3-large"),
-            endpoint=os.environ.get("MEM_EMBED_BASE_URL", "https://inference-api.nvidia.com/v1"),
-            api_key=os.environ.get("MEM_EMBED_API_KEY"),
-            dimensions=int(dims) if dims else 1024,
+
+    profile = ProviderRequestProfile.from_record(profile_record)
+    if not api_key:
+        raise ValueError("api_key must be supplied explicitly")
+
+    config: dict[str, Any] = {
+        "api_base": profile.api_base,
+        "api_key": api_key,
+        "drop_params": profile.drop_params,
+        "max_output_tokens": profile.max_output_tokens,
+        "num_retries": profile.litellm_num_retries,
+        "stream": profile.stream,
+        "timeout": profile.request_timeout_seconds,
+    }
+    if profile.reasoning_effort is not None:
+        config["reasoning_effort"] = profile.reasoning_effort
+    if profile.temperature is not None:
+        config["temperature"] = profile.temperature
+    if profile.seed is not None:
+        config["seed"] = profile.seed
+
+    return ResponsesClient(
+        model=profile.model,
+        retry_config=RetryConfig(
+            max_retries=profile.nooa_max_retries,
+            rate_limit_extra_retries=profile.nooa_rate_limit_extra_retries,
+            retry_on_empty_content=False,
+        ),
+        cache_control_injection_points=[],
+        **config,
+    )
+
+
+def _commit_secret(value: object, *, kind: str = "credential") -> dict[str, Any]:
+    if isinstance(value, bytes):
+        raw = value
+    else:
+        raw = str(value).encode("utf-8")
+    return {
+        "redacted": True,
+        "kind": kind,
+        "bytes": len(raw),
+        "sha256": sha256(raw).hexdigest(),
+    }
+
+
+def _redact_data_image(value: str) -> dict[str, Any] | None:
+    if not value.startswith("data:image/") or "," not in value:
+        return None
+    metadata, payload = value.split(",", 1)
+    media_type = metadata[5:].split(";", 1)[0]
+    try:
+        raw = (
+            base64.b64decode(payload, validate=True)
+            if ";base64" in metadata
+            else payload.encode()
         )
-    return EmbeddingConfig(backend="hashing", dim=256)
+    except (ValueError, binascii.Error):
+        raw = payload.encode("utf-8")
+    return {
+        "redacted": True,
+        "kind": "data-image",
+        "media_type": media_type,
+        "bytes": len(raw),
+        "sha256": sha256(raw).hexdigest(),
+    }
+
+
+_AUDIT_CREDENTIAL_QUERY_KEYS = {
+    "access_key",
+    "credential",
+    "key",
+    "secret",
+    "sig",
+    "signature",
+    "token",
+}
+
+
+def _credential_marker(value: str) -> str:
+    digest = sha256(value.encode("utf-8")).hexdigest()
+    return f"[REDACTED sha256={digest} chars={len(value)}]"
+
+
+def _redact_url(value: str) -> str:
+    try:
+        split = urlsplit(value)
+    except ValueError:
+        return value
+    netloc = split.netloc
+    if "@" in netloc:
+        userinfo, host = netloc.rsplit("@", 1)
+        netloc = f"{_credential_marker(userinfo)}@{host}"
+    query = []
+    for key, item in parse_qsl(split.query, keep_blank_values=True):
+        sensitive = _is_sensitive_key(key) or key.casefold() in _AUDIT_CREDENTIAL_QUERY_KEYS
+        query.append((key, _credential_marker(item) if sensitive else item))
+    return urlunsplit((split.scheme, netloc, split.path, urlencode(query), split.fragment))
+
+
+def redact_for_audit(
+    value: Any,
+    *,
+    key: object | None = None,
+    known_credentials: tuple[str, ...] = (),
+) -> Any:
+    """Return a JSON-safe copy with credentials and image bodies committed, not stored."""
+
+    if key is not None and _is_sensitive_key(key):
+        return _commit_secret(value)
+    if is_dataclass(value) and not isinstance(value, type):
+        value = asdict(value)
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        value = model_dump(mode="json")
+    if isinstance(value, Mapping):
+        return {
+            str(item_key): redact_for_audit(
+                item,
+                key=item_key,
+                known_credentials=known_credentials,
+            )
+            for item_key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [
+            redact_for_audit(item, known_credentials=known_credentials)
+            for item in value
+        ]
+    if isinstance(value, str):
+        image = _redact_data_image(value)
+        if image is not None:
+            return image
+        if any(secret in value for secret in known_credentials):
+            return _commit_secret(value, kind="known-credential-bearing-string")
+        _scrubbed, redactions = scrub_string(value)
+        if redactions:
+            return _commit_secret(value, kind="credential-bearing-string")
+        if value.startswith(("http://", "https://")):
+            return _redact_url(value)
+        return value
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    if isinstance(value, bytes):
+        return _commit_secret(value, kind="opaque-bytes")
+    return {"type": type(value).__name__, "repr_sha256": sha256(repr(value).encode()).hexdigest()}
+
+
+def _canonical_bytes(value: Any) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _body_record(
+    content: bytes,
+    *,
+    known_credentials: tuple[str, ...],
+) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "body_sha256": sha256(content).hexdigest(),
+        "body_bytes": len(content),
+    }
+    try:
+        decoded = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        record["body"] = _commit_secret(content, kind="non-json-body")
+    else:
+        record["body"] = redact_for_audit(
+            decoded,
+            known_credentials=known_credentials,
+        )
+    return record
+
+
+class ActualCrossingRecorder:
+    """Capture the HTTP request/response that NOOA's owned client actually crosses."""
+
+    def __init__(self, *, known_credentials: Iterable[str] = ()) -> None:
+        self.records: list[dict[str, Any]] = []
+        self.known_credentials = tuple(
+            credential for credential in known_credentials if credential
+        )
+
+    def async_event_hooks(self) -> dict[str, list[Any]]:
+        return {"request": [self._request], "response": [self._response]}
+
+    async def _request(self, request: Any) -> None:
+        crossing_id = len(self.records)
+        request.extensions["0002_nooa_crossing_id"] = crossing_id
+        content = bytes(request.content)
+        self.records.append(
+            {
+                "sequence": crossing_id,
+                "request": {
+                    "method": request.method,
+                    "url": redact_for_audit(
+                        _redact_url(str(request.url)),
+                        known_credentials=self.known_credentials,
+                    ),
+                    "headers": redact_for_audit(
+                        dict(request.headers),
+                        known_credentials=self.known_credentials,
+                    ),
+                    **_body_record(
+                        content,
+                        known_credentials=self.known_credentials,
+                    ),
+                },
+                "response": None,
+            }
+        )
+
+    async def _response(self, response: Any) -> None:
+        await response.aread()
+        crossing_id = response.request.extensions.get("0002_nooa_crossing_id")
+        if type(crossing_id) is not int or not (0 <= crossing_id < len(self.records)):
+            raise RuntimeError("provider response has no matching audited request")
+        content = bytes(response.content)
+        self.records[crossing_id]["response"] = {
+            "status_code": response.status_code,
+            "headers": redact_for_audit(
+                dict(response.headers),
+                known_credentials=self.known_credentials,
+            ),
+            **_body_record(
+                content,
+                known_credentials=self.known_credentials,
+            ),
+        }
+
+
+def _tool_records(tools: list[Any] | None) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": tool.get_parameter_schema(strict=True),
+        }
+        for tool in tools or ()
+    ]
+
+
+class TransportDisposition(StrEnum):
+    """Whether a failed provider attempt may be repeated without guessing."""
+
+    RETRYABLE = "retryable"
+    FATAL = "fatal"
+    UNCERTAIN = "uncertain"
+
+
+class InjectedTransportFailure(Exception):
+    """Deterministic fault used to exercise the public provider boundary."""
+
+    def __init__(self, disposition: TransportDisposition) -> None:
+        self.disposition = disposition
+        super().__init__(f"injected {disposition.value} provider transport failure")
+
+
+class ProviderTransportAbort(BaseException):
+    """Control signal that bypasses NOOA's independent generation-repair loop.
+
+    NOOA's CodeAct strategy catches ordinary ``Exception`` values and makes a new
+    model call. A fatal or uncertain transport result must instead leave the
+    action point without another provider crossing. The launcher catches this
+    signal and returns structured failure evidence to the host.
+    """
+
+    def __init__(self, disposition: TransportDisposition, attempts: int) -> None:
+        self.disposition = disposition
+        self.attempts = attempts
+        super().__init__(
+            f"provider transport aborted: {disposition.value} after {attempts} attempt(s)"
+        )
+
+
+def classify_transport_failure(error: Exception) -> TransportDisposition:
+    """Classify external errors conservatively at the provider-call boundary."""
+
+    if isinstance(error, InjectedTransportFailure):
+        return error.disposition
+    status = getattr(error, "status_code", None)
+    if type(status) is int:
+        if status in {429, 500, 502, 503, 504}:
+            return TransportDisposition.UNCERTAIN
+        return TransportDisposition.FATAL
+    if isinstance(error, (httpx.ConnectError, httpx.ConnectTimeout)):
+        return TransportDisposition.RETRYABLE
+    if isinstance(
+        error,
+        (
+            httpx.ReadError,
+            httpx.ReadTimeout,
+            httpx.RemoteProtocolError,
+            httpx.WriteError,
+            httpx.WriteTimeout,
+        ),
+    ):
+        return TransportDisposition.UNCERTAIN
+    if isinstance(error, (TypeError, ValueError)):
+        return TransportDisposition.FATAL
+    return TransportDisposition.UNCERTAIN
+
+
+def _failure_record(error: Exception, disposition: TransportDisposition) -> dict[str, Any]:
+    encoded = str(error).encode("utf-8", errors="replace")
+    status = getattr(error, "status_code", None)
+    return {
+        "disposition": disposition.value,
+        "error_type": type(error).__name__,
+        "message_chars": len(str(error)),
+        "message_sha256": sha256(encoded).hexdigest(),
+        "status_code": status if type(status) is int else None,
+    }
+
+
+class AuditedProviderClient:
+    """Snapshot canonical calls and pair them with NOOA's actual HTTP crossings."""
+
+    def __init__(
+        self,
+        provider: Any,
+        profile_record: Mapping[str, Any],
+        *,
+        transport_max_retries: int,
+        require_actual_crossings: bool = False,
+        known_credentials: Iterable[str] = (),
+    ) -> None:
+        if transport_max_retries < 0:
+            raise ValueError("transport_max_retries must not be negative")
+        self.provider = provider
+        self.profile = ProviderRequestProfile.from_record(profile_record)
+        self.transport_max_retries = transport_max_retries
+        self.require_actual_crossings = require_actual_crossings
+        self.audit_calls: list[dict[str, Any]] = []
+        self.known_credentials = tuple(
+            credential for credential in known_credentials if credential
+        )
+        self.actual = ActualCrossingRecorder(
+            known_credentials=self.known_credentials,
+        )
+        http_owner = getattr(provider, "_http", None)
+        httpx_async = getattr(http_owner, "httpx_async", None)
+        if httpx_async is not None:
+            hooks = self.actual.async_event_hooks()
+            for event, callbacks in hooks.items():
+                httpx_async.event_hooks.setdefault(event, []).extend(callbacks)
+        elif require_actual_crossings:
+            raise RuntimeError("NOOA provider exposes no auditable owned async HTTP client")
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.provider, name)
+
+    async def acall(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[Any] | None = None,
+        output_model: type[Any] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        canonical = {
+            "provider_request_profile": asdict(self.profile),
+            "messages": messages,
+            "tools": _tool_records(tools),
+            "kwargs": kwargs,
+        }
+        canonical_snapshot = redact_for_audit(
+            canonical,
+            known_credentials=self.known_credentials,
+        )
+        actual_offset = len(self.actual.records)
+        audit = {
+            "schema": "0002-nooa-provider-crossing-v1",
+            "messages": canonical_snapshot["messages"],
+            "tools": canonical_snapshot["tools"],
+            "canonical_request": canonical_snapshot,
+            "canonical_request_sha256": sha256(_canonical_bytes(canonical)).hexdigest(),
+            "canonicalization": "json-utf8-sort-keys-compact-v1",
+            "actual_provider_crossings": [],
+            "attempts": [],
+            "outcome": None,
+        }
+        self.audit_calls.append(audit)
+        for attempt_index in range(self.transport_max_retries + 1):
+            attempt_offset = len(self.actual.records)
+            try:
+                response = await self.provider.acall(
+                    messages,
+                    tools=tools,
+                    output_model=output_model,
+                    **kwargs,
+                )
+            except Exception as error:
+                disposition = classify_transport_failure(error)
+                crossings = self.actual.records[attempt_offset:]
+                failure = _failure_record(error, disposition)
+                audit["attempts"].append(
+                    {
+                        "attempt": attempt_index + 1,
+                        "outcome": f"{disposition.value}_failure",
+                        "failure": failure,
+                        "actual_provider_crossings": crossings,
+                    }
+                )
+                audit["actual_provider_crossings"] = self.actual.records[actual_offset:]
+                if (
+                    disposition is TransportDisposition.RETRYABLE
+                    and attempt_index < self.transport_max_retries
+                ):
+                    continue
+                audit["outcome"] = {
+                    "kind": "transport_failure",
+                    **failure,
+                    "attempts": attempt_index + 1,
+                }
+                raise ProviderTransportAbort(
+                    disposition,
+                    attempt_index + 1,
+                ) from error
+            crossings = self.actual.records[attempt_offset:]
+            if self.require_actual_crossings and not crossings:
+                failure = {
+                    "disposition": TransportDisposition.FATAL.value,
+                    "error_type": "MissingActualProviderCrossing",
+                    "message_chars": 0,
+                    "message_sha256": sha256(b"").hexdigest(),
+                    "status_code": None,
+                }
+                audit["attempts"].append(
+                    {
+                        "attempt": attempt_index + 1,
+                        "outcome": "fatal_failure",
+                        "failure": failure,
+                        "actual_provider_crossings": [],
+                    }
+                )
+                audit["outcome"] = {
+                    "kind": "transport_failure",
+                    **failure,
+                    "attempts": attempt_index + 1,
+                }
+                raise ProviderTransportAbort(
+                    TransportDisposition.FATAL,
+                    attempt_index + 1,
+                )
+            audit["attempts"].append(
+                {
+                    "attempt": attempt_index + 1,
+                    "outcome": "success",
+                    "actual_provider_crossings": crossings,
+                }
+            )
+            audit["actual_provider_crossings"] = self.actual.records[actual_offset:]
+            audit["outcome"] = {
+                "kind": "success",
+                "response": redact_for_audit(
+                    {
+                        "content": getattr(response, "content", None),
+                        "raw_response": getattr(response, "raw_response", None),
+                        "usage": getattr(response, "usage", None),
+                    },
+                    known_credentials=self.known_credentials,
+                ),
+            }
+            return response
+        raise AssertionError("transport attempt loop exited without an outcome")
+
+    async def aclose(self) -> None:
+        close = getattr(self.provider, "aclose", None)
+        if close is not None:
+            await close()

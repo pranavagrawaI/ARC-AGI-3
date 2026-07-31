@@ -1,6 +1,6 @@
 # 0002-NOOA
 
-Status: offline tracer bullet implemented; qualification is partial.
+Status: provider-capable tracer implemented; offline qualification is partial.
 
 `0002-NOOA` is the 0002 minimum Python REPL agent implemented using NOOA. It is a candidate base for the planned `0006-NOOA`, not a 0006 implementation and not the existing NVIDIA NOOA ARC agent under a new name.
 
@@ -53,9 +53,17 @@ Python/files and one typed final action. Offline fixture tests currently exercis
 - generated-code import, object, filesystem, network, and runtime restrictions;
 - syntax/runtime/malformed-action repair, output bounds, timeout restart, budgets,
   process death, and process-tree cleanup;
+- an immutable Responses request profile with NOOA and LiteLLM hidden retries
+  disabled;
+- canonical and actual HTTP crossing evidence with credential/image redaction;
+- retryable, fatal, and uncertain transport injection, including the temporal
+  barrier that keeps fatal/uncertain failures out of NOOA's repair loop and
+  end-to-end evidence that no failed transport path creates a host action;
 - source-manifest verification and mutations that reintroduce hidden history or
   runtime prompt terms.
 
-This does **not** yet license a live comparison. The provider adapter, transport
-classification/retries, full evidence commitments, the remaining mutation
-matrix, and G9 are still open. See [`QUALIFICATION.md`](./QUALIFICATION.md).
+[`run_live_probe.py`](./run_live_probe.py) is a bounded single-arm provider
+smoke helper, not the paired G9 comparison. This does **not** yet license
+running it. The remaining G3/G4/G5/G7/G8 matrices must close, G1-G8 must be
+rerun, and the same-spec 0002-R/0002-NOOA paired runner must be constructed.
+See [`QUALIFICATION.md`](./QUALIFICATION.md).
