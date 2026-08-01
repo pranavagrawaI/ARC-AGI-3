@@ -1,6 +1,8 @@
-# 0002-NOOA pre-freeze contract
+# 0002-NOOA frozen minimal-substrate contract
 
-Status: build authority for the first working candidate. Not frozen. Revise this contract when executable evidence shows it is wrong or unnecessarily strong.
+Status: frozen after offline G1–G8 and bounded live G9 on qualified implementation
+revision `94b31b039b2b6da592a19f583d7dc6c69d6341ad`. Future competence mechanisms
+belong to a successor agent, not amendments to this base.
 
 ## 1. Identity and question
 

@@ -113,8 +113,10 @@ forbidden-surface, and first parity slices. The remaining first-green work is:
   catalogue and rerun G1-G8.
 - [x] Construct and offline-test the paired 0002-R-minimal/0002-NOOA G9 runner after
   G1-G8 became green.
-- [ ] Run the current-byte bounded live pair after the operator chooses the
-  explicit game/model/endpoint. Historical predecessor evidence
+- [x] Run the current-byte bounded live pair after the operator chooses the
+  explicit game/model/endpoint. Accepted run
+  `g9-20260801T152726Z-fbf2ce0d` qualifies clean revision `94b31b0`.
+  Historical predecessor evidence
   `g9-20260731T153745Z-d253eb4b` passed LS20/OpenRouter/Gemma before the final
   helper deletion and compatibility-arm rename; it does not qualify this
   surface. `run_live_probe.py` remains a single-arm smoke helper, not G9.

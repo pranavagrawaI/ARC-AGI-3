@@ -1,8 +1,7 @@
 # 0002-NOOA
 
-Status: provider-capable tracer passes offline G1–G8. A bounded live G9 passed
-on an earlier workspace surface; the committed minimal surface requires one
-bounded live requalification before freeze acceptance.
+Status: frozen minimal substrate. Offline G1–G8 and bounded current-byte live G9
+pass; gameplay competence is deliberately not claimed.
 
 `0002-NOOA` is the 0002 minimum Python REPL agent implemented using NOOA. It is a candidate base for the planned `0006-NOOA`, not a 0006 implementation and not the existing NVIDIA NOOA ARC agent under a new name.
 
@@ -86,11 +85,11 @@ actual `/responses` profile projections. A blocker returns a nonzero status.
 
 [`run_live_probe.py`](./run_live_probe.py) remains a bounded single-arm smoke
 helper and is not G9. Offline G1–G8 and the same-spec
-[`run_paired_probe.py`](./run_paired_probe.py) runner is green offline. The
-historical G9 used LS20, `openai/google/gemma-4-31b-it` routing,
+[`run_paired_probe.py`](./run_paired_probe.py) runner is green offline and live.
+The accepted current-byte G9 used LS20, `openai/google/gemma-4-31b-it` routing,
 `google/gemma-4-31b-it` on the wire, and OpenRouter's `/responses` endpoint.
-It establishes bounded interface usability for those historical bytes, not the
-current minimal surface, gameplay competence, or cross-game generality. See
+It establishes bounded interface usability for the minimal surface, not
+gameplay competence or cross-game generality. See
 [`QUALIFICATION.md`](./QUALIFICATION.md).
 
 The separate 44-action LS20 single-arm tracer is packaged as compact commitments
@@ -101,9 +100,8 @@ Coordinate action and multi-layer last-layer routing have deterministic end-to-e
 closure tests. The bounded online CN04 click smoke completed two validated
 coordinate clicks with successor transitions; the third decision hit its declared
 reported-token budget, while the worker stopped cleanly. This is route evidence,
-not gameplay competence. Because the final minimal surface deletes the optional
-frame helper after these live runs, one bounded current-byte G9 pair remains before
-the freeze is accepted.
+not gameplay competence. The final current-byte G9 separately qualifies the
+no-helper minimal surface.
 
 A separate CN04 tracer completed 50 validated coordinate clicks and 50 successors,
 then stopped at its action budget with worker exit code 0. It is retained as
@@ -112,14 +110,14 @@ establishes general gameplay competence.
 
 ## Handoff to competence
 
-If the current-byte G9 is accepted, the 0002 freeze ends substrate work: the
-evidence will show that a model can observe, use persistent Python and files,
+The accepted current-byte G9 ends 0002 substrate work: the evidence shows that a
+model can observe, use persistent Python and files,
 take simple or coordinate actions, receive successors, exhaust a declared
 budget, and stop without either process crashing. The next stage will not
 enrich 0002. It will build the competent agent, using NOOA as the design
 architecture and Tycho as the oracle from which mechanisms are modified or
 deleted until the harness fits the target small model. Competence claims and
-Tycho-derived mechanisms belong to that later agent, not this pre-freeze control.
+Tycho-derived mechanisms belong to that later agent, not this frozen control.
 
 ## Inspect a paired run
 

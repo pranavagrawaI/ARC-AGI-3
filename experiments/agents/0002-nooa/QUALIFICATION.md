@@ -1,30 +1,31 @@
 # Qualifying 0002-NOOA
 
-Status: executable qualification plan for the pre-freeze candidate. This file may change as tests expose missing or unnecessary checks; it does not define the semantic identity of `0002-NOOA`.
+Status: accepted qualification record for the frozen minimal substrate. It does
+not license gameplay-competence or treatment-effect claims.
 
 The stable authority boundary is in [`CONTRACT.md`](./CONTRACT.md). Engineering choices are in [`IMPLEMENTATION.md`](./IMPLEMENTATION.md). Upstream provenance is in [`SOURCE_MANIFEST.json`](./SOURCE_MANIFEST.json).
 
 ## Current gate state
 
-The current minimal tracer is qualified through G8. A prior bounded live G9
-passed on LS20 through OpenRouter with Gemma, but its model-visible workspace
-surface predates the final helper deletion and does not qualify the current bytes.
+The minimal tracer is qualified through G9. Current-byte live run
+`g9-20260801T152726Z-fbf2ce0d` passed on LS20 through OpenRouter with Gemma from
+clean implementation revision `94b31b039b2b6da592a19f583d7dc6c69d6341ad`.
 
 | Gate | State | Current evidence | Remaining load-bearing gap |
 |---|---|---|---|
-| G1 | pass offline | pinned source bytes and notices; pruned provider source; full generated-code import/file/runtime route matrix; forbidden-affordance mutations | repeat source commitments in the live pair |
-| G2 | pass for offline fixture | cumulative memory/file loop crosses a real successor through host IPC; provider mode uses the same long-lived control path | exercise a successor through the live provider adapter |
-| G3 | pass offline | forced eviction matches the 0002-R boundary; host retains audit events while generated code cannot enumerate framework history; omission-removal mutant fails | exercise eviction only if the bounded live run reaches it |
-| G4 | pass offline | namespace/helpers after initial start and timeout restart, garbage-collector enumeration, concurrency, processes, packages, source, caches, IPC/run artifacts, and outside-workspace reads are closed while generic Python, NumPy, and Pillow work | inspect live traces for an unclassified route |
-| G5 | pass offline | valid return stops later model/Python work; delayed background mutation, replacement, and post-accept workspace mutation are rejected; environment-step failure closes the pending action into host evidence | inspect the live successor boundary |
-| G6 | pass offline | existing recovery matrix plus retryable/fatal/uncertain provider transport injection; fatal, uncertain, and exhausted-retryable paths carry exact attempt evidence and make no host action | repeat the success path in G9; no offline failure class remains open |
-| G7 | pass offline | a real constructed `0002-R-minimal` compatibility fixture and the NOOA fixture run the same sequence; every crossing is value-diffed for instructions, observations/images, status, tools, context boundaries, decisions, and evidence; replay uses host-owned committed observations | inspect both live provider payloads in G9 |
+| G1 | pass offline + live commitment | pinned source bytes and notices; pruned provider source; full generated-code import/file/runtime route matrix; forbidden-affordance mutations; live source-state records clean revision, runtimes, and 51 source hashes | none |
+| G2 | pass offline + live | cumulative memory/file loop crosses a successor through host IPC; both live arms reused the committed probe file after a successor | none |
+| G3 | pass offline | forced eviction matches the 0002-R boundary; host retains audit events while generated code cannot enumerate framework history; omission-removal mutant fails | none; bounded live G9 did not reach eviction |
+| G4 | pass offline + live inspection | namespace/helpers after initial start and timeout restart, garbage-collector enumeration, concurrency, processes, packages, source, caches, IPC/run artifacts, and outside-workspace reads are closed while generic Python, NumPy, and Pillow work; live traces exposed no unclassified route | none |
+| G5 | pass offline + live | valid return stops later model/Python work; delayed background mutation, replacement, and post-accept workspace mutation are rejected; both live arms crossed three accepted actions and successors | none |
+| G6 | pass offline + live success | retryable/fatal/uncertain injection carries exact attempt evidence and makes no host action; the bounded live success path stopped cleanly | none |
+| G7 | pass offline + live | the constructed `0002-R-minimal` compatibility fixture and NOOA fixture are value-diffed across every crossing; all 12 live provider crossings matched the frozen request profile with zero mismatches | none |
 | G8 | pass offline | eight behavioral crossing mutants are rejected independently of wording; deletion probes kill namespace closure, omission, persistence, timeout restart, validation, and both temporal barriers | none offline |
-| G9 | requalification pending | historical run `g9-20260731T153745Z-d253eb4b` passed its frozen bytes; the separate CN04 smoke validates the unchanged coordinate-action route | rerun one bounded pair on the committed minimal workspace surface; gameplay competence and cross-game generality remain outside this gate |
+| G9 | pass live | `g9-20260801T152726Z-fbf2ce0d`: both arms completed three actions, used Python on at least two action points, reused the probe file, stopped at the action budget, shut down cleanly, and emitted complete traces | none within the interface-usability claim; competence remains outside this gate |
 
 The provider and transport/evidence seam, exhaustive negative/mutation matrices,
-and complete offline parity catalogue are green. The historical G9 establishes
-interface usability for its committed predecessor only.
+complete offline compatibility catalogue, and bounded current-byte live
+usability pair are green.
 
 ### Reproduction
 
@@ -75,11 +76,24 @@ successor. It stopped at the action budget (`NOT_FINISHED`, 0 levels completed)
 with a clean worker exit. This is crash-resistance and route evidence, not proof
 of CN04-solving or cross-game capability. The
 subsequent removal of the optional frame helper does not alter this action route;
-the exact current provider pair still requires bounded G9 requalification.
+the accepted current-byte G9 independently qualifies the minimal interface.
+
+### Accepted current-byte live G9
+
+[`g9-20260801T152726Z-fbf2ce0d`](./artifacts/paired-usability-probes/g9-20260801T152726Z-fbf2ce0d/summary.json)
+ran `0002-R-minimal` and `0002-NOOA` from clean revision `94b31b0` on LS20
+seed 0. Each arm completed three actions, used Python across at least two action
+points, reused `G9_CAPABILITY_PROBE.json` after the first successor, stopped at
+the common action budget, shut down cleanly, and produced complete traces. The
+control made seven provider crossings and the candidate five; all twelve matched
+the frozen OpenRouter `/responses` profile with zero mismatches. The source-state
+record commits the revision, clean status, Python 3.14/3.12 runtimes, and 51
+participating-source hashes. A 67-file audit found no credential, authorization
+header, `.env` path, or unredacted data-image body.
 
 ### Historical live G9 evidence
 
-The accepted run is
+The predecessor run is
 [`g9-20260731T153745Z-d253eb4b`](./artifacts/paired-usability-probes/g9-20260731T153745Z-d253eb4b/summary.json),
 with paired-spec digest
 `c6d5ebb6639d10b7f5f486ce0e380459bb9ec33db04786470c18170a5e6ae0a5`.
