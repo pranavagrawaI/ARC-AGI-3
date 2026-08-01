@@ -88,8 +88,8 @@ the common action budget, shut down cleanly, and produced complete traces. The
 control made seven provider crossings and the candidate five; all twelve matched
 the frozen OpenRouter `/responses` profile with zero mismatches. The source-state
 record commits the revision, clean status, Python 3.14/3.12 runtimes, and 51
-participating-source hashes. A 67-file audit found no credential, authorization
-header, `.env` path, or unredacted data-image body.
+participating-source hashes. A 67-file audit found no unredacted credential,
+Authorization bearer value, `.env` path, or unredacted data-image body.
 
 ### Historical live G9 evidence
 
