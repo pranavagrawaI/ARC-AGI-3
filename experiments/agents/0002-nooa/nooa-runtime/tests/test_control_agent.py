@@ -95,6 +95,37 @@ async def test_model_can_compute_write_a_file_and_return_one_action(
     assert llm.call_count == 2
 
 
+@pytest.mark.asyncio
+async def test_string_null_data_is_visible_and_requires_model_repair() -> None:
+    llm = _RecordingFakeLLM(
+        scripted_responses=[
+            _execute(
+                "return_result({'action': 1, 'data': 'null', 'reason': 'move'})",
+                "string-null",
+            ),
+            _execute(
+                "return_result({'action': 1, 'data': None, 'reason': 'repaired'})",
+                "repaired-null",
+            ),
+        ]
+    )
+    agent = NooaControlAgent(llm=llm)
+
+    decision = await agent.choose_action(
+        PublicActionPoint(observation={"step": 0}, legal_actions=(1, 2))
+    )
+
+    assert decision == ActionDecision(action=1, data=None, reason="repaired")
+    assert llm.call_count == 2
+    assert "use none without quotes" in json.dumps(llm.calls[1]).lower()
+
+
+@pytest.mark.parametrize("data", ["None", "NULL", "{}", ""])
+def test_action_decision_rejects_other_data_strings(data: str) -> None:
+    with pytest.raises(ValueError, match="data"):
+        ActionDecision(action=1, data=data, reason="invalid")
+
+
 def test_host_rejects_an_action_outside_the_current_public_legal_set() -> None:
     action_point = PublicActionPoint(
         observation={"step": 3, "pixels": [[[0]]], "state": "NOT_FINISHED"},

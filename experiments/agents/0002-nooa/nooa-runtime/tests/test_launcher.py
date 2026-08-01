@@ -11,10 +11,17 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from PIL import Image
 
-from launcher import _FixtureLLM, _provider_client, run_offline_fixture, serve_provider
+from launcher import (
+    _FixtureLLM,
+    _provider_client,
+    run_offline_fixture,
+    serve_offline_fixture,
+    serve_provider,
+)
 from llm import AuditedProviderClient, InjectedTransportFailure, TransportDisposition
 
 
@@ -239,6 +246,203 @@ async def test_provider_serve_returns_transport_failure_evidence_without_an_acti
 
 
 @pytest.mark.asyncio
+async def test_launcher_returns_decision_failure_evidence_without_an_action(
+    tmp_path: Path,
+) -> None:
+    requests = tmp_path / "requests.jsonl"
+    responses = tmp_path / "responses.jsonl"
+    workspace = tmp_path / "workspace"
+    _write_frame(workspace)
+    request = _request(
+        0,
+        "return_result({'action': 99, 'data': None, 'reason': 'illegal'})",
+    )
+    request["paired_run_spec"] = {"max_decision_repairs": 1}
+    stop = {"protocol": PROTOCOL, "kind": "stop"}
+    requests.write_text(json.dumps(request) + "\n" + json.dumps(stop) + "\n")
+
+    completed = await serve_offline_fixture(requests, responses, workspace)
+
+    assert completed == 0
+    response = json.loads(responses.read_text())
+    assert "decision" not in response
+    assert response["error"]["kind"] == "decision_failure"
+    assert response["error"]["type"] == "GenerationError"
+    assert "not legal" in response["error"]["message"]
+    assert len(response["audit"]["model_calls"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_launcher_does_not_rewrite_agent_runtime_failure_as_decision_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BrokenControl:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def choose_action(self, _action_point: object) -> object:
+            raise RuntimeError("agent runtime failed")
+
+        async def aclose(self) -> None:
+            pass
+
+    monkeypatch.setattr("launcher.NooaControlAgent", BrokenControl)
+    requests = tmp_path / "requests.jsonl"
+    responses = tmp_path / "responses.jsonl"
+    workspace = tmp_path / "workspace"
+    _write_frame(workspace)
+    request = _request(0, "unused")
+    stop = {"protocol": PROTOCOL, "kind": "stop"}
+    requests.write_text(json.dumps(request) + "\n" + json.dumps(stop) + "\n")
+
+    with pytest.raises(RuntimeError, match="agent runtime failed"):
+        await serve_offline_fixture(requests, responses, workspace)
+
+    assert not responses.exists()
+
+
+@pytest.mark.asyncio
+async def test_failed_provider_decision_preserves_redacted_canonical_and_actual_crossings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"id": "actual-response", "access_token": "response-secret"},
+            request=request,
+        )
+
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(respond),
+        headers={"Authorization": "Bearer provider-secret"},
+    )
+
+    class InvalidDecisionProvider:
+        _http = SimpleNamespace(httpx_async=http_client)
+
+        async def acall(
+            self,
+            messages: list[dict[str, object]],
+            tools: list[object] | None = None,
+            output_model: type[object] | None = None,
+            **_kwargs: object,
+        ) -> LLMResponse:
+            await http_client.post(
+                "https://gateway.invalid/v1/responses",
+                json={"model": "openai/openai/gpt-5.6-sol", "input": messages},
+            )
+            return LLMResponse(
+                raw_response={"id": "model-response"},
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="invalid-decision",
+                        name="execute_python",
+                        arguments=json.dumps(
+                            {
+                                "code": (
+                                    "return_result({'action': 99, 'data': None, "
+                                    "'reason': 'illegal'})"
+                                )
+                            }
+                        ),
+                    )
+                ],
+                finish_reason="tool_calls",
+                assistant_message={"role": "assistant", "content": ""},
+            )
+
+        async def aclose(self) -> None:
+            await http_client.aclose()
+
+    audited = AuditedProviderClient(
+        InvalidDecisionProvider(),
+        _provider_profile(),
+        transport_max_retries=0,
+        require_actual_crossings=True,
+        known_credentials=("provider-secret",),
+    )
+    monkeypatch.setattr("launcher._provider_client", lambda *_args, **_kwargs: audited)
+    requests = tmp_path / "requests.jsonl"
+    responses = tmp_path / "responses.jsonl"
+    workspace = tmp_path / "workspace"
+    _write_frame(workspace)
+    request = _request(0, "unused")
+    request.pop("fixture_python_cells")
+    request["paired_run_spec"] = {
+        "provider_request_profile": _provider_profile(),
+        "transport_max_retries": 0,
+        "max_decision_repairs": 1,
+    }
+    stop = {"protocol": PROTOCOL, "kind": "stop"}
+    requests.write_text(json.dumps(request) + "\n" + json.dumps(stop) + "\n")
+
+    completed = await serve_provider(
+        requests,
+        responses,
+        workspace,
+        api_key="provider-secret",
+    )
+
+    assert completed == 0
+    response = json.loads(responses.read_text())
+    assert "decision" not in response
+    call = response["audit"]["model_calls"][0]
+    assert call["canonical_request"]
+    assert len(call["canonical_request_sha256"]) == 64
+    assert len(call["actual_provider_crossings"]) == 1
+    assert call["actual_provider_crossings"][0]["response"]["status_code"] == 200
+    encoded = json.dumps(response)
+    assert "provider-secret" not in encoded
+    assert "response-secret" not in encoded
+    assert "data:image/" not in encoded
+
+
+@pytest.mark.asyncio
+async def test_launcher_distinguishes_model_call_budget_exhaustion_from_decision_failure(
+    tmp_path: Path,
+) -> None:
+    requests = tmp_path / "requests.jsonl"
+    responses = tmp_path / "responses.jsonl"
+    workspace = tmp_path / "workspace"
+    _write_frame(workspace)
+    spec = {"max_model_calls": 1, "max_decision_repairs": 1}
+    first = _request(
+        0,
+        "return_result({'action': 1, 'data': None, 'reason': 'first'})",
+    )
+    second = _request(
+        1,
+        "return_result({'action': 1, 'data': None, 'reason': 'must not run'})",
+    )
+    first["paired_run_spec"] = spec
+    second["paired_run_spec"] = spec
+    stop = {"protocol": PROTOCOL, "kind": "stop"}
+    requests.write_text(
+        json.dumps(first)
+        + "\n"
+        + json.dumps(second)
+        + "\n"
+        + json.dumps(stop)
+        + "\n"
+    )
+
+    completed = await serve_offline_fixture(requests, responses, workspace)
+
+    assert completed == 1
+    records = [json.loads(line) for line in responses.read_text().splitlines()]
+    assert records[1]["error"] == {
+        "kind": "budget_exhausted",
+        "resource": "model_calls",
+        "used": 1,
+        "limit": 1,
+    }
+    assert records[1]["audit"]["model_calls"] == []
+
+
+@pytest.mark.asyncio
 async def test_offline_launcher_closes_two_action_points_over_append_only_files(
     tmp_path: Path,
 ) -> None:
@@ -315,6 +519,13 @@ async def test_offline_launcher_closes_two_action_points_over_append_only_files(
     assert list(
         first_call["tools"][1]["parameters"]["properties"]["result"]["properties"]
     ) == ["action", "data", "reason"]
+    data_schema = first_call["tools"][1]["parameters"]["properties"]["result"][
+        "properties"
+    ]["data"]
+    assert data_schema["description"] == (
+        "Use JSON null itself for an action without data, never the string \"null\"; "
+        "otherwise use an object."
+    )
     assert (workspace / "model.txt").read_text() == "kept"
 
 

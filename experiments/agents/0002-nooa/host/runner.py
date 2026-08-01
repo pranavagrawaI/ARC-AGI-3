@@ -314,16 +314,22 @@ class NooaProcessAgent:
         )
         response = self._wait_for_response(self._step)
         audit = response.get("audit")
+        worker_error = response.get("error")
         self._write_process(
             "model_crossing",
             action_point_id=self._step,
             audit=_redact_images(audit if isinstance(audit, dict) else {}),
             worker_decision=response.get("decision"),
+            worker_error=_redact_images(worker_error),
         )
         model_calls = audit.get("model_calls") if isinstance(audit, dict) else None
+        budget_exhausted = (
+            isinstance(worker_error, dict)
+            and worker_error.get("kind") == "budget_exhausted"
+        )
         if (
             not isinstance(model_calls, list)
-            or not model_calls
+            or (not model_calls and not budget_exhausted)
             or any(
                 not isinstance(call, dict)
                 or not isinstance(call.get("messages"), list)
@@ -333,15 +339,27 @@ class NooaProcessAgent:
             )
         ):
             raise NooaWorkerError("worker response has no valid model-call audit")
-        transport_error = response.get("error")
         if (
-            isinstance(transport_error, dict)
-            and transport_error.get("kind") == "provider_transport"
+            isinstance(worker_error, dict)
+            and worker_error.get("kind") == "provider_transport"
         ):
             raise NooaWorkerError(
                 "provider transport "
-                f"{transport_error.get('disposition')} after "
-                f"{transport_error.get('attempts')} attempt(s)"
+                f"{worker_error.get('disposition')} after "
+                f"{worker_error.get('attempts')} attempt(s)"
+            )
+        if (
+            isinstance(worker_error, dict)
+            and worker_error.get("kind") == "decision_failure"
+        ):
+            raise NooaWorkerError(
+                "worker decision "
+                f"{worker_error.get('type')}: {worker_error.get('message')}"
+            )
+        if budget_exhausted:
+            raise NooaWorkerError(
+                f"{worker_error.get('resource')} budget exhausted "
+                f"({worker_error.get('used')}/{worker_error.get('limit')})"
             )
         payload = response.get("decision")
         if not isinstance(payload, dict):

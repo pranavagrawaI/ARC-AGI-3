@@ -22,9 +22,10 @@ from typing import Any
 os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
 os.environ["LITELLM_MODE"] = "PRODUCTION"
 
+from nooa.errors import GenerationError
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
-from agent import NooaControlAgent, PublicActionPoint
+from agent import ModelBudgetExceeded, NooaControlAgent, PublicActionPoint
 from llm import AuditedProviderClient, ProviderTransportAbort, build_llm
 
 PROTOCOL = "0002-nooa-ipc-v1"
@@ -219,6 +220,38 @@ def _append_response(path: Path, record: dict[str, Any]) -> None:
         os.fsync(handle.fileno())
 
 
+def _append_failure_response(
+    path: Path,
+    *,
+    run_id: str,
+    action_point_id: int,
+    error: dict[str, Any],
+    model_calls: list[dict[str, Any]],
+) -> None:
+    _append_response(
+        path,
+        {
+            "protocol": PROTOCOL,
+            "run_id": run_id,
+            "action_point_id": action_point_id,
+            "error": error,
+            "audit": {"model_calls": model_calls},
+            "complete": True,
+        },
+    )
+
+
+def _find_model_budget(error: BaseException) -> ModelBudgetExceeded | None:
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ModelBudgetExceeded):
+            return current
+        current = current.__cause__ or current.__context__
+    return None
+
+
 async def run_offline_fixture(
     requests_path: Path,
     responses_path: Path,
@@ -364,20 +397,40 @@ async def serve_offline_fixture(
                         )
                     )
                 except ProviderTransportAbort as error:
-                    _append_response(
+                    _append_failure_response(
                         responses_path,
-                        {
-                            "protocol": PROTOCOL,
-                            "run_id": run_id,
-                            "action_point_id": action_point_id,
-                            "error": {
-                                "kind": "provider_transport",
-                                "disposition": error.disposition.value,
-                                "attempts": error.attempts,
-                            },
-                            "audit": {"model_calls": client.audit_calls[call_offset:]},
-                            "complete": True,
+                        run_id=run_id,
+                        action_point_id=action_point_id,
+                        error={
+                            "kind": "provider_transport",
+                            "disposition": error.disposition.value,
+                            "attempts": error.attempts,
                         },
+                        model_calls=client.audit_calls[call_offset:],
+                    )
+                    continue
+                except GenerationError as error:
+                    budget = _find_model_budget(error)
+                    failure = (
+                        {
+                            "kind": "budget_exhausted",
+                            "resource": budget.resource,
+                            "used": budget.used,
+                            "limit": budget.limit,
+                        }
+                        if budget is not None
+                        else {
+                            "kind": "decision_failure",
+                            "type": type(error).__name__,
+                            "message": str(error),
+                        }
+                    )
+                    _append_failure_response(
+                        responses_path,
+                        run_id=run_id,
+                        action_point_id=action_point_id,
+                        error=failure,
+                        model_calls=client.audit_calls[call_offset:],
                     )
                     continue
                 _append_response(

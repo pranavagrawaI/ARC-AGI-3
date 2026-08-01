@@ -40,7 +40,7 @@ with hidden:
     from nooa.strategies.codeact import _ReturnResultSignal
     from nooa.strategy_validation import InvariantError
     from nooa.unifiedllm import Tool
-    from pydantic import BaseModel, ConfigDict, Field
+    from pydantic import BaseModel, ConfigDict, Field, field_validator
 
     _BLOCKED_RUNTIME_MODULES = frozenset(
         {
@@ -239,8 +239,37 @@ class ActionDecision(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     action: int
-    data: dict[str, Any] | None
+    data: dict[str, Any] | None = Field(
+        description=(
+            'Use JSON null itself for an action without data, never the string "null"; '
+            "otherwise use an object."
+        )
+    )
     reason: str
+
+    @field_validator("data", mode="before")
+    @classmethod
+    def reject_quoted_json_null(cls, value: Any) -> Any:
+        if value == "null":
+            raise ValueError(
+                "data uses quoted JSON null; in Python return_result code, "
+                "use None without quotes"
+            )
+        return value
+
+
+class ModelBudgetExceeded(RuntimeError):
+    """A frozen aggregate model budget was exhausted before another call."""
+
+    def __init__(self, resource: str, used: int, limit: int) -> None:
+        self.resource = resource
+        self.used = used
+        self.limit = limit
+        label = {
+            "model_calls": "model-call",
+            "reported_tokens": "reported-token",
+        }.get(resource, resource.replace("_", "-"))
+        super().__init__(f"{label} budget exhausted ({used}/{limit})")
 
 
 def validate_decision(action_point: PublicActionPoint, decision: ActionDecision) -> ActionDecision:
@@ -559,17 +588,19 @@ Plain text does not finish an action point."""
                 self._max_model_calls is not None
                 and self._model_calls_total >= self._max_model_calls
             ):
-                raise RuntimeError(
-                    "model-call budget exhausted "
-                    f"({self._model_calls_total}/{self._max_model_calls})"
+                raise ModelBudgetExceeded(
+                    "model_calls",
+                    self._model_calls_total,
+                    self._max_model_calls,
                 )
             if (
                 self._max_reported_tokens is not None
                 and self._reported_tokens_total >= self._max_reported_tokens
             ):
-                raise RuntimeError(
-                    "reported-token budget exhausted "
-                    f"({self._reported_tokens_total}/{self._max_reported_tokens})"
+                raise ModelBudgetExceeded(
+                    "reported_tokens",
+                    self._reported_tokens_total,
+                    self._max_reported_tokens,
                 )
             processed = await next_handler(context)
             self._model_calls_total += 1

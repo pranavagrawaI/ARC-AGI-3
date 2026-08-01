@@ -496,6 +496,83 @@ class NooaProcessAgentTests(unittest.TestCase):
                         except NooaWorkerError:
                             pass
 
+    def test_host_preserves_structured_decision_failure_with_the_model_crossing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_root = Path(directory) / "run"
+            agent = NooaProcessAgent(
+                runtime_root=RUNTIME_ROOT,
+                run_root=run_root,
+                fixture_policy=lambda _step, _observation: [
+                    "return_result({'action': 1, 'data': None, 'reason': 'unused'})"
+                ],
+            )
+            response = {
+                "error": {
+                    "kind": "decision_failure",
+                    "type": "GenerationError",
+                    "message": "invalid action payload",
+                },
+                "audit": {
+                    "model_calls": [
+                        {
+                            "messages": [{"role": "user", "content": "x"}],
+                            "tools": [],
+                        }
+                    ]
+                },
+            }
+            try:
+                with patch.object(agent, "_wait_for_response", return_value=response):
+                    with self.assertRaisesRegex(
+                        NooaWorkerError,
+                        "decision GenerationError: invalid action payload",
+                    ):
+                        agent.act(observation(0))
+                crossing = next(
+                    json.loads(line)
+                    for line in (run_root / "process.jsonl").read_text().splitlines()
+                    if json.loads(line)["kind"] == "model_crossing"
+                )
+                self.assertEqual(crossing["worker_error"], response["error"])
+            finally:
+                try:
+                    agent.close()
+                except NooaWorkerError:
+                    pass
+
+    def test_host_surfaces_structured_budget_exhaustion_without_an_action(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            agent = NooaProcessAgent(
+                runtime_root=RUNTIME_ROOT,
+                run_root=Path(directory) / "run",
+                fixture_policy=lambda _step, _observation: [
+                    "return_result({'action': 1, 'data': None, 'reason': 'unused'})"
+                ],
+            )
+            response = {
+                "error": {
+                    "kind": "budget_exhausted",
+                    "resource": "model_calls",
+                    "used": 12,
+                    "limit": 12,
+                },
+                "audit": {"model_calls": []},
+            }
+            try:
+                with patch.object(agent, "_wait_for_response", return_value=response):
+                    with self.assertRaisesRegex(
+                        NooaWorkerError,
+                        r"model_calls budget exhausted \(12/12\)",
+                    ):
+                        agent.act(observation(0))
+            finally:
+                try:
+                    agent.close()
+                except NooaWorkerError:
+                    pass
+
     def test_host_preserves_simple_action_data_like_the_frozen_control(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             agent = NooaProcessAgent(
