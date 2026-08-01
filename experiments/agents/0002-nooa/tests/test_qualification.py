@@ -69,7 +69,6 @@ class PairedRunSpecTests(unittest.TestCase):
             (
                 "WORKSPACE.md",
                 "NOTES.md",
-                "frames.py",
                 "public_history.jsonl",
                 "observations/",
                 "current_observation.json",

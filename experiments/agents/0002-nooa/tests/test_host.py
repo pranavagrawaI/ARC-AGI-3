@@ -787,7 +787,7 @@ class NooaProcessAgentTests(unittest.TestCase):
             validated = next(record for record in records if record["kind"] == "decision_validated")
             self.assertEqual(validated["decision"]["data"], {"x": 3, "y": 2})
 
-    def test_multilayer_observation_uses_its_last_layer_for_png_descriptor_and_helper(self) -> None:
+    def test_multilayer_observation_uses_its_last_layer_for_png_and_descriptor(self) -> None:
         pixels = np.array(
             [
                 [[1, 1], [1, 1]],
@@ -809,8 +809,9 @@ class NooaProcessAgentTests(unittest.TestCase):
                 runtime_root=RUNTIME_ROOT,
                 run_root=run_root,
                 fixture_policy=lambda _step, _observation: [
-                    "import frames\n"
-                    "assert frames.grid(0).tolist() == [[2, 2], [2, 2]]\n"
+                    "import json\n"
+                    "saved = json.load(open('current_observation.json'))\n"
+                    "assert saved['pixels'][-1] == [[2, 2], [2, 2]]\n"
                     "return_result({'action': 1, 'data': None, 'reason': 'last layer'})"
                 ],
             ) as agent:
@@ -818,11 +819,8 @@ class NooaProcessAgentTests(unittest.TestCase):
 
             self.assertEqual(decision.action, 1)
             workspace_contract = (run_root / "workspace" / "WORKSPACE.md").read_text()
-            helper_source = (run_root / "workspace" / "frames.py").read_text()
-            self.assertIn("`import frames`", workspace_contract)
-            self.assertNotIn("sys.path.insert", workspace_contract)
-            self.assertIn("    import frames", helper_source)
-            self.assertNotIn("sys.path.insert", helper_source)
+            self.assertIn("Workspace files are data and persistent storage", workspace_contract)
+            self.assertFalse((run_root / "workspace" / "frames.py").exists())
             descriptor = json.loads(
                 (run_root / "workspace" / "current_observation.json").read_text()
             )
@@ -835,7 +833,6 @@ class NooaProcessAgentTests(unittest.TestCase):
             with Image.open(run_root / "workspace" / "current_frame.png") as image:
                 self.assertEqual(image.getpixel((0, 0)), hex_to_rgb(COLOR_MAP[2]))
                 self.assertNotEqual(image.getpixel((0, 0)), hex_to_rgb(COLOR_MAP[1]))
-
 
     def test_host_classifies_a_non_object_response(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

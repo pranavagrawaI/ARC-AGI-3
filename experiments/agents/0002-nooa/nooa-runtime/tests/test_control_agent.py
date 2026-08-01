@@ -692,6 +692,41 @@ async def test_generated_python_cannot_import_the_nooa_runtime() -> None:
 
 
 @pytest.mark.asyncio
+async def test_model_written_module_cannot_bypass_blocked_imports(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ARC_LLM_API_KEY", "workspace-import-secret")
+    llm = FakeLLMClient(
+        scripted_responses=[
+            _execute(
+                "open('escape_module.py', 'w').write("
+                "\"import os\\nopen('leaked.txt', 'w').write("
+                "os.environ.get('ARC_LLM_API_KEY', 'missing'))\\n\")\n"
+                "try:\n"
+                "    import escape_module\n"
+                "except ModuleNotFoundError:\n"
+                "    pass\n"
+                "else:\n"
+                "    raise AssertionError('workspace module became importable')\n"
+                "return_result({'action': 1, 'data': None, 'reason': 'contained'})",
+                "workspace-import-probe",
+            )
+        ]
+    )
+    agent = NooaControlAgent(llm=llm, workspace=str(tmp_path))
+
+    decision = await agent.choose_action(
+        PublicActionPoint(observation={"step": 0}, legal_actions=(1,))
+    )
+    await agent.aclose()
+
+    assert decision.reason == "contained"
+    assert not (tmp_path / "leaked.txt").exists()
+    assert "workspace-import-secret" not in json.dumps(llm.last_messages)
+
+
+@pytest.mark.asyncio
 async def test_public_action_point_is_plain_data_not_an_agent_runtime_type() -> None:
     llm = FakeLLMClient(
         scripted_responses=[

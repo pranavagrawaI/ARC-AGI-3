@@ -19,6 +19,9 @@ CONTROL_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(CONTROL_ROOT))
 
 from host.qualification import ProviderRequestProfile  # noqa: E402
+from host.control_surface import normalize_quoted_null_message  # noqa: E402
+from llm_repl_agent.agent import parse_decision_message  # noqa: E402
+from llm_repl_agent.client import ChatResponse  # noqa: E402
 from run_paired_probe import (  # noqa: E402
     _control_client_for_live,
     _provider_profile_report,
@@ -27,6 +30,27 @@ from run_paired_probe import (  # noqa: E402
 
 
 class PairedProbeRunnerTests(unittest.TestCase):
+    def test_control_canonicalizes_exact_quoted_null_before_decision_parsing(self) -> None:
+        response = ChatResponse(
+            message={
+                "role": "assistant",
+                "content": '{"action":1,"data":"null","reason":"move"}',
+            },
+            usage={},
+            response_body={"preserves": "original transport evidence"},
+        )
+
+        normalized = normalize_quoted_null_message(response)
+        action, data, reason = parse_decision_message(
+            normalized.message,
+            available_actions=(1,),
+            frame_width=2,
+            frame_height=2,
+        )
+
+        self.assertEqual((action, data, reason), (1, None, "move"))
+        self.assertEqual(normalized.response_body, response.response_body)
+
     def test_g9_rejects_a_one_action_budget(self) -> None:
         with self.assertRaisesRegex(SystemExit, "at least 2"):
             main(["--offline", "--max-actions", "1"])
@@ -356,6 +380,15 @@ class PairedProbeRunnerTests(unittest.TestCase):
             self.assertTrue((run_root / "candidate" / "worker" / "process.jsonl").is_file())
             self.assertTrue((run_root / "control" / "trace.jsonl").is_file())
             self.assertTrue((run_root / "candidate" / "trace.jsonl").is_file())
+            source_state = json.loads((run_root / "source-state.json").read_text())
+            self.assertEqual(source_state["schema"], "0002-nooa-source-state-v1")
+            self.assertEqual(len(source_state["git"]["revision"]), 40)
+            self.assertIn("host_python", source_state["runtime_versions"])
+            self.assertIn(
+                "experiments/agents/0002-nooa/nooa-runtime/agent.py",
+                source_state["source_sha256"],
+            )
+            self.assertEqual(len(pair["source_state_sha256"]), 64)
 
             frozen_spec = json.loads((run_root / "paired-run-spec.json").read_text())
             probe_instruction = frozen_spec["usability_probe_instruction"]

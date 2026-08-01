@@ -14,6 +14,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 from typing import Any, Callable
 from uuid import uuid4
@@ -36,10 +37,11 @@ from experiments.harness import JsonlTraceWriter, Observation, run_episode
 from host.qualification import PairedRunSpec, ProviderRequestProfile
 from host.responses_client import OpenAICompatibleResponsesClient
 from host.runner import NooaProcessAgent, NooaWorkerError
-from host.workspace import (
+from host.control_surface import (
+    QuotedNullNormalizingClient,
     adapt_control_spec,
-    adapt_workspace_for_direct_import,
-    direct_import_control_runtime,
+    manifest_without_helper,
+    prepare_minimal_workspace,
 )
 from llm_repl_agent.agent import DecisionFormatError, ModelBudgetExceeded
 from llm_repl_agent.client import ModelRequestError
@@ -70,6 +72,57 @@ def _write_json(path: Path, value: Any) -> None:
         json.dumps(value, indent=2, sort_keys=True, default=str) + "\n",
         encoding="utf-8",
     )
+
+
+def _source_state() -> dict[str, Any]:
+    """Commit the revision, dirty scope, runtimes, and every participating source."""
+
+    status = subprocess.run(
+        ("git", "status", "--porcelain=v1", "--untracked-files=all"),
+        cwd=REPO,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.splitlines()
+    revision = subprocess.run(
+        ("git", "rev-parse", "HEAD"),
+        cwd=REPO,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+    sources = {
+        CONTROL_ROOT / "run_paired_probe.py",
+        *(CONTROL_ROOT / "host").glob("*.py"),
+        *(CONTROL_ROOT / "nooa-runtime").glob("*.py"),
+        *(BASELINE_ROOT / "llm_repl_agent").glob("*.py"),
+        *(P9_PARENT / "p9").glob("*.py"),
+        *(REPO / "experiments" / "harness").glob("*.py"),
+    }
+    source_sha256 = {
+        path.relative_to(REPO).as_posix(): sha256(path.read_bytes()).hexdigest()
+        for path in sorted(sources)
+        if path.is_file()
+    }
+    runtime_python = subprocess.run(
+        (str(RUNTIME_ROOT / ".venv" / "bin" / "python"), "--version"),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return {
+        "schema": "0002-nooa-source-state-v1",
+        "git": {
+            "revision": revision,
+            "dirty": bool(status),
+            "status": status,
+        },
+        "runtime_versions": {
+            "host_python": sys.version,
+            "nooa_python": (runtime_python.stdout or runtime_python.stderr).strip(),
+        },
+        "source_sha256": source_sha256,
+    }
 
 
 def _operation_mode(value: str) -> OperationMode:
@@ -161,8 +214,6 @@ def _probe_python(step: int) -> str:
     if step == 0:
         return (
             "import json\n"
-            "import frames\n"
-            "assert frames.grid(0).ndim == 2\n"
             f"open({_PROBE_FILE!r}, 'w').write(json.dumps({{'first_step': 0}}))"
         )
     if step == 1:
@@ -252,53 +303,49 @@ def _run_control(
     environment: Any,
     client: Any,
 ) -> dict[str, Any]:
-    with direct_import_control_runtime():
-        with build_arm(
-            adapt_control_spec(control_spec(**spec.control_overrides())),
-            run_dir=run_root,
-            inner_client=client,
-        ) as arm:
-            adapt_workspace_for_direct_import(arm.workspace.root)
-            if spec.usability_probe_instruction is not None:
-                (arm.workspace.root / "NOTES.md").write_text(
-                    spec.usability_probe_instruction,
-                    encoding="utf-8",
-                )
-            constructed_manifest = arm_manifest(arm)
-            constructed_manifest["model_visible"]["workspace"][
-                "provided_helper_sha256"
-            ] = sha256((arm.workspace.root / "frames.py").read_bytes()).hexdigest()
-            with JsonlTraceWriter(run_root / "trace.jsonl") as trace:
-                result = run_episode(
-                    environment,
-                    arm.agent,
-                    max_actions=spec.max_actions,
-                    trace=trace,
-                    stop_on_exceptions={
-                        ModelBudgetExceeded: "model_budget_exhausted",
-                        DecisionFormatError: "unrepaired_invalid_decision",
-                        ModelRequestError: "transport_failure",
-                    },
-                )
-            arm.workspace.snapshot(run_root / "workspace")
-            summary = {
-                "schema": "0002-nooa-g9-arm-v1",
-                "arm": "0002-R",
-                "actions": result.actions,
-                "levels_completed": result.final.levels_completed,
-                "state": result.final.state,
-                "stop_reason": result.stop_reason,
-                "model_calls": arm.agent.model_calls,
-                "python_calls": arm.agent.python_calls,
-                "python_action_points": _control_python_action_points(
-                    run_root / "process.jsonl"
-                ),
-                "capability_probe": _probe_file_evidence(
-                    arm.workspace.root / _PROBE_FILE
-                ),
-                "clean_shutdown": True,
-                "trace_complete": True,
-            }
+    with build_arm(
+        adapt_control_spec(control_spec(**spec.control_overrides())),
+        run_dir=run_root,
+        inner_client=QuotedNullNormalizingClient(client),
+    ) as arm:
+        prepare_minimal_workspace(arm.workspace.root)
+        if spec.usability_probe_instruction is not None:
+            (arm.workspace.root / "NOTES.md").write_text(
+                spec.usability_probe_instruction,
+                encoding="utf-8",
+            )
+        constructed_manifest = manifest_without_helper(arm_manifest(arm))
+        with JsonlTraceWriter(run_root / "trace.jsonl") as trace:
+            result = run_episode(
+                environment,
+                arm.agent,
+                max_actions=spec.max_actions,
+                trace=trace,
+                stop_on_exceptions={
+                    ModelBudgetExceeded: "model_budget_exhausted",
+                    DecisionFormatError: "unrepaired_invalid_decision",
+                    ModelRequestError: "transport_failure",
+                },
+            )
+        arm.workspace.snapshot(run_root / "workspace")
+        summary = {
+            "schema": "0002-nooa-g9-arm-v1",
+            "arm": "0002-R",
+            "actions": result.actions,
+            "levels_completed": result.final.levels_completed,
+            "state": result.final.state,
+            "stop_reason": result.stop_reason,
+            "model_calls": arm.agent.model_calls,
+            "python_calls": arm.agent.python_calls,
+            "python_action_points": _control_python_action_points(
+                run_root / "process.jsonl"
+            ),
+            "capability_probe": _probe_file_evidence(
+                arm.workspace.root / _PROBE_FILE
+            ),
+            "clean_shutdown": True,
+            "trace_complete": True,
+        }
     _write_json(run_root / "arm-manifest.json", constructed_manifest)
     _write_json(run_root / "summary.json", summary)
     return summary
@@ -567,6 +614,9 @@ def main(argv: list[str] | None = None) -> int:
     api_key = os.environ.get("ARC_LLM_API_KEY")
     if not args.offline and not api_key:
         raise RuntimeError("ARC_LLM_API_KEY must be present in the inherited environment")
+    source_state = _source_state()
+    if not args.offline and source_state["git"]["dirty"]:
+        raise RuntimeError("live G9 requires a clean committed worktree")
     spec = _spec(args)
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     pair_id = f"g9-{stamp}-{uuid4().hex[:8]}"
@@ -576,6 +626,7 @@ def main(argv: list[str] | None = None) -> int:
     ).resolve()
     run_root.mkdir(parents=True, exist_ok=False)
     _write_json(run_root / "paired-run-spec.json", spec.as_record())
+    _write_json(run_root / "source-state.json", source_state)
 
     if args.offline:
         environment_factory, control_client = _offline_inputs(args)
@@ -670,6 +721,11 @@ def main(argv: list[str] | None = None) -> int:
         "provider_profile_report": provider_report,
         "paired_run_spec_sha256": sha256(
             json.dumps(spec.as_record(), sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).hexdigest(),
+        "source_state_sha256": sha256(
+            json.dumps(source_state, sort_keys=True, separators=(",", ":")).encode(
                 "utf-8"
             )
         ).hexdigest(),

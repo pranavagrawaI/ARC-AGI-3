@@ -28,12 +28,11 @@ for _source_root in (_BASELINE_AGENT_ROOT, _P9_PARENT):
         sys.path.insert(0, str(_source_root))
 
 from llm_repl_agent.observations import ColorPermutation, ModelObservation, ObservationStore
-from p9.agent import NOTES_FILE, WORKSPACE_ADDENDUM
+from p9.agent import NOTES_FILE
 from p9.annotated_frame import annotate, annotation_descriptor
-from p9.frame_tools import FRAME_TOOLS_FILE, frame_tools_source
 
+from .control_surface import prepare_minimal_workspace
 from .qualification import PairedRunSpec
-from .workspace import adapt_workspace_for_direct_import
 
 PROTOCOL = "0002-nooa-ipc-v1"
 
@@ -176,8 +175,7 @@ class NooaProcessAgent:
             self.workspace,
             colors=ColorPermutation.identity(),
         )
-        with (self.workspace / "WORKSPACE.md").open("a", encoding="utf-8") as contract:
-            contract.write(WORKSPACE_ADDENDUM)
+        prepare_minimal_workspace(self.workspace)
         (self.workspace / "public_history.jsonl").touch()
         notes_path = self.workspace / NOTES_FILE
         notes_path.touch()
@@ -186,11 +184,6 @@ class NooaProcessAgent:
                 self.paired_run_spec.usability_probe_instruction,
                 encoding="utf-8",
             )
-        (self.workspace / FRAME_TOOLS_FILE).write_text(
-            frame_tools_source(components=False),
-            encoding="utf-8",
-        )
-        adapt_workspace_for_direct_import(self.workspace)
         self.run_id = uuid4().hex
         self._step = 0
         self._current_projection: ModelObservation | None = None

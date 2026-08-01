@@ -6,8 +6,9 @@ The stable authority boundary is in [`CONTRACT.md`](./CONTRACT.md). Engineering 
 
 ## Current gate state
 
-The offline tracer is qualified through G8. Bounded live G9 passed on LS20
-through OpenRouter with Gemma.
+The current minimal tracer is qualified through G8. A prior bounded live G9
+passed on LS20 through OpenRouter with Gemma, but its model-visible workspace
+surface predates the final helper deletion and does not qualify the current bytes.
 
 | Gate | State | Current evidence | Remaining load-bearing gap |
 |---|---|---|---|
@@ -19,11 +20,11 @@ through OpenRouter with Gemma.
 | G6 | pass offline | existing recovery matrix plus retryable/fatal/uncertain provider transport injection; fatal, uncertain, and exhausted-retryable paths carry exact attempt evidence and make no host action | repeat the success path in G9; no offline failure class remains open |
 | G7 | pass offline | a real constructed 0002-R fixture and the NOOA fixture run the same sequence; every crossing is value-diffed for instructions, observations/images, status, tools, context boundaries, decisions, and evidence; replay uses host-owned committed observations | inspect both live provider payloads in G9 |
 | G8 | pass offline | eight behavioral crossing mutants are rejected independently of wording; deletion probes kill namespace closure, omission, persistence, timeout restart, validation, and both temporal barriers | none offline |
-| G9 | pass live | accepted run `g9-20260731T153745Z-d253eb4b`: both arms completed three LS20 actions, used Python across at least two action points, reused the committed probe file, stopped at the shared action budget, shut down cleanly, and matched every actual OpenRouter `/responses` projection | none for bounded LS20 interface usability; gameplay competence and cross-game generality remain outside this gate |
+| G9 | requalification pending | historical run `g9-20260731T153745Z-d253eb4b` passed its frozen bytes; the separate CN04 smoke validates the unchanged coordinate-action route | rerun one bounded pair on the committed minimal workspace surface; gameplay competence and cross-game generality remain outside this gate |
 
 The provider and transport/evidence seam, exhaustive negative/mutation matrices,
-complete offline parity catalogue, and bounded live usability pair are green.
-G9 establishes interface usability and observed incompatibilities only.
+and complete offline parity catalogue are green. The historical G9 establishes
+interface usability for its committed predecessor only.
 
 ### Reproduction
 
@@ -51,7 +52,7 @@ uv run --python 3.14 python experiments/agents/0002-nooa/run_paired_probe.py \
 The timeout fixtures create nested workers; run them where the operating system
 process and Landlock guards are available.
 
-Current rerun (2026-08-01): 89 Python 3.12 runtime tests and 30 Python 3.14 host
+Current rerun (2026-08-01): 90 Python 3.12 runtime tests and 31 Python 3.14 host
 tests pass. The offline G9 runner regression is included in the host count. The
 host count includes end-to-end coordinate-action and multi-layer last-layer
 closure tests.
@@ -63,11 +64,20 @@ advertised coordinate action `6` at all three requests. It validated and crossed
 two actions (`{x: 15, y: 27}` and `{x: 39, y: 36}`), each with a successor.
 The third request exhausted its explicit reported-token budget before a decision;
 the worker still stopped with exit code 0. Compact commitments and redaction
-results are in `artifacts/FREEZE_EVIDENCE.json`; raw evidence is local only. The
-subsequent shared direct-import workspace convention does not alter this action
-route and is exercised offline through both real isolated workers.
+results are in `artifacts/FREEZE_EVIDENCE.json`; raw evidence is local only.
 
-### Live G9 evidence
+### CN04 long-horizon click tracer
+
+The separate online CN04 tracer at
+`provider-smoke-probes/cn04/20260801T142326Z-50a-20r-4m` completed 50 actions:
+all 50 were validated coordinate action `6` decisions and all 50 recorded a
+successor. It stopped at the action budget (`NOT_FINISHED`, 0 levels completed)
+with a clean worker exit. This is crash-resistance and route evidence, not proof
+of CN04-solving or cross-game capability. The
+subsequent removal of the optional frame helper does not alter this action route;
+the exact current provider pair still requires bounded G9 requalification.
+
+### Historical live G9 evidence
 
 The accepted run is
 [`g9-20260731T153745Z-d253eb4b`](./artifacts/paired-usability-probes/g9-20260731T153745Z-d253eb4b/summary.json),

@@ -12,6 +12,8 @@ import sys
 from tempfile import TemporaryDirectory
 from typing import Any, ClassVar, Mapping
 
+from .control_surface import MINIMAL_WORKSPACE_CONTRACT_SHA256
+
 
 @dataclass(frozen=True, slots=True)
 class ProviderRequestProfile:
@@ -178,7 +180,6 @@ class PairedRunSpec:
         "host_workspace_files": (
             "WORKSPACE.md",
             "NOTES.md",
-            "frames.py",
             "public_history.jsonl",
             "observations/",
             "current_observation.json",
@@ -195,9 +196,8 @@ class PairedRunSpec:
         "legal_event_schema": "integer-id-with-optional-xy-v1",
         "final_action_schema": "action-int-data-object-or-null-reason-string-v1",
         "host_workspace_initialization": (
-            "WORKSPACE.md=direct-import-contract-v1",
+            f"WORKSPACE.md=sha256:{MINIMAL_WORKSPACE_CONTRACT_SHA256}",
             "NOTES.md=empty",
-            "frames.py=direct-import-frame-tools-v1",
             "public_history.jsonl=empty",
             "observations/=empty-directory",
             "current_observation.json=exact-current-public-observation",
@@ -703,10 +703,10 @@ def _control_fixture_model_visible(
     import numpy as np
 
     from experiments.harness import Observation, Transition
-    from host.workspace import (
+    from host.control_surface import (
         adapt_control_spec,
-        adapt_workspace_for_direct_import,
-        direct_import_control_runtime,
+        manifest_without_helper,
+        prepare_minimal_workspace,
     )
     from p9.arms import arm_manifest, build_arm, control_spec
     from p9.fixtures import ScriptedChatClient, action_turn
@@ -765,33 +765,29 @@ def _control_fixture_model_visible(
 
     client = ScriptedChatClient(script, model=spec.model_profile)
     with TemporaryDirectory(prefix="0002-nooa-control-fixture-") as directory:
-        with direct_import_control_runtime():
-            with build_arm(
-                adapt_control_spec(control_spec(**spec.control_overrides())),
-                run_dir=Path(directory) / "run",
-                inner_client=client,
-            ) as arm:
-                adapt_workspace_for_direct_import(arm.workspace.root)
-                manifest = arm_manifest(arm)["model_visible"]
-                manifest["workspace"]["provided_helper_sha256"] = sha256(
-                    (arm.workspace.root / "frames.py").read_bytes()
-                ).hexdigest()
-                decisions = []
-                for index, before in enumerate(observations):
-                    decision = arm.agent.act(before)
-                    decisions.append(decision)
-                    if index + 1 < len(observations):
-                        arm.agent.observe(
-                            Transition(
-                                before=before,
-                                decision=decision,
-                                after=observations[index + 1],
-                            )
+        with build_arm(
+            adapt_control_spec(control_spec(**spec.control_overrides())),
+            run_dir=Path(directory) / "run",
+            inner_client=client,
+        ) as arm:
+            prepare_minimal_workspace(arm.workspace.root)
+            manifest = manifest_without_helper(arm_manifest(arm))["model_visible"]
+            decisions = []
+            for index, before in enumerate(observations):
+                decision = arm.agent.act(before)
+                decisions.append(decision)
+                if index + 1 < len(observations):
+                    arm.agent.observe(
+                        Transition(
+                            before=before,
+                            decision=decision,
+                            after=observations[index + 1],
                         )
-                workspace_contract = (
-                    arm.workspace.root / "WORKSPACE.md"
-                ).read_text(encoding="utf-8")
-                requests = client.request_payloads()
+                    )
+            workspace_contract = (arm.workspace.root / "WORKSPACE.md").read_text(
+                encoding="utf-8"
+            )
+            requests = client.request_payloads()
     return {
         "manifest": manifest,
         "requests": requests,
@@ -1020,8 +1016,8 @@ def qualify_model_visible_parity(
     compare(
         "workspace.helper_digest",
         control["workspace"]["provided_helper_sha256"],
-        sha256((run_root / "workspace" / "frames.py").read_bytes()).hexdigest(),
-        evidence="exact model-readable frames.py bytes",
+        None if not (run_root / "workspace" / "frames.py").exists() else "present",
+        evidence="optional frame helper absent from both minimal arms",
     )
     compare(
         "workspace.timeout_seconds",
