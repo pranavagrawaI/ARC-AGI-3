@@ -84,3 +84,21 @@ G9 used LS20, `openai/google/gemma-4-31b-it` routing,
 `google/gemma-4-31b-it` on the wire, and OpenRouter's `/responses` endpoint.
 This establishes bounded interface usability, not gameplay competence or
 cross-game generality. See [`QUALIFICATION.md`](./QUALIFICATION.md).
+
+## Inspect a paired run
+
+The read-only NOOA evidence viewer replays public frames and aligns each arm's
+action point with its recorded provider text, tool or Python use, final action,
+workspace evidence, and successor transition where present. For NOOA it also
+shows the typed worker decision, host validation, and workspace commitment. It
+serves only allowlisted recorded artifacts, binds only to loopback, and never
+starts an agent or changes a run.
+
+```bash
+UV_CACHE_DIR=/tmp/uv-cache PYTHONPYCACHEPREFIX=/tmp/nooa-viewer-pycache \
+  uv run python experiments/agents/0002-nooa/output_viewer.py
+```
+
+Open <http://127.0.0.1:8766/>. Select a paired G9 run and either `0002-NOOA`
+or `0002-R`. The site labels the displayed reasoning as provider-returned text
+and the runs as usability evidence, not gameplay-competence evidence.
