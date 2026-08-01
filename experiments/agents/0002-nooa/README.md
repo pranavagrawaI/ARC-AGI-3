@@ -112,13 +112,14 @@ establishes general gameplay competence.
 
 ## Handoff to competence
 
-The 0002 freeze ends substrate work: a model can observe, use persistent Python
-and files, take simple or coordinate actions, receive successors, exhaust a
-declared budget, and stop without either process crashing. The next stage is not
-to enrich 0002. It is to build the competent agent, using NOOA as the design
+If the current-byte G9 is accepted, the 0002 freeze ends substrate work: the
+evidence will show that a model can observe, use persistent Python and files,
+take simple or coordinate actions, receive successors, exhaust a declared
+budget, and stop without either process crashing. The next stage will not
+enrich 0002. It will build the competent agent, using NOOA as the design
 architecture and Tycho as the oracle from which mechanisms are modified or
 deleted until the harness fits the target small model. Competence claims and
-Tycho-derived mechanisms belong to that later agent, not this frozen control.
+Tycho-derived mechanisms belong to that later agent, not this pre-freeze control.
 
 ## Inspect a paired run
 
