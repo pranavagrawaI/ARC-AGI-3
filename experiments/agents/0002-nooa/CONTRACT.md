@@ -15,11 +15,16 @@ It does **not** answer whether the planned 0006 capability environment improves 
 The intended families are:
 
 ```text
-0002-R    → planned 0006
-0002-NOOA → planned 0006-NOOA
+0002-R                   → planned 0006
+0002-R-minimal ↔ 0002-NOOA  (usability qualification only)
+0002-NOOA                → planned 0006-NOOA
 ```
 
-The first comparison is base against base. A later `0006-NOOA` must be constructed as a declared treatment delta over a frozen `0002-NOOA`, not by comparing an enriched NOOA agent directly with `0002-R`.
+`0002-R-minimal` is not a replacement or re-freeze of `0002-R`, and its pair
+with `0002-NOOA` is not a causal base-against-base comparison. It exists only
+to test the minimal no-helper interface under matched live conditions. A later
+`0006-NOOA` must be constructed as a declared treatment delta over a frozen
+`0002-NOOA`, not by comparing an enriched NOOA agent directly with `0002-R`.
 
 ## 2. Authority
 
@@ -60,9 +65,22 @@ The reference behavior is the frozen `0002-R` contract at:
 - [`../0006-capability-environment/p9/CONTRACT.md`](../0006-capability-environment/p9/CONTRACT.md)
 - [`../0006-capability-environment/p9/README.md`](../0006-capability-environment/p9/README.md)
 
-`0002-NOOA` targets **capability and information parity**, not byte-identical requests or identical internal architecture. NOOA is the independent substrate under examination, so its CodeAct/runtime protocol may differ where the difference is explicit, measured, and does not add cognitive assistance.
+`0002-NOOA` targets the same semantic authority and primitive Python/files
+capability boundary, not byte-identical requests, identical convenience
+helpers, or identical internal architecture. NOOA is the independent substrate
+under examination, so its CodeAct/runtime protocol may differ where the
+difference is explicit, measured, and does not add cognitive assistance.
 
 Historical `0002-R`/P9 files are read-only references for this work. Building `0002-NOOA` must not modify or re-freeze them.
+
+Executable usability qualification uses `0002-R-minimal`, derived at run time
+from the frozen arm without modifying it. The adapter deletes `frames.py` and
+its import instructions, writes the exact committed minimal workspace contract,
+and applies the exact lowercase quoted-`"null"` normalization at the final-action
+boundary. Its manifest must record `source_arm_id: 0002-R`, identify itself as
+`0002-R-minimal`, and commit those adapter details. Evidence from this arm
+licenses minimal-interface usability only; it is not evidence about the frozen
+`0002-R` comparison.
 
 ## 4. Required model-facing capability
 

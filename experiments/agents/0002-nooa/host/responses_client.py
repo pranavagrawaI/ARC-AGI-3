@@ -1,4 +1,4 @@
-"""Synchronous Responses transport for the 0002-R side of the G9 pair."""
+"""Synchronous Responses transport for the 0002-R-minimal side of G9."""
 
 from __future__ import annotations
 

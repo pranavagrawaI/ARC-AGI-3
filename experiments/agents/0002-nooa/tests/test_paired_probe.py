@@ -96,6 +96,10 @@ class PairedProbeRunnerTests(unittest.TestCase):
         )
 
         self.assertTrue(matching["success"])
+        self.assertEqual(
+            set(matching["projections"]),
+            {"0002-R-minimal", "0002-NOOA"},
+        )
         self.assertFalse(drifted["success"])
         self.assertEqual(drifted["mismatches"][0]["arm"], "0002-NOOA")
 
@@ -373,9 +377,17 @@ class PairedProbeRunnerTests(unittest.TestCase):
             )
             self.assertEqual(
                 [(run["arm"], run["actions"]) for run in pair["runs"]],
-                [("0002-R", 2), ("0002-NOOA", 2)],
+                [("0002-R-minimal", 2), ("0002-NOOA", 2)],
             )
             self.assertTrue((run_root / "control" / "arm-manifest.json").is_file())
+            manifest = json.loads(
+                (run_root / "control" / "arm-manifest.json").read_text()
+            )
+            self.assertEqual(manifest["source_arm_id"], "0002-R")
+            self.assertEqual(manifest["arm_id"], "0002-R-minimal")
+            self.assertIsNone(
+                manifest["compatibility_adapter"]["provided_helper_sha256"]
+            )
             self.assertTrue((run_root / "control" / "process.jsonl").is_file())
             self.assertTrue((run_root / "candidate" / "worker" / "process.jsonl").is_file())
             self.assertTrue((run_root / "control" / "trace.jsonl").is_file())

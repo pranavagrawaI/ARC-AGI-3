@@ -18,7 +18,7 @@ surface predates the final helper deletion and does not qualify the current byte
 | G4 | pass offline | namespace/helpers after initial start and timeout restart, garbage-collector enumeration, concurrency, processes, packages, source, caches, IPC/run artifacts, and outside-workspace reads are closed while generic Python, NumPy, and Pillow work | inspect live traces for an unclassified route |
 | G5 | pass offline | valid return stops later model/Python work; delayed background mutation, replacement, and post-accept workspace mutation are rejected; environment-step failure closes the pending action into host evidence | inspect the live successor boundary |
 | G6 | pass offline | existing recovery matrix plus retryable/fatal/uncertain provider transport injection; fatal, uncertain, and exhausted-retryable paths carry exact attempt evidence and make no host action | repeat the success path in G9; no offline failure class remains open |
-| G7 | pass offline | a real constructed 0002-R fixture and the NOOA fixture run the same sequence; every crossing is value-diffed for instructions, observations/images, status, tools, context boundaries, decisions, and evidence; replay uses host-owned committed observations | inspect both live provider payloads in G9 |
+| G7 | pass offline | a real constructed `0002-R-minimal` compatibility fixture and the NOOA fixture run the same sequence; every crossing is value-diffed for instructions, observations/images, status, tools, context boundaries, decisions, and evidence; replay uses host-owned committed observations | inspect both live provider payloads in G9 |
 | G8 | pass offline | eight behavioral crossing mutants are rejected independently of wording; deletion probes kill namespace closure, omission, persistence, timeout restart, validation, and both temporal barriers | none offline |
 | G9 | requalification pending | historical run `g9-20260731T153745Z-d253eb4b` passed its frozen bytes; the separate CN04 smoke validates the unchanged coordinate-action route | rerun one bounded pair on the committed minimal workspace surface; gameplay competence and cross-game generality remain outside this gate |
 
@@ -104,7 +104,10 @@ tool controls that are present exactly when tools are present.
 
 ## Shared paired-run specification
 
-A comparison constructs `0002-R` and `0002-NOOA` from one immutable paired-run specification. It must declare at least:
+A usability qualification constructs `0002-R-minimal` and `0002-NOOA` from one
+immutable paired-run specification. `0002-R-minimal` is the explicitly derived
+no-helper compatibility arm defined in `CONTRACT.md`, not the frozen reference
+and not a treatment-effect control. The specification must declare at least:
 
 - model, provider endpoint, request profile, and model seed where supported;
 - environment/game identifier and environment seed, host-only where required;
@@ -239,7 +242,7 @@ Assert each fault actually fired and produced the contracted routing and evidenc
 
 ## G7 — Model-visible parity report
 
-Construct one `0002-R` and one `0002-NOOA` fixture run from the shared paired-run specification. Normalize and diff:
+Construct one `0002-R-minimal` and one `0002-NOOA` fixture run from the shared paired-run specification. Normalize and diff:
 
 - semantic system-instruction sections and digests;
 - current observation fields and representations;
@@ -298,7 +301,8 @@ G7 rejects it. Text sentinels remain only a secondary diagnostic.
 
 ## G9 — One bounded live usability probe
 
-After G1–G8 pass, run a small same-model, same-provider, same-game, same-budget pair. Inspect raw traces from both bases for:
+After G1–G8 pass, run a small same-model, same-provider, same-game, same-budget
+`0002-R-minimal`/`0002-NOOA` pair. Inspect raw traces from both arms for:
 
 - interface rediscovery;
 - tool and import friction;

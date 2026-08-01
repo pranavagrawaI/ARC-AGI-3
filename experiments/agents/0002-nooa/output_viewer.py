@@ -330,7 +330,7 @@ def _project_nooa_model_call(call: dict[str, Any]) -> dict[str, Any]:
 
 
 def _project_control_model_call(record: dict[str, Any]) -> dict[str, Any]:
-    """Project a recorded 0002-R provider response through the shared call schema."""
+    """Project a recorded P9-derived control response through the call schema."""
 
     projected = _project_nooa_model_call(
         {
@@ -410,7 +410,7 @@ def _candidate_events(
 def _control_events(
     arm_dir: Path, pair_name: str, arm: str
 ) -> dict[int, dict[str, Any]]:
-    """Align 0002-R's one-based action steps to their zero-based input frames."""
+    """Align the P9-derived arm's one-based actions to zero-based input frames."""
 
     events: dict[int, dict[str, Any]] = defaultdict(dict)
     for record in _read_jsonl(arm_dir / "process.jsonl"):
@@ -502,6 +502,14 @@ def load_arm(pairs_root: Path, pair_name: str, arm: str) -> dict[str, Any]:
 
     pair_dir = resolve_pair_directory(pairs_root, pair_name)
     arm_dir = resolve_arm_directory(pairs_root, pair_name, arm)
+    summary = _run_summary(arm_dir, arm)
+    arms = arm_names(pair_dir)
+    arm_labels = {
+        arm_key: _run_summary(
+            resolve_arm_directory(pairs_root, pair_name, arm_key), arm_key
+        )["arm"]
+        for arm_key in arms
+    }
     frames = _trace_frames(arm_dir)
     event_by_step = (
         _candidate_events(arm_dir, pair_name, arm)
@@ -542,16 +550,17 @@ def load_arm(pairs_root: Path, pair_name: str, arm: str) -> dict[str, Any]:
         "paired_run_spec": _as_dict(_read_json(pair_dir / "paired-run-spec.json")),
         "provider_profile": _as_dict(_read_json(pair_dir / "provider-profile-report.json")),
         "pair_spec_evidence": _pair_artifact_url(pair_name, "paired-run-spec.json"),
-        "arm": "0002-NOOA" if arm == "candidate" else ("0002-R" if arm == "control" else "0002-NOOA single arm"),
+        "arm": summary["arm"],
         "arm_key": arm,
-        "arms": arm_names(pair_dir),
+        "arms": arms,
+        "arm_labels": arm_labels,
         "selection_label": "Paired run" if arm != "single" else "Single-arm run",
         "scope_note": (
             "Read-only provider-smoke evidence. Provider-returned reasoning is displayed as recorded; it is not a claim to expose hidden model state. This run is not gameplay competence evidence."
             if arm == "single"
             else "Read-only evidence view. Provider-returned reasoning is displayed as recorded; it is not a claim to expose hidden model state. This G9 usability probe is not gameplay competence evidence."
         ),
-        "summary": _run_summary(arm_dir, arm),
+        "summary": summary,
         "steps": stages,
     }
 

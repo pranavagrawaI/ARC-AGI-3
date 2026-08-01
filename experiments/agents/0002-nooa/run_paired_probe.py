@@ -1,4 +1,4 @@
-"""Run the bounded G9 0002-R/0002-NOOA usability pair.
+"""Run the bounded G9 0002-R-minimal/0002-NOOA usability pair.
 
 Offline mode validates this runner without credentials. Live mode creates two
 fresh instances of the same public game from one immutable ``PairedRunSpec``.
@@ -38,9 +38,10 @@ from host.qualification import PairedRunSpec, ProviderRequestProfile
 from host.responses_client import OpenAICompatibleResponsesClient
 from host.runner import NooaProcessAgent, NooaWorkerError
 from host.control_surface import (
+    MINIMAL_CONTROL_ARM,
     QuotedNullNormalizingClient,
+    adapt_minimal_control_manifest,
     adapt_control_spec,
-    manifest_without_helper,
     prepare_minimal_workspace,
 )
 from llm_repl_agent.agent import DecisionFormatError, ModelBudgetExceeded
@@ -136,7 +137,7 @@ def _operation_mode(value: str) -> OperationMode:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run the bounded 0002-R/0002-NOOA G9 usability pair."
+        description="Run the bounded 0002-R-minimal/0002-NOOA G9 usability pair."
     )
     parser.add_argument("--offline", action="store_true")
     parser.add_argument("--offline-recording", type=Path)
@@ -314,7 +315,7 @@ def _run_control(
                 spec.usability_probe_instruction,
                 encoding="utf-8",
             )
-        constructed_manifest = manifest_without_helper(arm_manifest(arm))
+        constructed_manifest = adapt_minimal_control_manifest(arm_manifest(arm))
         with JsonlTraceWriter(run_root / "trace.jsonl") as trace:
             result = run_episode(
                 environment,
@@ -330,7 +331,7 @@ def _run_control(
         arm.workspace.snapshot(run_root / "workspace")
         summary = {
             "schema": "0002-nooa-g9-arm-v1",
-            "arm": "0002-R",
+            "arm": MINIMAL_CONTROL_ARM,
             "actions": result.actions,
             "levels_completed": result.final.levels_completed,
             "state": result.final.state,
@@ -555,7 +556,7 @@ def _provider_profile_report(
         "truncation": profile.truncation,
     }
     crossings = {
-        "0002-R": control_crossings,
+        MINIMAL_CONTROL_ARM: control_crossings,
         "0002-NOOA": candidate_crossings,
     }
     projections = {
@@ -646,7 +647,7 @@ def main(argv: list[str] | None = None) -> int:
             client=control_client,
         )
     except Exception as error:
-        control_summary = _failed_arm_summary("0002-R", error)
+        control_summary = _failed_arm_summary(MINIMAL_CONTROL_ARM, error)
         (run_root / "control").mkdir(parents=True, exist_ok=True)
         _write_json(run_root / "control" / "summary.json", control_summary)
     response_timeout = args.response_timeout_seconds

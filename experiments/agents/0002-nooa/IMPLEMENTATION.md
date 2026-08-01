@@ -111,7 +111,7 @@ forbidden-surface, and first parity slices. The remaining first-green work is:
 - [x] Finish the G3/G4/G5/G8 negative and mutation matrices.
 - [x] Extend G7 from the exercised provider crossing to the complete parity
   catalogue and rerun G1-G8.
-- [x] Construct and offline-test the paired 0002-R/0002-NOOA G9 runner after
+- [x] Construct and offline-test the paired 0002-R-minimal/0002-NOOA G9 runner after
   G1-G8 became green.
 - [x] Run the bounded live pair after the operator chooses the explicit
   game/model/endpoint. The accepted LS20/OpenRouter/Gemma run is

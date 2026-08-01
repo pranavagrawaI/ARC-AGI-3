@@ -119,6 +119,7 @@ class NooaProcessAgentTests(unittest.TestCase):
                 spec=PairedRunSpec.initial(),
             )
 
+            self.assertEqual(parity["control_arm"], "0002-R-minimal")
             self.assertEqual(parity["unmatched_affordances"], [])
             self.assertEqual(parity["fixture_coverage"]["candidate_actions"], 8)
             self.assertEqual(parity["fixture_coverage"]["control_actions"], 8)

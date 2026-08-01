@@ -17,11 +17,16 @@ The documents have separate authority:
 ## Family
 
 ```text
-0002-R    → planned 0006
-0002-NOOA → planned 0006-NOOA
+0002-R                   → planned 0006
+0002-R-minimal ↔ 0002-NOOA  (usability qualification only)
+0002-NOOA                → planned 0006-NOOA
 ```
 
-First compare `0002-R` with `0002-NOOA` as bases. If `0002-NOOA` is retained, compare the later `0006-NOOA` treatment against this unchanged base.
+Frozen `0002-R` remains an unchanged historical reference. The executable live
+pair uses `0002-R-minimal`, an explicitly derived no-helper compatibility arm;
+it tests interface usability but is not a causal comparison with frozen
+`0002-R`. If `0002-NOOA` is retained, compare the later `0006-NOOA` treatment
+against this unchanged NOOA base.
 
 ## Build strategy
 
@@ -45,12 +50,13 @@ Features removed from this base but potentially useful later are recorded in [`.
 ## Current executable slice
 
 The host-side `NooaProcessAgent` starts one episode-scoped Python 3.12 worker,
-projects the frozen `0002-R` observation/workspace surface, and crosses a
+projects the minimal no-helper Python/files surface, and crosses a
 versioned append-only JSONL boundary. The worker exposes only generic persistent
 Python/files and one typed final action. Offline fixture tests currently exercise:
 
 - cumulative Python memory and model-authored files across environment actions;
-- exact current text/image observation crossings and a normalized `0002-R` parity report;
+- exact current text/image observation crossings and a normalized
+  `0002-R-minimal` compatibility report;
 - complete-turn eviction with a pointer-only omission notice;
 - generated-code import, object, filesystem, network, and runtime restrictions;
 - syntax/runtime/malformed-action repair, output bounds, timeout restart, budgets,
@@ -104,6 +110,16 @@ then stopped at its action budget with worker exit code 0. It is retained as
 long-horizon crash-resistance/route evidence only; it neither solved CN04 nor
 establishes general gameplay competence.
 
+## Handoff to competence
+
+The 0002 freeze ends substrate work: a model can observe, use persistent Python
+and files, take simple or coordinate actions, receive successors, exhaust a
+declared budget, and stop without either process crashing. The next stage is not
+to enrich 0002. It is to build the competent agent, using NOOA as the design
+architecture and Tycho as the oracle from which mechanisms are modified or
+deleted until the harness fits the target small model. Competence claims and
+Tycho-derived mechanisms belong to that later agent, not this frozen control.
+
 ## Inspect a paired run
 
 The read-only NOOA evidence viewer replays public frames and aligns each arm's
@@ -119,7 +135,7 @@ UV_CACHE_DIR=/tmp/uv-cache PYTHONPYCACHEPREFIX=/tmp/nooa-viewer-pycache \
 ```
 
 Open <http://127.0.0.1:8766/>. Select a paired G9 run and either `0002-NOOA`
-or `0002-R`. The site labels the displayed reasoning as provider-returned text
+or the control identity recorded by that run. The site labels the displayed reasoning as provider-returned text
 and the runs as usability evidence, not gameplay-competence evidence.
 
 To inspect single-arm provider-smoke runs such as the 44-action LS20 traces,

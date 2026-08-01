@@ -20,6 +20,7 @@ from p9.agent import (
 )
 
 
+MINIMAL_CONTROL_ARM = "0002-R-minimal"
 _WORKSPACE_CONTENTS = (
     "The workspace is new for this run but not empty: it already contains "
     "NOTES.md, WORKSPACE.md, current_frame.png, current_observation.json, "
@@ -83,9 +84,16 @@ def adapt_control_spec(spec: Any) -> Any:
     return replace(spec, system_prompt=prompt)
 
 
-def manifest_without_helper(manifest: dict[str, Any]) -> dict[str, Any]:
-    """Correct P9's source-derived helper field to the constructed minimal arm."""
+def adapt_minimal_control_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Identify the P9-derived arm and commit its minimal adapter surface."""
 
+    manifest["source_arm_id"] = manifest["arm_id"]
+    manifest["arm_id"] = MINIMAL_CONTROL_ARM
+    manifest["compatibility_adapter"] = {
+        "workspace_contract_sha256": MINIMAL_WORKSPACE_CONTRACT_SHA256,
+        "provided_helper_sha256": None,
+        "quoted_null_normalization": "exact-lowercase-string-v1",
+    }
     workspace = manifest["model_visible"]["workspace"]
     workspace["provided_helper_sha256"] = None
     return manifest

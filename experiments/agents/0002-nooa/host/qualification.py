@@ -1,4 +1,4 @@
-"""Executable qualification inputs shared by 0002-R and 0002-NOOA."""
+"""Executable qualification inputs shared by 0002-R-minimal and 0002-NOOA."""
 
 from __future__ import annotations
 
@@ -12,7 +12,10 @@ import sys
 from tempfile import TemporaryDirectory
 from typing import Any, ClassVar, Mapping
 
-from .control_surface import MINIMAL_WORKSPACE_CONTRACT_SHA256
+from .control_surface import (
+    MINIMAL_CONTROL_ARM,
+    MINIMAL_WORKSPACE_CONTRACT_SHA256,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -691,7 +694,7 @@ def _control_fixture_model_visible(
     run_root: Path,
     process_records: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Run 0002-R over the exact successful candidate observation sequence."""
+    """Run 0002-R-minimal over the candidate observation sequence."""
 
     repo = Path(__file__).resolve().parents[4]
     baseline = repo / "experiments" / "agents" / "0002-llm-repl-agent"
@@ -705,7 +708,7 @@ def _control_fixture_model_visible(
     from experiments.harness import Observation, Transition
     from host.control_surface import (
         adapt_control_spec,
-        manifest_without_helper,
+        adapt_minimal_control_manifest,
         prepare_minimal_workspace,
     )
     from p9.arms import arm_manifest, build_arm, control_spec
@@ -771,7 +774,7 @@ def _control_fixture_model_visible(
             inner_client=client,
         ) as arm:
             prepare_minimal_workspace(arm.workspace.root)
-            manifest = manifest_without_helper(arm_manifest(arm))["model_visible"]
+            manifest = adapt_minimal_control_manifest(arm_manifest(arm))["model_visible"]
             decisions = []
             for index, before in enumerate(observations):
                 decision = arm.agent.act(before)
@@ -801,7 +804,7 @@ def qualify_model_visible_parity(
     run_root: Path,
     spec: PairedRunSpec,
 ) -> dict[str, Any]:
-    """Run 0002-R over the candidate fixture and diff every model-facing crossing."""
+    """Run the minimal compatibility arm and diff model-facing crossings."""
 
     process_records = [
         json.loads(line)
@@ -976,7 +979,7 @@ def qualify_model_visible_parity(
         {
             "path": "python.builtins",
             "classification": "measured_substrate_difference",
-            "control": "0002-R isolated Python builtins",
+            "control": "0002-R-minimal isolated Python builtins",
             "nooa": {
                 "generic_object_introspection": ["dir", "getattr"],
                 "nooa_validator_restrictions": [
@@ -1061,7 +1064,7 @@ def qualify_model_visible_parity(
                 "control": control_omissions,
                 "nooa": candidate_omissions,
                 "evidence": (
-                    "0002-R labels completed action turns from 1; NOOA labels "
+                    "0002-R-minimal labels completed action turns from 1; NOOA labels "
                     "public action points from 0"
                 ),
             }
@@ -1367,7 +1370,7 @@ def qualify_model_visible_parity(
     ]
     report = {
         "schema": "0002-nooa-model-visible-parity-v2",
-        "control_arm": "0002-R",
+        "control_arm": MINIMAL_CONTROL_ARM,
         "candidate_arm": "0002-NOOA",
         "fixture_coverage": {
             "candidate_actions": len(crossings),
