@@ -102,3 +102,15 @@ UV_CACHE_DIR=/tmp/uv-cache PYTHONPYCACHEPREFIX=/tmp/nooa-viewer-pycache \
 Open <http://127.0.0.1:8766/>. Select a paired G9 run and either `0002-NOOA`
 or `0002-R`. The site labels the displayed reasoning as provider-returned text
 and the runs as usability evidence, not gameplay-competence evidence.
+
+To inspect single-arm provider-smoke runs such as the 44-action LS20 traces,
+point the same viewer at their parent directory:
+
+```bash
+UV_CACHE_DIR=/tmp/uv-cache PYTHONPYCACHEPREFIX=/tmp/nooa-viewer-pycache \
+  uv run python experiments/agents/0002-nooa/output_viewer.py \
+  --runs-root experiments/agents/0002-nooa/artifacts/provider-smoke-probes/ls20
+```
+
+The picker identifies these as `Single-arm run`; there is no control selector
+because no matched control artifact exists in that layout.

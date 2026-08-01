@@ -16,7 +16,8 @@ from urllib.parse import parse_qs, quote, urlparse
 AGENT_ROOT = Path(__file__).resolve().parent
 DEFAULT_PAIRS_ROOT = AGENT_ROOT / "artifacts" / "paired-usability-probes"
 PAGE_TEMPLATE = (AGENT_ROOT / "output_viewer.html").read_text(encoding="utf-8")
-ARM_NAMES = ("candidate", "control")
+PAIRED_ARM_NAMES = ("candidate", "control")
+ARM_NAMES = (*PAIRED_ARM_NAMES, "single")
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 PAIR_DIRECT_ARTIFACTS = frozenset(
     {"paired-run-spec.json", "summary.json", "provider-profile-report.json"}
@@ -83,8 +84,12 @@ def _as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+def _is_single_arm_run(path: Path) -> bool:
+    return (path / "trace.jsonl").is_file() and (path / "worker/process.jsonl").is_file()
+
+
 def pair_names(pairs_root: Path) -> list[str]:
-    """Return completed or in-progress paired runs in newest-first name order."""
+    """Return paired or single-arm NOOA runs in newest-first name order."""
 
     if not pairs_root.is_dir():
         return []
@@ -93,7 +98,10 @@ def pair_names(pairs_root: Path) -> list[str]:
         for path in pairs_root.iterdir()
         if path.is_dir()
         and (path / "paired-run-spec.json").is_file()
-        and any((path / arm).is_dir() for arm in ARM_NAMES)
+        and (
+            any((path / arm).is_dir() for arm in PAIRED_ARM_NAMES)
+            or _is_single_arm_run(path)
+        )
     ]
     return sorted(names, reverse=True)
 
@@ -107,13 +115,18 @@ def resolve_pair_directory(pairs_root: Path, pair_name: str) -> Path:
 
 
 def arm_names(pair_dir: Path) -> list[str]:
-    return [arm for arm in ARM_NAMES if (pair_dir / arm).is_dir()]
+    paired = [arm for arm in PAIRED_ARM_NAMES if (pair_dir / arm).is_dir()]
+    return paired or (["single"] if _is_single_arm_run(pair_dir) else [])
 
 
 def resolve_arm_directory(pairs_root: Path, pair_name: str, arm: str) -> Path:
     if arm not in ARM_NAMES:
         raise ValueError(f"unknown arm: {arm}")
     pair = resolve_pair_directory(pairs_root, pair_name)
+    if arm == "single":
+        if not _is_single_arm_run(pair):
+            raise ValueError(f"unknown arm: {arm}")
+        return pair
     arm_dir = (pair / arm).resolve()
     if arm_dir.parent != pair or not arm_dir.is_dir():
         raise ValueError(f"unknown arm: {arm}")
@@ -201,7 +214,9 @@ def _observation_image(
     arm_dir: Path, pair_name: str, arm: str, step: int
 ) -> str | None:
     roots = (
-        "worker/workspace/observations" if arm == "candidate" else "workspace/observations",
+        "worker/workspace/observations"
+        if arm in {"candidate", "single"}
+        else "workspace/observations",
     )
     for root in roots:
         relative = f"{root}/step-{step:05d}.png"
@@ -469,7 +484,7 @@ def _run_summary(arm_dir: Path, arm: str) -> dict[str, Any]:
     summary = _as_dict(_read_json(arm_dir / "summary.json"))
     scorecard = _as_dict(_read_json(arm_dir / "scorecard.json"))
     return {
-        "arm": summary.get("arm", "0002-NOOA" if arm == "candidate" else "0002-R"),
+        "arm": summary.get("arm", "0002-NOOA" if arm != "control" else "0002-R"),
         "actions": summary.get("actions", scorecard.get("total_actions", 0)),
         "levels_completed": summary.get(
             "levels_completed", scorecard.get("total_levels_completed", 0)
@@ -490,7 +505,7 @@ def load_arm(pairs_root: Path, pair_name: str, arm: str) -> dict[str, Any]:
     frames = _trace_frames(arm_dir)
     event_by_step = (
         _candidate_events(arm_dir, pair_name, arm)
-        if arm == "candidate"
+        if arm != "control"
         else _control_events(arm_dir, pair_name, arm)
     )
     stages: list[dict[str, Any]] = []
@@ -511,9 +526,13 @@ def load_arm(pairs_root: Path, pair_name: str, arm: str) -> dict[str, Any]:
             "process_evidence": _artifact_url(
                 pair_name,
                 arm,
-                "worker/process.jsonl" if arm == "candidate" else "process.jsonl",
+                "worker/process.jsonl" if arm != "control" else "process.jsonl",
             ),
-            "provider_evidence": _artifact_url(pair_name, arm, "provider-crossings.json"),
+            "provider_evidence": (
+                _artifact_url(pair_name, arm, "provider-crossings.json")
+                if (arm_dir / "provider-crossings.json").is_file()
+                else None
+            ),
             **event_by_step.get(step, {}),
         }
         stages.append(stage)
@@ -523,9 +542,15 @@ def load_arm(pairs_root: Path, pair_name: str, arm: str) -> dict[str, Any]:
         "paired_run_spec": _as_dict(_read_json(pair_dir / "paired-run-spec.json")),
         "provider_profile": _as_dict(_read_json(pair_dir / "provider-profile-report.json")),
         "pair_spec_evidence": _pair_artifact_url(pair_name, "paired-run-spec.json"),
-        "arm": "0002-NOOA" if arm == "candidate" else "0002-R",
+        "arm": "0002-NOOA" if arm == "candidate" else ("0002-R" if arm == "control" else "0002-NOOA single arm"),
         "arm_key": arm,
         "arms": arm_names(pair_dir),
+        "selection_label": "Paired run" if arm != "single" else "Single-arm run",
+        "scope_note": (
+            "Read-only provider-smoke evidence. Provider-returned reasoning is displayed as recorded; it is not a claim to expose hidden model state. This run is not gameplay competence evidence."
+            if arm == "single"
+            else "Read-only evidence view. Provider-returned reasoning is displayed as recorded; it is not a claim to expose hidden model state. This G9 usability probe is not gameplay competence evidence."
+        ),
         "summary": _run_summary(arm_dir, arm),
         "steps": stages,
     }
@@ -639,7 +664,13 @@ def main() -> None:
     )
     parser.add_argument("--host", default="127.0.0.1", type=_loopback_host)
     parser.add_argument("--port", type=int, default=8766)
-    parser.add_argument("--pairs-root", type=Path, default=DEFAULT_PAIRS_ROOT)
+    parser.add_argument(
+        "--pairs-root",
+        "--runs-root",
+        dest="pairs_root",
+        type=Path,
+        default=DEFAULT_PAIRS_ROOT,
+    )
     args = parser.parse_args()
     pairs_root = args.pairs_root.resolve()
     names = pair_names(pairs_root)

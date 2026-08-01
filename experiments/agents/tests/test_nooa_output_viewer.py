@@ -244,6 +244,60 @@ def _candidate_pair(root: Path, name: str = "pair-a") -> Path:
     return pair
 
 
+def _single_nooa_run(root: Path, name: str = "single-a") -> Path:
+    run = root / name
+    _write_json(run / "paired-run-spec.json", {"game": "ls20", "max_actions": 44})
+    _write_json(
+        run / "summary.json",
+        {"actions": 44, "state": "NOT_FINISHED", "stop_reason": "action_budget"},
+    )
+    _write_jsonl(
+        run / "trace.jsonl",
+        [
+            {
+                "type": "observation",
+                "step": 0,
+                "available_actions": [1],
+                "levels_completed": 0,
+                "state": "NOT_FINISHED",
+                "full_reset": True,
+            },
+            {
+                "type": "transition",
+                "step": 1,
+                "action": 3,
+                "observation": {"state": "NOT_FINISHED"},
+            },
+        ],
+    )
+    _write_jsonl(
+        run / "worker/process.jsonl",
+        [
+            {"kind": "action_request", "action_point_id": 0, "request": {"legal_actions": [1]}},
+            {
+                "kind": "model_crossing",
+                "action_point_id": 0,
+                "audit": {"model_calls": []},
+                "worker_decision": {"action": 3},
+            },
+            {
+                "kind": "decision_validated",
+                "action_point_id": 0,
+                "decision": {"action": 3},
+            },
+            {
+                "kind": "transition_recorded",
+                "action_point_id": 0,
+                "transition": {"changed_pixels": 1},
+            },
+        ],
+    )
+    image = run / "worker/workspace/observations/step-00000.png"
+    image.parent.mkdir(parents=True, exist_ok=True)
+    image.write_bytes(b"not-a-real-single-run-png")
+    return run
+
+
 class NooaOutputViewerTests(unittest.TestCase):
     def test_discovers_pairs_and_projects_one_nooa_action_point(self) -> None:
         viewer = _load_viewer()
@@ -296,6 +350,22 @@ class NooaOutputViewerTests(unittest.TestCase):
         labels = [link["label"] for link in stage["evidence_links"]]
         self.assertIn("Exact request payload", labels)
         self.assertIn("Exact response body", labels)
+
+    def test_discovers_and_projects_a_single_arm_nooa_run(self) -> None:
+        viewer = _load_viewer()
+        with TemporaryDirectory() as directory:
+            runs_root = Path(directory)
+            _single_nooa_run(runs_root)
+            names = viewer.pair_names(runs_root)
+            data = viewer.load_arm(runs_root, "single-a", "single")
+
+        self.assertEqual(names, ["single-a"])
+        self.assertEqual(data["arm"], "0002-NOOA single arm")
+        self.assertEqual(data["arms"], ["single"])
+        self.assertEqual(data["selection_label"], "Single-arm run")
+        self.assertIn("provider-smoke", data["scope_note"])
+        self.assertEqual(data["summary"]["actions"], 44)
+        self.assertEqual(data["steps"][0]["decision"]["action"], 3)
 
     def test_server_serves_only_allowlisted_artifacts_inside_the_selected_arm(self) -> None:
         viewer = _load_viewer()
