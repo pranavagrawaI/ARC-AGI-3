@@ -52,7 +52,7 @@ uv run --python 3.14 python experiments/agents/0002-nooa/run_paired_probe.py \
 The timeout fixtures create nested workers; run them where the operating system
 process and Landlock guards are available.
 
-Current rerun (2026-08-01): 90 Python 3.12 runtime tests and 31 Python 3.14 host
+Current rerun (2026-08-01): 91 Python 3.12 runtime tests and 31 Python 3.14 host
 tests pass. The offline G9 runner regression is included in the host count. The
 host count includes end-to-end coordinate-action and multi-layer last-layer
 closure tests.

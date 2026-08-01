@@ -307,8 +307,10 @@ async def run_offline_fixture(
             )
             completed += 1
     finally:
-        await control.aclose()
-        os.chdir(original_cwd)
+        try:
+            await control.aclose()
+        finally:
+            os.chdir(original_cwd)
     return completed
 
 
@@ -446,11 +448,15 @@ async def serve_offline_fixture(
                 )
                 completed += 1
     finally:
-        if control is not None:
-            await control.aclose()
-        if _provider_mode and client is not None:
-            await client.aclose()
-        os.chdir(original_cwd)
+        try:
+            if control is not None:
+                await control.aclose()
+        finally:
+            try:
+                if _provider_mode and client is not None:
+                    await client.aclose()
+            finally:
+                os.chdir(original_cwd)
 
 
 async def serve_provider(

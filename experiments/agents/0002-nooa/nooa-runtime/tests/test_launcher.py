@@ -530,6 +530,32 @@ async def test_offline_launcher_closes_two_action_points_over_append_only_files(
 
 
 @pytest.mark.asyncio
+async def test_offline_launcher_restores_cwd_when_agent_close_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BrokenCloseControl:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def aclose(self) -> None:
+            raise RuntimeError("close failed")
+
+    requests = tmp_path / "requests.jsonl"
+    responses = tmp_path / "responses.jsonl"
+    workspace = tmp_path / "workspace"
+    requests.write_text("")
+    workspace.mkdir()
+    original_cwd = Path.cwd()
+    monkeypatch.setattr("launcher.NooaControlAgent", BrokenCloseControl)
+
+    with pytest.raises(RuntimeError, match="close failed"):
+        await run_offline_fixture(requests, responses, workspace)
+
+    assert Path.cwd() == original_cwd
+
+
+@pytest.mark.asyncio
 async def test_launcher_rejects_duplicate_action_point_identity(tmp_path: Path) -> None:
     requests = tmp_path / "requests.jsonl"
     responses = tmp_path / "responses.jsonl"
