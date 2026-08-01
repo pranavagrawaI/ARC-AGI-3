@@ -51,8 +51,21 @@ uv run --python 3.14 python experiments/agents/0002-nooa/run_paired_probe.py \
 The timeout fixtures create nested workers; run them where the operating system
 process and Landlock guards are available.
 
-Current rerun (2026-07-31): 79 Python 3.12 runtime tests and 26 Python 3.14 host
-tests pass. The offline G9 runner regression is included in the host count.
+Current rerun (2026-08-01): 89 Python 3.12 runtime tests and 30 Python 3.14 host
+tests pass. The offline G9 runner regression is included in the host count. The
+host count includes end-to-end coordinate-action and multi-layer last-layer
+closure tests.
+
+### CN04 click-route smoke
+
+The bounded online CN04 smoke at `provider-smoke-probes/cn04/20260801T141859Z`
+advertised coordinate action `6` at all three requests. It validated and crossed
+two actions (`{x: 15, y: 27}` and `{x: 39, y: 36}`), each with a successor.
+The third request exhausted its explicit reported-token budget before a decision;
+the worker still stopped with exit code 0. Compact commitments and redaction
+results are in `artifacts/FREEZE_EVIDENCE.json`; raw evidence is local only. The
+subsequent shared direct-import workspace convention does not alter this action
+route and is exercised offline through both real isolated workers.
 
 ### Live G9 evidence
 

@@ -195,9 +195,9 @@ class PairedRunSpec:
         "legal_event_schema": "integer-id-with-optional-xy-v1",
         "final_action_schema": "action-int-data-object-or-null-reason-string-v1",
         "host_workspace_initialization": (
-            "WORKSPACE.md=p9-neutral-workspace-contract-v1",
+            "WORKSPACE.md=direct-import-contract-v1",
             "NOTES.md=empty",
-            "frames.py=p9-frame-tools-components-false-v1",
+            "frames.py=direct-import-frame-tools-v1",
             "public_history.jsonl=empty",
             "observations/=empty-directory",
             "current_observation.json=exact-current-public-observation",
@@ -703,6 +703,11 @@ def _control_fixture_model_visible(
     import numpy as np
 
     from experiments.harness import Observation, Transition
+    from host.workspace import (
+        adapt_control_spec,
+        adapt_workspace_for_direct_import,
+        direct_import_control_runtime,
+    )
     from p9.arms import arm_manifest, build_arm, control_spec
     from p9.fixtures import ScriptedChatClient, action_turn
 
@@ -760,28 +765,33 @@ def _control_fixture_model_visible(
 
     client = ScriptedChatClient(script, model=spec.model_profile)
     with TemporaryDirectory(prefix="0002-nooa-control-fixture-") as directory:
-        with build_arm(
-            control_spec(**spec.control_overrides()),
-            run_dir=Path(directory) / "run",
-            inner_client=client,
-        ) as arm:
-            manifest = arm_manifest(arm)["model_visible"]
-            decisions = []
-            for index, before in enumerate(observations):
-                decision = arm.agent.act(before)
-                decisions.append(decision)
-                if index + 1 < len(observations):
-                    arm.agent.observe(
-                        Transition(
-                            before=before,
-                            decision=decision,
-                            after=observations[index + 1],
+        with direct_import_control_runtime():
+            with build_arm(
+                adapt_control_spec(control_spec(**spec.control_overrides())),
+                run_dir=Path(directory) / "run",
+                inner_client=client,
+            ) as arm:
+                adapt_workspace_for_direct_import(arm.workspace.root)
+                manifest = arm_manifest(arm)["model_visible"]
+                manifest["workspace"]["provided_helper_sha256"] = sha256(
+                    (arm.workspace.root / "frames.py").read_bytes()
+                ).hexdigest()
+                decisions = []
+                for index, before in enumerate(observations):
+                    decision = arm.agent.act(before)
+                    decisions.append(decision)
+                    if index + 1 < len(observations):
+                        arm.agent.observe(
+                            Transition(
+                                before=before,
+                                decision=decision,
+                                after=observations[index + 1],
+                            )
                         )
-                    )
-            workspace_contract = (arm.workspace.root / "WORKSPACE.md").read_text(
-                encoding="utf-8"
-            )
-            requests = client.request_payloads()
+                workspace_contract = (
+                    arm.workspace.root / "WORKSPACE.md"
+                ).read_text(encoding="utf-8")
+                requests = client.request_payloads()
     return {
         "manifest": manifest,
         "requests": requests,

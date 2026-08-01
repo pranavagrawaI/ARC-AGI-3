@@ -96,16 +96,12 @@ async def test_model_can_compute_write_a_file_and_return_one_action(
 
 
 @pytest.mark.asyncio
-async def test_string_null_data_is_visible_and_requires_model_repair() -> None:
+async def test_string_null_data_is_normalized_for_an_action_without_data() -> None:
     llm = _RecordingFakeLLM(
         scripted_responses=[
             _execute(
                 "return_result({'action': 1, 'data': 'null', 'reason': 'move'})",
                 "string-null",
-            ),
-            _execute(
-                "return_result({'action': 1, 'data': None, 'reason': 'repaired'})",
-                "repaired-null",
             ),
         ]
     )
@@ -115,9 +111,44 @@ async def test_string_null_data_is_visible_and_requires_model_repair() -> None:
         PublicActionPoint(observation={"step": 0}, legal_actions=(1, 2))
     )
 
-    assert decision == ActionDecision(action=1, data=None, reason="repaired")
+    assert decision == ActionDecision(action=1, data=None, reason="move")
+    assert llm.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_string_null_data_does_not_bypass_coordinate_requirements() -> None:
+    llm = _RecordingFakeLLM(
+        scripted_responses=[
+            _execute(
+                "return_result({'action': 6, 'data': 'null', 'reason': 'missing'})",
+                "string-null",
+            ),
+            _execute(
+                "return_result({'action': 6, 'data': {'x': 2, 'y': 3}, "
+                "'reason': 'repaired'})",
+                "coordinate-repair",
+            ),
+        ]
+    )
+    agent = NooaControlAgent(llm=llm)
+
+    decision = await agent.choose_action(
+        PublicActionPoint(
+            observation={"step": 0},
+            legal_actions=(6,),
+            coordinate_actions=(6,),
+            frame_width=8,
+            frame_height=6,
+        )
+    )
+
+    assert decision == ActionDecision(
+        action=6,
+        data={"x": 2, "y": 3},
+        reason="repaired",
+    )
     assert llm.call_count == 2
-    assert "use none without quotes" in json.dumps(llm.calls[1]).lower()
+    assert "requires integer x and y data" in json.dumps(llm.calls[1]).lower()
 
 
 @pytest.mark.parametrize("data", ["None", "NULL", "{}", ""])

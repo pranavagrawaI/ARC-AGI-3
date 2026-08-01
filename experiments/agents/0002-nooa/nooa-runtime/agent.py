@@ -249,12 +249,9 @@ class ActionDecision(BaseModel):
 
     @field_validator("data", mode="before")
     @classmethod
-    def reject_quoted_json_null(cls, value: Any) -> Any:
+    def normalize_quoted_json_null(cls, value: Any) -> Any:
         if value == "null":
-            raise ValueError(
-                "data uses quoted JSON null; in Python return_result code, "
-                "use None without quotes"
-            )
+            return None
         return value
 
 

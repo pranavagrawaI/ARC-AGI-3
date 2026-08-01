@@ -90,6 +90,8 @@ inspect current public observation
 
 Python and files are generic capability. The model may invent notes, ledgers, world models, planners, transition indexes, or hypothesis stores through them, but the host does not prescribe or maintain those structures.
 
+The workspace is already on the generated-code module path, so model-authored modules are imported directly (for example, `import frames`) without modifying `sys.path`. `0002-NOOA` still does not expose `sys`; this convention does not grant access to host runtime paths.
+
 The paired-run specification must declare:
 
 - the number of complete recent model turns retained;
@@ -122,7 +124,8 @@ The model-visible final answer has the same semantic shape as 0002-R:
 - `reason` is non-authoritative prose. It is not a required prediction, claim, or reconciliation record.
 - Exactly one environment action is admitted per successor observation.
 - The action is validated against the current public legal-action set and coordinate bounds.
-- Invalid final output returns a bounded, explicit repair opportunity rather than being silently coerced.
+- At the NOOA tool-transport boundary only, the exact lowercase string `"null"` is canonicalized to JSON null before final-action validation. Every other string remains invalid. This repairs one observed provider serialization defect without relaxing action legality, coordinate requirements, or bounds. Future 0002-R comparisons must apply the same canonicalization at their shared comparison boundary before judging parser parity.
+- Other invalid final output returns a bounded, explicit repair opportunity rather than being silently coerced.
 
 NOOA may use an internal return/yield mechanism to deliver this object, but it must not expose an unmatched batched `submit_actions()` interface.
 

@@ -15,6 +15,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import sys
 from typing import Any
 
 # NOOA imports LiteLLM. Force its bundled registry and suppress its implicit
@@ -29,6 +30,21 @@ from agent import ModelBudgetExceeded, NooaControlAgent, PublicActionPoint
 from llm import AuditedProviderClient, ProviderTransportAbort, build_llm
 
 PROTOCOL = "0002-nooa-ipc-v1"
+
+
+def _activate_workspace_module_path(workspace: Path) -> str | None:
+    """Make model-authored modules importable before NOOA forks its cell worker."""
+
+    resolved = str(workspace.resolve())
+    if resolved in sys.path:
+        return None
+    sys.path.insert(0, resolved)
+    return resolved
+
+
+def _restore_module_path(inserted: str | None) -> None:
+    if inserted is not None:
+        sys.path.remove(inserted)
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -281,8 +297,10 @@ async def run_offline_fixture(
         **_runtime_options(requests[0] if requests else None),
     )
     original_cwd = Path.cwd()
+    inserted_module_path: str | None = None
     completed = 0
     try:
+        inserted_module_path = _activate_workspace_module_path(workspace)
         os.chdir(workspace)
         for request in requests:
             call_offset = len(client.audit_calls)
@@ -307,8 +325,11 @@ async def run_offline_fixture(
             )
             completed += 1
     finally:
-        await control.aclose()
-        os.chdir(original_cwd)
+        try:
+            await control.aclose()
+        finally:
+            _restore_module_path(inserted_module_path)
+            os.chdir(original_cwd)
     return completed
 
 
@@ -330,12 +351,14 @@ async def serve_offline_fixture(
     workspace.mkdir(parents=True, exist_ok=True)
     control: NooaControlAgent | None = None
     original_cwd = Path.cwd()
+    inserted_module_path: str | None = None
     seen: set[tuple[str, int]] = set()
     completed = 0
     offset = 0
     pending = ""
     active_spec: object = None
     try:
+        inserted_module_path = _activate_workspace_module_path(workspace)
         os.chdir(workspace)
         while True:
             with requests_path.open("r", encoding="utf-8") as handle:
@@ -446,11 +469,14 @@ async def serve_offline_fixture(
                 )
                 completed += 1
     finally:
-        if control is not None:
-            await control.aclose()
-        if _provider_mode and client is not None:
-            await client.aclose()
-        os.chdir(original_cwd)
+        try:
+            if control is not None:
+                await control.aclose()
+            if _provider_mode and client is not None:
+                await client.aclose()
+        finally:
+            _restore_module_path(inserted_module_path)
+            os.chdir(original_cwd)
 
 
 async def serve_provider(

@@ -11,6 +11,8 @@ from unittest.mock import patch
 
 import numpy as np
 from PIL import Image
+from arc_agi.rendering import COLOR_MAP, hex_to_rgb
+from arcengine import GameAction
 
 CONTROL_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_ROOT = CONTROL_ROOT / "nooa-runtime"
@@ -733,6 +735,107 @@ class NooaProcessAgentTests(unittest.TestCase):
                     agent.close()
                 except NooaWorkerError:
                     pass
+
+    def test_coordinate_action_crosses_worker_host_and_environment(self) -> None:
+        class CoordinateEnvironment:
+            def __init__(self) -> None:
+                self.received: list[tuple[object, object, object]] = []
+
+            def reset(self):
+                return SimpleNamespace(
+                    frame=np.zeros((1, 3, 4), dtype=int),
+                    available_actions=(6,),
+                    levels_completed=0,
+                    state="NOT_FINISHED",
+                    full_reset=False,
+                )
+
+            def step(self, action, *, data=None, reasoning=None):
+                self.received.append((action, data, reasoning))
+                return SimpleNamespace(
+                    frame=np.ones((1, 3, 4), dtype=int),
+                    available_actions=(),
+                    levels_completed=0,
+                    state="WIN",
+                    full_reset=False,
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            run_root = Path(directory) / "run"
+            environment = CoordinateEnvironment()
+            with NooaProcessAgent(
+                runtime_root=RUNTIME_ROOT,
+                run_root=run_root,
+                fixture_policy=lambda _step, _observation: [
+                    "return_result({'action': 6, 'data': {'x': 3, 'y': 2}, "
+                    "'reason': 'coordinate fixture'})"
+                ],
+            ) as agent:
+                result = run_episode(environment, agent, max_actions=1)
+
+            self.assertEqual(result.actions, 1)
+            self.assertEqual(result.stop_reason, "terminal")
+            self.assertEqual(
+                environment.received,
+                [(GameAction.ACTION6, {"x": 3, "y": 2}, {"reason": "coordinate fixture"})],
+            )
+            records = [
+                json.loads(line) for line in (run_root / "process.jsonl").read_text().splitlines()
+            ]
+            request = next(record for record in records if record["kind"] == "action_request")
+            self.assertEqual(request["request"]["coordinate_actions"], [6])
+            validated = next(record for record in records if record["kind"] == "decision_validated")
+            self.assertEqual(validated["decision"]["data"], {"x": 3, "y": 2})
+
+    def test_multilayer_observation_uses_its_last_layer_for_png_descriptor_and_helper(self) -> None:
+        pixels = np.array(
+            [
+                [[1, 1], [1, 1]],
+                [[2, 2], [2, 2]],
+            ],
+            dtype=int,
+        )
+        pixels.setflags(write=False)
+        multilayer = Observation(
+            pixels=pixels,
+            available_actions=(1,),
+            levels_completed=0,
+            state="NOT_FINISHED",
+            full_reset=False,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            run_root = Path(directory) / "run"
+            with NooaProcessAgent(
+                runtime_root=RUNTIME_ROOT,
+                run_root=run_root,
+                fixture_policy=lambda _step, _observation: [
+                    "import frames\n"
+                    "assert frames.grid(0).tolist() == [[2, 2], [2, 2]]\n"
+                    "return_result({'action': 1, 'data': None, 'reason': 'last layer'})"
+                ],
+            ) as agent:
+                decision = agent.act(multilayer)
+
+            self.assertEqual(decision.action, 1)
+            workspace_contract = (run_root / "workspace" / "WORKSPACE.md").read_text()
+            helper_source = (run_root / "workspace" / "frames.py").read_text()
+            self.assertIn("`import frames`", workspace_contract)
+            self.assertNotIn("sys.path.insert", workspace_contract)
+            self.assertIn("    import frames", helper_source)
+            self.assertNotIn("sys.path.insert", helper_source)
+            descriptor = json.loads(
+                (run_root / "workspace" / "current_observation.json").read_text()
+            )
+            self.assertEqual(descriptor["pixels"], pixels.tolist())
+            request = json.loads(
+                (run_root / "ipc" / "requests.jsonl").read_text().splitlines()[0]
+            )
+            rendered = request["observation"]["representations"]["rendered_image"]
+            self.assertEqual(rendered["source_grid_layer"], 1)
+            with Image.open(run_root / "workspace" / "current_frame.png") as image:
+                self.assertEqual(image.getpixel((0, 0)), hex_to_rgb(COLOR_MAP[2]))
+                self.assertNotEqual(image.getpixel((0, 0)), hex_to_rgb(COLOR_MAP[1]))
+
 
     def test_host_classifies_a_non_object_response(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

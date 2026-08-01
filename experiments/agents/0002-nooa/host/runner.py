@@ -33,6 +33,7 @@ from p9.annotated_frame import annotate, annotation_descriptor
 from p9.frame_tools import FRAME_TOOLS_FILE, frame_tools_source
 
 from .qualification import PairedRunSpec
+from .workspace import adapt_workspace_for_direct_import
 
 PROTOCOL = "0002-nooa-ipc-v1"
 
@@ -189,6 +190,7 @@ class NooaProcessAgent:
             frame_tools_source(components=False),
             encoding="utf-8",
         )
+        adapt_workspace_for_direct_import(self.workspace)
         self.run_id = uuid4().hex
         self._step = 0
         self._current_projection: ModelObservation | None = None

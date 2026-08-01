@@ -85,6 +85,16 @@ G9 used LS20, `openai/google/gemma-4-31b-it` routing,
 This establishes bounded interface usability, not gameplay competence or
 cross-game generality. See [`QUALIFICATION.md`](./QUALIFICATION.md).
 
+The separate 44-action LS20 single-arm tracer is packaged as compact commitments
+in [`artifacts/FREEZE_EVIDENCE.json`](./artifacts/FREEZE_EVIDENCE.json); its raw
+provider evidence remains local and unstaged. It establishes long-horizon
+crash-resistance for null-data actions, not paired parity or LS20 competence.
+Coordinate action and multi-layer last-layer routing have deterministic end-to-end
+closure tests. The bounded online CN04 click smoke completed two validated
+coordinate clicks with successor transitions; the third decision hit its declared
+reported-token budget, while the worker stopped cleanly. This is route evidence,
+not gameplay competence.
+
 ## Inspect a paired run
 
 The read-only NOOA evidence viewer replays public frames and aligns each arm's
