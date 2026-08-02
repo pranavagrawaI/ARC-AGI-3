@@ -10,6 +10,7 @@ from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
+from arc_agi.remote_wrapper import RemoteEnvironmentWrapper
 
 ROOT = Path(__file__).resolve().parents[1]
 HOST_ROOT = ROOT / "host"
@@ -29,6 +30,7 @@ from competence_runner import (
 from evidence_chain import canonical_digest, two_action_chain_report
 
 from experiments.harness import Observation, Transition
+from experiments.harness.runner import public_observation
 
 
 class CompetenceRunnerTests(unittest.TestCase):
@@ -85,14 +87,33 @@ class CompetenceRunnerTests(unittest.TestCase):
                 full_reset=False,
             )
 
-        # What arc_agi actually hands over: int8 frame layers.
-        produced = np.array([[[0, 1], [2, 3]]], dtype=np.int8)
-        self.assertEqual(produced.dtype.str, "|i1")
-        _require_expected_projection_dtype(observation_with(produced))
+        preserved_path = (
+            ROOT.parents[1]
+            / "artifacts/0006-nooa/provider-smoke-probes/ls20"
+            / "20260801T195450Z/worker/workspace/observations/step-00000.json"
+        )
+        preserved = json.loads(preserved_path.read_text(encoding="utf-8"))
+        producer = RemoteEnvironmentWrapper.__new__(RemoteEnvironmentWrapper)
+        raw_frame = producer._convert_to_frame_data_raw(
+            {
+                "game_id": "ls20",
+                "frame": preserved["pixels"],
+                "state": preserved["state"],
+                "levels_completed": preserved["levels_completed"],
+                "win_levels": 0,
+                "guid": "preserved-ls20-fixture",
+                "full_reset": preserved["full_reset"],
+                "available_actions": preserved["available_actions"],
+            }
+        )
+        self.assertIsNotNone(raw_frame)
+        produced = public_observation(raw_frame)
+        self.assertEqual(produced.pixels.dtype.str, "|i1")
+        _require_expected_projection_dtype(produced)
 
-        # uint8 belongs to the RGB render; int64 is numpy's default for nested
-        # Python ints. Neither is what the producer emits.
-        for wrong in (np.uint8, np.int64):
+        # These alternatives can all encode the visible integers, but none is
+        # the dtype emitted by the production remote wrapper.
+        for wrong in (np.uint8, np.int32, np.int64):
             with self.assertRaisesRegex(NooaWorkerError, "approved ls20 contract"):
                 _require_expected_projection_dtype(
                     observation_with(np.zeros((1, 2, 2), dtype=wrong))

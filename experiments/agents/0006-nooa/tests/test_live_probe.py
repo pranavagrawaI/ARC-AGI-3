@@ -445,11 +445,13 @@ class LiveProbeTests(unittest.TestCase):
             spec=spec,
             run_root=Path(args.run_root),
             source_state=source_state,
+            route_name="pinned",
         )
         second = MODULE["_approval_request"](
             spec=spec,
             run_root=Path("/tmp/different-run"),
             source_state=source_state,
+            route_name="pinned",
         )
         self.assertNotEqual(first["required_confirmation"], second["required_confirmation"])
 
@@ -459,6 +461,7 @@ class LiveProbeTests(unittest.TestCase):
             spec=spec,
             run_root=Path(args.run_root),
             source_state=changed_state,
+            route_name="pinned",
         )
         self.assertNotEqual(first["required_confirmation"], third["required_confirmation"])
 
@@ -735,6 +738,7 @@ class LiveProbeTests(unittest.TestCase):
                 MODULE["_runtime_environment_record"](linked_runtime)
             runtime_root = MODULE["_materialize_runtime_overlay"](
                 run_root,
+                route=MODULE["PROVIDER_ROUTES"]["pinned"],
                 expected_sha256=source_state["source_sha256"],
                 expected_mode=source_state["source_mode"],
                 runtime_environment_source=runtime_source,
@@ -821,6 +825,7 @@ class LiveProbeTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "source snapshot"):
                 MODULE["_materialize_runtime_overlay"](
                     run_root,
+                    route=MODULE["PROVIDER_ROUTES"]["pinned"],
                     expected_sha256=source_state["source_sha256"],
                 expected_mode=source_state["source_mode"],
                     runtime_environment_source=runtime_source,
@@ -856,6 +861,7 @@ class LiveProbeTests(unittest.TestCase):
             ), self.assertRaisesRegex(RuntimeError, "runtime overlay"):
                 MODULE["_materialize_runtime_overlay"](
                     run_root,
+                    route=MODULE["PROVIDER_ROUTES"]["pinned"],
                     expected_sha256=source_state["source_sha256"],
                 expected_mode=source_state["source_mode"],
                     runtime_environment_source=runtime_source,
@@ -1003,6 +1009,7 @@ class LiveProbeTests(unittest.TestCase):
                 spec=spec,
                 run_root=run_root,
                 source_state=source_state,
+            route_name="pinned",
             )
             consumed_approval = root / "approval.json.consumed"
             consumed_approval.write_text(json.dumps(approval), encoding="utf-8")
@@ -1253,6 +1260,7 @@ class LiveProbeTests(unittest.TestCase):
             )
             runtime_root = MODULE["_materialize_runtime_overlay"](
                 run_root,
+                route=MODULE["PROVIDER_ROUTES"]["pinned"],
                 expected_sha256=source_state["source_sha256"],
                 expected_mode=source_state["source_mode"],
                 runtime_environment_source=Path(
@@ -2121,6 +2129,7 @@ class LiveProbeTests(unittest.TestCase):
                     ),
                     expected_runtime_environment=source_state["runtime_environment"],
                     environments_dir=environments_dir,
+                    route=MODULE["PROVIDER_ROUTES"]["pinned"],
                 )
             persisted = json.loads((run_root / "summary.json").read_text(encoding="utf-8"))
             self.assertEqual(summary, persisted)
@@ -2170,3 +2179,69 @@ class LiveProbeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProviderRouteTests(unittest.TestCase):
+    def test_an_open_route_cannot_qualify_a_gate(self) -> None:
+        """Automatic routing shows the loop closes, not that it closes everywhere.
+
+        0002's G9 gate passed a broken substrate because unpinned load balancing
+        put its later crossings on CoreWeave, which accepts an unanswered tool
+        call that ModelRun refuses. An open run must never be able to stand in
+        for the pinned evidence run again.
+        """
+
+        summary = {
+            "actions": 2,
+            "attempted_actions": 2,
+            "observed_successors": 2,
+            "stop_reason": "action_budget",
+            "clean_shutdown": True,
+            "trace_complete": True,
+        }
+        events, process = two_action_fixture()
+
+        def verdict(route: str) -> dict:
+            return MODULE["_operational_verdict"](
+                summary,
+                competence_events=events,
+                process_records=process,
+                provider_success=True,
+                required_actions=2,
+                route_name=route,
+            )
+
+        pinned = verdict("pinned")
+        self.assertTrue(pinned["success"], pinned)
+        self.assertTrue(pinned["checks"]["route_can_qualify"])
+        self.assertEqual(pinned["route"], "pinned")
+
+        # Identical evidence, only the route differs.
+        opened = verdict("open")
+        self.assertFalse(opened["success"])
+        self.assertFalse(opened["checks"]["route_can_qualify"])
+        self.assertEqual(opened["route"], "open")
+        differing = {
+            key
+            for key in pinned["checks"]
+            if pinned["checks"][key] != opened["checks"][key]
+        }
+        self.assertEqual(differing, {"route_can_qualify"})
+
+    def test_both_routes_are_accepted_by_the_audited_launcher(self) -> None:
+        overlay = runpy.run_path(str(ROOT / "provider_runtime_launcher.py"))
+        for route in MODULE["PROVIDER_ROUTES"].values():
+            self.assertIn(route, overlay["EXPECTED_PROVIDER_ROUTES"])
+        # An open route carries no provider block, so nothing is pinned onto the
+        # request; a pinned one must still reach extra_body intact.
+        class _Client:
+            def __init__(self) -> None:
+                self.config: dict = {}
+
+        opened = overlay["_pin_client"](_Client(), MODULE["PROVIDER_ROUTES"]["open"])
+        self.assertEqual(opened.config, {})
+        pinned = overlay["_pin_client"](_Client(), MODULE["PROVIDER_ROUTES"]["pinned"])
+        self.assertEqual(
+            pinned.config["extra_body"],
+            {"provider": MODULE["PROVIDER_ROUTES"]["pinned"]},
+        )

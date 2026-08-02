@@ -15,13 +15,20 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any
 
-EXPECTED_PROVIDER_ROUTE = {
-    "order": ["modelrun/fp4"],
-    "only": ["modelrun/fp4"],
-    "allow_fallbacks": False,
-    "require_parameters": False,
-    "quantizations": ["fp4"],
-}
+# The launcher stays on one audited path for both routes. "pinned" fixes one
+# endpoint for evidence runs; "open" carries no provider block and lets
+# OpenRouter route freely, for harness shakedown that must not be blocked by one
+# provider's shared capacity. Anything else is refused.
+EXPECTED_PROVIDER_ROUTES = (
+    {
+        "order": ["modelrun/fp4"],
+        "only": ["modelrun/fp4"],
+        "allow_fallbacks": False,
+        "require_parameters": False,
+        "quantizations": ["fp4"],
+    },
+    {},
+)
 
 
 def _load_overlay_config(path: Path) -> tuple[Path, dict[str, Any]]:
@@ -31,8 +38,8 @@ def _load_overlay_config(path: Path) -> tuple[Path, dict[str, Any]]:
     if record["schema"] != "0006-nooa-provider-runtime-overlay-v1":
         raise RuntimeError("transport overlay config has the wrong schema")
     provider = record["provider"]
-    if not isinstance(provider, Mapping) or dict(provider) != EXPECTED_PROVIDER_ROUTE:
-        raise RuntimeError("transport overlay config does not carry the frozen provider pin")
+    if not isinstance(provider, Mapping) or dict(provider) not in EXPECTED_PROVIDER_ROUTES:
+        raise RuntimeError("transport overlay config carries an unknown provider route")
     base_runtime_root = Path(record["base_runtime_root"]).resolve()
     if not (base_runtime_root / "launcher.py").is_file():
         raise RuntimeError("transport overlay base runtime is unavailable")
@@ -43,7 +50,8 @@ def _pin_client(client: Any, provider: dict[str, Any]) -> Any:
     if "extra_body" in client.config:
         client.close()
         raise RuntimeError("frozen provider client unexpectedly supplied extra_body")
-    client.config["extra_body"] = {"provider": provider}
+    if provider:
+        client.config["extra_body"] = {"provider": provider}
     return client
 
 

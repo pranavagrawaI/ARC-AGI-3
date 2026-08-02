@@ -50,8 +50,16 @@ four rounds per action, two decision repairs, and zero transport retries. The
 reported-token value is a cumulative pre-call gate rather than a provider billing
 ceiling; one admitted action costs roughly 16.6k of it, so the earlier 32,768
 ceiling could not admit the two-action smoke it was meant to bound.
-The treatment-side transport overlay adds the exact `modelrun/fp4` provider slug,
-FP4 filter, and disabled fallbacks to the request; the frozen 0002 runtime remains
+`--provider-route` selects one of two routes, and the approval records which.
+`pinned` (the default) adds the exact `modelrun/fp4` provider slug, FP4 filter,
+and disabled fallbacks, so provider identity is exact and the run can qualify a
+gate. `open` carries no provider block and lets OpenRouter route freely, for
+shaking the harness out without competing for one provider's shared capacity.
+An open run cannot qualify: `route_can_qualify` fails in the operational verdict.
+That guardrail exists because `0002-NOOA`'s own G9 gate passed a broken substrate
+— unpinned load balancing put its later crossings on CoreWeave, which accepts an
+unanswered tool call that ModelRun refuses. Both routes travel the same audited
+launcher. On the pinned route the overlay adds the slug, filter and fallbacks; the frozen 0002 runtime remains
 byte-for-byte unchanged. Parameter filtering is disabled because OpenRouter's
 Responses envelope includes optional transport fields absent from ModelRun's
 endpoint capability list; tools, tool choice, reasoning, and output limits remain
@@ -115,7 +123,7 @@ top-level messages and tools, successful crossing attempts, and the final
 `return_result` payload to the recorded worker decision. Each frozen environment transition—including
 pixel digests, changed-pixel count, public state, reset flag, available actions,
 and observation paths—must equal the two linked competence observations. The
-treatment admits only the approved ls20 `|u1` producer dtype, preserves each
+treatment admits only the approved ls20 `|i1` producer dtype, preserves each
 projection's complete shape and digest, and reproduces the producer's full-array
 `tobytes()` digest rather
 than flattening only its final layer. Action 1's
@@ -125,6 +133,13 @@ Natural mismatch IDs are
 derived from the failed assertion indexes and must agree across prediction
 context, reconciliation event, and commitment 2. Counts without this linked
 evidence chain fail.
+
+**Option A — producer consistency:** the acceptance threat model is inside the approved,
+immutable execution boundary. It detects malformed, independently altered, or
+internally contradictory evidence; it does not claim resistance to a malicious
+post-run editor who can rewrite the complete artifact and recompute every
+unkeyed hash. That stronger claim requires an external signature, MAC, or
+append-only transparency authority and is outside this smoke.
 
 The model-visible competence packet publishes the complete existing field types
 and shape limits, requires the final Python workspace cell to construct the

@@ -66,13 +66,34 @@ SMOKE_MAXIMA = {
     "max_model_rounds_per_action": 4,
     "max_decision_repairs": 2,
 }
-PROVIDER_ROUTE = {
-    "order": ["modelrun/fp4"],
-    "only": ["modelrun/fp4"],
-    "allow_fallbacks": False,
-    "require_parameters": False,
-    "quantizations": ["fp4"],
+# Two routes, both carried through the same audited overlay so the launcher is
+# on one path either way.
+#
+# "pinned" is the evidence route. It fixes one endpoint, so provider identity is
+# exact and a later matched comparison means something.
+#
+# "open" lets OpenRouter route freely, for shaking the harness out without
+# competing for one provider's shared capacity. It is deliberately weaker
+# evidence: the unanswered-tool-call defect fixed at 0002-nooa e878370 was
+# refused by ModelRun and accepted by CoreWeave, and 0002's G9 gate passed only
+# because unpinned load balancing happened to land on the lenient one. An open
+# run can show the loop closes. It cannot qualify a gate, and
+# _operational_verdict refuses to let it.
+PROVIDER_ROUTES = {
+    "pinned": {
+        "order": ["modelrun/fp4"],
+        "only": ["modelrun/fp4"],
+        "allow_fallbacks": False,
+        "require_parameters": False,
+        "quantizations": ["fp4"],
+    },
+    "open": {},
 }
+PROVIDER_ROUTE_MODES = {
+    "pinned": "openrouter-exact-endpoint-pin",
+    "open": "openrouter-automatic-routing",
+}
+PROVIDER_ROUTE = PROVIDER_ROUTES["pinned"]
 GENERATION_AUDIT_ATTEMPTS = 6
 GENERATION_AUDIT_DELAY_SECONDS = 2.0
 GENERATION_AUDIT_TIMEOUT_SECONDS = 10.0
@@ -132,6 +153,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--confirm-live-run",
         help="Required exact digest-bound value from the approval request.",
+    )
+    parser.add_argument(
+        "--provider-route",
+        choices=sorted(PROVIDER_ROUTES),
+        default="pinned",
+        help=(
+            "pinned fixes one endpoint and is required for evidence; open lets "
+            "OpenRouter route freely and cannot qualify a gate."
+        ),
     )
     parser.add_argument(
         "--approved-snapshot-handoff",
@@ -397,7 +427,7 @@ def _runtime_overlay_record(root: Path) -> dict[str, Any]:
     }
 
 
-def _transport_config(runtime_root: Path) -> dict[str, Any]:
+def _transport_config(runtime_root: Path, route: dict[str, Any]) -> dict[str, Any]:
     snapshot_root = runtime_root.parent / "source-snapshot"
     base_runtime_root = (
         snapshot_root / "experiments/agents/0002-nooa/nooa-runtime"
@@ -405,7 +435,7 @@ def _transport_config(runtime_root: Path) -> dict[str, Any]:
     return {
         "schema": "0006-nooa-provider-runtime-overlay-v1",
         "base_runtime_root": str(base_runtime_root.resolve()),
-        "provider": PROVIDER_ROUTE,
+        "provider": route,
     }
 
 
@@ -414,10 +444,11 @@ def _expected_runtime_overlay_record(
     *,
     expected_source_sha256: dict[str, str],
     expected_runtime_environment: dict[str, Any],
+    route: dict[str, Any],
 ) -> dict[str, Any]:
     launcher_relative = "experiments/agents/0006-nooa/provider_runtime_launcher.py"
     config_bytes = (
-        json.dumps(_transport_config(root), indent=2, sort_keys=True) + "\n"
+        json.dumps(_transport_config(root, route), indent=2, sort_keys=True) + "\n"
     ).encode()
     return {
         "schema": "0006-nooa-materialized-runtime-overlay-v1",
@@ -719,13 +750,14 @@ def _approval_request(
     spec: PairedRunSpec,
     run_root: Path,
     source_state: dict[str, Any],
+    route_name: str,
 ) -> dict[str, Any]:
     authorization = {
         "schema": "0006-nooa-live-authorization-v2",
         "claim_boundary": "single-arm live interface-and-behavior smoke; no treatment effect",
         "provider_routing": {
-            "mode": "openrouter-exact-endpoint-pin",
-            "request": PROVIDER_ROUTE,
+            "mode": PROVIDER_ROUTE_MODES[route_name],
+            "request": PROVIDER_ROUTES[route_name],
         },
         "provider_identity_audit": {
             "endpoint": GENERATION_AUDIT_URL,
@@ -980,6 +1012,7 @@ def _materialize_runtime_overlay(
     expected_mode: dict[str, str],
     runtime_environment_source: Path,
     expected_runtime_environment: dict[str, Any],
+    route: dict[str, Any],
 ) -> Path:
     snapshot_root = run_root / "source-snapshot"
     _verify_source_snapshot(
@@ -994,7 +1027,9 @@ def _materialize_runtime_overlay(
     runtime_root.mkdir(parents=True, exist_ok=False)
     runtime_root.chmod(0o755)
     (runtime_root / "launcher.py").write_bytes(overlay_launcher.read_bytes())
-    _write_json(runtime_root / "transport-config.json", _transport_config(runtime_root))
+    _write_json(
+        runtime_root / "transport-config.json", _transport_config(runtime_root, route)
+    )
     (runtime_root / "launcher.py").chmod(0o644)
     (runtime_root / "transport-config.json").chmod(0o644)
     actual_runtime_environment = _runtime_environment_record(runtime_environment_source)
@@ -1012,6 +1047,7 @@ def _materialize_runtime_overlay(
         runtime_root,
         expected_source_sha256=expected_sha256,
         expected_runtime_environment=expected_runtime_environment,
+        route=route,
     )
     _verify_runtime_overlay(runtime_root, expected=expected_overlay)
     return runtime_root
@@ -1066,6 +1102,7 @@ def _crossing_profile(crossing: dict[str, Any]) -> dict[str, Any]:
 def _provider_profile_report(
     profile: ProviderRequestProfile,
     crossings: list[dict[str, Any]],
+    route: dict[str, Any] = PROVIDER_ROUTE,
 ) -> dict[str, Any]:
     expected_static = {
         "method": "POST",
@@ -1078,7 +1115,7 @@ def _provider_profile_report(
         "seed": profile.seed if profile.seed is not None else "<omitted>",
         "stream": profile.stream,
         "truncation": profile.truncation,
-        "provider": PROVIDER_ROUTE,
+        "provider": route,
     }
     actuals = [_crossing_profile(item) for item in crossings]
     expected: list[dict[str, Any]] = []
@@ -1424,8 +1461,15 @@ def _operational_verdict(
     provider_success: bool,
     required_actions: int,
     integrity_success: bool = True,
+    route_name: str = "pinned",
 ) -> dict[str, Any]:
     event_types = [event.get("type") for event in competence_events]
+    # An open route cannot qualify a gate. The unanswered-tool-call defect fixed
+    # at 0002-nooa e878370 was refused by ModelRun and accepted by CoreWeave, and
+    # 0002's own G9 passed a broken substrate because unpinned load balancing
+    # landed on the lenient provider. An open run shows the loop closes; it is
+    # not evidence that it closes everywhere.
+    qualifies = route_name == "pinned"
     if required_actions == 1:
         checks = {
             "one_action_admitted": summary.get("actions") == 1,
@@ -1438,10 +1482,12 @@ def _operational_verdict(
             "provider_profile_matches": provider_success,
             "approved_bytes_remained_immutable": integrity_success,
         }
+        checks["route_can_qualify"] = qualifies
         return {
             "goal": "one-action-admission",
             "success": all(checks.values()),
             "checks": checks,
+            "route": route_name,
         }
     chain_checks = _two_action_chain_report(competence_events, process_records or [])
     checks = {
@@ -1454,12 +1500,14 @@ def _operational_verdict(
         "exact_commitments": event_types.count("commitment") == required_actions,
         "provider_profile_matches": provider_success,
         "approved_bytes_remained_immutable": integrity_success,
+        "route_can_qualify": qualifies,
         **chain_checks,
     }
     return {
         "goal": f"{required_actions}-action-competence-continuity",
         "success": all(checks.values()),
         "checks": checks,
+        "route": route_name,
     }
 
 
@@ -1506,6 +1554,7 @@ def _run_stage(
     runtime_environment_source: Path,
     expected_runtime_environment: dict[str, Any],
     environments_dir: Path,
+    route: dict[str, Any],
 ) -> dict[str, Any]:
     phase = "source_snapshot_verification"
     runtime_overlay: dict[str, Any] | None = None
@@ -1520,9 +1569,11 @@ def _run_stage(
             run_root / "provider-runtime",
             expected_source_sha256=expected_source_sha256,
             expected_runtime_environment=expected_runtime_environment,
+            route=route,
         )
         provider_runtime_root = _materialize_runtime_overlay(
             run_root,
+            route=route,
             expected_sha256=expected_source_sha256,
             expected_mode=expected_source_mode,
             runtime_environment_source=runtime_environment_source,
@@ -1606,6 +1657,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         source_state = _source_state()
         approval_request = _approval_request(
+            route_name=args.provider_route,
             spec=spec,
             run_root=run_root,
             source_state=source_state,
@@ -1661,8 +1713,8 @@ def main(argv: list[str] | None = None) -> int:
         "consumed_approval_request": str(consumed_approval),
         "source_state": source_state,
         "provider_routing": {
-            "mode": "openrouter-exact-endpoint-pin",
-            "request": PROVIDER_ROUTE,
+            "mode": PROVIDER_ROUTE_MODES[args.provider_route],
+            "request": PROVIDER_ROUTES[args.provider_route],
         },
         "provider_identity_audit": {
             "endpoint": GENERATION_AUDIT_URL,
@@ -1685,6 +1737,7 @@ def main(argv: list[str] | None = None) -> int:
         runtime_environment_source=Path(source_state["runtime_environment_source"]),
         expected_runtime_environment=source_state["runtime_environment"],
         environments_dir=environments_dir,
+        route=PROVIDER_ROUTES[args.provider_route],
     )
     finalization_errors: list[dict[str, str]] = []
     integrity_success = True
@@ -1709,7 +1762,11 @@ def main(argv: list[str] | None = None) -> int:
     assert spec.provider_request_profile is not None
     try:
         crossings = _candidate_provider_crossings(run_root)
-        provider_report = _provider_profile_report(spec.provider_request_profile, crossings)
+        provider_report = _provider_profile_report(
+            spec.provider_request_profile,
+            crossings,
+            PROVIDER_ROUTES[args.provider_route],
+        )
     except Exception as error:  # noqa: BLE001 - evidence finalization must fail closed.
         provider_report = {
             "schema": "0006-nooa-provider-profile-v1",
@@ -1772,6 +1829,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
         required_actions=spec.max_actions,
         integrity_success=integrity_success,
+        route_name=args.provider_route,
     )
     summary["provider_profile_report"] = provider_report
     summary["provider_identity_report"] = provider_identity
