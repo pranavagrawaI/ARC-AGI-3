@@ -166,14 +166,13 @@ def test_provider_adapter_flattens_nooa_response_batches_for_the_successor() -> 
         client.close()
 
     assert instructions is None
-    assert transformed == [
-        {
-            "type": "function_call",
-            "call_id": "call-1",
-            "name": "return_result",
-            "arguments": '{"result":{"action":1}}',
-        }
-    ]
+    # The batch is still flattened, but a call the host consumed is not replayed
+    # as an open tool call. Its text is kept so the model does not lose the record
+    # of the cell that produced its own action.
+    assert len(transformed) == 1
+    assert transformed[0]["role"] == "assistant"
+    assert "return_result" in transformed[0]["content"]
+    assert '{"result":{"action":1}}' in transformed[0]["content"]
 
 
 def test_build_llm_never_discovers_credentials_or_falls_back(
@@ -529,3 +528,70 @@ def test_external_transport_failures_are_classified_conservatively() -> None:
     unavailable = RuntimeError("unavailable")
     unavailable.status_code = 503  # type: ignore[attr-defined]
     assert classify_transport_failure(unavailable) is TransportDisposition.UNCERTAIN
+
+
+def test_live_response_batch_loses_only_its_unanswered_calls() -> None:
+    """Drive the real envelope from run 20260802T160203Z.
+
+    Three earlier attempts at this fix passed against FakeLLMClient's chat shape
+    -- ``{"role": "assistant", "tool_calls": [...]}`` -- which a real Responses
+    call never produces. Production returns ``{"_batch": [...]}``, and the
+    ``function_call`` items inside do not exist until ``_expand_response_batches``
+    runs, well past where those tests were looking. This fixture is the recorded
+    envelope from the run that failed, so the shape cannot drift from production
+    without the test noticing.
+
+    Past reasoning is required for model performance, so the reasoning item must
+    survive exactly.
+    """
+
+    envelope = json.loads(
+        (Path(__file__).parent / "live_batch_20260802T160203Z.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    original = json.loads(json.dumps(envelope))
+    consumed = [
+        item["call_id"]
+        for item in envelope["_batch"]
+        if item.get("type") == "function_call"
+    ]
+    assert len(consumed) == 2, "the recorded turn issued two calls"
+
+    client = build_llm(_profile(), api_key="test-secret")
+    try:
+        # Answer the first call; the second is the one the host consumed.
+        transformed, _instructions = client._transform_messages(
+            [
+                envelope,
+                {
+                    "role": "tool",
+                    "tool_call_id": consumed[0],
+                    "content": "status: complete",
+                },
+            ]
+        )
+    finally:
+        client.close()
+
+    surviving = [
+        item.get("call_id")
+        for item in transformed
+        if item.get("type") == "function_call"
+    ]
+    assert surviving == [consumed[0]], surviving
+
+    reasoning = [item for item in transformed if item.get("type") == "reasoning"]
+    assert len(reasoning) == 1, "past reasoning must reach the provider"
+    assert reasoning[0] == original["_batch"][0], "reasoning must be untouched"
+
+    replayed = json.dumps(transformed)
+    assert consumed[1] not in replayed or any(
+        item.get("role") == "assistant" and consumed[1] not in str(item.get("content"))
+        for item in transformed
+    )
+    assert any(
+        item.get("role") == "assistant"
+        and "the host consumed" in str(item.get("content"))
+        for item in transformed
+    ), "the consumed call must survive as text"
