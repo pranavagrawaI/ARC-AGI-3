@@ -25,10 +25,16 @@ point failed with HTTP 400. It is reproducible from the preserved request body
 once the redacted frame image is restored from `worker/model-frame.png`, whose
 sha256 the audit records.
 
-The retained turn now drops any tool call that was never answered. Dropping only
+The assembled request now drops any tool call that was never answered. Dropping only
 `return_result` was insufficient: when the model returns inline, the cell itself
 ends the action point, so the enclosing `execute_python` call is the one left
 unanswered. The rule is therefore stated over replies, not over tool names.
+
+Filtering at retention was not enough. A repair crossing reissues one action
+point, so the consumed call reaches the provider through the live turn as well as
+through the retained ones, and only the assembled request sees both. Two
+regression tests passed against the retained path while the live repair crossing
+still failed.
 
 What the consumed call said is preserved as text on the same message. Deleting it
 outright would also delete the model's record of the cell that produced its own

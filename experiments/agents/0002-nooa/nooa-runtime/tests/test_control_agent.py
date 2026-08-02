@@ -415,6 +415,46 @@ async def test_inline_return_leaves_no_unanswered_execute_python_in_history() ->
 
 
 @pytest.mark.asyncio
+async def test_a_reissued_action_point_carries_no_unanswered_call_either() -> None:
+    """A repair crossing reissues one action point, and it must stay clean.
+
+    Filtering only the retained turns passed both earlier regressions and still
+    failed live: a reissued action point reaches the provider through the live
+    turn, which retention never touches. Run 20260802T144344Z refused a
+    commitment, reissued the crossing, and ModelRun rejected the repair with the
+    same "every tool_call must be answered" error, naming the consumed call from
+    the crossing before it.
+    """
+
+    llm = FakeLLMClient(
+        scripted_responses=[
+            _execute("marker = 1", "answered-call"),
+            _execute(
+                "return_result({'action': 1, 'data': None, 'reason': 'refused'})",
+                "consumed-first",
+            ),
+            _execute(
+                "return_result({'action': 2, 'data': None, 'reason': 'repaired'})",
+                "consumed-repair",
+            ),
+        ]
+    )
+    agent = NooaControlAgent(llm=llm)
+
+    # The same step twice: the host refused the first commitment and reissued.
+    await agent.choose_action(
+        PublicActionPoint(observation={"step": 0}, legal_actions=(1, 2))
+    )
+    repaired = await agent.choose_action(
+        PublicActionPoint(observation={"step": 0}, legal_actions=(1, 2))
+    )
+    await agent.aclose()
+
+    assert repaired.action == 2
+    _assert_every_replayed_tool_call_is_answered(llm.last_messages)
+
+
+@pytest.mark.asyncio
 async def test_context_evicts_complete_action_turns_with_only_a_pointer_notice() -> None:
     llm = FakeLLMClient(
         scripted_responses=[
