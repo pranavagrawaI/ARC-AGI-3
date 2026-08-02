@@ -579,7 +579,11 @@ Plain text does not finish an action point."""
             for _step, messages in self._visible_turns:
                 assembled.extend(messages)
             assembled.extend(current)
-            context.messages = assembled
+            # Filter here rather than at retention: a repair crossing reissues an
+            # action point, so a consumed call reaches the provider through the
+            # live turn as well as through the retained ones, and only the
+            # assembled request sees both.
+            context.messages = _without_unanswered_tool_calls(assembled)
             self._current_turn_messages = json.loads(json.dumps(current))
             if (
                 self._max_model_calls is not None
@@ -646,12 +650,9 @@ Plain text does not finish an action point."""
         step = action_point.observation.get("step")
         if type(step) is not int:
             raise ValueError("public action point observation requires integer step")
-        retained = _without_unanswered_tool_calls(
-            [
-                _without_frame_image(message)
-                for message in self._current_turn_messages
-            ]
-        )
+        retained = [
+            _without_frame_image(message) for message in self._current_turn_messages
+        ]
         self._visible_turns.append((step, retained))
         while len(self._visible_turns) > self._max_context_turns:
             evicted_step, _messages = self._visible_turns.pop(0)
