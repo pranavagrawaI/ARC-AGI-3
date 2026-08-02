@@ -46,7 +46,9 @@ from host.runner import NooaWorkerError
 
 from experiments.harness import JsonlTraceWriter, run_episode
 
-FROZEN_CONTROL_REVISION = "dfb2d2b"
+# Reopened 2026-08-02: dfb2d2b replayed the consumed return_result call as an
+# open tool call, which ModelRun refuses. See 0002-nooa QUALIFICATION.md.
+FROZEN_CONTROL_REVISION = "8794d49"
 CONFIRMATION_PREFIX = "RUN-0006-NOOA-SINGLE-ARM:"
 EXPECTED_GAME = "ls20"
 EXPECTED_MODEL = "openai/google/gemma-4-31b-it"
