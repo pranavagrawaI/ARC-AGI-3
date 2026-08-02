@@ -78,3 +78,8 @@ The executable verifier is the offline end-to-end test: it crosses a real
 frozen NOOA worker, records a typed commitment, admits one action, forwards a
 multi-layer successor, and exposes the mechanical prediction result at the
 next action point.
+
+What that verifier proves, and against which attacker, is pinned in
+[THREAT_MODEL.md](./THREAT_MODEL.md). It bounds review: a proposed finding must
+name a declared attacker capability, and a finding requiring coordinated rewrite
+of the whole artifact is closed by that document rather than fixed.

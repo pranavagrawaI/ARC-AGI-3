@@ -45,6 +45,8 @@ from competence import (
     parse_model_reason,
 )
 
+EXPECTED_PROJECTION_DTYPE = "|u1"
+
 _REASON_FIELDS = (
     "working_state",
     "test",
@@ -161,6 +163,43 @@ def attach_competence_context(
     return model_observation
 
 
+def _projection_identity(projection: Any) -> dict[str, Any]:
+    pixels = projection.pixels
+    return {
+        "digest": projection.digest,
+        "dtype": pixels.dtype.str,
+        "shape": list(pixels.shape),
+    }
+
+
+def _require_expected_projection_dtype(observation: Observation) -> None:
+    actual = observation.pixels.dtype.str
+    if actual != EXPECTED_PROJECTION_DTYPE:
+        raise NooaWorkerError(
+            "0006-NOOA observation dtype differs from the approved ls20 contract: "
+            f"expected {EXPECTED_PROJECTION_DTYPE}, received {actual}"
+        )
+
+
+def _bound_model_audit(audit: object) -> dict[str, Any]:
+    bound = _redact_images(audit if isinstance(audit, dict) else {})
+    model_calls = bound.get("model_calls") if isinstance(bound, dict) else None
+    if isinstance(model_calls, list):
+        for call in model_calls:
+            canonical_request = (
+                call.get("canonical_request") if isinstance(call, dict) else None
+            )
+            if isinstance(canonical_request, dict):
+                call["canonical_audit_request_sha256"] = sha256(
+                    json.dumps(
+                        canonical_request,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+    return bound
+
+
 class NooaCompetenceProcessAgent(NooaProcessAgent):
     """Frozen 0002 transport plus the 0006 competence admission protocol."""
 
@@ -181,6 +220,7 @@ class NooaCompetenceProcessAgent(NooaProcessAgent):
                 "environment-action budget exhausted "
                 f"({self._step}/{self.paired_run_spec.max_actions})"
             )
+        _require_expected_projection_dtype(observation)
 
         host_public = {"step": self._step, **_host_observation_record(observation)}
         if self._competence_step is None:
@@ -255,6 +295,7 @@ class NooaCompetenceProcessAgent(NooaProcessAgent):
                     "utf-8"
                 )
             ).hexdigest(),
+            projection=_projection_identity(current),
         )
         self._write_process(
             "action_request",
@@ -271,10 +312,11 @@ class NooaCompetenceProcessAgent(NooaProcessAgent):
         response = self._wait_for_response(self._step)
         audit = response.get("audit")
         worker_error = response.get("error")
+        bound_audit = _bound_model_audit(audit)
         self._write_process(
             "model_crossing",
             action_point_id=self._step,
-            audit=_redact_images(audit if isinstance(audit, dict) else {}),
+            audit=bound_audit,
             worker_decision=response.get("decision"),
             worker_error=_redact_images(worker_error),
         )
@@ -353,14 +395,38 @@ class NooaCompetenceProcessAgent(NooaProcessAgent):
     def observe(self, transition: Transition) -> None:
         """Bind and evaluate the actual successor before any later model decision."""
 
+        _require_expected_projection_dtype(transition.before)
+        _require_expected_projection_dtype(transition.after)
         successor_step = self._step + 1
         super().observe(transition)
         host_public = {
             "step": successor_step,
             **_host_observation_record(transition.after),
         }
-        self.competence.receive_observation(host_public)
+        successor_evidence = self.competence.receive_observation(host_public)
         self._competence_step = successor_step
+        if self._current_projection is None:
+            raise NooaWorkerError("frozen host did not preserve the successor projection")
+        host_observation_path = (
+            self.host_observations / f"step-{successor_step:05d}.json"
+        )
+        host_observation_bytes = json.dumps(
+            host_public,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        host_observation_path.write_bytes(host_observation_bytes)
+        self._write_process(
+            "competence_successor_observed",
+            action_point_id=successor_step - 1,
+            successor_step=successor_step,
+            evidence_id=successor_evidence.evidence_id,
+            host_observation={
+                "path": host_observation_path.relative_to(self.run_root).as_posix(),
+                "sha256": sha256(host_observation_bytes).hexdigest(),
+            },
+            projection=_projection_identity(self._current_projection),
+        )
         self._flush_competence_events()
 
     def _flush_competence_events(self) -> None:

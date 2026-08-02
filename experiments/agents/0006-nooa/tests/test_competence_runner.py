@@ -20,13 +20,28 @@ for path in (ROOT, HOST_ROOT):
 from competence import SCHEMA, ContractError, parse_model_reason
 from competence_runner import (
     NooaCompetenceProcessAgent,
+    NooaWorkerError,
+    _require_expected_projection_dtype,
     attach_competence_context,
 )
+from evidence_chain import canonical_digest, two_action_chain_report
 
 from experiments.harness import Observation, Transition
 
 
 class CompetenceRunnerTests(unittest.TestCase):
+    def test_ls20_projection_dtype_is_host_enforced(self) -> None:
+        pixels = np.zeros((1, 2, 2), dtype=np.int64)
+        observation = Observation(
+            pixels=pixels,
+            available_actions=(1,),
+            levels_completed=0,
+            state="NOT_FINISHED",
+            full_reset=False,
+        )
+        with self.assertRaisesRegex(NooaWorkerError, "approved ls20 contract"):
+            _require_expected_projection_dtype(observation)
+
     def test_treatment_adds_a_fixed_contract_without_mutating_frozen_observation(self) -> None:
         frozen_observation = {
             "step": 3,
@@ -122,7 +137,7 @@ class CompetenceRunnerTests(unittest.TestCase):
 
     def test_offline_worker_must_carry_and_host_admits_a_commitment(self) -> None:
         def observation(step: int) -> Observation:
-            pixels = np.array([[[0, step], [0, 0]]], dtype=int)
+            pixels = np.array([[[0, step], [0, 0]]], dtype=np.uint8)
             pixels.setflags(write=False)
             return Observation(
                 pixels=pixels,
@@ -165,7 +180,7 @@ class CompetenceRunnerTests(unittest.TestCase):
             ]
 
         frozen_root = ROOT.parent / "0002-nooa"
-        before, after = observation(0), observation(1)
+        before, after, final = observation(0), observation(1), observation(2)
         with tempfile.TemporaryDirectory() as directory:
             run_root = Path(directory) / "run"
             with NooaCompetenceProcessAgent(
@@ -178,11 +193,16 @@ class CompetenceRunnerTests(unittest.TestCase):
                 self.assertEqual(first.reasoning["competence"]["action_id"], 1)
                 agent.observe(Transition(before=before, decision=first, after=after))
                 self.assertEqual(
-                    agent.competence.context_packet()["last_prediction_result"]["outcome"],
+                    next(
+                        event
+                        for event in reversed(agent.competence.events)
+                        if event.get("type") == "prediction_result"
+                    )["outcome"],
                     "match",
                 )
                 second = agent.act(after)
                 self.assertEqual(second.reasoning["competence"]["action_id"], 2)
+                agent.observe(Transition(before=after, decision=second, after=final))
 
             requests = [
                 json.loads(line)
@@ -226,7 +246,93 @@ class CompetenceRunnerTests(unittest.TestCase):
                 for line in (run_root / "competence.jsonl").read_text().splitlines()
                 if line.strip()
             ]
+            process_records = [
+                json.loads(line)
+                for line in (run_root / "process.jsonl").read_text().splitlines()
+                if line.strip()
+            ]
+            # The fixture policy bypasses the paid model crossing. Normalize only
+            # those fixture-only fields; every observation, projection, transition,
+            # commitment, and successor record remains producer-authored.
+            for record in process_records:
+                if record.get("kind") == "action_request":
+                    record["request"].pop("fixture_python_cells")
+                    record["request_sha256"] = canonical_digest(record["request"])
+            requests_by_action = {
+                record["action_point_id"]: record["request"]
+                for record in process_records
+                if record.get("kind") == "action_request"
+            }
+            for record in process_records:
+                if record.get("kind") != "model_crossing":
+                    continue
+                action_point = record["action_point_id"]
+                worker_decision = record["worker_decision"]
+                canonical_request = {
+                    "provider_request_profile": requests_by_action[action_point][
+                        "paired_run_spec"
+                    ]["provider_request_profile"],
+                    "messages": [{"role": "user", "content": "fixture"}],
+                    "tools": [],
+                    "kwargs": {},
+                }
+                crossing = {
+                    "request": {},
+                    "response": {},
+                    "sequence": action_point + 1,
+                }
+                record["audit"]["model_calls"] = [
+                    {
+                        "schema": "0002-nooa-provider-crossing-v1",
+                        "messages": canonical_request["messages"],
+                        "tools": canonical_request["tools"],
+                        "canonical_request": canonical_request,
+                        "canonical_request_sha256": canonical_digest(
+                            canonical_request
+                        ),
+                        "canonical_audit_request_sha256": canonical_digest(
+                            canonical_request
+                        ),
+                        "canonicalization": "json-utf8-sort-keys-compact-v1",
+                        "actual_provider_crossings": [crossing],
+                        "attempts": [
+                            {
+                                "attempt": 1,
+                                "outcome": "success",
+                                "actual_provider_crossings": [crossing],
+                            }
+                        ],
+                        "outcome": {
+                            "kind": "success",
+                            "response": {
+                                "tool_calls": [
+                                    {
+                                        "arguments": json.dumps(
+                                            {"result": worker_decision}
+                                        ),
+                                        "id": f"call-{action_point + 1}",
+                                        "name": "return_result",
+                                    }
+                                ]
+                            },
+                        },
+                    }
+                ]
+            chain_report = two_action_chain_report(events, process_records)
             event_types = [event["type"] for event in events]
+            self.assertTrue(
+                all(chain_report.values()),
+                {
+                    "report": chain_report,
+                    "types": event_types,
+                    "process_kinds": [record["kind"] for record in process_records],
+                    "requests": [
+                        record["request"]
+                        for record in process_records
+                        if record.get("kind") == "action_request"
+                    ],
+                },
+            )
             observation_event = next(event for event in events if event["type"] == "observation")
             self.assertEqual(
                 observation_event["record"]["evidence_id"],

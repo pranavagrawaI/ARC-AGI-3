@@ -11,6 +11,8 @@ import argparse
 import json
 import os
 import re
+import shutil
+import stat
 import subprocess
 import sys
 from dataclasses import replace
@@ -38,6 +40,7 @@ for path in (REPO, CONTROL_ROOT, TREATMENT_ROOT, TREATMENT_ROOT / "host"):
 import arc_agi
 from arc_agi.base import OperationMode
 from competence_runner import NooaCompetenceProcessAgent
+from evidence_chain import two_action_chain_report as _two_action_chain_report
 from host.qualification import PairedRunSpec, ProviderRequestProfile
 from host.runner import NooaWorkerError
 
@@ -68,6 +71,7 @@ GENERATION_AUDIT_ATTEMPTS = 6
 GENERATION_AUDIT_DELAY_SECONDS = 2.0
 GENERATION_AUDIT_TIMEOUT_SECONDS = 10.0
 GENERATION_AUDIT_URL = "https://openrouter.ai/api/v1/generation"
+SNAPSHOT_HANDOFF_ENV = "NOOA_APPROVED_SNAPSHOT_NONCE"
 
 
 def _operation_mode(value: str) -> OperationMode:
@@ -122,6 +126,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--confirm-live-run",
         help="Required exact digest-bound value from the approval request.",
+    )
+    parser.add_argument(
+        "--approved-snapshot-handoff",
+        type=Path,
+        help=argparse.SUPPRESS,
     )
     return parser
 
@@ -217,7 +226,10 @@ def _git_record() -> dict[str, Any]:
 
 def _source_paths() -> set[Path]:
     return {
+        REPO / "experiments" / "__init__.py",
+        REPO / "experiments" / "agents" / "__init__.py",
         TREATMENT_ROOT / "competence.py",
+        TREATMENT_ROOT / "evidence_chain.py",
         PROVIDER_RUNTIME_LAUNCHER,
         TREATMENT_ROOT / "run_live_probe.py",
         *(TREATMENT_ROOT / "host").glob("*.py"),
@@ -241,45 +253,319 @@ def _participating_sources() -> dict[str, str]:
     }
 
 
+def _file_sha256(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _has_symlink_component(path: Path, *, root: Path) -> bool:
+    """Return whether root or any lexical component below it is a symlink."""
+
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return True
+    current = root
+    if current.is_symlink():
+        return True
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            return True
+    return False
+
+
+def _runtime_environment_record(root: Path) -> dict[str, Any]:
+    if root.is_symlink() or not root.is_dir():
+        raise RuntimeError(f"worker runtime root must be a real directory: {root}")
+    digest = sha256()
+    root_mode = stat.S_IMODE(root.stat().st_mode)
+    digest.update(
+        json.dumps(
+            [".", "directory", f"{root_mode:o}", ""],
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+    )
+    digest.update(b"\n")
+    entries = 1
+    files = 0
+    external_symlinks: list[dict[str, str]] = []
+    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+        relative = path.relative_to(root).as_posix()
+        mode = stat.S_IMODE(path.lstat().st_mode)
+        if path.is_symlink():
+            kind = "symlink"
+            value = os.readlink(path)
+            resolved = path.resolve(strict=True)
+            try:
+                resolved.relative_to(root.resolve())
+            except ValueError:
+                if not resolved.is_file():
+                    raise RuntimeError(
+                        f"worker runtime has unsupported external symlink: {path}"
+                    )
+                external_symlinks.append(
+                    {
+                        "path": relative,
+                        "target": str(resolved),
+                        "target_type": "file",
+                        "target_mode": f"{stat.S_IMODE(resolved.stat().st_mode):o}",
+                        "target_sha256": _file_sha256(resolved),
+                    }
+                )
+        elif path.is_dir():
+            kind = "directory"
+            value = ""
+        elif path.is_file():
+            kind = "file"
+            value = _file_sha256(path)
+            files += 1
+        else:
+            raise RuntimeError(f"unsupported runtime environment entry: {path}")
+        digest.update(
+            json.dumps(
+                [relative, kind, f"{mode:o}", value],
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("utf-8")
+        )
+        digest.update(b"\n")
+        entries += 1
+    interpreter = (root / "bin" / "python").resolve(strict=True)
+    pyvenv = root / "pyvenv.cfg"
+    if not pyvenv.is_file():
+        raise RuntimeError(f"worker runtime has no pyvenv.cfg: {root}")
+    version_fields = {
+        key.strip(): value.strip()
+        for line in pyvenv.read_text(encoding="utf-8").splitlines()
+        if "=" in line
+        for key, value in [line.split("=", 1)]
+    }
+    interpreter_version = version_fields.get("version") or version_fields.get(
+        "version_info"
+    )
+    if not interpreter_version:
+        raise RuntimeError(f"worker runtime pyvenv.cfg has no version: {root}")
+    return {
+        "schema": "0006-nooa-runtime-environment-v1",
+        "root_mode": f"{root_mode:o}",
+        "tree_sha256": digest.hexdigest(),
+        "entries": entries,
+        "files": files,
+        "external_symlinks": external_symlinks,
+        "interpreter_sha256": _file_sha256(interpreter),
+        "interpreter_version": interpreter_version,
+    }
+
+
+def _runtime_overlay_record(root: Path) -> dict[str, Any]:
+    if root.is_symlink() or not root.is_dir():
+        raise RuntimeError("runtime overlay root must be a real directory")
+    root_mode = f"{stat.S_IMODE(root.stat().st_mode):o}"
+    expected_entries = {".venv", "launcher.py", "transport-config.json"}
+    actual_entries = {path.name for path in root.iterdir()}
+    if actual_entries != expected_entries:
+        raise RuntimeError(
+            "runtime overlay has undeclared entries: "
+            f"expected={sorted(expected_entries)}, actual={sorted(actual_entries)}"
+        )
+    file_records: dict[str, dict[str, object]] = {}
+    for name in ("launcher.py", "transport-config.json"):
+        path = root / name
+        if not path.is_file() or path.is_symlink():
+            raise RuntimeError(f"runtime overlay file is not a regular file: {path}")
+        file_records[name] = {
+            "sha256": _file_sha256(path),
+            "mode": f"{stat.S_IMODE(path.stat().st_mode):o}",
+        }
+    return {
+        "schema": "0006-nooa-materialized-runtime-overlay-v1",
+        "root_mode": root_mode,
+        "files": file_records,
+        "environment": _runtime_environment_record(root / ".venv"),
+    }
+
+
+def _transport_config(runtime_root: Path) -> dict[str, Any]:
+    snapshot_root = runtime_root.parent / "source-snapshot"
+    base_runtime_root = (
+        snapshot_root / "experiments/agents/0002-nooa/nooa-runtime"
+    )
+    return {
+        "schema": "0006-nooa-provider-runtime-overlay-v1",
+        "base_runtime_root": str(base_runtime_root.resolve()),
+        "provider": PROVIDER_ROUTE,
+    }
+
+
+def _expected_runtime_overlay_record(
+    root: Path,
+    *,
+    expected_source_sha256: dict[str, str],
+    expected_runtime_environment: dict[str, Any],
+) -> dict[str, Any]:
+    launcher_relative = "experiments/agents/0006-nooa/provider_runtime_launcher.py"
+    config_bytes = (
+        json.dumps(_transport_config(root), indent=2, sort_keys=True) + "\n"
+    ).encode()
+    return {
+        "schema": "0006-nooa-materialized-runtime-overlay-v1",
+        "root_mode": "755",
+        "files": {
+            "launcher.py": {
+                "sha256": expected_source_sha256[launcher_relative],
+                "mode": "644",
+            },
+            "transport-config.json": {
+                "sha256": sha256(config_bytes).hexdigest(),
+                "mode": "644",
+            },
+        },
+        "environment": expected_runtime_environment,
+    }
+
+
+def _verify_runtime_overlay(root: Path, *, expected: dict[str, Any]) -> None:
+    if _runtime_overlay_record(root) != expected:
+        raise RuntimeError("materialized provider runtime overlay changed during execution")
+
+
 def _verify_source_snapshot(
     snapshot_root: Path,
     *,
     expected_sha256: dict[str, str],
+    expected_mode: dict[str, str],
 ) -> None:
+    if snapshot_root.is_symlink() or not snapshot_root.is_dir():
+        raise RuntimeError("source snapshot root must be a real directory")
+    if stat.S_IMODE(snapshot_root.stat().st_mode) != 0o755:
+        raise RuntimeError("source snapshot root mode differs from the approved mode")
+    if set(expected_mode) != set(expected_sha256):
+        raise RuntimeError("source snapshot mode manifest differs from its hash manifest")
+
     mismatches: list[str] = []
     for relative, expected in sorted(expected_sha256.items()):
         path = snapshot_root / relative
-        actual = sha256(path.read_bytes()).hexdigest() if path.is_file() else None
-        if actual != expected:
+        is_regular = path.is_file() and not _has_symlink_component(
+            path, root=snapshot_root
+        )
+        actual = sha256(path.read_bytes()).hexdigest() if is_regular else None
+        mode = f"{stat.S_IMODE(path.stat().st_mode):o}" if is_regular else None
+        if actual != expected or mode != expected_mode[relative]:
             mismatches.append(relative)
     if mismatches:
         raise RuntimeError(f"source snapshot differs from approved hashes: {mismatches}")
+    record_path = snapshot_root / "record.json"
+    actual_files = {
+        path.relative_to(snapshot_root).as_posix()
+        for path in snapshot_root.rglob("*")
+        if path.is_file()
+        and path != record_path
+    }
+    symlink_entries = {
+        path.relative_to(snapshot_root).as_posix()
+        for path in snapshot_root.rglob("*")
+        if path.is_symlink() and path != record_path
+    }
+    extras = sorted(
+        (actual_files - set(expected_sha256))
+        | (symlink_entries - set(expected_sha256))
+    )
+    missing = sorted(set(expected_sha256) - actual_files)
+    expected_directories = {
+        parent.as_posix()
+        for relative in expected_sha256
+        for parent in Path(relative).parents
+        if parent != Path(".")
+    }
+    actual_directories = {
+        path.relative_to(snapshot_root).as_posix()
+        for path in snapshot_root.rglob("*")
+        if path.is_dir() and not path.is_symlink()
+    }
+    directory_extras = sorted(actual_directories - expected_directories)
+    directory_missing = sorted(expected_directories - actual_directories)
+    wrong_directory_modes = sorted(
+        relative
+        for relative in actual_directories & expected_directories
+        if stat.S_IMODE((snapshot_root / relative).stat().st_mode) != 0o755
+    )
+    if extras or missing or directory_extras or directory_missing or wrong_directory_modes:
+        raise RuntimeError(
+            "source snapshot tree differs from approval: "
+            f"extras={extras}, missing={missing}, directory_extras={directory_extras}, "
+            f"directory_missing={directory_missing}, "
+            f"wrong_directory_modes={wrong_directory_modes}"
+        )
+    if not record_path.is_file() or record_path.is_symlink():
+        raise RuntimeError("source snapshot record is missing or not a regular file")
+    if stat.S_IMODE(record_path.stat().st_mode) != 0o644:
+        raise RuntimeError("source snapshot record mode differs from approval")
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    expected_record = {
+        "schema": "0006-nooa-live-source-snapshot-v2",
+        "root_mode": "755",
+        "directory_mode": "755",
+        "record_mode": "644",
+        "source_sha256": expected_sha256,
+        "source_mode": expected_mode,
+    }
+    if record != expected_record:
+        raise RuntimeError("source snapshot record differs from approved hashes")
 
 
 def _snapshot_participating_sources(
     run_root: Path,
     *,
     expected_sha256: dict[str, str],
+    expected_mode: dict[str, str],
 ) -> Path:
     snapshot_root = run_root / "source-snapshot"
     snapshot_root.mkdir(parents=True, exist_ok=False)
+    snapshot_root.chmod(0o755)
+    if set(expected_mode) != set(expected_sha256):
+        raise RuntimeError("approved source mode manifest differs from hash manifest")
     for relative, expected in sorted(expected_sha256.items()):
         source = REPO / relative
-        if not source.is_file():
-            raise RuntimeError(f"approved source is missing: {relative}")
+        if (
+            not source.is_file()
+            or _has_symlink_component(source, root=REPO)
+        ):
+            raise RuntimeError(
+                f"approved source is missing or has a symlink component: {relative}"
+            )
         data = source.read_bytes()
-        if sha256(data).hexdigest() != expected:
+        source_mode = f"{stat.S_IMODE(source.stat().st_mode):o}"
+        if sha256(data).hexdigest() != expected or source_mode != expected_mode[relative]:
             raise RuntimeError(f"approved source changed before snapshot: {relative}")
         destination = snapshot_root / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
+        for parent in destination.parents:
+            if parent == snapshot_root.parent:
+                break
+            parent.chmod(0o755)
         destination.write_bytes(data)
-    _verify_source_snapshot(snapshot_root, expected_sha256=expected_sha256)
+        destination.chmod(int(expected_mode[relative], 8))
     _write_json(
         snapshot_root / "record.json",
         {
-            "schema": "0006-nooa-live-source-snapshot-v1",
+            "schema": "0006-nooa-live-source-snapshot-v2",
+            "root_mode": "755",
+            "directory_mode": "755",
+            "record_mode": "644",
             "source_sha256": expected_sha256,
+            "source_mode": expected_mode,
         },
+    )
+    (snapshot_root / "record.json").chmod(0o644)
+    _verify_source_snapshot(
+        snapshot_root,
+        expected_sha256=expected_sha256,
+        expected_mode=expected_mode,
     )
     return snapshot_root
 
@@ -359,27 +645,42 @@ def _frozen_control_record(
 
 
 def _source_state() -> dict[str, Any]:
-    runtime_python = subprocess.run(
-        [str(CONTROL_RUNTIME_ROOT / ".venv" / "bin" / "python"), "--version"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    runtime_environment = _runtime_environment_record(CONTROL_RUNTIME_ROOT / ".venv")
     frozen_control = _frozen_control_record()
     if not frozen_control["matches"]:
         raise RuntimeError(
             "frozen 0002-NOOA sources differ from "
             f"{FROZEN_CONTROL_REVISION}: {frozen_control['mismatches']}"
         )
+    source_sha256 = _participating_sources()
+    symlinked_sources = sorted(
+        relative
+        for relative in source_sha256
+        if _has_symlink_component(REPO / relative, root=REPO)
+    )
+    if symlinked_sources:
+        raise RuntimeError(
+            "participating source paths contain symlink components: "
+            f"{symlinked_sources}"
+        )
+    source_mode = {
+        relative: f"{stat.S_IMODE((REPO / relative).stat().st_mode):o}"
+        for relative in source_sha256
+    }
     return {
-        "schema": "0006-nooa-live-source-state-v2",
+        "schema": "0006-nooa-live-source-state-v4",
         "git": _git_record(),
         "runtime_versions": {
             "host_python": sys.version,
-            "nooa_python": (runtime_python.stdout or runtime_python.stderr).strip(),
+            "nooa_python": runtime_environment["interpreter_version"],
         },
+        "runtime_environment_source": str(
+            (CONTROL_RUNTIME_ROOT / ".venv").resolve()
+        ),
+        "runtime_environment": runtime_environment,
         "frozen_control": frozen_control,
-        "source_sha256": _participating_sources(),
+        "source_sha256": source_sha256,
+        "source_mode": source_mode,
     }
 
 
@@ -469,34 +770,184 @@ def _consume_approved_request(
     return consumed
 
 
+def _snapshot_runner_path(run_root: Path) -> Path:
+    relative = TREATMENT_ROOT.relative_to(REPO) / "run_live_probe.py"
+    return run_root / "source-snapshot" / relative
+
+
+def _write_snapshot_handoff(
+    run_root: Path,
+    *,
+    approval_request: dict[str, Any],
+    consumed_approval: Path,
+) -> tuple[Path, str]:
+    nonce = os.urandom(32).hex()
+    path = run_root / ".approved-snapshot-handoff.json"
+    _write_json(
+        path,
+        {
+            "schema": "0006-nooa-approved-snapshot-handoff-v1",
+            "nonce_sha256": sha256(nonce.encode()).hexdigest(),
+            "approval_request_sha256": _canonical_sha256(approval_request),
+            "consumed_approval_request": str(consumed_approval.resolve()),
+            "snapshot_runner": str(_snapshot_runner_path(run_root).resolve()),
+        },
+    )
+    return path, nonce
+
+
+def _reexec_approved_snapshot(
+    *,
+    run_root: Path,
+    handoff: Path,
+    nonce: str,
+    argv: list[str],
+    expected_source_sha256: dict[str, str],
+    expected_source_mode: dict[str, str],
+    expected_approval_request: dict[str, Any],
+) -> None:
+    expected_handoff = run_root / ".approved-snapshot-handoff.json"
+    if handoff.resolve() != expected_handoff.resolve():
+        raise RuntimeError("approved snapshot handoff is outside the exact run root")
+    if not handoff.is_file() or handoff.is_symlink():
+        raise RuntimeError("approved snapshot handoff is missing or not a regular file")
+    handoff_record = json.loads(handoff.read_text(encoding="utf-8"))
+    runner = _snapshot_runner_path(run_root).resolve()
+    consumed_approval = Path(handoff_record.get("consumed_approval_request", ""))
+    if not consumed_approval.is_file() or consumed_approval.is_symlink():
+        raise RuntimeError("consumed approval is missing or not a regular file")
+    actual_approval_request = json.loads(consumed_approval.read_text(encoding="utf-8"))
+    if (
+        handoff_record.get("schema") != "0006-nooa-approved-snapshot-handoff-v1"
+        or handoff_record.get("nonce_sha256")
+        != sha256(nonce.encode()).hexdigest()
+        or handoff_record.get("snapshot_runner") != str(runner)
+        or handoff_record.get("approval_request_sha256")
+        != _canonical_sha256(expected_approval_request)
+        or actual_approval_request != expected_approval_request
+    ):
+        raise RuntimeError("approved snapshot handoff differs before re-exec")
+    _verify_source_snapshot(
+        run_root / "source-snapshot",
+        expected_sha256=expected_source_sha256,
+        expected_mode=expected_source_mode,
+    )
+    environment = os.environ.copy()
+    environment[SNAPSHOT_HANDOFF_ENV] = nonce
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    environment["PYTHONNOUSERSITE"] = "1"
+    environment.pop("PYTHONPATH", None)
+    environment.pop("PYTHONHOME", None)
+    command = [
+        sys.executable,
+        "-I",
+        "-B",
+        str(runner),
+        *argv,
+        "--approved-snapshot-handoff",
+        str(handoff.resolve()),
+    ]
+    os.chdir(run_root / "source-snapshot")
+    os.execve(sys.executable, command, environment)
+
+
+def _load_snapshot_handoff(
+    args: argparse.Namespace,
+    *,
+    spec: PairedRunSpec,
+) -> tuple[dict[str, Any], Path]:
+    run_root = args.run_root.resolve()
+    handoff = args.approved_snapshot_handoff.resolve()
+    expected_handoff = run_root / ".approved-snapshot-handoff.json"
+    if handoff != expected_handoff:
+        raise RuntimeError("approved snapshot handoff is outside the exact run root")
+    expected_runner = _snapshot_runner_path(run_root).resolve()
+    if Path(__file__).resolve() != expected_runner or REPO.resolve() != (
+        run_root / "source-snapshot"
+    ).resolve():
+        raise RuntimeError("approved handoff must execute the run-local snapshot runner")
+    nonce = os.environ.pop(SNAPSHOT_HANDOFF_ENV, None)
+    if not nonce:
+        raise RuntimeError("approved snapshot nonce is absent")
+    record = json.loads(handoff.read_text(encoding="utf-8"))
+    if record.get("schema") != "0006-nooa-approved-snapshot-handoff-v1":
+        raise RuntimeError("approved snapshot handoff schema is invalid")
+    if record.get("nonce_sha256") != sha256(nonce.encode()).hexdigest():
+        raise RuntimeError("approved snapshot nonce does not match the handoff")
+    if record.get("snapshot_runner") != str(expected_runner):
+        raise RuntimeError("approved snapshot runner does not match the handoff")
+    consumed_handoff = handoff.with_name(handoff.name + ".consumed")
+    if consumed_handoff.exists():
+        raise RuntimeError("approved snapshot handoff was already consumed")
+    handoff.replace(consumed_handoff)
+    consumed_approval = Path(record["consumed_approval_request"])
+    approval = json.loads(consumed_approval.read_text(encoding="utf-8"))
+    if record.get("approval_request_sha256") != _canonical_sha256(approval):
+        raise RuntimeError("consumed approval differs from the snapshot handoff")
+    authorization = approval.get("authorization")
+    if not isinstance(authorization, dict):
+        raise TypeError("consumed approval has no authorization")
+    expected_confirmation = CONFIRMATION_PREFIX + _canonical_sha256(authorization)
+    if approval.get("required_confirmation") != expected_confirmation:
+        raise RuntimeError("consumed approval confirmation is not bound to its authorization")
+    if expected_confirmation != args.confirm_live_run:
+        raise RuntimeError("snapshot execution confirmation does not match approval")
+    if authorization.get("run_root") != str(run_root):
+        raise RuntimeError("snapshot execution run root does not match approval")
+    if authorization.get("paired_run_spec") != spec.as_record():
+        raise RuntimeError("snapshot execution spec does not match approval")
+    source_state = authorization.get("source_state")
+    if not isinstance(source_state, dict):
+        raise TypeError("consumed approval has no source state")
+    _verify_source_snapshot(
+        run_root / "source-snapshot",
+        expected_sha256=source_state["source_sha256"],
+        expected_mode=source_state["source_mode"],
+    )
+    return source_state, consumed_approval
+
+
 def _materialize_runtime_overlay(
     run_root: Path,
     *,
     expected_sha256: dict[str, str],
+    expected_mode: dict[str, str],
+    runtime_environment_source: Path,
+    expected_runtime_environment: dict[str, Any],
 ) -> Path:
     snapshot_root = run_root / "source-snapshot"
-    _verify_source_snapshot(snapshot_root, expected_sha256=expected_sha256)
+    _verify_source_snapshot(
+        snapshot_root,
+        expected_sha256=expected_sha256,
+        expected_mode=expected_mode,
+    )
     overlay_launcher = (
         snapshot_root / "experiments/agents/0006-nooa/provider_runtime_launcher.py"
     )
-    base_runtime_root = (
-        snapshot_root / "experiments/agents/0002-nooa/nooa-runtime"
-    )
     runtime_root = run_root / "provider-runtime"
     runtime_root.mkdir(parents=True, exist_ok=False)
+    runtime_root.chmod(0o755)
     (runtime_root / "launcher.py").write_bytes(overlay_launcher.read_bytes())
-    _write_json(
-        runtime_root / "transport-config.json",
-        {
-            "schema": "0006-nooa-provider-runtime-overlay-v1",
-            "base_runtime_root": str(base_runtime_root.resolve()),
-            "provider": PROVIDER_ROUTE,
-        },
+    _write_json(runtime_root / "transport-config.json", _transport_config(runtime_root))
+    (runtime_root / "launcher.py").chmod(0o644)
+    (runtime_root / "transport-config.json").chmod(0o644)
+    actual_runtime_environment = _runtime_environment_record(runtime_environment_source)
+    if actual_runtime_environment != expected_runtime_environment:
+        raise RuntimeError("worker runtime environment changed after approval")
+    shutil.copytree(
+        runtime_environment_source,
+        runtime_root / ".venv",
+        symlinks=True,
     )
-    (runtime_root / ".venv").symlink_to(
-        (CONTROL_RUNTIME_ROOT / ".venv").resolve(),
-        target_is_directory=True,
+    copied_runtime_environment = _runtime_environment_record(runtime_root / ".venv")
+    if copied_runtime_environment != expected_runtime_environment:
+        raise RuntimeError("materialized worker runtime differs from approved environment")
+    expected_overlay = _expected_runtime_overlay_record(
+        runtime_root,
+        expected_source_sha256=expected_sha256,
+        expected_runtime_environment=expected_runtime_environment,
     )
+    _verify_runtime_overlay(runtime_root, expected=expected_overlay)
     return runtime_root
 
 
@@ -591,25 +1042,33 @@ def _provider_profile_report(
 
 def _generation_ids(crossings: list[dict[str, Any]]) -> list[str]:
     generation_ids: list[str] = []
-    for crossing in crossings:
+    for index, crossing in enumerate(crossings):
         response = crossing.get("response", {})
         headers = response.get("headers", {}) if isinstance(response, dict) else {}
         body = response.get("body", {}) if isinstance(response, dict) else {}
-        generation_id = None
+        candidates: set[str] = set()
         if isinstance(headers, dict):
-            generation_id = next(
-                (
-                    value
-                    for key, value in headers.items()
-                    if str(key).lower() == "x-generation-id" and isinstance(value, str)
-                ),
-                None,
+            candidates.update(
+                value.strip()
+                for key, value in headers.items()
+                if str(key).lower() == "x-generation-id"
+                and isinstance(value, str)
+                and value.strip()
             )
-        if generation_id is None and isinstance(body, dict):
+        if isinstance(body, dict):
             body_id = body.get("id")
-            generation_id = body_id if isinstance(body_id, str) else None
-        if generation_id is not None and generation_id not in generation_ids:
-            generation_ids.append(generation_id)
+            if isinstance(body_id, str) and body_id.strip():
+                candidates.add(body_id.strip())
+        if len(candidates) != 1:
+            raise RuntimeError(
+                f"provider crossing {index} has {len(candidates)} generation identities"
+            )
+        generation_id = next(iter(candidates))
+        if generation_id in generation_ids:
+            raise RuntimeError(
+                f"provider generation identity is reused across crossings: {generation_id}"
+            )
+        generation_ids.append(generation_id)
     return generation_ids
 
 
@@ -735,9 +1194,12 @@ def _provider_identity_report(
         "success": success,
         "expected_generation_ids": generation_ids,
         "actual_provider": "ModelRun" if success else None,
-        "actual_quantization": "fp4" if success else None,
+        "actual_quantization": None,
+        "requested_quantization": "fp4",
+        "quantization_evidence_scope": "requested-route-only",
         "quantization_evidence": (
-            "exclusive modelrun/fp4 request pin with fallbacks disabled"
+            "exclusive modelrun/fp4 request pin with fallbacks disabled; generation metadata "
+            "does not independently return quantization"
             if success
             else None
         ),
@@ -875,69 +1337,14 @@ def _artifact_counts(run_root: Path) -> dict[str, int]:
     }
 
 
-def _predecessor_result_exposed(events: list[dict[str, Any]]) -> bool:
-    result_indexes = [index for index, event in enumerate(events) if event.get("type") == "prediction_result"]
-    context_indexes = [index for index, event in enumerate(events) if event.get("type") == "context_assembled"]
-    return bool(result_indexes) and any(
-        context_index > result_indexes[0] for context_index in context_indexes
-    )
-
-
-def _claim_continuity(events: list[dict[str, Any]]) -> bool:
-    commitments = [
-        (index, event)
-        for index, event in enumerate(events)
-        if event.get("type") == "commitment"
-    ]
-    if len(commitments) < 2:
-        return False
-    first_index, first = commitments[0]
-    second_index, second = commitments[1]
-    first_claim_ids = set(first.get("claim_ids", []))
-    second_claim_ids = set(second.get("claim_ids", []))
-    if not first_claim_ids:
-        return False
-    if first_claim_ids & second_claim_ids:
-        return True
-    return any(
-        event.get("type") == "ledger"
-        and first_index < index < second_index
-        and isinstance(event.get("operation"), dict)
-        and event["operation"].get("claim_id") in first_claim_ids
-        and event["operation"].get("op") in {"revise", "retire"}
-        for index, event in enumerate(events)
-    )
-
-
-def _mismatches_reconciled_before_next_commitment(
-    events: list[dict[str, Any]],
-) -> bool:
-    commitment_indexes = [
-        index for index, event in enumerate(events) if event.get("type") == "commitment"
-    ]
-    for index, event in enumerate(events):
-        if event.get("type") != "prediction_result" or event.get("outcome") != "mismatch":
-            continue
-        next_commitment = next(
-            (commitment_index for commitment_index in commitment_indexes if commitment_index > index),
-            None,
-        )
-        if next_commitment is None:
-            continue
-        if not any(
-            candidate.get("type") == "reconciliation"
-            for candidate in events[index + 1 : next_commitment]
-        ):
-            return False
-    return True
-
-
 def _operational_verdict(
     summary: dict[str, Any],
     *,
     competence_events: list[dict[str, Any]],
+    process_records: list[dict[str, Any]] | None = None,
     provider_success: bool,
     required_actions: int,
+    integrity_success: bool = True,
 ) -> dict[str, Any]:
     event_types = [event.get("type") for event in competence_events]
     if required_actions == 1:
@@ -950,12 +1357,14 @@ def _operational_verdict(
             "trace_complete": summary.get("trace_complete") is True,
             "one_commitment": event_types.count("commitment") == 1,
             "provider_profile_matches": provider_success,
+            "approved_bytes_remained_immutable": integrity_success,
         }
         return {
             "goal": "one-action-admission",
             "success": all(checks.values()),
             "checks": checks,
         }
+    chain_checks = _two_action_chain_report(competence_events, process_records or [])
     checks = {
         "exact_actions": summary.get("actions") == required_actions,
         "exact_attempted_actions": summary.get("attempted_actions") == required_actions,
@@ -964,12 +1373,9 @@ def _operational_verdict(
         "clean_shutdown": summary.get("clean_shutdown") is True,
         "trace_complete": summary.get("trace_complete") is True,
         "exact_commitments": event_types.count("commitment") == required_actions,
-        "predecessor_prediction_result_exposed": _predecessor_result_exposed(competence_events),
-        "claim_continuity": _claim_continuity(competence_events),
-        "mismatches_reconciled_before_next_commitment": (
-            _mismatches_reconciled_before_next_commitment(competence_events)
-        ),
         "provider_profile_matches": provider_success,
+        "approved_bytes_remained_immutable": integrity_success,
+        **chain_checks,
     }
     return {
         "goal": f"{required_actions}-action-competence-continuity",
@@ -1017,12 +1423,30 @@ def _run_stage(
     run_root: Path,
     response_timeout: float,
     expected_source_sha256: dict[str, str],
+    expected_source_mode: dict[str, str],
+    runtime_environment_source: Path,
+    expected_runtime_environment: dict[str, Any],
 ) -> dict[str, Any]:
-    phase = "source_snapshot"
+    phase = "source_snapshot_verification"
+    runtime_overlay: dict[str, Any] | None = None
     try:
-        _snapshot_participating_sources(
+        _verify_source_snapshot(
+            run_root / "source-snapshot",
+            expected_sha256=expected_source_sha256,
+            expected_mode=expected_source_mode,
+        )
+        phase = "provider_runtime_materialization"
+        runtime_overlay = _expected_runtime_overlay_record(
+            run_root / "provider-runtime",
+            expected_source_sha256=expected_source_sha256,
+            expected_runtime_environment=expected_runtime_environment,
+        )
+        provider_runtime_root = _materialize_runtime_overlay(
             run_root,
             expected_sha256=expected_source_sha256,
+            expected_mode=expected_source_mode,
+            runtime_environment_source=runtime_environment_source,
+            expected_runtime_environment=expected_runtime_environment,
         )
         phase = "arcade_init"
         arcade = arc_agi.Arcade(
@@ -1037,11 +1461,6 @@ def _run_stage(
         )
         if environment is None:
             raise RuntimeError(f"could not create requested game: {args.game}")
-        phase = "provider_runtime_materialization"
-        provider_runtime_root = _materialize_runtime_overlay(
-            run_root,
-            expected_sha256=expected_source_sha256,
-        )
         phase = "worker_start_or_episode"
         with NooaCompetenceProcessAgent(
             runtime_root=provider_runtime_root,
@@ -1069,6 +1488,7 @@ def _run_stage(
             "stop_reason": result.stop_reason,
             "clean_shutdown": True,
             "trace_complete": _trace_complete(run_root / "trace.jsonl"),
+            "runtime_overlay": runtime_overlay,
             "run_root": str(run_root),
         }
     except Exception as error:  # noqa: BLE001 - preserve every post-manifest failure.
@@ -1080,42 +1500,72 @@ def _run_stage(
             error=error,
         )
         summary["trace_complete"] = _trace_complete(run_root / "trace.jsonl")
+        summary["runtime_overlay"] = runtime_overlay
     _write_json(run_root / "summary.json", summary)
     return summary
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args = build_parser().parse_args(raw_argv)
     _validate_live_args(args)
     spec = _paired_spec(args)
     run_root = args.run_root.resolve()
-    source_state = _source_state()
-    approval_request = _approval_request(
-        spec=spec,
-        run_root=run_root,
-        source_state=source_state,
-    )
-    if args.prepare_approval_request is not None:
-        request_path = args.prepare_approval_request.resolve()
-        if request_path.exists():
-            raise RuntimeError(f"refusing to overwrite approval request: {request_path}")
+    if args.approved_snapshot_handoff is not None:
+        if args.prepare_approval_request is not None:
+            raise RuntimeError("snapshot execution cannot prepare an approval request")
+        if not os.environ.get("ARC_LLM_API_KEY"):
+            raise RuntimeError("ARC_LLM_API_KEY must be present in the inherited environment")
+        source_state, consumed_approval = _load_snapshot_handoff(args, spec=spec)
+        approval_request = json.loads(consumed_approval.read_text(encoding="utf-8"))
+    else:
+        source_state = _source_state()
+        approval_request = _approval_request(
+            spec=spec,
+            run_root=run_root,
+            source_state=source_state,
+        )
+        if args.prepare_approval_request is not None:
+            request_path = args.prepare_approval_request.resolve()
+            if request_path.exists():
+                raise RuntimeError(f"refusing to overwrite approval request: {request_path}")
+            if run_root.exists():
+                raise RuntimeError(f"approved run root already exists: {run_root}")
+            _write_json(request_path, approval_request)
+            print(json.dumps(approval_request, indent=2, sort_keys=True))
+            return 0
+        if args.approval_request is None:
+            raise RuntimeError("live execution requires --approval-request")
+        if not os.environ.get("ARC_LLM_API_KEY"):
+            raise RuntimeError("ARC_LLM_API_KEY must be present in the inherited environment")
         if run_root.exists():
             raise RuntimeError(f"approved run root already exists: {run_root}")
-        _write_json(request_path, approval_request)
-        print(json.dumps(approval_request, indent=2, sort_keys=True))
-        return 0
-    if args.approval_request is None:
-        raise RuntimeError("live execution requires --approval-request")
-    if not os.environ.get("ARC_LLM_API_KEY"):
-        raise RuntimeError("ARC_LLM_API_KEY must be present in the inherited environment")
-    if run_root.exists():
-        raise RuntimeError(f"approved run root already exists: {run_root}")
-    consumed_approval = _consume_approved_request(
-        args.approval_request,
-        expected=approval_request,
-        confirmation=args.confirm_live_run,
-    )
-    run_root.mkdir(parents=True, exist_ok=False)
+        consumed_approval = _consume_approved_request(
+            args.approval_request,
+            expected=approval_request,
+            confirmation=args.confirm_live_run,
+        )
+        run_root.mkdir(parents=True, exist_ok=False)
+        _snapshot_participating_sources(
+            run_root,
+            expected_sha256=source_state["source_sha256"],
+            expected_mode=source_state["source_mode"],
+        )
+        handoff, nonce = _write_snapshot_handoff(
+            run_root,
+            approval_request=approval_request,
+            consumed_approval=consumed_approval,
+        )
+        _reexec_approved_snapshot(
+            run_root=run_root,
+            handoff=handoff,
+            nonce=nonce,
+            argv=raw_argv,
+            expected_source_sha256=source_state["source_sha256"],
+            expected_source_mode=source_state["source_mode"],
+            expected_approval_request=approval_request,
+        )
+        raise AssertionError("snapshot re-exec returned unexpectedly")
     response_timeout = _response_timeout(args)
     manifest = {
         "schema": "0006-nooa-single-arm-execution-manifest-v2",
@@ -1145,8 +1595,29 @@ def main(argv: list[str] | None = None) -> int:
         run_root=run_root,
         response_timeout=response_timeout,
         expected_source_sha256=source_state["source_sha256"],
+        expected_source_mode=source_state["source_mode"],
+        runtime_environment_source=Path(source_state["runtime_environment_source"]),
+        expected_runtime_environment=source_state["runtime_environment"],
     )
     finalization_errors: list[dict[str, str]] = []
+    integrity_success = True
+    expected_runtime_overlay = summary.get("runtime_overlay")
+    try:
+        _verify_source_snapshot(
+            run_root / "source-snapshot",
+            expected_sha256=source_state["source_sha256"],
+            expected_mode=source_state["source_mode"],
+        )
+        if not isinstance(expected_runtime_overlay, dict):
+            raise TypeError("run has no materialized runtime-overlay record")
+        _verify_runtime_overlay(
+            run_root / "provider-runtime", expected=expected_runtime_overlay
+        )
+    except Exception as error:  # noqa: BLE001 - immutable-byte audit must fail closed.
+        integrity_success = False
+        finalization_errors.append(
+            {"type": type(error).__name__, "message": str(error)}
+        )
     crossings: list[dict[str, Any]] = []
     assert spec.provider_request_profile is not None
     try:
@@ -1183,17 +1654,37 @@ def main(argv: list[str] | None = None) -> int:
     _write_json(run_root / "provider-identity-report.json", provider_identity)
     try:
         competence_events = _read_jsonl(run_root / "worker" / "competence.jsonl")
+        process_records = _read_jsonl(run_root / "worker" / "process.jsonl")
     except Exception as error:  # noqa: BLE001 - preserve malformed evidence as a verdict failure.
         competence_events = []
+        process_records = []
         finalization_errors.append({"type": type(error).__name__, "message": str(error)})
+    try:
+        _verify_source_snapshot(
+            run_root / "source-snapshot",
+            expected_sha256=source_state["source_sha256"],
+            expected_mode=source_state["source_mode"],
+        )
+        if not isinstance(expected_runtime_overlay, dict):
+            raise TypeError("run has no materialized runtime-overlay record")
+        _verify_runtime_overlay(
+            run_root / "provider-runtime", expected=expected_runtime_overlay
+        )
+    except Exception as error:  # noqa: BLE001 - final source audit must fail closed.
+        integrity_success = False
+        finalization_errors.append(
+            {"type": type(error).__name__, "message": str(error)}
+        )
     verdict = _operational_verdict(
         summary,
         competence_events=competence_events,
+        process_records=process_records,
         provider_success=(
             provider_report.get("success") is True
             and provider_identity.get("success") is True
         ),
         required_actions=spec.max_actions,
+        integrity_success=integrity_success,
     )
     summary["provider_profile_report"] = provider_report
     summary["provider_identity_report"] = provider_identity
