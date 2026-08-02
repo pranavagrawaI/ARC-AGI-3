@@ -5,11 +5,41 @@ not license gameplay-competence or treatment-effect claims.
 
 The stable authority boundary is in [`CONTRACT.md`](./CONTRACT.md). Engineering choices are in [`IMPLEMENTATION.md`](./IMPLEMENTATION.md). Upstream provenance is in [`SOURCE_MANIFEST.json`](./SOURCE_MANIFEST.json).
 
+## The freeze was reopened on 2026-08-02
+
+`dfb2d2b` was frozen with a defect G9 could not have caught, and G9's pass was
+routing luck rather than evidence of correctness.
+
+`return_result` ends an action point: the host takes its argument and releases
+the environment action, so no tool message ever replies to that call. The
+retained conversation replayed it anyway, leaving an unanswered `tool_call` in
+every request after the first action point. Providers disagree about whether that
+is legal. ModelRun refuses it — *"every tool_call must be answered by a tool
+message before the conversation continues"* — while CoreWeave accepts it.
+
+`g9-20260801T152726Z-fbf2ce0d` sent no provider pin, so OpenRouter load-balanced
+it: its first generation went to ModelRun and its later ones to CoreWeave, which
+is why three action points completed. The fault surfaced only when `0006-NOOA`
+pinned `modelrun/fp4` exclusively with fallbacks disabled and every second action
+point failed with HTTP 400. It is reproducible from the preserved request body
+once the redacted frame image is restored from `worker/model-frame.png`, whose
+sha256 the audit records.
+
+The retained turn now drops the consumed `return_result` call. Only the
+unanswered call is removed; a `return_result` invoked inline from an
+`execute_python` cell is untouched, because there the tool call is
+`execute_python` and it receives its output normally.
+
+**G9 must be re-run against a pinned single provider before this gate is claimed
+again.** The prior artifact stands as a record of what was run, not as evidence
+that the substrate is correct across providers.
+
 ## Current gate state
 
 The minimal tracer is qualified through G9. Current-byte live run
 `g9-20260801T152726Z-fbf2ce0d` passed on LS20 through OpenRouter with Gemma from
-clean implementation revision `94b31b039b2b6da592a19f583d7dc6c69d6341ad`.
+clean implementation revision `94b31b039b2b6da592a19f583d7dc6c69d6341ad`, under
+the provider-routing caveat recorded above.
 
 | Gate | State | Current evidence | Remaining load-bearing gap |
 |---|---|---|---|

@@ -40,6 +40,24 @@ def _execute(code: str, call_id: str) -> LLMResponse:
     )
 
 
+def _return_via_tool(payload: dict[str, Any], call_id: str) -> LLMResponse:
+    """The model answering through the return_result tool rather than inline."""
+
+    return LLMResponse(
+        raw_response=None,
+        content="",
+        tool_calls=[
+            ToolCall(
+                id=call_id,
+                name="return_result",
+                arguments=json.dumps({"result": payload}),
+            )
+        ],
+        finish_reason="tool_calls",
+        assistant_message={"role": "assistant", "content": ""},
+    )
+
+
 class _RecordingFakeLLM(FakeLLMClient):
     def __init__(self, *, scripted_responses: list[LLMResponse]) -> None:
         super().__init__(scripted_responses=scripted_responses)
@@ -296,6 +314,52 @@ async def test_python_memory_and_files_survive_the_environment_successor(
     assert first.action == 1
     assert second == ActionDecision(action=2, data=None, reason="42")
     assert llm.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_consumed_return_result_call_is_not_replayed_as_an_open_tool_call() -> None:
+    """The host answers return_result, so history must not leave it open.
+
+    return_result ends an action point: the host takes its argument and releases
+    the environment action, and no tool message ever replies. Replaying the call
+    left an unanswered tool call in the next request, which ModelRun refuses with
+    "every tool_call must be answered by a tool message before the conversation
+    continues". Other providers accept it, so load balancing hid the fault until
+    a run pinned one endpoint.
+    """
+
+    llm = FakeLLMClient(
+        scripted_responses=[
+            _execute("marker = 1", "python-call"),
+            _return_via_tool({"action": 1, "data": None, "reason": "first"}, "ret-1"),
+            _return_via_tool({"action": 2, "data": None, "reason": "second"}, "ret-2"),
+        ]
+    )
+    agent = NooaControlAgent(llm=llm)
+
+    await agent.choose_action(
+        PublicActionPoint(observation={"step": 0}, legal_actions=(1, 2))
+    )
+    second = await agent.choose_action(
+        PublicActionPoint(observation={"step": 1}, legal_actions=(1, 2))
+    )
+    await agent.aclose()
+
+    assert second.action == 2
+    replayed = llm.last_messages
+    open_calls = [
+        call
+        for message in replayed
+        for call in (message.get("tool_calls") or [])
+        if call.get("function", {}).get("name") == "return_result"
+    ]
+    assert open_calls == [], open_calls
+    # The answered execute_python call and its output must survive untouched.
+    assert any(
+        call.get("function", {}).get("name") == "execute_python"
+        for message in replayed
+        for call in (message.get("tool_calls") or [])
+    )
 
 
 @pytest.mark.asyncio
