@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import io
 import json
+import os
 import runpy
 import subprocess
 import sys
@@ -854,6 +855,50 @@ class LiveProbeTests(unittest.TestCase):
                     runtime_environment_source=runtime_source,
                     expected_runtime_environment=runtime_environment,
                 )
+
+    def test_forwarded_paths_survive_the_snapshot_working_directory_change(self) -> None:
+        """A relative --run-root must not re-resolve inside the snapshot.
+
+        The parent chdirs into the run-local snapshot before re-exec. Forwarding
+        a relative path verbatim made the child resolve it against the snapshot
+        directory and reject its own handoff as "outside the exact run root".
+        """
+
+        absolutize = MODULE["_absolutize_forwarded_paths"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            original = Path.cwd()
+            os.chdir(root)
+            try:
+                argv = [
+                    "--game",
+                    "ls20",
+                    "--run-root",
+                    "artifacts/run",
+                    "--approval-request=plans/approval-request.json",
+                    "--confirm-live-run",
+                    "RUN-0006-NOOA-SINGLE-ARM:abc",
+                ]
+                normalized = absolutize(argv)
+                os.chdir(root / "..")
+            finally:
+                os.chdir(original)
+
+        self.assertEqual(
+            normalized,
+            [
+                "--game",
+                "ls20",
+                "--run-root",
+                str(root / "artifacts/run"),
+                f"--approval-request={root / 'plans/approval-request.json'}",
+                "--confirm-live-run",
+                "RUN-0006-NOOA-SINGLE-ARM:abc",
+            ],
+        )
+        # Non-path tokens that happen to look like values are left alone.
+        self.assertEqual(absolutize(["--game", "ls20"]), ["--game", "ls20"])
+        self.assertEqual(absolutize(["--run-root"]), ["--run-root"])
 
     def test_snapshot_handoff_executes_exact_run_local_runner_once(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

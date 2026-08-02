@@ -796,6 +796,37 @@ def _write_snapshot_handoff(
     return path, nonce
 
 
+_FORWARDED_PATH_OPTIONS = ("--run-root", "--approval-request")
+
+
+def _absolutize_forwarded_paths(argv: list[str]) -> list[str]:
+    """Make forwarded path arguments independent of the working directory.
+
+    The parent chdirs into the run-local snapshot before re-exec, so a relative
+    path on the original command line would re-resolve against the snapshot
+    directory in the child and name a file that does not exist. Resolution
+    happens here, against the operator's own working directory, so the child
+    receives exactly the paths the operator named.
+    """
+
+    normalized: list[str] = []
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        option, separator, inline = token.partition("=")
+        if separator and option in _FORWARDED_PATH_OPTIONS:
+            normalized.append(f"{option}={Path(inline).resolve()}")
+            index += 1
+            continue
+        if token in _FORWARDED_PATH_OPTIONS and index + 1 < len(argv):
+            normalized.extend([token, str(Path(argv[index + 1]).resolve())])
+            index += 2
+            continue
+        normalized.append(token)
+        index += 1
+    return normalized
+
+
 def _reexec_approved_snapshot(
     *,
     run_root: Path,
@@ -1560,7 +1591,7 @@ def main(argv: list[str] | None = None) -> int:
             run_root=run_root,
             handoff=handoff,
             nonce=nonce,
-            argv=raw_argv,
+            argv=_absolutize_forwarded_paths(raw_argv),
             expected_source_sha256=source_state["source_sha256"],
             expected_source_mode=source_state["source_mode"],
             expected_approval_request=approval_request,
