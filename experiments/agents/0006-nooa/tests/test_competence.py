@@ -172,6 +172,60 @@ class CompetenceControllerTests(unittest.TestCase):
             )
         )
 
+    def test_reconciliation_may_be_omitted_only_while_nothing_is_unresolved(self) -> None:
+        """Reproduces the 20260802T052341Z live failure and its boundary.
+
+        The model authored ``reconciliation: {}``, deleted the field on the
+        reasoning that absence means nothing to reconcile, and the run died
+        before admitting any action. With nothing unresolved, null is the only
+        legal value, so omission is accepted. Once a mismatch is outstanding the
+        field carries real content and stays mandatory.
+        """
+
+        controller = CompetenceController()
+        controller.receive_observation(observation(0, pixels=[[0, 0], [0, 0]]))
+
+        commitment = controller.admit(
+            {
+                "action": 1,
+                "data": None,
+                "working_state": {"candidate": "action 1 changes the public grid"},
+                "test": "test the immediate effect of action 1",
+                "claim_ids": ["claim-1"],
+                "ledger": [
+                    {
+                        "op": "create",
+                        "claim_id": "claim-1",
+                        "statement": "action 1 changes at least one public cell",
+                    }
+                ],
+                "assertions": [{"observable": "changed_cells", "op": ">", "value": 0}],
+                "evidence_requests": [],
+            },
+            legal_actions=(1, 2),
+        )
+        self.assertIsNone(commitment["reconciliation"])
+
+        controller.receive_observation(observation(1, pixels=[[0, 0], [0, 0]]))
+        self.assertEqual(len(controller.context_packet()["unresolved_mismatches"]), 1)
+
+        with self.assertRaisesRegex(ContractError, "reconciliation"):
+            controller.admit(
+                {
+                    "action": 2,
+                    "data": None,
+                    "working_state": {},
+                    "test": "omit the field while a mismatch is outstanding",
+                    "claim_ids": [],
+                    "ledger": [],
+                    "assertions": [
+                        {"observable": "state", "op": "==", "value": "NOT_FINISHED"}
+                    ],
+                    "evidence_requests": [],
+                },
+                legal_actions=(1, 2),
+            )
+
     def test_only_model_selected_claims_enter_the_bounded_context(self) -> None:
         controller = CompetenceController()
         controller.receive_observation(observation(0, pixels=[[0]]))

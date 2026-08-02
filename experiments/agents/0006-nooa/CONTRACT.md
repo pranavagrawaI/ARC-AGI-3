@@ -32,6 +32,13 @@ It must not repeat or override `action` or `data`. The host validates the
 action using the frozen legality/coordinate checks, validates the commitment,
 then releases exactly one action. A malformed commitment releases no action.
 
+`reconciliation` is the one field the model may omit, and only while no
+mismatch is unresolved — in that state `null` is its sole legal value, so
+accepting absence supplies no semantic content the model did not author. While a
+mismatch is outstanding the field carries real dispositions and stays mandatory.
+This is a syntax allowance, not a repair: the host still neither guesses nor
+corrects a malformed or semantically invalid commitment.
+
 ## Admitted mechanisms
 
 | Missing function | 0006 implementation | Host authority | Model-visible difference |

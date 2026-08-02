@@ -69,7 +69,9 @@ def attach_competence_context(
         "schema": SCHEMA,
         "instruction": (
             "For the final return_result, reason must be compact JSON and contain "
-            "exactly the listed competence fields. It must not contain action or data. "
+            "exactly the listed competence fields, except that reconciliation may be "
+            "omitted when there is no unresolved mismatch. "
+            "It must not contain action or data. "
             "The host alone checks the successor and admits the environment action. "
             "Do not manually quote or escape reason. In execute_python, first define "
             "model-authored action and data variables plus commitment as a Python dict, "
@@ -135,7 +137,9 @@ def attach_competence_context(
                 },
             },
             "reconciliation": {
-                "when_no_unresolved_mismatches": None,
+                "when_no_unresolved_mismatches": (
+                    "omit this field entirely, or set it to null; both are accepted"
+                ),
                 "when_unresolved_mismatches": {
                     "type": "array",
                     "itemCount": "exactly one per unresolved mismatch",

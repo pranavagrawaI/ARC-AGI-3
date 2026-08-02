@@ -108,9 +108,18 @@ class CompetenceRunnerTests(unittest.TestCase):
             set(authoring_schema["assertions"]["items"]["numeric"]["observable"]),
             {"changed_cells", "levels_completed"},
         )
-        self.assertEqual(
-            authoring_schema["reconciliation"]["when_no_unresolved_mismatches"],
-            None,
+        # A bare null here serialized as "no specification given" and the model
+        # deleted the field, killing run 20260802T052341Z. State the permission
+        # in words the model cannot read as an absent rule.
+        no_mismatch_rule = authoring_schema["reconciliation"][
+            "when_no_unresolved_mismatches"
+        ]
+        self.assertIsInstance(no_mismatch_rule, str)
+        self.assertIn("omit", no_mismatch_rule)
+        self.assertIn("null", no_mismatch_rule)
+        self.assertIn(
+            "reconciliation may be omitted when there is no unresolved mismatch",
+            attached["competence"]["instruction"],
         )
         exec(  # noqa: S102 - execute the exact model-visible Python scaffold.
             serialization["python_pattern"], namespace

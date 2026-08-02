@@ -513,7 +513,13 @@ class CompetenceController:
             "evidence_requests",
             "reconciliation",
         }
-        if set(decision) != required:
+        provided = set(decision)
+        if not self._unresolved and "reconciliation" not in provided:
+            # With nothing unresolved, null is the only legal value and the host
+            # already knows it. Accepting omission invents no semantic value; it
+            # removes a syntax tax that costs live runs.
+            provided |= {"reconciliation"}
+        if provided != required:
             raise ContractError(f"decision must contain exactly {sorted(required)}")
         action = decision.get("action")
         if not _is_int(action) or int(action) not in set(legal_actions):
