@@ -22,6 +22,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "run_live_probe.py"
 MODULE = runpy.run_path(str(RUNNER))
+MODULE_CHAIN = runpy.run_path(str(ROOT / "evidence_chain.py"))
 
 from competence import CompetenceController
 from competence_runner import EXPECTED_PROJECTION_DTYPE, attach_competence_context
@@ -2245,3 +2246,65 @@ class ProviderRouteTests(unittest.TestCase):
             pinned.config["extra_body"],
             {"provider": MODULE["PROVIDER_ROUTES"]["pinned"]},
         )
+
+
+class InlineReturnRouteTests(unittest.TestCase):
+    """The verifier must accept the route the packet requires.
+
+    Run 20260802T182855Z closed the two-action loop and still failed
+    linked_process_records, because the verifier demanded a separate
+    return_result tool call while the packet forbids one. The audit shape here is
+    the one measured from that run: {"arguments", "id", "name"} with arguments a
+    JSON object carrying "code".
+    """
+
+    @staticmethod
+    def _cell(code: str) -> dict:
+        return {
+            "id": "call_abc123",
+            "name": "execute_python",
+            "arguments": json.dumps({"code": code}),
+        }
+
+    def test_inline_return_as_the_final_statement_closes_the_turn(self) -> None:
+        inline = MODULE_CHAIN["_inline_return_closes_the_turn"]
+        self.assertTrue(
+            inline(
+                self._cell(
+                    "import json\n"
+                    "action = 1\n"
+                    "data = None\n"
+                    "reason = json.dumps({'test': 'x'})\n"
+                    "return_result({'action': action, 'data': data, 'reason': reason})"
+                )
+            )
+        )
+
+    def test_a_cell_that_does_not_end_in_return_result_does_not_close_it(self) -> None:
+        inline = MODULE_CHAIN["_inline_return_closes_the_turn"]
+        # Computing the payload is not returning it. Run 20260802T124434Z spent
+        # every round doing exactly this and released no action.
+        self.assertFalse(inline(self._cell("reason = '{}'\nprint(reason)")))
+        self.assertFalse(inline(self._cell("return_result({'a': 1})\nprint('after')")))
+        self.assertFalse(inline(self._cell("not valid python (")))
+        self.assertFalse(inline({"id": "x", "name": "execute_python"}))
+
+    def test_the_separate_tool_route_still_binds_the_literal_decision(self) -> None:
+        binds = MODULE_CHAIN["_last_model_call_returns_decision"]
+        decision = {"action": 1, "data": None, "reason": "r"}
+        call = {
+            "outcome": {
+                "kind": "success",
+                "response": {
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "name": "return_result",
+                            "arguments": json.dumps({"result": decision}),
+                        }
+                    ]
+                },
+            }
+        }
+        self.assertTrue(binds([call], decision))
+        self.assertFalse(binds([call], {**decision, "action": 2}))

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 from hashlib import sha256
 from typing import Any
@@ -177,6 +178,51 @@ def _model_call_audit_valid(
     )
 
 
+def _inline_return_closes_the_turn(final_tool_call: dict[str, object]) -> bool:
+    """Accept the inline route, which the competence packet now requires.
+
+    The packet tells the model to call ``return_result`` as the final statement
+    of its ``execute_python`` cell, and forbids the separate tool, because the
+    tool route makes it retype a serialized string by hand -- one surplus brace
+    discarded a complete commitment in run 20260802T120006Z. This verifier still
+    demanded the tool route, so it contradicted the instruction the treatment
+    gives and failed the first two-action run for following it.
+
+    The inline route cannot bind the literal payload the way the tool route can:
+    the cell calls ``return_result`` with variables it computed, so the decision
+    is not present as text. What is checkable, and what matters, is that the turn
+    ended because the model invoked ``return_result`` itself -- the same final
+    statement the frozen worker detects at agent.py's inline-return handling --
+    rather than because the host supplied a decision of its own.
+    """
+
+    if set(final_tool_call) != {"arguments", "id", "name"}:
+        return False
+    identifier = final_tool_call.get("id")
+    arguments = final_tool_call.get("arguments")
+    if not isinstance(identifier, str) or not identifier:
+        return False
+    if not isinstance(arguments, str):
+        return False
+    try:
+        payload = json.loads(arguments)
+    except json.JSONDecodeError:
+        return False
+    if set(payload) != {"code"} or not isinstance(payload["code"], str):
+        return False
+    try:
+        tree = ast.parse(payload["code"])
+    except SyntaxError:
+        return False
+    final = tree.body[-1] if tree.body else None
+    return (
+        isinstance(final, ast.Expr)
+        and isinstance(final.value, ast.Call)
+        and isinstance(final.value.func, ast.Name)
+        and final.value.func.id == "return_result"
+    )
+
+
 def _last_model_call_returns_decision(
     model_calls: list[object], worker_decision: object
 ) -> bool:
@@ -191,6 +237,11 @@ def _last_model_call_returns_decision(
     if not isinstance(tool_calls, list) or not tool_calls:
         return False
     final_tool_call = tool_calls[-1]
+    if (
+        isinstance(final_tool_call, dict)
+        and final_tool_call.get("name") == "execute_python"
+    ):
+        return _inline_return_closes_the_turn(final_tool_call)
     if (
         not isinstance(final_tool_call, dict)
         or set(final_tool_call) != {"arguments", "id", "name"}

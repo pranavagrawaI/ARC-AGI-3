@@ -1115,7 +1115,10 @@ def _provider_profile_report(
         "seed": profile.seed if profile.seed is not None else "<omitted>",
         "stream": profile.stream,
         "truncation": profile.truncation,
-        "provider": route,
+        # An open route sends no provider block at all, and _crossing_profile
+        # reports an absent field as "<omitted>". Expecting {} would compare a
+        # route we never sent against a field that was never there.
+        "provider": route if route else "<omitted>",
     }
     actuals = [_crossing_profile(item) for item in crossings]
     expected: list[dict[str, Any]] = []
