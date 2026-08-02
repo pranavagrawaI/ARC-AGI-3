@@ -45,6 +45,25 @@ from competence import (
     parse_model_reason,
 )
 
+
+class ModelCorrectableError(NooaWorkerError):
+    """A rejection the model could answer by re-authoring its own commitment.
+
+    Most failures here are preconditions: nothing the model writes can satisfy
+    them, because the observation arrived with the wrong dtype, a budget is
+    spent, or the worker is gone. Those must fail fast.
+
+    This class marks the other kind. The value that failed was authored by the
+    model, so a later crossing that reports the error is answerable — run
+    20260802T120006Z lost a complete and correct commitment to one surplus brace
+    that the model had every means to fix.
+
+    Both kinds still stop the run; repair is not built. The split exists so that
+    the summary says which failures were the model's to correct, and so the
+    repair crossing has one class to catch rather than a list of message
+    prefixes.
+    """
+
 # arc_agi declares the frame dtype at remote_wrapper.py:242,
 # np.array(frame_layer, dtype=np.int8), and experiments/harness/runner.py:53
 # passes it through with np.array(frame.frame, copy=True). Live ls20 observations
@@ -238,7 +257,11 @@ class NooaCompetenceProcessAgent(NooaProcessAgent):
             self._write_process(
                 "agent_error",
                 action_point_id=self._step,
-                error={"type": type(error).__name__, "message": str(error)},
+                error={
+                    "type": type(error).__name__,
+                    "message": str(error),
+                    "correctable": isinstance(error, ModelCorrectableError),
+                },
             )
             raise
 
@@ -360,11 +383,11 @@ class NooaCompetenceProcessAgent(NooaProcessAgent):
         data = payload.get("data")
         reason = payload.get("reason")
         if type(action) is not int or action not in observation.available_actions:
-            raise NooaWorkerError(f"worker returned illegal action: {action!r}")
+            raise ModelCorrectableError(f"worker returned illegal action: {action!r}")
         if data is not None and not isinstance(data, dict):
-            raise NooaWorkerError("worker decision data must be an object or null")
+            raise ModelCorrectableError("worker decision data must be an object or null")
         if not isinstance(reason, str):
-            raise NooaWorkerError("worker decision reason must be a string")
+            raise ModelCorrectableError("worker decision reason must be a string")
         if action in coordinate_actions:
             if (
                 not isinstance(data, dict)
@@ -374,11 +397,11 @@ class NooaCompetenceProcessAgent(NooaProcessAgent):
                     for axis in ("x", "y")
                 )
             ):
-                raise NooaWorkerError(
+                raise ModelCorrectableError(
                     f"action {action} requires integer x and y data"
                 )
             if not (0 <= data["x"] < width and 0 <= data["y"] < height):
-                raise NooaWorkerError(
+                raise ModelCorrectableError(
                     f"action {action} coordinates {(data['x'], data['y'])} are outside "
                     f"width={width}, height={height}"
                 )
@@ -395,7 +418,9 @@ class NooaCompetenceProcessAgent(NooaProcessAgent):
                 action_point_id=self._step,
                 error={"type": type(error).__name__, "message": str(error)},
             )
-            raise NooaWorkerError(f"competence commitment rejected: {error}") from error
+            raise ModelCorrectableError(
+                f"competence commitment rejected: {error}"
+            ) from error
 
         self._flush_competence_events()
 

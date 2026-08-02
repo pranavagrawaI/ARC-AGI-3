@@ -20,6 +20,7 @@ for path in (ROOT, HOST_ROOT):
 from competence import SCHEMA, ContractError, parse_model_reason
 from competence_runner import (
     EXPECTED_PROJECTION_DTYPE,
+    ModelCorrectableError,
     NooaCompetenceProcessAgent,
     NooaWorkerError,
     _require_expected_projection_dtype,
@@ -31,6 +32,49 @@ from experiments.harness import Observation, Transition
 
 
 class CompetenceRunnerTests(unittest.TestCase):
+    def test_only_model_authored_rejections_are_marked_correctable(self) -> None:
+        """Separate what the model could fix from what it could not.
+
+        Run 20260802T120006Z lost a complete commitment to one surplus closing
+        brace; run 20260802T114136Z died because the observation arrived with the
+        wrong dtype. Only the first is answerable by re-authoring, and the repair
+        crossing needs to tell them apart by class rather than by message.
+        """
+
+        # The harness stops on NooaWorkerError. Losing that relationship would
+        # turn a clean stop into an uncaught crash.
+        self.assertTrue(issubclass(ModelCorrectableError, NooaWorkerError))
+
+        # A precondition: no commitment the model writes changes the dtype.
+        with self.assertRaises(NooaWorkerError) as caught:
+            _require_expected_projection_dtype(
+                Observation(
+                    pixels=np.zeros((1, 2, 2), dtype=np.uint8),
+                    available_actions=(1,),
+                    levels_completed=0,
+                    state="NOT_FINISHED",
+                    full_reset=False,
+                )
+            )
+        self.assertNotIsInstance(caught.exception, ModelCorrectableError)
+
+        # A postcondition: the exact payload from 20260802T120006Z, whose only
+        # defect is a trailing brace the model could have dropped.
+        live_reason = (
+            '{"assertions":[{"observable":"levels_completed","op":"==","value":0}],'
+            '"claim_ids":["env_layout"],"evidence_requests":[],'
+            '"ledger":[{"op":"create","claim_id":"env_layout","statement":"a claim"}],'
+            '"reconciliation":null,"test":"Execute action 1.",'
+            '"working_state":{"observation":"initial"}}}'
+        )
+        with self.assertRaises(ContractError):
+            parse_model_reason(live_reason, action=1, data=None)
+        # Dropping the surplus brace makes the same commitment admissible.
+        self.assertEqual(
+            parse_model_reason(live_reason[:-1], action=1, data=None)["test"],
+            "Execute action 1.",
+        )
+
     def test_ls20_projection_dtype_is_host_enforced(self) -> None:
         def observation_with(pixels: np.ndarray) -> Observation:
             return Observation(

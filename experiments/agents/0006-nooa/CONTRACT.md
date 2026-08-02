@@ -39,6 +39,16 @@ mismatch is outstanding the field carries real dispositions and stays mandatory.
 This is a syntax allowance, not a repair: the host still neither guesses nor
 corrects a malformed or semantically invalid commitment.
 
+Rejections are of two kinds, and the host records which. A **precondition**
+failure is one no commitment could satisfy — an observation arriving with the
+wrong dtype, a spent budget, a closed worker — and it fails fast. A
+**postcondition** failure rejects a value the model itself authored: an
+unparseable `reason`, an illegal action, a commitment the contract refuses.
+Those raise `ModelCorrectableError` and are reported in the run summary as
+`correctable`. Both currently stop the run. The distinction exists because only
+the second kind is answerable by re-authoring, and a later repair crossing must
+be able to select it by class rather than by matching message text.
+
 ## Admitted mechanisms
 
 | Missing function | 0006 implementation | Host authority | Model-visible difference |
