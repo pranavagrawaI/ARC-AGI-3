@@ -17,7 +17,7 @@ for path in (ROOT, HOST_ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from competence import SCHEMA
+from competence import SCHEMA, ContractError, parse_model_reason
 from competence_runner import (
     NooaCompetenceProcessAgent,
     attach_competence_context,
@@ -56,6 +56,69 @@ class CompetenceRunnerTests(unittest.TestCase):
         )
         self.assertNotIn("action", attached["competence"]["reason_json_fields"])
         self.assertNotIn("data", attached["competence"]["reason_json_fields"])
+
+    def test_model_visible_pattern_serializes_the_nested_commitment_mechanically(self) -> None:
+        attached = attach_competence_context(
+            {"step": 0},
+            {"schema": SCHEMA, "current_observation": {"step": 0}},
+        )
+        malformed = (
+            '{"working_state":{},"test":"one action","claim_ids":[],"ledger":[],'
+            '"assertions":[],"evidence_requests":[],"reconciliation":"None"}"'
+        )
+        with self.assertRaisesRegex(ContractError, "JSON object"):
+            parse_model_reason(malformed, action=1, data=None)
+
+        captured: list[dict[str, object]] = []
+        namespace = {
+            "action": 1,
+            "data": None,
+            "commitment": {
+                "working_state": {},
+                "test": "one action",
+                "claim_ids": [],
+                "ledger": [],
+                "assertions": [],
+                "evidence_requests": [],
+                "reconciliation": None,
+            },
+            "return_result": captured.append,
+        }
+        serialization = attached["competence"]["reason_serialization"]
+        authoring_schema = attached["competence"]["reason_authoring_schema"]
+        self.assertEqual(authoring_schema["test"], {"type": "string", "minLength": 1, "maxLength": 500})
+        self.assertEqual(authoring_schema["assertions"]["minItems"], 1)
+        self.assertEqual(authoring_schema["assertions"]["maxItems"], 5)
+        self.assertEqual(
+            set(authoring_schema["assertions"]["items"]["numeric"]["observable"]),
+            {"changed_cells", "levels_completed"},
+        )
+        self.assertEqual(
+            authoring_schema["reconciliation"]["when_no_unresolved_mismatches"],
+            None,
+        )
+        exec(  # noqa: S102 - execute the exact model-visible Python scaffold.
+            serialization["python_pattern"], namespace
+        )
+
+        result = captured.pop()
+        reason = result["reason"]
+        self.assertIsInstance(reason, str)
+        assert isinstance(reason, str)
+        self.assertNotIn('"None"', reason)
+        parsed = parse_model_reason(reason, action=1, data=None)
+        self.assertIsNone(parsed["reconciliation"])
+
+        with self.assertRaisesRegex(TypeError, "Python dict"):
+            exec(  # noqa: S102 - execute the exact model-visible Python scaffold.
+                serialization["python_pattern"],
+                {
+                    "action": 1,
+                    "data": None,
+                    "commitment": json.dumps(namespace["commitment"]),
+                    "return_result": captured.append,
+                },
+            )
 
     def test_offline_worker_must_carry_and_host_admits_a_commitment(self) -> None:
         def observation(step: int) -> Observation:

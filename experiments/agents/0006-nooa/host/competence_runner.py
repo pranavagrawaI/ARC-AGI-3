@@ -68,9 +68,94 @@ def attach_competence_context(
         "instruction": (
             "For the final return_result, reason must be compact JSON and contain "
             "exactly the listed competence fields. It must not contain action or data. "
-            "The host alone checks the successor and admits the environment action."
+            "The host alone checks the successor and admits the environment action. "
+            "Do not manually quote or escape reason. In execute_python, first define "
+            "model-authored action and data variables plus commitment as a Python dict, "
+            "then execute the "
+            "provided reason_serialization.python_pattern. Use Python None for JSON null."
         ),
         "reason_json_fields": list(_REASON_FIELDS),
+        "reason_authoring_schema": {
+            "working_state": {"type": "object", "maxEncodedCharacters": 4_000},
+            "test": {"type": "string", "minLength": 1, "maxLength": 500},
+            "claim_ids": {
+                "type": "array",
+                "maxItems": 4,
+                "uniqueItems": True,
+                "items": {"type": "string", "minLength": 1, "maxLength": 80},
+                "constraint": "each ID must name an active claim after ledger operations",
+            },
+            "ledger": {
+                "type": "array",
+                "items": {
+                    "create_or_revise": {
+                        "exactKeys": ["op", "claim_id", "statement"],
+                        "op": ["create", "revise"],
+                        "claim_id": {"type": "string", "minLength": 1, "maxLength": 80},
+                        "statement": {"type": "string", "minLength": 1, "maxLength": 1_000},
+                    },
+                    "retire": {
+                        "exactKeys": ["op", "claim_id"],
+                        "op": ["retire"],
+                        "claim_id": {"type": "string", "minLength": 1, "maxLength": 80},
+                    },
+                },
+            },
+            "assertions": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 5,
+                "items": {
+                    "numeric": {
+                        "exactKeys": ["observable", "op", "value"],
+                        "observable": ["changed_cells", "levels_completed"],
+                        "op": ["==", "!=", "<", "<=", ">", ">="],
+                        "value": {"type": "integer", "minimum": 0},
+                    },
+                    "state": {
+                        "exactKeys": ["observable", "op", "value"],
+                        "observable": ["state"],
+                        "op": ["==", "!="],
+                        "value": {"type": "string", "minLength": 1, "maxLength": 500},
+                    },
+                },
+            },
+            "evidence_requests": {
+                "type": "array",
+                "maxItems": 4,
+                "items": {
+                    "exactKeys": ["operator", "action_id"],
+                    "operator": ["transition"],
+                    "action_id": {
+                        "type": "integer",
+                        "constraint": "must name an already recorded transition",
+                    },
+                },
+            },
+            "reconciliation": {
+                "when_no_unresolved_mismatches": None,
+                "when_unresolved_mismatches": {
+                    "type": "array",
+                    "itemCount": "exactly one per unresolved mismatch",
+                    "items": {
+                        "exactKeys": ["mismatch_id", "disposition", "note"],
+                        "mismatch_id": {"type": "string", "minLength": 1, "maxLength": 100},
+                        "disposition": ["ABANDON", "NARROW", "RETAIN"],
+                        "note": {"type": "string", "minLength": 1, "maxLength": 1_000},
+                    },
+                },
+            },
+        },
+        "reason_serialization": {
+            "method": "python-json-dumps",
+            "python_pattern": (
+                "import json\n"
+                "if not isinstance(commitment, dict):\n"
+                "    raise TypeError('commitment must be a Python dict')\n"
+                "reason = json.dumps(commitment, sort_keys=True, separators=(',', ':'))\n"
+                "return_result({'action': action, 'data': data, 'reason': reason})"
+            ),
+        },
         "context": deepcopy(dict(packet)),
     }
     return model_observation
