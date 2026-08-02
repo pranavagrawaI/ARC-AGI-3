@@ -646,7 +646,12 @@ Plain text does not finish an action point."""
         step = action_point.observation.get("step")
         if type(step) is not int:
             raise ValueError("public action point observation requires integer step")
-        retained = [_without_frame_image(message) for message in self._current_turn_messages]
+        retained = [
+            kept
+            for message in self._current_turn_messages
+            if (kept := _without_consumed_return(_without_frame_image(message)))
+            is not None
+        ]
         self._visible_turns.append((step, retained))
         while len(self._visible_turns) > self._max_context_turns:
             evicted_step, _messages = self._visible_turns.pop(0)
@@ -684,6 +689,48 @@ def _bounded_stream(value: str, *, limit: int) -> str:
         + f"\n<truncated>{omitted} characters omitted</truncated>\n"
         + value[-tail:]
     )
+
+
+def _without_consumed_return(message: dict[str, Any]) -> dict[str, Any] | None:
+    """Drop the final-answer tool call the host consumed instead of answering.
+
+    ``return_result`` ends an action point: the host takes its argument and
+    releases the environment action, so no tool message ever replies to it.
+    Replaying that call as conversation history leaves an open tool call, and a
+    provider that enforces the rule refuses the next request outright --
+    ModelRun answers "every tool_call must be answered by a tool message before
+    the conversation continues". Providers differ on this, so the fault stayed
+    hidden until a run pinned one endpoint and stopped being load-balanced onto a
+    lenient one.
+
+    Only the unanswered call is removed. A ``return_result`` invoked inline from
+    an ``execute_python`` cell is not affected: there the tool call is
+    ``execute_python`` and it receives its output normally.
+    """
+
+    tool_calls = message.get("tool_calls")
+    if not isinstance(tool_calls, list):
+        return message
+    kept = [
+        call
+        for call in tool_calls
+        if not (
+            isinstance(call, dict)
+            and isinstance(call.get("function"), dict)
+            and call["function"].get("name") == "return_result"
+        )
+    ]
+    if len(kept) == len(tool_calls):
+        return message
+    rebuilt = {key: value for key, value in message.items() if key != "tool_calls"}
+    if kept:
+        rebuilt["tool_calls"] = kept
+        return rebuilt
+    content = rebuilt.get("content")
+    if content in (None, "", []):
+        # Nothing survives: the turn was the final answer and nothing else.
+        return None
+    return rebuilt
 
 
 def _without_frame_image(message: dict[str, Any]) -> dict[str, Any]:
