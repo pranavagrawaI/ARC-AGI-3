@@ -579,11 +579,7 @@ Plain text does not finish an action point."""
             for _step, messages in self._visible_turns:
                 assembled.extend(messages)
             assembled.extend(current)
-            # Filter here rather than at retention: a repair crossing reissues an
-            # action point, so a consumed call reaches the provider through the
-            # live turn as well as through the retained ones, and only the
-            # assembled request sees both.
-            context.messages = _without_unanswered_tool_calls(assembled)
+            context.messages = assembled
             self._current_turn_messages = json.loads(json.dumps(current))
             if (
                 self._max_model_calls is not None
@@ -690,88 +686,6 @@ def _bounded_stream(value: str, *, limit: int) -> str:
         + f"\n<truncated>{omitted} characters omitted</truncated>\n"
         + value[-tail:]
     )
-
-
-def _without_unanswered_tool_calls(
-    messages: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Drop tool calls the host consumed instead of answering.
-
-    An action point ends the moment ``return_result`` supplies its argument. The
-    host takes that argument and releases the environment action, so whichever
-    tool call carried it never receives a reply: the ``return_result`` call when
-    the model uses the tool directly, or the ``execute_python`` call whose cell
-    ended in an inline ``return_result``.
-
-    Replaying such a call leaves an open tool call in the next request. Providers
-    disagree about whether that is legal -- ModelRun refuses with "every
-    tool_call must be answered by a tool message before the conversation
-    continues", CoreWeave accepts it -- so the fault stayed hidden while
-    OpenRouter load-balanced across both, and became deterministic as soon as a
-    run pinned one endpoint.
-
-    Answered calls, and every other message, are left exactly as they were.
-    """
-
-    answered = {
-        message.get("tool_call_id")
-        for message in messages
-        if message.get("role") == "tool" and message.get("tool_call_id")
-    }
-    kept: list[dict[str, Any]] = []
-    for message in messages:
-        calls = message.get("tool_calls")
-        if not isinstance(calls, list):
-            kept.append(message)
-            continue
-        surviving = [
-            call
-            for call in calls
-            if isinstance(call, dict) and call.get("id") in answered
-        ]
-        if len(surviving) == len(calls):
-            kept.append(message)
-            continue
-        rebuilt = {key: value for key, value in message.items() if key != "tool_calls"}
-        if surviving:
-            rebuilt["tool_calls"] = surviving
-        dropped = [call for call in calls if call not in surviving]
-        kept.append(_with_consumed_calls_as_text(rebuilt, dropped))
-    return kept
-
-
-def _consumed_call_note(call: dict[str, Any]) -> str:
-    function = call.get("function") if isinstance(call.get("function"), dict) else {}
-    return (
-        f"[this action point ended inside the {function.get('name')} call below, whose "
-        "result the host consumed and released as the environment action; it is "
-        "recorded here as text because no tool reply exists for it]\n"
-        f"{function.get('arguments')}"
-    )
-
-
-def _with_consumed_calls_as_text(
-    message: dict[str, Any], dropped: list[dict[str, Any]]
-) -> dict[str, Any]:
-    """Keep what a consumed tool call said, without leaving the call open.
-
-    Deleting the message outright would also delete the model's record of the
-    cell that produced its own action, which the workspace keeps but the
-    transcript would not. The call is re-recorded as text instead.
-    """
-
-    if not dropped:
-        return message
-    notes = [_consumed_call_note(call) for call in dropped]
-    content = message.get("content")
-    if isinstance(content, list):
-        return {
-            **message,
-            "content": content + [{"type": "text", "text": note} for note in notes],
-        }
-    existing = content if isinstance(content, str) and content else ""
-    joined = "\n".join(notes)
-    return {**message, "content": f"{existing}\n{joined}".strip()}
 
 
 def _without_frame_image(message: dict[str, Any]) -> dict[str, Any]:

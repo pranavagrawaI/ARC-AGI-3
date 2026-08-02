@@ -188,6 +188,65 @@ def _expand_response_batches(
     return expanded
 
 
+def _without_unanswered_tool_calls(
+    items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Drop tool calls the host consumed instead of answering.
+
+    An action point ends the moment ``return_result`` supplies its argument: the
+    host takes it and releases the environment action, so whichever call carried
+    it never receives a reply. That is the ``return_result`` call when the model
+    uses the tool directly, and the ``execute_python`` call when the cell ends in
+    an inline ``return_result``. A repair crossing reissues the action point, so
+    the consumed call also reaches the provider through the live turn.
+
+    Providers disagree about whether an open call is legal. ModelRun refuses --
+    "every tool_call must be answered by a tool message before the conversation
+    continues" -- and CoreWeave accepts, so load balancing hid this until a run
+    pinned one endpoint.
+
+    This runs on the final Responses items, after ``_expand_response_batches``,
+    because that is the only point where every route into the request has one
+    shape. Filtering the agent's message list instead misses ``_batch``
+    envelopes, whose ``function_call`` items do not exist yet.
+
+    Reasoning items are never removed. Past reasoning is required for model
+    performance, and only unanswered ``function_call`` items are dropped.
+    """
+
+    answered = {
+        item.get("call_id")
+        for item in items
+        if isinstance(item, dict) and item.get("type") == "function_call_output"
+    }
+    kept: list[dict[str, Any]] = []
+    for item in items:
+        consumed = (
+            isinstance(item, dict)
+            and item.get("type") == "function_call"
+            and item.get("call_id") not in answered
+        )
+        if not consumed:
+            kept.append(item)
+            continue
+        # Keep what the call said. Dropping it outright would also drop the
+        # model's record of the cell that produced its own action, which the
+        # workspace keeps but the transcript would not.
+        kept.append(
+            {
+                "role": "assistant",
+                "content": (
+                    f"[this action point ended inside the {item.get('name')} call "
+                    "below, whose result the host consumed and released as the "
+                    "environment action; it is recorded here as text because no "
+                    "tool reply exists for it]\n"
+                    f"{item.get('arguments')}"
+                ),
+            }
+        )
+    return kept
+
+
 class ResponsesClient(_NooaResponsesClient):
     """NOOA Responses client with an explicit Chat-to-Responses content crossing."""
 
@@ -208,7 +267,7 @@ class ResponsesClient(_NooaResponsesClient):
                     item.get("content"),
                 )
             normalized.append(item)
-        return normalized, instructions
+        return _without_unanswered_tool_calls(normalized), instructions
 
 
 def build_llm(

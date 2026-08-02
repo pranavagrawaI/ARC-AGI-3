@@ -30,7 +30,20 @@ The assembled request now drops any tool call that was never answered. Dropping 
 ends the action point, so the enclosing `execute_python` call is the one left
 unanswered. The rule is therefore stated over replies, not over tool names.
 
-Filtering at retention was not enough. A repair crossing reissues one action
+Filtering the agent's message list was not enough, at either site. A real
+Responses turn arrives as a ``{"_batch": [...]}`` envelope carrying the
+provider's output items verbatim, and its ``function_call`` items do not exist
+until ``_expand_response_batches`` runs inside the client. Three successive fixes
+passed against ``FakeLLMClient``'s chat shape -- ``{"role": "assistant",
+"tool_calls": [...]}`` -- which production never emits, and each still failed
+live. The filter now runs on the final Responses items, the one point where every
+route into the request has one shape, and its test is driven by the recorded
+envelope from run 20260802T160203Z.
+
+Reasoning items are never dropped; past reasoning is required for model
+performance and the test asserts the item survives byte-for-byte.
+
+Filtering at retention was also not enough. A repair crossing reissues one action
 point, so the consumed call reaches the provider through the live turn as well as
 through the retained ones, and only the assembled request sees both. Two
 regression tests passed against the retained path while the live repair crossing
