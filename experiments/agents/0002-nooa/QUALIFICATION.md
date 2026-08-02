@@ -25,10 +25,15 @@ point failed with HTTP 400. It is reproducible from the preserved request body
 once the redacted frame image is restored from `worker/model-frame.png`, whose
 sha256 the audit records.
 
-The retained turn now drops the consumed `return_result` call. Only the
-unanswered call is removed; a `return_result` invoked inline from an
-`execute_python` cell is untouched, because there the tool call is
-`execute_python` and it receives its output normally.
+The retained turn now drops any tool call that was never answered. Dropping only
+`return_result` was insufficient: when the model returns inline, the cell itself
+ends the action point, so the enclosing `execute_python` call is the one left
+unanswered. The rule is therefore stated over replies, not over tool names.
+
+What the consumed call said is preserved as text on the same message. Deleting it
+outright would also delete the model's record of the cell that produced its own
+action -- the workspace keeps those variables, but the transcript would not, and
+the eviction gate caught exactly that regression.
 
 **G9 must be re-run against a pinned single provider before this gate is claimed
 again.** The prior artifact stands as a record of what was run, not as evidence

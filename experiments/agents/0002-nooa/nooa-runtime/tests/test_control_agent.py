@@ -346,19 +346,71 @@ async def test_consumed_return_result_call_is_not_replayed_as_an_open_tool_call(
     await agent.aclose()
 
     assert second.action == 2
-    replayed = llm.last_messages
-    open_calls = [
-        call
-        for message in replayed
-        for call in (message.get("tool_calls") or [])
-        if call.get("function", {}).get("name") == "return_result"
-    ]
-    assert open_calls == [], open_calls
+    _assert_every_replayed_tool_call_is_answered(llm.last_messages)
     # The answered execute_python call and its output must survive untouched.
     assert any(
         call.get("function", {}).get("name") == "execute_python"
-        for message in replayed
+        for message in llm.last_messages
         for call in (message.get("tool_calls") or [])
+    )
+
+
+def _assert_every_replayed_tool_call_is_answered(
+    messages: list[dict[str, Any]],
+) -> None:
+    answered = {
+        message.get("tool_call_id")
+        for message in messages
+        if message.get("role") == "tool"
+    }
+    open_calls = [
+        call
+        for message in messages
+        for call in (message.get("tool_calls") or [])
+        if call.get("id") not in answered
+    ]
+    assert open_calls == [], open_calls
+
+
+@pytest.mark.asyncio
+async def test_inline_return_leaves_no_unanswered_execute_python_in_history() -> None:
+    """The inline route ends the turn too, so its execute_python is unanswered.
+
+    Dropping only ``return_result`` was not enough. When the cell itself ends in
+    an inline ``return_result``, the host consumes the result and the enclosing
+    ``execute_python`` call never receives its output either. ModelRun refuses
+    the next request for exactly the same reason.
+    """
+
+    llm = FakeLLMClient(
+        scripted_responses=[
+            _execute("marker = 1", "answered-call"),
+            _execute(
+                "return_result({'action': 1, 'data': None, 'reason': 'first'})",
+                "consumed-call",
+            ),
+            _execute(
+                "return_result({'action': 2, 'data': None, 'reason': 'second'})",
+                "consumed-call-2",
+            ),
+        ]
+    )
+    agent = NooaControlAgent(llm=llm)
+
+    await agent.choose_action(
+        PublicActionPoint(observation={"step": 0}, legal_actions=(1, 2))
+    )
+    second = await agent.choose_action(
+        PublicActionPoint(observation={"step": 1}, legal_actions=(1, 2))
+    )
+    await agent.aclose()
+
+    assert second.action == 2
+    _assert_every_replayed_tool_call_is_answered(llm.last_messages)
+    # The answered call and its output are untouched.
+    assert any(
+        message.get("tool_call_id") == "answered-call"
+        for message in llm.last_messages
     )
 
 

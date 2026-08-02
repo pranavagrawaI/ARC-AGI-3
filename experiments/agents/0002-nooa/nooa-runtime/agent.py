@@ -646,12 +646,12 @@ Plain text does not finish an action point."""
         step = action_point.observation.get("step")
         if type(step) is not int:
             raise ValueError("public action point observation requires integer step")
-        retained = [
-            kept
-            for message in self._current_turn_messages
-            if (kept := _without_consumed_return(_without_frame_image(message)))
-            is not None
-        ]
+        retained = _without_unanswered_tool_calls(
+            [
+                _without_frame_image(message)
+                for message in self._current_turn_messages
+            ]
+        )
         self._visible_turns.append((step, retained))
         while len(self._visible_turns) > self._max_context_turns:
             evicted_step, _messages = self._visible_turns.pop(0)
@@ -691,46 +691,86 @@ def _bounded_stream(value: str, *, limit: int) -> str:
     )
 
 
-def _without_consumed_return(message: dict[str, Any]) -> dict[str, Any] | None:
-    """Drop the final-answer tool call the host consumed instead of answering.
+def _without_unanswered_tool_calls(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Drop tool calls the host consumed instead of answering.
 
-    ``return_result`` ends an action point: the host takes its argument and
-    releases the environment action, so no tool message ever replies to it.
-    Replaying that call as conversation history leaves an open tool call, and a
-    provider that enforces the rule refuses the next request outright --
-    ModelRun answers "every tool_call must be answered by a tool message before
-    the conversation continues". Providers differ on this, so the fault stayed
-    hidden until a run pinned one endpoint and stopped being load-balanced onto a
-    lenient one.
+    An action point ends the moment ``return_result`` supplies its argument. The
+    host takes that argument and releases the environment action, so whichever
+    tool call carried it never receives a reply: the ``return_result`` call when
+    the model uses the tool directly, or the ``execute_python`` call whose cell
+    ended in an inline ``return_result``.
 
-    Only the unanswered call is removed. A ``return_result`` invoked inline from
-    an ``execute_python`` cell is not affected: there the tool call is
-    ``execute_python`` and it receives its output normally.
+    Replaying such a call leaves an open tool call in the next request. Providers
+    disagree about whether that is legal -- ModelRun refuses with "every
+    tool_call must be answered by a tool message before the conversation
+    continues", CoreWeave accepts it -- so the fault stayed hidden while
+    OpenRouter load-balanced across both, and became deterministic as soon as a
+    run pinned one endpoint.
+
+    Answered calls, and every other message, are left exactly as they were.
     """
 
-    tool_calls = message.get("tool_calls")
-    if not isinstance(tool_calls, list):
+    answered = {
+        message.get("tool_call_id")
+        for message in messages
+        if message.get("role") == "tool" and message.get("tool_call_id")
+    }
+    kept: list[dict[str, Any]] = []
+    for message in messages:
+        calls = message.get("tool_calls")
+        if not isinstance(calls, list):
+            kept.append(message)
+            continue
+        surviving = [
+            call
+            for call in calls
+            if isinstance(call, dict) and call.get("id") in answered
+        ]
+        if len(surviving) == len(calls):
+            kept.append(message)
+            continue
+        rebuilt = {key: value for key, value in message.items() if key != "tool_calls"}
+        if surviving:
+            rebuilt["tool_calls"] = surviving
+        dropped = [call for call in calls if call not in surviving]
+        kept.append(_with_consumed_calls_as_text(rebuilt, dropped))
+    return kept
+
+
+def _consumed_call_note(call: dict[str, Any]) -> str:
+    function = call.get("function") if isinstance(call.get("function"), dict) else {}
+    return (
+        f"[this action point ended inside the {function.get('name')} call below, whose "
+        "result the host consumed and released as the environment action; it is "
+        "recorded here as text because no tool reply exists for it]\n"
+        f"{function.get('arguments')}"
+    )
+
+
+def _with_consumed_calls_as_text(
+    message: dict[str, Any], dropped: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Keep what a consumed tool call said, without leaving the call open.
+
+    Deleting the message outright would also delete the model's record of the
+    cell that produced its own action, which the workspace keeps but the
+    transcript would not. The call is re-recorded as text instead.
+    """
+
+    if not dropped:
         return message
-    kept = [
-        call
-        for call in tool_calls
-        if not (
-            isinstance(call, dict)
-            and isinstance(call.get("function"), dict)
-            and call["function"].get("name") == "return_result"
-        )
-    ]
-    if len(kept) == len(tool_calls):
-        return message
-    rebuilt = {key: value for key, value in message.items() if key != "tool_calls"}
-    if kept:
-        rebuilt["tool_calls"] = kept
-        return rebuilt
-    content = rebuilt.get("content")
-    if content in (None, "", []):
-        # Nothing survives: the turn was the final answer and nothing else.
-        return None
-    return rebuilt
+    notes = [_consumed_call_note(call) for call in dropped]
+    content = message.get("content")
+    if isinstance(content, list):
+        return {
+            **message,
+            "content": content + [{"type": "text", "text": note} for note in notes],
+        }
+    existing = content if isinstance(content, str) and content else ""
+    joined = "\n".join(notes)
+    return {**message, "content": f"{existing}\n{joined}".strip()}
 
 
 def _without_frame_image(message: dict[str, Any]) -> dict[str, Any]:
