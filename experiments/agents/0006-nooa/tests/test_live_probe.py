@@ -29,6 +29,7 @@ from evidence_chain import (
     _changed_pixels,
     canonical_digest,
     competence_packet_digest,
+    two_action_chain_report,
 )
 
 
@@ -319,6 +320,7 @@ def two_action_fixture(
                     "kind": "competence_context_assembled",
                     "run_id": run_id,
                     "action_point_id": action_point,
+                    "step": action_point,
                     "current_evidence_id": commitment["before_evidence_id"],
                     "competence_packet_sha256": canonical_digest(packet),
                     "projection": projection(before),
@@ -328,6 +330,7 @@ def two_action_fixture(
                     "kind": "action_request",
                     "run_id": run_id,
                     "action_point_id": action_point,
+                    "step": action_point,
                     "host_observation": {
                         "path": f"host-observations/step-{action_point:05d}.json",
                         "sha256": sha256(
@@ -344,6 +347,7 @@ def two_action_fixture(
                     "kind": "model_crossing",
                     "run_id": run_id,
                     "action_point_id": action_point,
+                    "step": action_point,
                     "audit": {
                         "model_calls": [
                             model_call(
@@ -363,6 +367,7 @@ def two_action_fixture(
                     "kind": "decision_validated",
                     "run_id": run_id,
                     "action_point_id": action_point,
+                    "step": action_point,
                     "decision": {
                         "action": commitment["action"],
                         "data": commitment["data"],
@@ -378,6 +383,7 @@ def two_action_fixture(
                     "kind": "competence_action_admitted",
                     "run_id": run_id,
                     "action_point_id": action_point,
+                    "step": action_point,
                     "commitment": commitment,
                 },
                 {
@@ -1715,6 +1721,72 @@ class LiveProbeTests(unittest.TestCase):
                 required_actions=2,
             )["success"]
         )
+
+    def test_a_refused_crossing_stays_visible_and_must_precede_its_action(self) -> None:
+        """A repair is evidence, not noise, and only counts before the action.
+
+        Run 20260802T120006Z lost a correct commitment to one surplus brace with
+        no way to answer. Once the host can re-cross, the log must still show
+        that a refusal happened and that it came before the action it belongs to.
+        """
+
+        crossing_kinds = {
+            "action_request",
+            "model_crossing",
+            "decision_validated",
+            "competence_action_admitted",
+        }
+
+        def with_refusal(after_admission: bool) -> list[dict]:
+            _events, process = two_action_fixture()
+            # Leave crossing id 0 free for the refused attempt.
+            for record in process:
+                if record.get("kind") in crossing_kinds:
+                    record["action_point_id"] = record["step"] + 1
+                    if record["kind"] == "action_request":
+                        record["request"]["action_point_id"] = record["action_point_id"]
+                        record["request_sha256"] = canonical_digest(record["request"])
+            request = deepcopy(
+                next(r for r in process if r.get("kind") == "action_request")
+            )
+            request["action_point_id"] = 0
+            request["request"]["action_point_id"] = 0
+            request["request_sha256"] = canonical_digest(request["request"])
+            crossing = deepcopy(
+                next(r for r in process if r.get("kind") == "model_crossing")
+            )
+            crossing["action_point_id"] = 0
+            refusal = {
+                "protocol": request["protocol"],
+                "kind": "competence_rejected",
+                "run_id": request["run_id"],
+                "action_point_id": 0,
+                "step": 0,
+                "error": {
+                    "type": "ModelCorrectableError",
+                    "message": "competence commitment rejected: not a JSON object",
+                    "correctable": True,
+                },
+                "attempts_remaining": 1,
+            }
+            triple = [request, crossing, refusal]
+            anchor_kind = (
+                "competence_action_admitted" if after_admission else "action_request"
+            )
+            index = process.index(
+                next(r for r in process if r.get("kind") == anchor_kind)
+            )
+            offset = index + 1 if after_admission else index
+            return process[:offset] + triple + process[offset:]
+
+        events, _baseline = two_action_fixture()
+
+        report = two_action_chain_report(events, with_refusal(after_admission=False))
+        self.assertTrue(all(report.values()), report)
+
+        # A refusal recorded after the action was released is not a repair.
+        late = two_action_chain_report(events, with_refusal(after_admission=True))
+        self.assertFalse(late["refused_crossings_precede_their_action"])
 
     def test_reviewed_false_positive_mutants_fail_closed(self) -> None:
         summary = {

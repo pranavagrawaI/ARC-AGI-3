@@ -45,6 +45,12 @@ from competence import (
     parse_model_reason,
 )
 
+# A correctable rejection may be answered this many times within one action
+# point. It is a 0006 bound, not a frozen 0002 one, so it is pinned by the
+# approval's source hash rather than by the paired run spec. Each attempt also
+# spends the spec's model-call budget, which remains the ceiling on total cost.
+MAX_COMMITMENT_REPAIRS = 1
+
 
 class ModelCorrectableError(NooaWorkerError):
     """A rejection the model could answer by re-authoring its own commitment.
@@ -86,9 +92,35 @@ _REASON_FIELDS = (
 )
 
 
+def rejection_notice(message: str, *, attempts_remaining: int) -> dict[str, object]:
+    """State the host's own rejection without authoring a replacement.
+
+    The notice carries the contract error and points at the model's workspace,
+    where the ``reason`` string it already serialized is still in scope. It
+    supplies no field values, no corrected payload, and no suggestion about what
+    to claim or predict: the model re-authors, or the action is refused.
+    """
+
+    return {
+        "schema": "0006-nooa-rejection-notice-v1",
+        "rejected_reason": message,
+        "attempts_remaining": attempts_remaining,
+        "instruction": (
+            "Your previous commitment was refused for the stated reason and no "
+            "environment action was released. The Python workspace is unchanged, "
+            "so any variable your last cell defined is still in scope. If you "
+            "already serialized a commitment there, pass that exact string as "
+            "reason rather than retyping it. Otherwise author a new commitment. "
+            "The host will not repair or complete a commitment for you."
+        ),
+    }
+
+
 def attach_competence_context(
     frozen_observation: Mapping[str, object],
     packet: Mapping[str, object],
+    *,
+    rejection: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Add the fixed treatment viewport without granting a new host affordance."""
 
@@ -192,6 +224,8 @@ def attach_competence_context(
         },
         "context": deepcopy(dict(packet)),
     }
+    if rejection is not None:
+        model_observation["competence"]["rejection"] = deepcopy(dict(rejection))
     return model_observation
 
 
@@ -235,12 +269,29 @@ def _bound_model_audit(audit: object) -> dict[str, Any]:
 class NooaCompetenceProcessAgent(NooaProcessAgent):
     """Frozen 0002 transport plus the 0006 competence admission protocol."""
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *args: Any,
+        max_commitment_repairs: int = MAX_COMMITMENT_REPAIRS,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.competence = CompetenceController()
         self.competence_events_path = self.run_root / "competence.jsonl"
         self._competence_event_offset = 0
         self._competence_step: int | None = None
+        if max_commitment_repairs < 0:
+            raise ValueError("max_commitment_repairs must not be negative")
+        self.max_commitment_repairs = max_commitment_repairs
+        # The frozen worker refuses a repeated (run_id, action_point_id) at
+        # launcher.py:367 and validates nothing else about the id, so a repair is
+        # simply the next one. Crossings therefore outnumber environment steps.
+        self._crossing_id = 0
+
+    def _next_crossing_id(self) -> int:
+        crossing_id = self._crossing_id
+        self._crossing_id += 1
+        return crossing_id
 
     def act(self, observation: Observation) -> Decision:
         """Decide one action, recording why if the decision cannot be made.
@@ -324,26 +375,34 @@ class NooaCompetenceProcessAgent(NooaProcessAgent):
             "current_observation_file": "current_observation.json",
             "observations_glob": "observations/step-*.json",
         }
-        request: dict[str, Any] = {
-            "protocol": "0002-nooa-ipc-v1",
-            "run_id": self.run_id,
-            "action_point_id": self._step,
-            "observation": attach_competence_context(
-                frozen_observation,
-                competence_packet,
-            ),
-            "legal_actions": list(observation.available_actions),
-            "coordinate_actions": coordinate_actions,
-            "frame_width": int(width),
-            "frame_height": int(height),
-            "paired_run_spec": self.paired_run_spec.as_record(),
-        }
-        if self.fixture_policy is not None:
-            request["fixture_python_cells"] = self.fixture_policy(self._step, observation)
-        _append_jsonl(self.requests_path, request)
+        def build_request(
+            crossing_id: int, rejection: Mapping[str, Any] | None
+        ) -> dict[str, Any]:
+            built: dict[str, Any] = {
+                "protocol": "0002-nooa-ipc-v1",
+                "run_id": self.run_id,
+                "action_point_id": crossing_id,
+                "observation": attach_competence_context(
+                    frozen_observation,
+                    competence_packet,
+                    rejection=rejection,
+                ),
+                "legal_actions": list(observation.available_actions),
+                "coordinate_actions": coordinate_actions,
+                "frame_width": int(width),
+                "frame_height": int(height),
+                "paired_run_spec": self.paired_run_spec.as_record(),
+            }
+            if self.fixture_policy is not None:
+                built["fixture_python_cells"] = self.fixture_policy(
+                    self._step, observation
+                )
+            return built
+
         self._write_process(
             "competence_context_assembled",
             action_point_id=self._step,
+            step=self._step,
             current_evidence_id=current_evidence.evidence_id,
             competence_packet_sha256=sha256(
                 json.dumps(competence_packet, sort_keys=True, separators=(",", ":")).encode(
@@ -352,75 +411,104 @@ class NooaCompetenceProcessAgent(NooaProcessAgent):
             ).hexdigest(),
             projection=_projection_identity(current),
         )
-        self._write_process(
-            "action_request",
-            action_point_id=self._step,
-            host_observation={
-                "path": host_observation_path.relative_to(self.run_root).as_posix(),
-                "sha256": host_observation_commitment,
-            },
-            request_sha256=sha256(
-                json.dumps(request, sort_keys=True, separators=(",", ":")).encode("utf-8")
-            ).hexdigest(),
-            request=request,
-        )
-        response = self._wait_for_response(self._step)
-        audit = response.get("audit")
-        worker_error = response.get("error")
-        bound_audit = _bound_model_audit(audit)
-        self._write_process(
-            "model_crossing",
-            action_point_id=self._step,
-            audit=bound_audit,
-            worker_decision=response.get("decision"),
-            worker_error=_redact_images(worker_error),
-        )
-        self._validate_worker_outcome(audit, worker_error)
-        payload = response.get("decision")
-        if not isinstance(payload, dict):
-            raise NooaWorkerError("worker response has no decision object")
-        action = payload.get("action")
-        data = payload.get("data")
-        reason = payload.get("reason")
-        if type(action) is not int or action not in observation.available_actions:
-            raise ModelCorrectableError(f"worker returned illegal action: {action!r}")
-        if data is not None and not isinstance(data, dict):
-            raise ModelCorrectableError("worker decision data must be an object or null")
-        if not isinstance(reason, str):
-            raise ModelCorrectableError("worker decision reason must be a string")
-        if action in coordinate_actions:
-            if (
-                not isinstance(data, dict)
-                or any(
-                    not isinstance(data.get(axis), int)
-                    or isinstance(data.get(axis), bool)
-                    for axis in ("x", "y")
-                )
-            ):
-                raise ModelCorrectableError(
-                    f"action {action} requires integer x and y data"
-                )
-            if not (0 <= data["x"] < width and 0 <= data["y"] < height):
-                raise ModelCorrectableError(
-                    f"action {action} coordinates {(data['x'], data['y'])} are outside "
-                    f"width={width}, height={height}"
-                )
-        try:
-            raw_commitment = parse_model_reason(reason, action=action, data=data)
-            commitment = self.competence.admit(
-                raw_commitment,
-                legal_actions=observation.available_actions,
+        def admit_from(response: Mapping[str, Any]) -> tuple[int, Any, str, dict[str, Any]]:
+            self._validate_worker_outcome(
+                response.get("audit"), response.get("error")
             )
-        except ContractError as error:
-            self._flush_competence_events()
+            payload = response.get("decision")
+            if not isinstance(payload, dict):
+                raise NooaWorkerError("worker response has no decision object")
+            action = payload.get("action")
+            data = payload.get("data")
+            reason = payload.get("reason")
+            if type(action) is not int or action not in observation.available_actions:
+                raise ModelCorrectableError(f"worker returned illegal action: {action!r}")
+            if data is not None and not isinstance(data, dict):
+                raise ModelCorrectableError(
+                    "worker decision data must be an object or null"
+                )
+            if not isinstance(reason, str):
+                raise ModelCorrectableError("worker decision reason must be a string")
+            if action in coordinate_actions:
+                if (
+                    not isinstance(data, dict)
+                    or any(
+                        not isinstance(data.get(axis), int)
+                        or isinstance(data.get(axis), bool)
+                        for axis in ("x", "y")
+                    )
+                ):
+                    raise ModelCorrectableError(
+                        f"action {action} requires integer x and y data"
+                    )
+                if not (0 <= data["x"] < width and 0 <= data["y"] < height):
+                    raise ModelCorrectableError(
+                        f"action {action} coordinates {(data['x'], data['y'])} are outside "
+                        f"width={width}, height={height}"
+                    )
+            try:
+                raw_commitment = parse_model_reason(reason, action=action, data=data)
+                admitted = self.competence.admit(
+                    raw_commitment,
+                    legal_actions=observation.available_actions,
+                )
+            except ContractError as error:
+                raise ModelCorrectableError(
+                    f"competence commitment rejected: {error}"
+                ) from error
+            return action, data, reason, admitted
+
+        rejection: dict[str, Any] | None = None
+        for attempt in range(self.max_commitment_repairs + 1):
+            crossing_id = self._next_crossing_id()
+            request = build_request(crossing_id, rejection)
+            _append_jsonl(self.requests_path, request)
             self._write_process(
-                "competence_rejected",
-                action_point_id=self._step,
-                error={"type": type(error).__name__, "message": str(error)},
+                "action_request",
+                action_point_id=crossing_id,
+                step=self._step,
+                host_observation={
+                    "path": host_observation_path.relative_to(self.run_root).as_posix(),
+                    "sha256": host_observation_commitment,
+                },
+                request_sha256=sha256(
+                    json.dumps(request, sort_keys=True, separators=(",", ":")).encode(
+                        "utf-8"
+                    )
+                ).hexdigest(),
+                request=request,
             )
-            raise ModelCorrectableError(
-                f"competence commitment rejected: {error}"
-            ) from error
+            response = self._wait_for_response(crossing_id)
+            self._write_process(
+                "model_crossing",
+                action_point_id=crossing_id,
+                step=self._step,
+                audit=_bound_model_audit(response.get("audit")),
+                worker_decision=response.get("decision"),
+                worker_error=_redact_images(response.get("error")),
+            )
+            try:
+                action, data, reason, commitment = admit_from(response)
+                break
+            except ModelCorrectableError as error:
+                attempts_remaining = self.max_commitment_repairs - attempt
+                self._flush_competence_events()
+                self._write_process(
+                    "competence_rejected",
+                    action_point_id=crossing_id,
+                    step=self._step,
+                    error={
+                        "type": type(error).__name__,
+                        "message": str(error),
+                        "correctable": True,
+                    },
+                    attempts_remaining=attempts_remaining,
+                )
+                if attempts_remaining <= 0:
+                    raise
+                rejection = rejection_notice(
+                    str(error), attempts_remaining=attempts_remaining
+                )
 
         self._flush_competence_events()
 
@@ -432,7 +520,8 @@ class NooaCompetenceProcessAgent(NooaProcessAgent):
         workspace_commitment = _workspace_commitment(self.workspace)
         self._write_process(
             "decision_validated",
-            action_point_id=self._step,
+            action_point_id=crossing_id,
+            step=self._step,
             workspace_commitment=workspace_commitment,
             decision={
                 "action": decision.action,
@@ -442,7 +531,8 @@ class NooaCompetenceProcessAgent(NooaProcessAgent):
         )
         self._write_process(
             "competence_action_admitted",
-            action_point_id=self._step,
+            action_point_id=crossing_id,
+            step=self._step,
             commitment=commitment,
         )
         self._pending_decision = decision

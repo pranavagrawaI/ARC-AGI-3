@@ -597,7 +597,11 @@ def _process_action_linked(
         set(request) == request_keys
         and request.get("protocol") == PROCESS_PROTOCOL
         and request.get("run_id") == request_record.get("run_id")
-        and request.get("action_point_id") == action_point_id
+        # The IPC body carries the crossing id, which advances on every attempt.
+        # The process record carries both, and its step is what ties this
+        # crossing to the environment action it produced.
+        and request.get("action_point_id") == request_record.get("action_point_id")
+        and request_record.get("step") == action_point_id
         and isinstance(observation, dict)
         and set(observation) == observation_keys
         and observation.get("step") == action_point_id
@@ -898,6 +902,39 @@ def two_action_chain_report(
         for index, record in enumerate(process_records)
         if record.get("kind") == "competence_successor_observed"
     ]
+    rejected_indexed = [
+        (index, record)
+        for index, record in enumerate(process_records)
+        if record.get("kind") == "competence_rejected"
+    ]
+    # A refused crossing is recorded in full, as its own request/crossing/
+    # rejection triple, so the log shows how many attempts an action took.
+    # Removing those triples must leave exactly the admitted spine.
+    rejected_crossing_ids = {
+        record.get("action_point_id") for _index, record in rejected_indexed
+    }
+    repair_records = [
+        record
+        for record in process_records
+        if record.get("kind")
+        in {"action_request", "model_crossing", "competence_rejected"}
+        and record.get("action_point_id") in rejected_crossing_ids
+    ]
+    spine_records = [
+        record for record in process_records if record not in repair_records
+    ]
+    # Downstream counts and ordering describe the admitted spine. The refused
+    # crossings are checked separately, by repairs_linked below.
+    requests_indexed = [
+        (index, record)
+        for index, record in requests_indexed
+        if record.get("action_point_id") not in rejected_crossing_ids
+    ]
+    crossings_indexed = [
+        (index, record)
+        for index, record in crossings_indexed
+        if record.get("action_point_id") not in rejected_crossing_ids
+    ]
     started_indexed = [
         (index, record)
         for index, record in enumerate(process_records)
@@ -909,9 +946,17 @@ def two_action_chain_report(
         if record.get("kind") == "worker_stopped"
     ]
     contexts = [record for _index, record in contexts_indexed]
-    requests = [record for _index, record in requests_indexed]
+    requests = [
+        record
+        for _index, record in requests_indexed
+        if record.get("action_point_id") not in rejected_crossing_ids
+    ]
     admitted = [record for _index, record in admitted_indexed]
-    crossings = [record for _index, record in crossings_indexed]
+    crossings = [
+        record
+        for _index, record in crossings_indexed
+        if record.get("action_point_id") not in rejected_crossing_ids
+    ]
     validated = [record for _index, record in validated_indexed]
     recorded_transitions = [
         record for _index, record in recorded_transitions_indexed
@@ -944,6 +989,7 @@ def two_action_chain_report(
             "kind",
             "run_id",
             "action_point_id",
+            "step",
             "current_evidence_id",
             "competence_packet_sha256",
             "projection",
@@ -953,6 +999,7 @@ def two_action_chain_report(
             "kind",
             "run_id",
             "action_point_id",
+            "step",
             "host_observation",
             "request_sha256",
             "request",
@@ -962,6 +1009,7 @@ def two_action_chain_report(
             "kind",
             "run_id",
             "action_point_id",
+            "step",
             "audit",
             "worker_decision",
             "worker_error",
@@ -971,6 +1019,7 @@ def two_action_chain_report(
             "kind",
             "run_id",
             "action_point_id",
+            "step",
             "decision",
             "workspace_commitment",
         },
@@ -979,6 +1028,7 @@ def two_action_chain_report(
             "kind",
             "run_id",
             "action_point_id",
+            "step",
             "commitment",
         },
         "transition_recorded": {
@@ -998,6 +1048,15 @@ def two_action_chain_report(
             "host_observation",
             "projection",
         },
+        "competence_rejected": {
+            "protocol",
+            "kind",
+            "run_id",
+            "action_point_id",
+            "step",
+            "error",
+            "attempts_remaining",
+        },
         "worker_stopped": {
             "protocol",
             "kind",
@@ -1012,7 +1071,7 @@ def two_action_chain_report(
         if isinstance(record.get("run_id"), str) and record.get("run_id")
     }
     process_shape = (
-        [record.get("kind") for record in process_records] == expected_process_kinds
+        [record.get("kind") for record in spine_records] == expected_process_kinds
         and all(
             isinstance((kind := record.get("kind")), str)
             and kind in process_keys
@@ -1027,10 +1086,10 @@ def two_action_chain_report(
         and bool(started_indexed[0][1]["runtime_python"])
         and isinstance(stopped_indexed[0][1].get("stderr"), str)
         and [record.get("action_point_id") for record in contexts] == [0, 1]
-        and [record.get("action_point_id") for record in requests] == [0, 1]
-        and [record.get("action_point_id") for record in crossings] == [0, 1]
-        and [record.get("action_point_id") for record in validated] == [0, 1]
-        and [record.get("action_point_id") for record in admitted] == [0, 1]
+        and [record.get("step") for record in requests] == [0, 1]
+        and [record.get("step") for record in crossings] == [0, 1]
+        and [record.get("step") for record in validated] == [0, 1]
+        and [record.get("step") for record in admitted] == [0, 1]
         and [record.get("action_point_id") for record in recorded_transitions]
         == [0, 1]
         and [record.get("action_point_id") for record in successor_process_records]
@@ -1191,10 +1250,13 @@ def two_action_chain_report(
         and requests[0].get("request", {}).get("paired_run_spec")
         == requests[1].get("request", {}).get("paired_run_spec")
         and stopped_indexed[0][1].get("returncode") == 0
+        # A refusal used to disqualify the chain outright, because it could only
+        # end the run. It can now be answered, so it disqualifies nothing on its
+        # own; refused_crossings_precede_their_action is what constrains it, and
+        # a refusal with no later admission for its step still fails there.
         and not any(
             record.get("kind")
             in {
-                "competence_rejected",
                 "host_execution_failure",
                 "temporal_seam_violation",
             }
@@ -1366,6 +1428,28 @@ def two_action_chain_report(
             and second.get("reconciliation") is None
             and not reconciliation_events
         )
+    # A refused crossing counts as evidence only where it belongs: before the
+    # crossing that carried the same action, under a distinct id, and never
+    # after an action was already released.
+    admitted_index_by_step = {
+        record.get("step"): index for index, record in admitted_indexed
+    }
+    repairs_linked = (
+        len(rejected_crossing_ids) == len(rejected_indexed)
+        and all(
+            record.get("action_point_id") not in admitted_index_by_step.values()
+            and isinstance(record.get("error"), dict)
+            and record["error"].get("correctable") is True
+            and record.get("step") in admitted_index_by_step
+            and index < admitted_index_by_step[record.get("step")]
+            for index, record in rejected_indexed
+        )
+        and len(
+            {record.get("action_point_id") for record in requests}
+            & rejected_crossing_ids
+        )
+        == 0
+    )
     return {
         "linked_event_shape": shape_ok,
         "linked_schema_versions": schemas_valid,
@@ -1373,6 +1457,10 @@ def two_action_chain_report(
         "content_addressed_evidence_ids": content_ids_valid,
         "linked_event_order": event_order,
         "linked_process_records": process_linked,
+        # Booleans only: callers reduce this report with all(). The count of
+        # refused crossings is a quantity, not a verdict, and is reported in the
+        # run summary instead.
+        "refused_crossings_precede_their_action": repairs_linked,
         "model_authored_semantic_replay": model_authored_replay,
         "successor_context_packet_linked": packet_linked,
         "claim_continuity_linked_to_action_2": claim_linked,

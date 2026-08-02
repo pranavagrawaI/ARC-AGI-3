@@ -45,9 +45,24 @@ wrong dtype, a spent budget, a closed worker — and it fails fast. A
 **postcondition** failure rejects a value the model itself authored: an
 unparseable `reason`, an illegal action, a commitment the contract refuses.
 Those raise `ModelCorrectableError` and are reported in the run summary as
-`correctable`. Both currently stop the run. The distinction exists because only
-the second kind is answerable by re-authoring, and a later repair crossing must
-be able to select it by class rather than by matching message text.
+`correctable`.
+
+A postcondition failure is answered by a **repair crossing**. The frozen worker
+refuses a repeated `(run_id, action_point_id)` and validates nothing else about
+that integer, so 0006 allocates it from a crossing counter rather than from the
+environment step: a repair is simply the next id, and the frozen worker, its
+transport, and its persistent Python workspace are untouched. The model's
+workspace survives, so the notice names the error and points at the `reason`
+string the model already serialized there. It supplies no field values and no
+corrected payload. `MAX_COMMITMENT_REPAIRS` bounds the attempts; each one also
+spends the frozen spec's model-call budget, which remains the ceiling on cost.
+
+Refused crossings are recorded in full — request, crossing, and rejection — and
+the verifier requires each to carry a distinct id, to be marked `correctable`,
+and to precede the admitted crossing for the same step. A refusal with no later
+admission for its step fails. The count reaches the run summary as
+`refused_crossings`, because how often the model must be told to re-author is a
+direct measure of whether this contract is usable.
 
 ## Admitted mechanisms
 
