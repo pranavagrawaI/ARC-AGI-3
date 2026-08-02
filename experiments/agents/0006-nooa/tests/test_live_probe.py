@@ -381,6 +381,8 @@ class LiveProbeTests(unittest.TestCase):
     def test_operational_verdict_requires_predecessor_result_exposure(self) -> None:
         summary = {
             "actions": 2,
+            "attempted_actions": 2,
+            "observed_successors": 2,
             "stop_reason": "action_budget",
             "clean_shutdown": True,
             "trace_complete": True,
@@ -388,18 +390,18 @@ class LiveProbeTests(unittest.TestCase):
         events = [
             {"type": "observation"},
             {"type": "context_assembled"},
-            {"type": "commitment"},
+            {"type": "commitment", "claim_ids": ["claim-control"]},
             {"type": "transition_occurrence"},
-            {"type": "prediction_result"},
+            {"type": "prediction_result", "outcome": "match"},
             {"type": "observation"},
             {"type": "context_assembled"},
-            {"type": "commitment"},
+            {"type": "commitment", "claim_ids": ["claim-control"]},
         ]
         verdict = MODULE["_operational_verdict"](
             summary,
             competence_events=events,
             provider_success=True,
-            required_actions=3,
+            required_actions=2,
         )
         self.assertTrue(verdict["success"])
         self.assertFalse(
@@ -407,7 +409,7 @@ class LiveProbeTests(unittest.TestCase):
                 summary,
                 competence_events=events[:5],
                 provider_success=True,
-                required_actions=3,
+                required_actions=2,
             )["success"]
         )
         self.assertFalse(
@@ -415,7 +417,45 @@ class LiveProbeTests(unittest.TestCase):
                 summary,
                 competence_events=events,
                 provider_success=False,
-                required_actions=3,
+                required_actions=2,
+            )["success"]
+        )
+        no_continuity = [dict(event) for event in events]
+        no_continuity[-1] = {"type": "commitment", "claim_ids": ["claim-other"]}
+        self.assertFalse(
+            MODULE["_operational_verdict"](
+                summary,
+                competence_events=no_continuity,
+                provider_success=True,
+                required_actions=2,
+            )["success"]
+        )
+        overrun = {**summary, "actions": 3, "attempted_actions": 3, "observed_successors": 3}
+        self.assertFalse(
+            MODULE["_operational_verdict"](
+                overrun,
+                competence_events=events,
+                provider_success=True,
+                required_actions=2,
+            )["success"]
+        )
+        unreconciled = [dict(event) for event in events]
+        unreconciled[4] = {"type": "prediction_result", "outcome": "mismatch"}
+        self.assertFalse(
+            MODULE["_operational_verdict"](
+                summary,
+                competence_events=unreconciled,
+                provider_success=True,
+                required_actions=2,
+            )["success"]
+        )
+        reconciled = [*unreconciled[:5], {"type": "reconciliation"}, *unreconciled[5:]]
+        self.assertTrue(
+            MODULE["_operational_verdict"](
+                summary,
+                competence_events=reconciled,
+                provider_success=True,
+                required_actions=2,
             )["success"]
         )
 

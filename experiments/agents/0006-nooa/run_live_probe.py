@@ -883,6 +883,55 @@ def _predecessor_result_exposed(events: list[dict[str, Any]]) -> bool:
     )
 
 
+def _claim_continuity(events: list[dict[str, Any]]) -> bool:
+    commitments = [
+        (index, event)
+        for index, event in enumerate(events)
+        if event.get("type") == "commitment"
+    ]
+    if len(commitments) < 2:
+        return False
+    first_index, first = commitments[0]
+    second_index, second = commitments[1]
+    first_claim_ids = set(first.get("claim_ids", []))
+    second_claim_ids = set(second.get("claim_ids", []))
+    if not first_claim_ids:
+        return False
+    if first_claim_ids & second_claim_ids:
+        return True
+    return any(
+        event.get("type") == "ledger"
+        and first_index < index < second_index
+        and isinstance(event.get("operation"), dict)
+        and event["operation"].get("claim_id") in first_claim_ids
+        and event["operation"].get("op") in {"revise", "retire"}
+        for index, event in enumerate(events)
+    )
+
+
+def _mismatches_reconciled_before_next_commitment(
+    events: list[dict[str, Any]],
+) -> bool:
+    commitment_indexes = [
+        index for index, event in enumerate(events) if event.get("type") == "commitment"
+    ]
+    for index, event in enumerate(events):
+        if event.get("type") != "prediction_result" or event.get("outcome") != "mismatch":
+            continue
+        next_commitment = next(
+            (commitment_index for commitment_index in commitment_indexes if commitment_index > index),
+            None,
+        )
+        if next_commitment is None:
+            continue
+        if not any(
+            candidate.get("type") == "reconciliation"
+            for candidate in events[index + 1 : next_commitment]
+        ):
+            return False
+    return True
+
+
 def _operational_verdict(
     summary: dict[str, Any],
     *,
@@ -908,16 +957,22 @@ def _operational_verdict(
             "checks": checks,
         }
     checks = {
-        "multiple_steps": summary.get("actions", 0) >= 2,
+        "exact_actions": summary.get("actions") == required_actions,
+        "exact_attempted_actions": summary.get("attempted_actions") == required_actions,
+        "exact_successors": summary.get("observed_successors") == required_actions,
         "non_blocking_stop": summary.get("stop_reason") in {"action_budget", "terminal"},
         "clean_shutdown": summary.get("clean_shutdown") is True,
         "trace_complete": summary.get("trace_complete") is True,
-        "two_commitments": event_types.count("commitment") >= 2,
+        "exact_commitments": event_types.count("commitment") == required_actions,
         "predecessor_prediction_result_exposed": _predecessor_result_exposed(competence_events),
+        "claim_continuity": _claim_continuity(competence_events),
+        "mismatches_reconciled_before_next_commitment": (
+            _mismatches_reconciled_before_next_commitment(competence_events)
+        ),
         "provider_profile_matches": provider_success,
     }
     return {
-        "goal": "multi-step-competence-loop",
+        "goal": f"{required_actions}-action-competence-continuity",
         "success": all(checks.values()),
         "checks": checks,
     }

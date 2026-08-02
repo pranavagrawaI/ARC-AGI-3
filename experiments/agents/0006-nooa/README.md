@@ -75,10 +75,12 @@ environment execution, observation, worker shutdown, or evidence finalization
 fails. A one-action admission run succeeds only with exactly one admitted action,
 one observed successor, complete trace and shutdown, an actual HTTP request
 profile matching the approved profile, and returned generation metadata proving
-ModelRun served every generation under the exclusive FP4 route. Multi-step runs also
-require at least two admitted actions and a predecessor prediction result exposed
-before the next context. A malformed competence commitment remains a failed smoke
-with no host-selected replacement action.
+ModelRun served every generation under the exclusive FP4 route. A two-action
+continuity smoke requires exactly two admitted actions and successors, the first
+prediction result exposed before the second commitment, and an explicit preserve,
+revise, or retire relation to a first-action claim. Any mismatch before another
+commitment must be reconciled. A malformed competence commitment remains a failed
+smoke with no host-selected replacement action.
 
 The model-visible competence packet publishes the complete existing field types
 and shape limits, requires the final Python workspace cell to construct the
