@@ -177,6 +177,17 @@ class CompetenceRunnerTests(unittest.TestCase):
             "reconciliation may be omitted when there is no unresolved mismatch",
             attached["competence"]["instruction"],
         )
+        # Run 20260802T124434Z spent every deliberation round deciding whether
+        # return_result was a tool or an in-cell call, and emitted neither. Both
+        # exist on the frozen surface, so the packet must name one route.
+        instruction = attached["competence"]["instruction"]
+        self.assertIn("Do not call return_result as a separate tool", instruction)
+        self.assertIn("the inline call is the only supported one", instruction)
+        self.assertTrue(
+            serialization["python_pattern"]
+            .strip()
+            .endswith("return_result({'action': action, 'data': data, 'reason': reason})")
+        )
         exec(  # noqa: S102 - execute the exact model-visible Python scaffold.
             serialization["python_pattern"], namespace
         )

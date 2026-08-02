@@ -133,10 +133,16 @@ def attach_competence_context(
             "omitted when there is no unresolved mismatch. "
             "It must not contain action or data. "
             "The host alone checks the successor and admits the environment action. "
-            "Do not manually quote or escape reason. In execute_python, first define "
-            "model-authored action and data variables plus commitment as a Python dict, "
-            "then execute the "
-            "provided reason_serialization.python_pattern. Use Python None for JSON null."
+            "Do not manually quote or escape reason. Use Python None for JSON null. "
+            "Return by exactly one route: inside execute_python, define the "
+            "model-authored action and data variables and commitment as a Python "
+            "dict, then run the provided reason_serialization.python_pattern, whose "
+            "final statement calls return_result with the reason variable. Do not "
+            "call return_result as a separate tool: that requires retyping the "
+            "serialized string by hand, and a single mistyped character discards "
+            "the whole commitment and releases no action. Passing the variable "
+            "cannot be mistyped. Do not spend turns deciding between the two "
+            "routes; the inline call is the only supported one."
         ),
         "reason_json_fields": list(_REASON_FIELDS),
         "reason_authoring_schema": {
