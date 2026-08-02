@@ -132,6 +132,9 @@ def attach_competence_context(
             "exactly the listed competence fields, except that reconciliation may be "
             "omitted when there is no unresolved mismatch. "
             "It must not contain action or data. "
+            "test records your intent and is never checked; assertions carry the "
+            "prediction the host evaluates against the successor, so at least "
+            "one is required and an empty list releases no action. "
             "The host alone checks the successor and admits the environment action. "
             "Do not manually quote or escape reason. Use Python None for JSON null. "
             "Return by exactly one route: inside execute_python, define the "
@@ -147,7 +150,15 @@ def attach_competence_context(
         "reason_json_fields": list(_REASON_FIELDS),
         "reason_authoring_schema": {
             "working_state": {"type": "object", "maxEncodedCharacters": 4_000},
-            "test": {"type": "string", "minLength": 1, "maxLength": 500},
+            "test": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500,
+                "purpose": (
+                    "your intent for this action, in prose, for the record. The "
+                    "host does not evaluate it and nothing is checked against it."
+                ),
+            },
             "claim_ids": {
                 "type": "array",
                 "maxItems": 4,
@@ -175,6 +186,15 @@ def attach_competence_context(
                 "type": "array",
                 "minItems": 1,
                 "maxItems": 5,
+                "purpose": (
+                    "the part of your prediction the host actually checks. After "
+                    "the action the host evaluates each assertion against the "
+                    "observed successor and reports match or mismatch back to "
+                    "you, and a mismatch must be reconciled before you act "
+                    "again. Stating your prediction only in test leaves nothing "
+                    "to check and teaches you nothing. At least one assertion is "
+                    "required; an empty list is refused and releases no action."
+                ),
                 "items": {
                     "numeric": {
                         "exactKeys": ["observable", "op", "value"],

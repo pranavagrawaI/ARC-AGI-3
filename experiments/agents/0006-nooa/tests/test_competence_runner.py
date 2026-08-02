@@ -178,7 +178,20 @@ class CompetenceRunnerTests(unittest.TestCase):
         }
         serialization = attached["competence"]["reason_serialization"]
         authoring_schema = attached["competence"]["reason_authoring_schema"]
-        self.assertEqual(authoring_schema["test"], {"type": "string", "minLength": 1, "maxLength": 500})
+        self.assertEqual(authoring_schema["test"]["type"], "string")
+        self.assertEqual(authoring_schema["test"]["minLength"], 1)
+        self.assertEqual(authoring_schema["test"]["maxLength"], 500)
+        # Three consecutive live runs wrote a good prose test and left
+        # assertions empty, losing the commitment. Neither field said what it was
+        # for, so the model put its prediction in the one the host never checks.
+        self.assertIn("does not evaluate", authoring_schema["test"]["purpose"])
+        assertions_purpose = authoring_schema["assertions"]["purpose"]
+        self.assertIn("the host actually checks", assertions_purpose)
+        self.assertIn("empty list is refused", assertions_purpose)
+        self.assertIn(
+            "an empty list releases no action",
+            attached["competence"]["instruction"],
+        )
         self.assertEqual(authoring_schema["assertions"]["minItems"], 1)
         self.assertEqual(authoring_schema["assertions"]["maxItems"], 5)
         self.assertEqual(
