@@ -45,7 +45,12 @@ from competence import (
     parse_model_reason,
 )
 
-EXPECTED_PROJECTION_DTYPE = "|u1"
+# The producer is experiments/harness/runner.py, which builds the observation as
+# np.array(frame.frame) over the game's nested Python ints, giving platform
+# int64. The uint8 in historical artifacts belongs to a different producer: the
+# rendered current_frame.png, which is RGB and genuinely 8-bit. Binding the
+# projection to that value rejected every real observation.
+EXPECTED_PROJECTION_DTYPE = "<i8"
 
 _REASON_FIELDS = (
     "working_state",
@@ -215,6 +220,25 @@ class NooaCompetenceProcessAgent(NooaProcessAgent):
         self._competence_step: int | None = None
 
     def act(self, observation: Observation) -> Decision:
+        """Decide one action, recording why if the decision cannot be made.
+
+        The shared harness maps a NooaWorkerError to the stop reason
+        ``agent_error`` and discards the exception, so a live failure otherwise
+        reaches the summary with no cause attached. The harness is frozen
+        substrate shared with the control arm, so the record is written here.
+        """
+
+        try:
+            return self._act(observation)
+        except BaseException as error:
+            self._write_process(
+                "agent_error",
+                action_point_id=self._step,
+                error={"type": type(error).__name__, "message": str(error)},
+            )
+            raise
+
+    def _act(self, observation: Observation) -> Decision:
         if self._closed:
             raise NooaWorkerError("worker is closed")
         if self._pending_decision is not None:

@@ -31,16 +31,25 @@ from experiments.harness import Observation, Transition
 
 class CompetenceRunnerTests(unittest.TestCase):
     def test_ls20_projection_dtype_is_host_enforced(self) -> None:
-        pixels = np.zeros((1, 2, 2), dtype=np.int64)
-        observation = Observation(
-            pixels=pixels,
-            available_actions=(1,),
-            levels_completed=0,
-            state="NOT_FINISHED",
-            full_reset=False,
-        )
+        def observation_with(pixels: np.ndarray) -> Observation:
+            return Observation(
+                pixels=pixels,
+                available_actions=(1,),
+                levels_completed=0,
+                state="NOT_FINISHED",
+                full_reset=False,
+            )
+
+        # What the harness actually produces: np.array over nested Python ints.
+        produced = np.array([[[0, 1], [2, 3]]])
+        self.assertEqual(produced.dtype.str, "<i8")
+        _require_expected_projection_dtype(observation_with(produced))
+
+        # uint8 belongs to the rendered PNG, not to the observation projection.
         with self.assertRaisesRegex(NooaWorkerError, "approved ls20 contract"):
-            _require_expected_projection_dtype(observation)
+            _require_expected_projection_dtype(
+                observation_with(np.zeros((1, 2, 2), dtype=np.uint8))
+            )
 
     def test_treatment_adds_a_fixed_contract_without_mutating_frozen_observation(self) -> None:
         frozen_observation = {
@@ -146,7 +155,7 @@ class CompetenceRunnerTests(unittest.TestCase):
 
     def test_offline_worker_must_carry_and_host_admits_a_commitment(self) -> None:
         def observation(step: int) -> Observation:
-            pixels = np.array([[[0, step], [0, 0]]], dtype=np.uint8)
+            pixels = np.array([[[0, step], [0, 0]]])
             pixels.setflags(write=False)
             return Observation(
                 pixels=pixels,

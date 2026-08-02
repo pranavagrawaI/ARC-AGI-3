@@ -165,7 +165,7 @@ def two_action_fixture(
     }
 
     def projection(public_observation: dict) -> dict:
-        pixels = np.asarray(public_observation["pixels"], dtype=np.uint8)
+        pixels = np.asarray(public_observation["pixels"])
         return {
             "digest": sha256(pixels.tobytes()).hexdigest()[:16],
             "dtype": pixels.dtype.str,
@@ -855,6 +855,37 @@ class LiveProbeTests(unittest.TestCase):
                     runtime_environment_source=runtime_source,
                     expected_runtime_environment=runtime_environment,
                 )
+
+    def test_summary_carries_the_agent_error_the_harness_discards(self) -> None:
+        """Run 20260802T113343Z stopped with agent_error and no stated cause.
+
+        The shared harness maps the exception to a stop reason and drops it, so
+        diagnosing a live failure needed a second paid approval. The treatment
+        records its own error and the summary must carry it.
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            run_root = Path(directory)
+            (run_root / "worker").mkdir()
+            (run_root / "worker" / "process.jsonl").write_text(
+                json.dumps(
+                    {
+                        "kind": "agent_error",
+                        "action_point_id": 0,
+                        "error": {
+                            "type": "NooaWorkerError",
+                            "message": "observation dtype differs from the approved ls20 contract",
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            counts = MODULE["_artifact_counts"](run_root)
+
+        self.assertEqual(counts["attempted_actions"], 0)
+        self.assertEqual(len(counts["agent_errors"]), 1)
+        self.assertIn("approved ls20 contract", counts["agent_errors"][0]["message"])
 
     def test_missing_game_is_refused_before_any_scorecard_is_opened(self) -> None:
         """Arcade reports a missing game only after opening a scorecard.

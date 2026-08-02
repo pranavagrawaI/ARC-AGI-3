@@ -1393,6 +1393,13 @@ def _artifact_counts(run_root: Path) -> dict[str, int]:
     return {
         "attempted_actions": max(admitted_actions, trace_successors),
         "observed_successors": max(recorded_transitions, trace_successors),
+        # The harness discards the exception behind stop_reason "agent_error",
+        # so carry the treatment's own record of it into the summary.
+        "agent_errors": [
+            record.get("error")
+            for record in process_records
+            if record.get("kind") == "agent_error"
+        ],
     }
 
 
