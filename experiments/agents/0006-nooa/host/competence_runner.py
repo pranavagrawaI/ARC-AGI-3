@@ -45,12 +45,16 @@ from competence import (
     parse_model_reason,
 )
 
-# The producer is experiments/harness/runner.py, which builds the observation as
-# np.array(frame.frame) over the game's nested Python ints, giving platform
-# int64. The uint8 in historical artifacts belongs to a different producer: the
-# rendered current_frame.png, which is RGB and genuinely 8-bit. Binding the
-# projection to that value rejected every real observation.
-EXPECTED_PROJECTION_DTYPE = "<i8"
+# arc_agi declares the frame dtype at remote_wrapper.py:242,
+# np.array(frame_layer, dtype=np.int8), and experiments/harness/runner.py:53
+# passes it through with np.array(frame.frame, copy=True). Live ls20 observations
+# are therefore int8.
+#
+# Two earlier values were inferred from proxies rather than from this producer,
+# and each rejected every real observation: |u1 came from uint8 in the artifacts,
+# which is the RGB render (arc_agi/rendering.py:91), and <i8 came from numpy's
+# promotion of nested Python ints, which is not what the game hands over.
+EXPECTED_PROJECTION_DTYPE = "|i1"
 
 _REASON_FIELDS = (
     "working_state",

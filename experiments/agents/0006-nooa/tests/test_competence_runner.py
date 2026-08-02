@@ -19,6 +19,7 @@ for path in (ROOT, HOST_ROOT):
 
 from competence import SCHEMA, ContractError, parse_model_reason
 from competence_runner import (
+    EXPECTED_PROJECTION_DTYPE,
     NooaCompetenceProcessAgent,
     NooaWorkerError,
     _require_expected_projection_dtype,
@@ -40,16 +41,18 @@ class CompetenceRunnerTests(unittest.TestCase):
                 full_reset=False,
             )
 
-        # What the harness actually produces: np.array over nested Python ints.
-        produced = np.array([[[0, 1], [2, 3]]])
-        self.assertEqual(produced.dtype.str, "<i8")
+        # What arc_agi actually hands over: int8 frame layers.
+        produced = np.array([[[0, 1], [2, 3]]], dtype=np.int8)
+        self.assertEqual(produced.dtype.str, "|i1")
         _require_expected_projection_dtype(observation_with(produced))
 
-        # uint8 belongs to the rendered PNG, not to the observation projection.
-        with self.assertRaisesRegex(NooaWorkerError, "approved ls20 contract"):
-            _require_expected_projection_dtype(
-                observation_with(np.zeros((1, 2, 2), dtype=np.uint8))
-            )
+        # uint8 belongs to the RGB render; int64 is numpy's default for nested
+        # Python ints. Neither is what the producer emits.
+        for wrong in (np.uint8, np.int64):
+            with self.assertRaisesRegex(NooaWorkerError, "approved ls20 contract"):
+                _require_expected_projection_dtype(
+                    observation_with(np.zeros((1, 2, 2), dtype=wrong))
+                )
 
     def test_treatment_adds_a_fixed_contract_without_mutating_frozen_observation(self) -> None:
         frozen_observation = {
@@ -155,7 +158,7 @@ class CompetenceRunnerTests(unittest.TestCase):
 
     def test_offline_worker_must_carry_and_host_admits_a_commitment(self) -> None:
         def observation(step: int) -> Observation:
-            pixels = np.array([[[0, step], [0, 0]]])
+            pixels = np.array([[[0, step], [0, 0]]], dtype=EXPECTED_PROJECTION_DTYPE)
             pixels.setflags(write=False)
             return Observation(
                 pixels=pixels,

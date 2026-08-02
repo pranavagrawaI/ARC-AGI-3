@@ -24,7 +24,7 @@ RUNNER = ROOT / "run_live_probe.py"
 MODULE = runpy.run_path(str(RUNNER))
 
 from competence import CompetenceController
-from competence_runner import attach_competence_context
+from competence_runner import EXPECTED_PROJECTION_DTYPE, attach_competence_context
 from evidence_chain import (
     _changed_pixels,
     canonical_digest,
@@ -165,7 +165,7 @@ def two_action_fixture(
     }
 
     def projection(public_observation: dict) -> dict:
-        pixels = np.asarray(public_observation["pixels"])
+        pixels = np.asarray(public_observation["pixels"], dtype=EXPECTED_PROJECTION_DTYPE)
         return {
             "digest": sha256(pixels.tobytes()).hexdigest()[:16],
             "dtype": pixels.dtype.str,
