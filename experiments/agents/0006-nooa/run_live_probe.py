@@ -236,6 +236,7 @@ def _source_paths() -> set[Path]:
         REPO / "experiments" / "agents" / "__init__.py",
         TREATMENT_ROOT / "competence.py",
         TREATMENT_ROOT / "evidence_chain.py",
+        TREATMENT_ROOT / "replay_failed_crossing.py",
         PROVIDER_RUNTIME_LAUNCHER,
         TREATMENT_ROOT / "run_live_probe.py",
         *(TREATMENT_ROOT / "host").glob("*.py"),
