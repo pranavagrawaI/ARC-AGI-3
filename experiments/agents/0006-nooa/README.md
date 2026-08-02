@@ -45,9 +45,11 @@ result.
 
 `run_live_probe.py` is the single-arm treatment entry point. It is restricted to
 LS20 seed 0, offline mode, OpenRouter's Gemma 4 31B wire model, at most three
-actions, 12 model calls, 32,768 reported tokens, 16,384 output tokens per call,
+actions, 12 model calls, 65,536 reported tokens, 16,384 output tokens per call,
 four rounds per action, two decision repairs, and zero transport retries. The
-reported-token value is a pre-call gate rather than a provider billing ceiling.
+reported-token value is a cumulative pre-call gate rather than a provider billing
+ceiling; one admitted action costs roughly 16.6k of it, so the earlier 32,768
+ceiling could not admit the two-action smoke it was meant to bound.
 The treatment-side transport overlay adds the exact `modelrun/fp4` provider slug,
 FP4 filter, and disabled fallbacks to the request; the frozen 0002 runtime remains
 byte-for-byte unchanged. Parameter filtering is disabled because OpenRouter's

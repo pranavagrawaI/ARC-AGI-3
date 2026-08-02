@@ -491,13 +491,13 @@ class LiveProbeTests(unittest.TestCase):
         for field, value in (
             ("game", "other"),
             ("api_base", "https://direct.example/v1"),
-            ("max_actions", 4),
-            ("max_model_calls", 13),
-            ("max_reported_tokens", 32_769),
-            ("max_model_rounds_per_action", 5),
-            ("max_decision_repairs", 3),
+            # Derived so a changed ceiling cannot leave the test asserting
+            # against a bound the runner no longer has.
+            *(
+                (field, maximum + 1)
+                for field, maximum in MODULE["SMOKE_MAXIMA"].items()
+            ),
             ("transport_max_retries", 1),
-            ("max_output_tokens", 32_769),
         ):
             invalid = deepcopy(args)
             setattr(invalid, field, value)

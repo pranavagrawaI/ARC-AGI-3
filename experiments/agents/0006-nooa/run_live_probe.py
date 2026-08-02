@@ -55,7 +55,11 @@ EXPECTED_API_BASE = "https://openrouter.ai/api/v1"
 SMOKE_MAXIMA = {
     "max_actions": 3,
     "max_model_calls": 12,
-    "max_reported_tokens": 32_768,
+    # One action costs about 16.6k reported tokens: run 20260802T114747Z spent
+    # 16,581 over three calls and then exhausted a 16,384 gate before action 2.
+    # A second action carries a larger packet, so the previous 32,768 ceiling
+    # could not admit the two-action smoke it was meant to bound.
+    "max_reported_tokens": 65_536,
     "max_output_tokens": 16_384,
     "max_model_rounds_per_action": 4,
     "max_decision_repairs": 2,
