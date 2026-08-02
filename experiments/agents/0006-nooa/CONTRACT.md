@@ -4,7 +4,7 @@ Status: first executable treatment slice. It licenses the protocol below, not
 gameplay competence, a treatment effect, or a claim that the target model uses
 the protocol well.
 
-`0002-NOOA` at revision `0364c96` is frozen. The earlier `dfb2d2b` freeze was
+`0002-NOOA` at revision `e878370` is frozen. The earlier `dfb2d2b` freeze was
 reopened on 2026-08-02 to stop the consumed `return_result` call being replayed
 as an open tool call, which ModelRun refuses and which blocked every second
 action point of this treatment; that directory's `QUALIFICATION.md` records the
