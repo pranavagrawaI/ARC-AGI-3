@@ -856,6 +856,29 @@ class LiveProbeTests(unittest.TestCase):
                     expected_runtime_environment=runtime_environment,
                 )
 
+    def test_missing_game_is_refused_before_any_scorecard_is_opened(self) -> None:
+        """Arcade reports a missing game only after opening a scorecard.
+
+        Run 20260802T112449Z created scorecard ff8add52 and then failed the
+        lookup, because the child executes inside the source snapshot where no
+        game files exist. The check is a filesystem read and must precede the
+        service call.
+        """
+
+        require = MODULE["_require_game_environment"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(RuntimeError, "game environment directory is absent"):
+                require(root / "absent", "ls20")
+
+            environments = root / "environment_files"
+            (environments / "cd82").mkdir(parents=True)
+            with self.assertRaisesRegex(RuntimeError, r"'ls20' is absent.*cd82"):
+                require(environments, "ls20")
+
+            (environments / "ls20").mkdir()
+            require(environments, "ls20")
+
     def test_forwarded_paths_survive_the_snapshot_working_directory_change(self) -> None:
         """A relative --run-root must not re-resolve inside the snapshot.
 
@@ -946,6 +969,10 @@ class LiveProbeTests(unittest.TestCase):
             )
             consumed_approval = root / "approval.json.consumed"
             consumed_approval.write_text(json.dumps(approval), encoding="utf-8")
+            # Game files live in the real repository, never in the snapshot: the
+            # parent writes the handoff while REPO still names the repository,
+            # and the child runs with REPO pointing at the snapshot.
+            (root / "environment_files" / "ls20").mkdir(parents=True)
             globals_patch = {
                 "__file__": str(runner),
                 "REPO": snapshot_root,
@@ -956,6 +983,7 @@ class LiveProbeTests(unittest.TestCase):
                     run_root,
                     approval_request=approval,
                     consumed_approval=consumed_approval,
+                    environments_dir=root / "environment_files",
                 )
                 with mock.patch("os.chdir") as chdir, mock.patch(
                     "os.execve", side_effect=RuntimeError("exec intercepted")
@@ -984,12 +1012,15 @@ class LiveProbeTests(unittest.TestCase):
                     {MODULE["SNAPSHOT_HANDOFF_ENV"]: nonce},
                     clear=False,
                 ):
-                    loaded_state, loaded_approval = MODULE["_load_snapshot_handoff"](
+                    loaded_state, loaded_approval, loaded_environments = MODULE[
+                        "_load_snapshot_handoff"
+                    ](
                         args,
                         spec=spec,
                     )
                 self.assertEqual(loaded_state, source_state)
                 self.assertEqual(loaded_approval, consumed_approval)
+                self.assertEqual(loaded_environments, root / "environment_files")
                 self.assertFalse(handoff.exists())
                 consumed_handoff = handoff.with_name(handoff.name + ".consumed")
                 self.assertTrue(consumed_handoff.exists())
@@ -1968,6 +1999,8 @@ class LiveProbeTests(unittest.TestCase):
                 expected_sha256=source_state["source_sha256"],
                 expected_mode=source_state["source_mode"],
             )
+            environments_dir = Path(directory) / "environment_files"
+            (environments_dir / args.game).mkdir(parents=True)
             with mock.patch.object(
                 MODULE["arc_agi"],
                 "Arcade",
@@ -1984,6 +2017,7 @@ class LiveProbeTests(unittest.TestCase):
                         source_state["runtime_environment_source"]
                     ),
                     expected_runtime_environment=source_state["runtime_environment"],
+                    environments_dir=environments_dir,
                 )
             persisted = json.loads((run_root / "summary.json").read_text(encoding="utf-8"))
             self.assertEqual(summary, persisted)

@@ -780,6 +780,7 @@ def _write_snapshot_handoff(
     *,
     approval_request: dict[str, Any],
     consumed_approval: Path,
+    environments_dir: Path,
 ) -> tuple[Path, str]:
     nonce = os.urandom(32).hex()
     path = run_root / ".approved-snapshot-handoff.json"
@@ -791,6 +792,10 @@ def _write_snapshot_handoff(
             "approval_request_sha256": _canonical_sha256(approval_request),
             "consumed_approval_request": str(consumed_approval.resolve()),
             "snapshot_runner": str(_snapshot_runner_path(run_root).resolve()),
+            # The child executes with its working directory inside the snapshot,
+            # which holds source only. Game files live in the real repository, so
+            # their location is recorded here, where the parent still names it.
+            "environments_dir": str(environments_dir.resolve()),
         },
     )
     return path, nonce
@@ -882,11 +887,29 @@ def _reexec_approved_snapshot(
     os.execve(sys.executable, command, environment)
 
 
+def _require_game_environment(environments_dir: Path, game: str) -> None:
+    """Refuse a missing game before Arcade can open a scorecard.
+
+    Arcade resolves its environments directory against the working directory and
+    reports a missing game only after creating a scorecard against the service.
+    A lookup failure would otherwise cost an externally visible side effect for
+    a condition that is a plain filesystem read.
+    """
+
+    if not environments_dir.is_dir():
+        raise RuntimeError(f"game environment directory is absent: {environments_dir}")
+    available = sorted(child.name for child in environments_dir.iterdir())
+    if game not in available:
+        raise RuntimeError(
+            f"game {game!r} is absent from {environments_dir}; available: {available}"
+        )
+
+
 def _load_snapshot_handoff(
     args: argparse.Namespace,
     *,
     spec: PairedRunSpec,
-) -> tuple[dict[str, Any], Path]:
+) -> tuple[dict[str, Any], Path, Path]:
     run_root = args.run_root.resolve()
     handoff = args.approved_snapshot_handoff.resolve()
     expected_handoff = run_root / ".approved-snapshot-handoff.json"
@@ -935,7 +958,12 @@ def _load_snapshot_handoff(
         expected_sha256=source_state["source_sha256"],
         expected_mode=source_state["source_mode"],
     )
-    return source_state, consumed_approval
+    environments_dir = Path(record.get("environments_dir", ""))
+    if not environments_dir.is_absolute() or not environments_dir.is_dir():
+        raise RuntimeError(
+            f"approved snapshot handoff names no game directory: {environments_dir}"
+        )
+    return source_state, consumed_approval, environments_dir
 
 
 def _materialize_runtime_overlay(
@@ -1457,6 +1485,7 @@ def _run_stage(
     expected_source_mode: dict[str, str],
     runtime_environment_source: Path,
     expected_runtime_environment: dict[str, Any],
+    environments_dir: Path,
 ) -> dict[str, Any]:
     phase = "source_snapshot_verification"
     runtime_overlay: dict[str, Any] | None = None
@@ -1479,9 +1508,12 @@ def _run_stage(
             runtime_environment_source=runtime_environment_source,
             expected_runtime_environment=expected_runtime_environment,
         )
+        phase = "game_environment_lookup"
+        _require_game_environment(environments_dir, args.game)
         phase = "arcade_init"
         arcade = arc_agi.Arcade(
             operation_mode=args.mode,
+            environments_dir=str(environments_dir),
             recordings_dir=str(run_root / "raw-recordings"),
         )
         phase = "environment_create"
@@ -1547,7 +1579,9 @@ def main(argv: list[str] | None = None) -> int:
             raise RuntimeError("snapshot execution cannot prepare an approval request")
         if not os.environ.get("ARC_LLM_API_KEY"):
             raise RuntimeError("ARC_LLM_API_KEY must be present in the inherited environment")
-        source_state, consumed_approval = _load_snapshot_handoff(args, spec=spec)
+        source_state, consumed_approval, environments_dir = _load_snapshot_handoff(
+            args, spec=spec
+        )
         approval_request = json.loads(consumed_approval.read_text(encoding="utf-8"))
     else:
         source_state = _source_state()
@@ -1586,6 +1620,7 @@ def main(argv: list[str] | None = None) -> int:
             run_root,
             approval_request=approval_request,
             consumed_approval=consumed_approval,
+            environments_dir=REPO / "environment_files",
         )
         _reexec_approved_snapshot(
             run_root=run_root,
@@ -1629,6 +1664,7 @@ def main(argv: list[str] | None = None) -> int:
         expected_source_mode=source_state["source_mode"],
         runtime_environment_source=Path(source_state["runtime_environment_source"]),
         expected_runtime_environment=source_state["runtime_environment"],
+        environments_dir=environments_dir,
     )
     finalization_errors: list[dict[str, str]] = []
     integrity_success = True
