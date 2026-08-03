@@ -51,13 +51,27 @@ mismatch is outstanding the field carries real dispositions and stays mandatory.
 This is a syntax allowance, not a repair: the host still neither guesses nor
 corrects a malformed or semantically invalid commitment.
 
-Rejections are of two kinds, and the host records which. A **precondition**
+Rejections are of three kinds, and the host records which. A **precondition**
 failure is one no commitment could satisfy — an observation arriving with the
-wrong dtype, a spent budget, a closed worker — and it fails fast. A
-**postcondition** failure rejects a value the model itself authored: an
-unparseable `reason`, an illegal action, a commitment the contract refuses.
-Those raise `ModelCorrectableError` and are reported in the run summary as
-`correctable`.
+wrong dtype, a spent budget, a closed worker, a provider transport that never
+returned — and it fails fast. A **postcondition** failure rejects a value the
+model itself authored: an unparseable `reason`, an illegal action, a commitment
+the contract refuses. A **non-commitment** is the model spending every
+deliberation round for an action point without calling `return_result`: it
+authored no value to reject, but a commitment was available to it throughout, so
+this is a fact about the model rather than about the host, the provider, or the
+environment. The last two raise `ModelCorrectableError` and are reported in the
+run summary as `correctable`.
+
+Treating a non-commitment as fatal made deliberation length decide whether a run
+produced any trajectory at all — the recorded `known-world-rules-treatment-open`
+run ended at action 0 after eight rounds of `execute_python`, having never
+called `return_result`. That is a result worth measuring, not a reason to
+discard the run. The repair crossing states what was spent and asks the model to
+commit. It supplies no action, no field value, and no candidate: if the model
+will not commit on the repair either, the action point still releases nothing
+and the run still ends. The host never gains action authority from a model's
+silence.
 
 A postcondition failure is answered by a **repair crossing**. The frozen worker
 refuses a repeated `(run_id, action_point_id)` and validates nothing else about

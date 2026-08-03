@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import contextlib
 import io
 import json
@@ -608,6 +609,32 @@ class LiveProbeTests(unittest.TestCase):
     def test_runner_rejects_profile_drift_and_oversized_smoke(self) -> None:
         args = parsed_args()
         MODULE["_validate_live_args"](args)
+
+        luna = deepcopy(args)
+        # The first openai/ selects LiteLLM's OpenAI-compatible transport and is
+        # stripped; the second is part of OpenRouter's model slug on the wire.
+        luna.model = "openai/openai/gpt-5.6-luna"
+        luna.wire_model = "openai/gpt-5.6-luna"
+        luna.provider_route = "openai"
+        MODULE["_validate_live_args"](luna)
+        luna_profile = MODULE["_paired_spec"](luna).provider_request_profile
+        self.assertEqual(luna_profile.model, "openai/openai/gpt-5.6-luna")
+        self.assertEqual(luna_profile.wire_model, "openai/gpt-5.6-luna")
+
+        for field, value in (
+            ("wire_model", "google/gemma-4-31b-it"),
+            ("provider_route", "pinned"),
+            ("provider_route", "open"),
+        ):
+            invalid_luna = deepcopy(luna)
+            setattr(invalid_luna, field, value)
+            with self.subTest(luna_field=field), self.assertRaises(ValueError):
+                MODULE["_validate_live_args"](invalid_luna)
+
+        gemma_on_openai = deepcopy(args)
+        gemma_on_openai.provider_route = "openai"
+        with self.assertRaises(ValueError):
+            MODULE["_validate_live_args"](gemma_on_openai)
 
         for field, value in (
             ("game", "other"),
@@ -1313,6 +1340,37 @@ class LiveProbeTests(unittest.TestCase):
         self.assertIsNone(identity["actual_quantization"])
         self.assertEqual(identity["requested_quantization"], "fp4")
         self.assertEqual(identity["quantization_evidence_scope"], "requested-route-only")
+
+        luna_payload = deepcopy(valid_payload)
+        luna_payload["data"].update(
+            {
+                "model": "openai/gpt-5.6-luna-20260709",
+                "provider_name": "OpenAI",
+            }
+        )
+        luna_payload["data"]["provider_responses"][0].update(
+            {
+                "provider_name": "OpenAI",
+                "model_permaslug": "openai/gpt-5.6-luna-20260709",
+            }
+        )
+        luna_identity = MODULE["_provider_identity_report"](
+            ["gen-test"],
+            [luna_payload],
+            expected_wire_model="openai/gpt-5.6-luna",
+            **MODULE["PROVIDER_IDENTITY_EXPECTATIONS"]["openai"],
+            crossing_usage={
+                "gen-test": {
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "reasoning_tokens": 5,
+                    "cost_usd": 0.001,
+                }
+            },
+        )
+        self.assertTrue(luna_identity["success"], luna_identity)
+        self.assertEqual(luna_identity["actual_provider"], "OpenAI")
+        self.assertIsNone(luna_identity["requested_quantization"])
         for field, value in (
             ("provider_name", "CoreWeave"),
             ("model", "unrelated/model"),
@@ -2461,6 +2519,99 @@ class LiveProbeTests(unittest.TestCase):
 
 
 class ProviderRouteTests(unittest.TestCase):
+    def test_assisted_level_completion_satisfies_the_44_action_or_level_gate(self) -> None:
+        events, process = two_action_fixture()
+        # The two-level stop deliberately withholds the newly opened level from
+        # agent.observe. The final admitted commitment therefore has no
+        # competence-side transition, prediction result, or successor
+        # observation; the harness summary is the terminal evidence.
+        for event_type in ("transition_occurrence", "prediction_result", "observation"):
+            index = max(
+                index for index, event in enumerate(events) if event.get("type") == event_type
+            )
+            events.pop(index)
+        process = [
+            record
+            for record in process
+            if not (
+                record.get("action_point_id") == 1
+                and record.get("kind")
+                in {"transition_recorded", "competence_successor_observed"}
+            )
+        ]
+        final_request = deepcopy(
+            next(
+                record
+                for record in process
+                if record.get("kind") == "action_request" and record.get("step") == 1
+            )
+        )
+        final_crossing = deepcopy(
+            next(
+                record
+                for record in process
+                if record.get("kind") == "model_crossing" and record.get("step") == 1
+            )
+        )
+        for record in process:
+            if record.get("step") == 1 and record.get("kind") in {
+                "action_request",
+                "model_crossing",
+                "decision_validated",
+                "competence_action_admitted",
+            }:
+                record["action_point_id"] = 2
+        final_request["action_point_id"] = 1
+        final_crossing["action_point_id"] = 1
+        process.extend(
+            [
+                final_request,
+                final_crossing,
+                {
+                    "kind": "competence_rejected",
+                    "action_point_id": 1,
+                    "step": 1,
+                    "attempts_remaining": 1,
+                },
+            ]
+        )
+        summary = {
+            "actions": 2,
+            "attempted_actions": 2,
+            "observed_successors": 2,
+            "levels_completed": 1,
+            "stop_reason": "level_limit",
+            "clean_shutdown": True,
+            "trace_complete": True,
+        }
+        kwargs = {
+            "competence_events": events,
+            "process_records": process,
+            "provider_success": True,
+            "required_actions": 44,
+            "route_name": "pinned",
+        }
+
+        self.assertFalse(MODULE["_operational_verdict"](summary, **kwargs)["success"])
+        assisted = MODULE["_operational_verdict"](
+            summary,
+            allow_level_limit=True,
+            **kwargs,
+        )
+        self.assertTrue(assisted["success"], assisted)
+
+        control = MODULE["_operational_verdict"](
+            summary,
+            competence_events=[],
+            process_records=[],
+            provider_success=True,
+            required_actions=44,
+            route_name="pinned",
+            arm="control",
+            allow_level_limit=True,
+        )
+        self.assertTrue(control["success"], control)
+
     def test_an_open_route_cannot_qualify_a_gate(self) -> None:
         """Automatic routing shows the loop closes, not that it closes everywhere.
 
@@ -2507,7 +2658,18 @@ class ProviderRouteTests(unittest.TestCase):
         }
         self.assertEqual(differing, {"route_can_qualify"})
 
-    def test_both_routes_are_accepted_by_the_audited_launcher(self) -> None:
+        openai = verdict("openai")
+        self.assertFalse(openai["success"])
+        self.assertFalse(openai["checks"]["route_can_qualify"])
+        self.assertEqual(openai["route"], "openai")
+        differing = {
+            key
+            for key in pinned["checks"]
+            if pinned["checks"][key] != openai["checks"][key]
+        }
+        self.assertEqual(differing, {"route_can_qualify"})
+
+    def test_all_routes_are_accepted_by_the_audited_launcher(self) -> None:
         overlay = runpy.run_path(str(ROOT / "provider_runtime_launcher.py"))
         for route in MODULE["PROVIDER_ROUTES"].values():
             self.assertIn(route, overlay["EXPECTED_PROVIDER_ROUTES"])
@@ -2524,6 +2686,33 @@ class ProviderRouteTests(unittest.TestCase):
             pinned.config["extra_body"],
             {"provider": MODULE["PROVIDER_ROUTES"]["pinned"]},
         )
+
+    def test_openai_route_bounds_only_the_opaque_prompt_cache_key(self) -> None:
+        overlay = runpy.run_path(str(ROOT / "provider_runtime_launcher.py"))
+
+        class _Client:
+            def __init__(self) -> None:
+                self.config: dict = {}
+                self.calls: list[tuple[tuple, dict]] = []
+
+            async def acall(self, *args: object, **kwargs: object) -> str:
+                self.calls.append((args, kwargs))
+                return "ok"
+
+        raw = _Client()
+        wrapped = overlay["_pin_client"](raw, MODULE["PROVIDER_ROUTES"]["openai"])
+        long_key = "a" * 70
+        result = asyncio.run(
+            wrapped.acall("messages", prompt_cache_key=long_key, semantic="unchanged")
+        )
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(raw.config["extra_body"], {"provider": MODULE["PROVIDER_ROUTES"]["openai"]})
+        args, kwargs = raw.calls[0]
+        self.assertEqual(args, ("messages",))
+        self.assertEqual(kwargs["semantic"], "unchanged")
+        self.assertEqual(len(kwargs["prompt_cache_key"]), 64)
+        self.assertNotEqual(kwargs["prompt_cache_key"], long_key)
 
 
 class InlineReturnRouteTests(unittest.TestCase):

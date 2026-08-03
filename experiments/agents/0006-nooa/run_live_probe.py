@@ -34,6 +34,15 @@ PROVIDER_RUNTIME_LAUNCHER = TREATMENT_ROOT / "provider_runtime_launcher.py"
 BASELINE_ROOT = TREATMENT_ROOT.parent / "0002-llm-repl-agent"
 P9_ROOT = TREATMENT_ROOT.parent / "0006-capability-environment" / "p9"
 KNOWN_WORLD_ROOT = TREATMENT_ROOT / "prototypes" / "known_world"
+CONTROLLER_ROOT = TREATMENT_ROOT / "prototypes" / "commitment_controller"
+# The model-facing controller protocol. It becomes the workspace NOTES.md, whose
+# sha256 the paired run spec binds into the approval, so its text cannot drift
+# between approval and execution.
+CONTROLLER_STATE_BLOCK = CONTROLLER_ROOT / "STATE_BLOCK.md"
+# The frozen worker's NOTES.md echo budget (nooa-runtime/agent.py:513). Past it
+# the model is shown only the tail. The seeded protocol must fit whole, and the
+# model needs headroom under it for its own block.
+NOTES_ECHO_LIMIT = 4_000
 LS20_SOURCE = REPO / "environment_files" / "ls20" / "9607627b" / "ls20.py"
 for path in (REPO, CONTROL_ROOT, TREATMENT_ROOT, TREATMENT_ROOT / "host"):
     if str(path) not in sys.path:
@@ -58,6 +67,18 @@ EXPECTED_GAME = "ls20"
 EXPECTED_MODEL = "openai/google/gemma-4-31b-it"
 EXPECTED_WIRE_MODEL = "google/gemma-4-31b-it"
 EXPECTED_API_BASE = "https://openrouter.ai/api/v1"
+MODEL_PROFILES = {
+    EXPECTED_MODEL: {
+        "wire_model": EXPECTED_WIRE_MODEL,
+        "provider_routes": ("open", "pinned"),
+    },
+    # LiteLLM consumes the first ``openai/`` as its provider selector. The
+    # remaining OpenRouter wire slug must still be ``openai/gpt-5.6-luna``.
+    "openai/openai/gpt-5.6-luna": {
+        "wire_model": "openai/gpt-5.6-luna",
+        "provider_routes": ("openai",),
+    },
+}
 # The two arms of the matched comparison. The control is the frozen 0002 worker
 # invoked exactly as 0002 invokes it -- no competence packet, no typed
 # commitment, no reconciliation gate. Both arms travel this runner, this approval
@@ -65,7 +86,13 @@ EXPECTED_API_BASE = "https://openrouter.ai/api/v1"
 # between them. It is bound into the approval digest for that reason: an arm
 # that could be swapped after approval would not be a control.
 ARMS = ("control", "treatment")
-KNOWLEDGE_CONDITIONS = ("none", "rules", "source", "executable")
+KNOWLEDGE_CONDITIONS = ("none", "rules", "source", "executable", "rules_controller")
+# rules_controller is "rules" plus the fixed commitment-preserving controller.
+# It is the smallest causal test of the claim that Gemma's LS20 failure is
+# executive rather than perceptual: same tutorial, same budgets, same harness,
+# with the only difference being that a provisional abstraction is now required
+# to survive an action. It supplies no conclusions, no map, and no actions.
+CONTROLLER_CONDITION = "rules_controller"
 SMOKE_MAXIMA = {
     # 44 actions is the established long-horizon budget in this repo: 0002's own
     # ls20 tracer and the p9 cd82 arms all ran it, so a comparison at 44 lands
@@ -95,8 +122,9 @@ SMOKE_MAXIMA = {
     "max_model_rounds_per_action": 8,
     "max_decision_repairs": 2,
 }
-# Two routes, both carried through the same audited overlay so the launcher is
-# on one path either way.
+# Every route is carried through the same audited overlay so the launcher is on
+# one path. The OpenAI route exists only for the Luna sanity check: it pins the
+# provider while remaining non-qualifying because it has no matched control.
 #
 # "pinned" is the evidence route. It fixes one endpoint, so provider identity is
 # exact and a later matched comparison means something.
@@ -117,10 +145,22 @@ PROVIDER_ROUTES = {
         "quantizations": ["fp4"],
     },
     "open": {},
+    "openai": {
+        "order": ["openai"],
+        "only": ["openai"],
+        "allow_fallbacks": False,
+        "require_parameters": False,
+    },
 }
 PROVIDER_ROUTE_MODES = {
     "pinned": "openrouter-exact-endpoint-pin",
     "open": "openrouter-automatic-routing",
+    "openai": "openrouter-exact-provider-pin",
+}
+PROVIDER_IDENTITY_EXPECTATIONS = {
+    "pinned": {"expected_provider_name": "ModelRun", "requested_quantization": "fp4"},
+    "open": {"expected_provider_name": "ModelRun", "requested_quantization": "fp4"},
+    "openai": {"expected_provider_name": "OpenAI", "requested_quantization": None},
 }
 PROVIDER_ROUTE = PROVIDER_ROUTES["pinned"]
 GENERATION_AUDIT_ATTEMPTS = 6
@@ -198,8 +238,9 @@ def build_parser() -> argparse.ArgumentParser:
         choices=sorted(PROVIDER_ROUTES),
         default="pinned",
         help=(
-            "pinned fixes one endpoint and is required for evidence; open lets "
-            "OpenRouter route freely and cannot qualify a gate."
+            "pinned fixes the Gemma endpoint and is required for matched evidence; "
+            "open routes Gemma freely; openai pins Luna to OpenAI. The latter two "
+            "are exploratory and cannot qualify a gate."
         ),
     )
     parser.add_argument(
@@ -224,8 +265,6 @@ def _validate_live_args(args: argparse.Namespace) -> None:
         "game": EXPECTED_GAME,
         "mode": OperationMode.OFFLINE,
         "environment_seed": 0,
-        "model": EXPECTED_MODEL,
-        "wire_model": EXPECTED_WIRE_MODEL,
         "api_base": EXPECTED_API_BASE,
         "reasoning_effort": "medium",
         "request_timeout_seconds": 180.0,
@@ -249,6 +288,27 @@ def _validate_live_args(args: argparse.Namespace) -> None:
         raise ValueError(
             "knowledge_condition must be one of "
             f"{KNOWLEDGE_CONDITIONS}, got {args.knowledge_condition!r}"
+        )
+    if args.knowledge_condition == CONTROLLER_CONDITION and args.arm != "treatment":
+        # The controller reads working_state, which only the treatment arm's
+        # typed commitment produces. On the control arm it would silently do
+        # nothing and the run would be an unlabelled plain rules run.
+        raise ValueError(
+            f"{CONTROLLER_CONDITION} requires --arm treatment; the control arm "
+            "authors no working_state for the controller to check"
+        )
+    model_profile = MODEL_PROFILES.get(args.model)
+    if model_profile is None:
+        raise ValueError(f"model must be one of {tuple(MODEL_PROFILES)}, got {args.model!r}")
+    if args.wire_model != model_profile["wire_model"]:
+        raise ValueError(
+            f"wire_model for {args.model!r} must be {model_profile['wire_model']!r}, "
+            f"got {args.wire_model!r}"
+        )
+    if args.provider_route not in model_profile["provider_routes"]:
+        raise ValueError(
+            f"provider_route for {args.model!r} must be one of "
+            f"{model_profile['provider_routes']}, got {args.provider_route!r}"
         )
     for field, expected in exact.items():
         actual = getattr(args, field)
@@ -325,8 +385,9 @@ def _knowledge_instruction(condition: str) -> str | None:
         "rules": "RULES.md",
         "source": "ls20.py",
         "executable": "EXECUTABLE_WORLD.md, ls20_world.py, ls20.py, and arcengine/",
+        CONTROLLER_CONDITION: "RULES.md",
     }[condition]
-    return (
+    preamble = (
         f"ASSISTED LS20 PROTOTYPE CONDITION: {condition}.\n"
         f"Before choosing a live action, inspect {files}. These host-provided files "
         "are ground-truth assistance for this run, not hypotheses to rediscover. "
@@ -334,6 +395,24 @@ def _knowledge_instruction(condition: str) -> str | None:
         "after 44 live actions. Plan to solve level 1; the bottom horizontal bar is "
         "a move budget, not progress.\n"
     )
+    if condition != CONTROLLER_CONDITION:
+        return preamble
+    # The whole point of seeding the protocol here rather than as another
+    # workspace file: the frozen worker echoes NOTES.md at the top of *every*
+    # model round, and the recorded failure is inside the rounds of a single
+    # action point, before any commitment exists to check. A file the model must
+    # remember to open reaches it once; this reaches it every time.
+    instruction = preamble + "\n" + CONTROLLER_STATE_BLOCK.read_text(encoding="utf-8")
+    if len(instruction) > NOTES_ECHO_LIMIT:
+        # agent.py:513 echoes only the last 4000 characters and flags the rest
+        # truncated. A seed over the limit loses its head on round one, silently,
+        # and the run would measure a protocol the model never saw whole.
+        raise ValueError(
+            f"{CONTROLLER_CONDITION} seed is {len(instruction)} characters, over "
+            f"the frozen worker's {NOTES_ECHO_LIMIT}-character NOTES.md echo "
+            "limit; shorten STATE_BLOCK.md"
+        )
+    return instruction
 
 
 def _arcengine_source_root() -> Path:
@@ -390,6 +469,10 @@ def _source_paths() -> set[Path]:
         LS20_SOURCE,
         *(KNOWN_WORLD_ROOT).glob("*.md"),
         *(KNOWN_WORLD_ROOT).glob("*.py"),
+        # Named rather than globbed: the sibling README and NOTES are working
+        # notes that change as the probe is written up, and binding them would
+        # invalidate a live approval for an edit the run never reads.
+        CONTROLLER_STATE_BLOCK,
         *(_arcengine_source_root()).glob("*.py"),
     }
 
@@ -893,6 +976,36 @@ def _approval_request(
     }
 
 
+def _controller_report(controller: object) -> dict[str, Any] | None:
+    """The pre-registered controller measurements, or None when it was off.
+
+    Deliberately excludes the two measures the host cannot compute honestly:
+    moved-versus-blocked classification accuracy and the share of failures
+    repaired locally. Both need the mechanical outcome derived from the pixel
+    diff compared against the model's own label, which is scoring work for the
+    post-run analysis, not for the run that produces the labels.
+    """
+
+    if controller is None:
+        return None
+    metrics = controller.metrics()  # type: ignore[attr-defined]
+    return {
+        "schema": "0006-nooa-commitment-controller-v1",
+        "final_state": controller.state.render(),  # type: ignore[attr-defined]
+        "identity_reversals": metrics["identity_reversals"],
+        "route_replacements": metrics["route_replacements"],
+        "rejections": metrics["rejections"],
+        "turns": metrics["turns"],
+        "rejected_rules": sorted(
+            {
+                str(entry["rule"])
+                for entry in controller.log  # type: ignore[attr-defined]
+                if not entry.get("accepted")
+            }
+        ),
+    }
+
+
 def _claim_boundary(knowledge_condition: str) -> str:
     if knowledge_condition == "none":
         return "one arm of a matched comparison; a treatment effect requires both arms"
@@ -1075,7 +1188,11 @@ def _install_knowledge_files(workspace: Path, condition: str) -> None:
 
     if condition == "none":
         return
-    if condition == "rules":
+    if condition in {"rules", CONTROLLER_CONDITION}:
+        # Identical assistance in both. The controller condition differs only in
+        # the seeded NOTES.md protocol and the host-side continuity check, which
+        # is what keeps it a test of executive discipline rather than of
+        # knowing more about LS20.
         shutil.copyfile(KNOWN_WORLD_ROOT / "RULES.md", workspace / "RULES.md")
         return
 
@@ -1438,6 +1555,8 @@ def _provider_identity_report(
     generation_payloads: list[dict[str, Any]],
     *,
     expected_wire_model: str,
+    expected_provider_name: str = "ModelRun",
+    requested_quantization: str | None = "fp4",
     crossing_usage: dict[str, dict[str, int | float | None]],
 ) -> dict[str, Any]:
     records: list[dict[str, Any]] = []
@@ -1475,7 +1594,7 @@ def _provider_identity_report(
         responses = record["provider_responses"]
         if not responses or not all(
             isinstance(response, dict)
-            and response.get("provider_name") == "ModelRun"
+            and response.get("provider_name") == expected_provider_name
             and response.get("status") == 200
             and _model_revision_matches(response.get("model_permaslug"), expected_wire_model)
             for response in responses
@@ -1494,7 +1613,7 @@ def _provider_identity_report(
         records.append(record)
     returned_ids = [record.get("id") for record in records]
     metadata_matches = bool(records) and all(
-        record.get("provider_name") == "ModelRun"
+        record.get("provider_name") == expected_provider_name
         and not record["validation_errors"]
         for record in records
     )
@@ -1507,14 +1626,16 @@ def _provider_identity_report(
         "schema": "0006-nooa-provider-identity-v1",
         "success": success,
         "expected_generation_ids": generation_ids,
-        "actual_provider": "ModelRun" if success else None,
+        "actual_provider": expected_provider_name if success else None,
         "actual_quantization": None,
-        "requested_quantization": "fp4",
-        "quantization_evidence_scope": "requested-route-only",
+        "requested_quantization": requested_quantization,
+        "quantization_evidence_scope": (
+            "requested-route-only" if requested_quantization is not None else "not-requested"
+        ),
         "quantization_evidence": (
-            "exclusive modelrun/fp4 request pin with fallbacks disabled; generation metadata "
+            "exclusive route request pin with fallbacks disabled; generation metadata "
             "does not independently return quantization"
-            if success
+            if success and requested_quantization is not None
             else None
         ),
         "records": records,
@@ -1674,6 +1795,7 @@ def _operational_verdict(
     integrity_success: bool = True,
     route_name: str = "pinned",
     arm: str = "treatment",
+    allow_level_limit: bool = False,
 ) -> dict[str, Any]:
     event_types = [event.get("type") for event in competence_events]
     # An open route cannot qualify a gate. The unanswered-tool-call defect fixed
@@ -1682,6 +1804,11 @@ def _operational_verdict(
     # landed on the lenient provider. An open run shows the loop closes; it is
     # not evidence that it closes everywhere.
     qualifies = route_name == "pinned"
+    completed_level_target = (
+        allow_level_limit
+        and summary.get("levels_completed", 0) >= 1
+        and summary.get("stop_reason") == "level_limit"
+    )
     if arm == "control":
         # The control produces no commitments, no ledger, and no competence.jsonl,
         # so every treatment-shaped check would either be vacuous or fail. What
@@ -1689,9 +1816,13 @@ def _operational_verdict(
         # on the same audited substrate: the actions happened, the successors were
         # observed, and the approved bytes did not move.
         checks = {
-            "exact_actions": summary.get("actions") == required_actions,
-            "exact_successors": summary.get("observed_successors") == required_actions,
-            "non_blocking_stop": summary.get("stop_reason") in {"action_budget", "terminal"},
+            "exact_actions": completed_level_target
+            or summary.get("actions") == required_actions,
+            "exact_successors": summary.get("observed_successors")
+            == (summary.get("actions") if completed_level_target else required_actions),
+            "non_blocking_stop": summary.get("stop_reason")
+            in {"action_budget", "terminal"}
+            or completed_level_target,
             "clean_shutdown": summary.get("clean_shutdown") is True,
             "trace_complete": summary.get("trace_complete") is True,
             "no_competence_records": not competence_events,
@@ -1726,17 +1857,31 @@ def _operational_verdict(
             "route": route_name,
             "arm": arm,
         }
-    chain_checks = _chain_report(
-        competence_events, process_records or [], actions=required_actions
+    observed_actions = summary.get("actions")
+    chain_actions = (
+        observed_actions
+        if completed_level_target and isinstance(observed_actions, int)
+        else required_actions
     )
+    if completed_level_target:
+        chain_checks = _level_limit_chain_report(
+            competence_events,
+            process_records or [],
+            actions=chain_actions,
+        )
+    else:
+        chain_checks = _chain_report(
+            competence_events, process_records or [], actions=chain_actions
+        )
     checks = {
-        "exact_actions": summary.get("actions") == required_actions,
-        "exact_attempted_actions": summary.get("attempted_actions") == required_actions,
-        "exact_successors": summary.get("observed_successors") == required_actions,
-        "non_blocking_stop": summary.get("stop_reason") in {"action_budget", "terminal"},
+        "exact_actions": completed_level_target or observed_actions == required_actions,
+        "exact_attempted_actions": summary.get("attempted_actions") == chain_actions,
+        "exact_successors": summary.get("observed_successors") == chain_actions,
+        "non_blocking_stop": summary.get("stop_reason") in {"action_budget", "terminal"}
+        or completed_level_target,
         "clean_shutdown": summary.get("clean_shutdown") is True,
         "trace_complete": summary.get("trace_complete") is True,
-        "exact_commitments": event_types.count("commitment") == required_actions,
+        "exact_commitments": event_types.count("commitment") == chain_actions,
         "provider_profile_matches": provider_success,
         "approved_bytes_remained_immutable": integrity_success,
         "route_can_qualify": qualifies,
@@ -1748,6 +1893,143 @@ def _operational_verdict(
         "checks": checks,
         "route": route_name,
         "arm": arm,
+    }
+
+
+def _level_limit_chain_report(
+    events: list[dict[str, Any]],
+    process_records: list[dict[str, Any]],
+    *,
+    actions: int,
+) -> dict[str, bool]:
+    """Verify a successful prefix without exposing the next level to the agent.
+
+    A level-limit stop occurs after the final environment action but before the
+    next-level frame reaches ``agent.observe``. The final commitment is therefore
+    admitted and externally confirmed by the harness summary, while competence
+    evidence contains complete successor links only for the preceding actions.
+    """
+
+    if actions < 1:
+        return {"linked_event_shape": False}
+    counts = {
+        event_type: sum(event.get("type") == event_type for event in events)
+        for event_type in (
+            "commitment",
+            "transition_occurrence",
+            "prediction_result",
+            "observation",
+            "context_assembled",
+        )
+    }
+    expected = {
+        "commitment": actions,
+        "transition_occurrence": actions - 1,
+        "prediction_result": actions - 1,
+        "observation": actions,
+        "context_assembled": actions,
+    }
+    if counts != expected:
+        return {"linked_event_shape": False}
+
+    final_context_index = max(
+        index
+        for index, event in enumerate(events)
+        if event.get("type") == "context_assembled"
+    )
+    prefix_events = events[:final_context_index]
+    final_events = events[final_context_index:]
+    final_commitments = [
+        event for event in final_events if event.get("type") == "commitment"
+    ]
+    last_observation = next(
+        (
+            event.get("record")
+            for event in reversed(prefix_events)
+            if event.get("type") == "observation"
+        ),
+        None,
+    )
+    final_event_shape = (
+        sum(event.get("type") == "context_assembled" for event in final_events) == 1
+        and len(final_commitments) == 1
+        and not any(
+            event.get("type")
+            in {"transition_occurrence", "prediction_result", "observation"}
+            for event in final_events
+        )
+        and isinstance(last_observation, dict)
+        and final_commitments[0].get("action_id") == actions
+        and final_commitments[0].get("before_evidence_id")
+        == last_observation.get("evidence_id")
+    )
+    final_step = actions - 1
+    final_process = [
+        record
+        for record in process_records
+        if record.get("step") == final_step
+    ]
+    kind_counts = {
+        kind: sum(record.get("kind") == kind for record in final_process)
+        for kind in {
+            "competence_context_assembled",
+            "action_request",
+            "model_crossing",
+            "competence_rejected",
+            "decision_validated",
+            "competence_action_admitted",
+            "agent_error",
+        }
+    }
+    admitted_records = [
+        record
+        for record in final_process
+        if record.get("kind") == "competence_action_admitted"
+    ]
+    admitted_crossing_id = (
+        admitted_records[0].get("action_point_id")
+        if len(admitted_records) == 1
+        else None
+    )
+    final_process_shape = (
+        kind_counts["competence_context_assembled"] == 1
+        and kind_counts["decision_validated"] == 1
+        and kind_counts["competence_action_admitted"] == 1
+        and kind_counts["agent_error"] == 0
+        and kind_counts["action_request"] == kind_counts["model_crossing"]
+        == kind_counts["competence_rejected"] + 1
+        and any(
+            record.get("kind") == "action_request"
+            and record.get("action_point_id") == admitted_crossing_id
+            for record in final_process
+        )
+        and any(
+            record.get("kind") == "model_crossing"
+            and record.get("action_point_id") == admitted_crossing_id
+            for record in final_process
+        )
+        and any(
+            record.get("kind") == "decision_validated"
+            and record.get("action_point_id") == admitted_crossing_id
+            for record in final_process
+        )
+    )
+    if actions == 1:
+        prefix_checks = {"linked_event_shape": True}
+    else:
+        prefix_process = [
+            record
+            for record in process_records
+            if record.get("step") != final_step
+        ]
+        prefix_checks = _chain_report(
+            prefix_events,
+            prefix_process,
+            actions=actions - 1,
+        )
+    return {
+        **prefix_checks,
+        "terminal_commitment_admitted": final_event_shape and final_process_shape,
     }
 
 
@@ -1847,11 +2129,15 @@ def _run_stage(
         agent_class = (
             NooaCompetenceProcessAgent if args.arm == "treatment" else NooaProcessAgent
         )
+        agent_kwargs: dict[str, Any] = {}
+        if args.knowledge_condition == CONTROLLER_CONDITION:
+            agent_kwargs["commitment_controller"] = True
         with agent_class(
             runtime_root=provider_runtime_root,
             run_root=run_root / "worker",
             paired_run_spec=spec,
             response_timeout=response_timeout,
+            **agent_kwargs,
         ) as agent, JsonlTraceWriter(run_root / "trace.jsonl") as trace:
             _install_knowledge_files(agent.workspace, args.knowledge_condition)
             result = run_episode(
@@ -1864,6 +2150,7 @@ def _run_stage(
                 ),
                 stop_on_exceptions={NooaWorkerError: "agent_error"},
             )
+            controller_report = _controller_report(getattr(agent, "commitment", None))
             phase = "worker_shutdown"
         summary = {
             "schema": "0006-nooa-single-arm-provider-smoke-v3",
@@ -1881,6 +2168,7 @@ def _run_stage(
             "trace_complete": _trace_complete(run_root / "trace.jsonl"),
             "runtime_overlay": runtime_overlay,
             "run_root": str(run_root),
+            **({"commitment_controller": controller_report} if controller_report else {}),
         }
     except Exception as error:  # noqa: BLE001 - preserve every post-manifest failure.
         summary = _failure_summary(
@@ -2046,6 +2334,7 @@ def main(argv: list[str] | None = None) -> int:
             generation_ids,
             generation_payloads,
             expected_wire_model=spec.provider_request_profile.wire_model,
+            **PROVIDER_IDENTITY_EXPECTATIONS[args.provider_route],
             crossing_usage=_generation_usage_by_id(crossings),
         )
         provider_identity["fetch"] = generation_fetch
@@ -2092,6 +2381,7 @@ def main(argv: list[str] | None = None) -> int:
         integrity_success=integrity_success,
         route_name=args.provider_route,
         arm=args.arm,
+        allow_level_limit=args.knowledge_condition != "none",
     )
     summary["provider_profile_report"] = provider_report
     summary["provider_identity_report"] = provider_identity

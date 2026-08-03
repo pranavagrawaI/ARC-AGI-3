@@ -26,6 +26,7 @@ if str(_FROZEN_CONTROL_ROOT) not in sys.path:
     sys.path.insert(0, str(_FROZEN_CONTROL_ROOT))
 
 from host.runner import (
+    NOTES_FILE,
     NooaProcessAgent,
     NooaWorkerError,
     _append_jsonl,
@@ -44,12 +45,49 @@ from competence import (
     ContractError,
     parse_model_reason,
 )
+# A sibling module, imported bare. ``host.*`` is the *frozen 0002* package on
+# this sys.path, not this directory, so ``from host.commitment_controller``
+# would silently reach into the control arm's tree.
+from commitment_controller import (
+    FIELDS,
+    MAY_BE_UNKNOWN,
+    OUTCOMES,
+    UNKNOWN,
+    CommitmentController,
+    Rejected,
+)
 
 # A correctable rejection may be answered this many times within one action
 # point. It is a 0006 bound, not a frozen 0002 one, so it is pinned by the
 # approval's source hash rather than by the paired run spec. Each attempt also
 # spends the spec's model-call budget, which remains the ceiling on total cost.
 MAX_COMMITMENT_REPAIRS = 1
+
+
+def admit_transactionally(
+    controller: CommitmentController | None,
+    competence: CompetenceController,
+    raw_commitment: dict[str, Any],
+    *,
+    action: int,
+    legal_actions: tuple[int, ...],
+) -> tuple[dict[str, object], CommitmentController | None]:
+    """Validate both gates before publishing controller state.
+
+    The controller is copied because its successful admission mutates history
+    and measurements. A later competence-contract rejection must leave the
+    previously accepted block untouched.
+    """
+
+    candidate = deepcopy(controller)
+    if candidate is not None:
+        candidate.admit_working_state(
+            raw_commitment.get("working_state"),
+            action=action,
+            legal_actions=legal_actions,
+        )
+    admitted = competence.admit(raw_commitment, legal_actions=legal_actions)
+    return admitted, candidate
 
 
 class ModelCorrectableError(NooaWorkerError):
@@ -101,18 +139,121 @@ def rejection_notice(message: str, *, attempts_remaining: int) -> dict[str, obje
     to claim or predict: the model re-authors, or the action is refused.
     """
 
-    return {
-        "schema": "0006-nooa-rejection-notice-v1",
-        "rejected_reason": message,
-        "attempts_remaining": attempts_remaining,
-        "instruction": (
+    if message.startswith("deliberation rounds exhausted"):
+        # There was no commitment to refuse, so the ordinary notice would be
+        # false. Still no field values and no action: the model is told what it
+        # spent and asked to commit, not told what to commit to.
+        instruction = (
+            "You used every deliberation round for this action point without "
+            "calling return_result, so no environment action was released and "
+            "the rounds are spent. The Python workspace is unchanged, so every "
+            "variable and file from those rounds is still in scope; do not "
+            "recompute what you already worked out. Commit this round: author "
+            "the commitment and call return_result. Inspecting further without "
+            "committing spends the run and changes nothing. The host will not "
+            "choose an action for you."
+        )
+    else:
+        instruction = (
             "Your previous commitment was refused for the stated reason and no "
             "environment action was released. The Python workspace is unchanged, "
             "so any variable your last cell defined is still in scope. If you "
             "already serialized a commitment there, pass that exact string as "
             "reason rather than retyping it. Otherwise author a new commitment. "
             "The host will not repair or complete a commitment for you."
+        )
+    return {
+        "schema": "0006-nooa-rejection-notice-v1",
+        "rejected_reason": message,
+        "attempts_remaining": attempts_remaining,
+        "instruction": instruction,
+    }
+
+
+def _is_round_exhaustion(error_type: object, message: str) -> bool:
+    """Whether the worker gave up because the model never committed.
+
+    The frozen worker reports this as a generic GenerationError, so it has to be
+    told apart from a real decision failure by its cause. Matched on the
+    iteration bound rather than the round count so the test does not silently
+    stop matching when max_model_rounds_per_action changes.
+    """
+
+    return error_type == "GenerationError" and "max_iterations" in message
+
+
+def _controller_working_state_schema(
+    controller: CommitmentController,
+) -> dict[str, object]:
+    """Publish the eight fields, their legal values, and the current block.
+
+    The host states the shape and the continuity rules. Every value in the block
+    is authored by the model; nothing here names an object, a coordinate, or an
+    action.
+    """
+
+    return {
+        "type": "object",
+        "maxEncodedCharacters": 4_000,
+        "exactKeys": list(FIELDS),
+        "purpose": (
+            "your whole persistent abstraction. It is checked as a continuation "
+            "of the previous action's block, not for truth. Keep the same eight "
+            "lines in NOTES.md so it also survives between rounds of one action."
         ),
+        "PLAYER_BINDING": {
+            "type": "string",
+            "mayBe": UNKNOWN,
+            "purpose": (
+                "which object you control and its current attributes. Once it is "
+                "not 'unknown' it is settled and rule R1 applies."
+            ),
+        },
+        "LOCAL_OBJECTIVE": {"type": "string", "purpose": "one near-term target"},
+        "ROUTE1": {
+            "type": "string",
+            "format": "comma-separated action ids, or 'unknown'",
+            "purpose": "the remaining actions you intend to take",
+        },
+        "CURRENT_APPROX_POSITION": {"type": "string", "mayBe": UNKNOWN},
+        "LAST_ACTION": {"type": "integer-or-null"},
+        "LAST_OUTCOME": {
+            "enum": list(OUTCOMES),
+            "purpose": (
+                "your classification of the previous transition. The host does "
+                "not label it for you; request the transition operator for the "
+                "changed_cells count and name the outcome yourself."
+            ),
+        },
+        "NEXT_STEP": {
+            "type": "integer",
+            "constraint": "must equal decision.action and be currently legal",
+        },
+        "CONTRADICTION": {
+            "type": "string",
+            "purpose": (
+                "empty, or one sentence naming the transition that broke a "
+                "settled binding. It licenses exactly one reinterpretation and "
+                "must be cleared on the next action."
+            ),
+        },
+        "rules": {
+            "R1": "a settled PLAYER_BINDING changes only with a CONTRADICTION in "
+            "the same block, or when LAST_OUTCOME is special_event",
+            "R2": "after 'moved', neither PLAYER_BINDING nor LOCAL_OBJECTIVE may "
+            "change unless you name a CONTRADICTION",
+            "R3": "after 'blocked', edit ROUTE1; binding and objective hold unless "
+            "you name a CONTRADICTION",
+            "R4": f"{list(MAY_BE_UNKNOWN)} may stay '{UNKNOWN}'; unknown is not a "
+            "contradiction and does not license rebinding",
+            "R5": "only special_event licenses focused semantic inspection",
+            "R7": "NEXT_STEP is exactly one legal action and equals decision.action",
+            "R8": "clear CONTRADICTION on the action after the one that set it",
+            "R9": "at most two consecutive 'uncertain' outcomes",
+            "not_enforced": "replacing ROUTE1 is recorded but never rejected; "
+            "re-planning after you learn the map is ordinary play",
+        },
+        "current_block": controller.state.render(),
     }
 
 
@@ -121,6 +262,7 @@ def attach_competence_context(
     packet: Mapping[str, object],
     *,
     rejection: Mapping[str, object] | None = None,
+    commitment_controller: CommitmentController | None = None,
 ) -> dict[str, object]:
     """Add the fixed treatment viewport without granting a new host affordance."""
 
@@ -276,6 +418,10 @@ def attach_competence_context(
         },
         "context": deepcopy(dict(packet)),
     }
+    if commitment_controller is not None:
+        model_observation["competence"]["reason_authoring_schema"]["working_state"] = (
+            _controller_working_state_schema(commitment_controller)
+        )
     if rejection is not None:
         model_observation["competence"]["rejection"] = deepcopy(dict(rejection))
     return model_observation
@@ -325,10 +471,14 @@ class NooaCompetenceProcessAgent(NooaProcessAgent):
         self,
         *args: Any,
         max_commitment_repairs: int = MAX_COMMITMENT_REPAIRS,
+        commitment_controller: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.competence = CompetenceController()
+        # Off unless the rules_controller knowledge condition asked for it, so
+        # every other condition and the control arm are byte-identical to before.
+        self.commitment = CommitmentController() if commitment_controller else None
         self.competence_events_path = self.run_root / "competence.jsonl"
         self._competence_event_offset = 0
         self._competence_step: int | None = None
@@ -339,6 +489,21 @@ class NooaCompetenceProcessAgent(NooaProcessAgent):
         # launcher.py:367 and validates nothing else about the id, so a repair is
         # simply the next one. Crossings therefore outnumber environment steps.
         self._crossing_id = 0
+
+    def _notes_diverged_from_seed(self) -> bool:
+        """Whether the model has rewritten NOTES.md away from the seeded block.
+
+        In all three earlier recorded runs it never did: NOTES.md sat at its
+        seed for the whole run while the model re-derived everything each round.
+        The host only observes this; it neither reads the contents nor acts on
+        them, exactly as the workspace documentation promises the model.
+        """
+
+        seed = self.paired_run_spec.usability_probe_instruction
+        notes = self.workspace / NOTES_FILE
+        if seed is None or not notes.is_file():
+            return False
+        return notes.read_text(encoding="utf-8", errors="replace") != seed
 
     def _next_crossing_id(self) -> int:
         crossing_id = self._crossing_id
@@ -438,6 +603,7 @@ class NooaCompetenceProcessAgent(NooaProcessAgent):
                     frozen_observation,
                     competence_packet,
                     rejection=rejection,
+                    commitment_controller=self.commitment,
                 ),
                 "legal_actions": list(observation.available_actions),
                 "coordinate_actions": coordinate_actions,
@@ -500,14 +666,27 @@ class NooaCompetenceProcessAgent(NooaProcessAgent):
                     )
             try:
                 raw_commitment = parse_model_reason(reason, action=action, data=data)
-                admitted = self.competence.admit(
-                    raw_commitment,
-                    legal_actions=observation.available_actions,
-                )
             except ContractError as error:
                 raise ModelCorrectableError(
                     f"competence commitment rejected: {error}"
                 ) from error
+            try:
+                admitted, candidate = admit_transactionally(
+                    self.commitment,
+                    self.competence,
+                    raw_commitment,
+                    action=action,
+                    legal_actions=observation.available_actions,
+                )
+            except Rejected as error:
+                raise ModelCorrectableError(
+                    f"commitment controller rejected {error}"
+                ) from error
+            except ContractError as error:
+                raise ModelCorrectableError(
+                    f"competence commitment rejected: {error}"
+                ) from error
+            self.commitment = candidate
             return action, data, reason, admitted
 
         rejection: dict[str, Any] | None = None
@@ -587,6 +766,20 @@ class NooaCompetenceProcessAgent(NooaProcessAgent):
             step=self._step,
             commitment=commitment,
         )
+        if self.commitment is not None:
+            # Recorded per action so a null result stays interpretable. Without
+            # notes_written a null has two readings that cannot be told apart:
+            # the rules did not help, or the round-level half of the protocol was
+            # never obeyed. The frozen worker echoes NOTES.md every round but has
+            # no hook to reject one, so obedience there can only be observed.
+            self._write_process(
+                "commitment_controller_state",
+                action_point_id=crossing_id,
+                step=self._step,
+                state=self.commitment.state.render(),
+                metrics=self.commitment.metrics(),
+                notes_written=self._notes_diverged_from_seed(),
+            )
         self._pending_decision = decision
         self._accepted_workspace_commitment = workspace_commitment
         return decision
@@ -667,6 +860,21 @@ class NooaCompetenceProcessAgent(NooaProcessAgent):
             isinstance(worker_error, dict)
             and worker_error.get("kind") == "decision_failure"
         ):
+            message = str(worker_error.get("message", ""))
+            if _is_round_exhaustion(worker_error.get("type"), message):
+                # Thinking too long is not a reason to end a run. The model spent
+                # its deliberation rounds without calling return_result, which is
+                # a failure to author a commitment, not a failure of the host or
+                # the provider. It is answered the way every other model-authored
+                # failure is: a repair crossing that names the problem and asks
+                # again. The host still supplies no action and no field value, so
+                # the run stays inside the decision boundary in CONTRACT.md.
+                #
+                # This is what killed the recorded gemma+rules treatment run at
+                # action 0 after eight rounds of execute_python.
+                raise ModelCorrectableError(
+                    f"deliberation rounds exhausted without a committed action: {message}"
+                )
             raise NooaWorkerError(
                 "worker decision "
                 f"{worker_error.get('type')}: {worker_error.get('message')}"
