@@ -780,8 +780,20 @@ def _model_authored_replay_matches(
     observations: list[object],
     requests: list[dict[str, Any]],
     crossings: list[dict[str, Any]],
+    actions: int,
 ) -> bool:
-    if len(observations) != 3 or len(requests) != 2 or len(crossings) != 2:
+    """Replay the raw model output through a fresh controller for every action.
+
+    The counts are checked against the expected action count rather than each
+    other, so a run that is internally consistent but shorter than the one that
+    was approved cannot satisfy this by replaying only the part it completed.
+    """
+
+    if (
+        len(observations) != actions + 1
+        or len(requests) != actions
+        or len(crossings) != actions
+    ):
         return False
     try:
         controller = CompetenceController()
@@ -792,7 +804,7 @@ def _model_authored_replay_matches(
         if not isinstance(initial_public, dict):
             return False
         controller.receive_observation(initial_public)
-        for index in range(2):
+        for index in range(actions):
             request = requests[index].get("request")
             crossing_decision = crossings[index].get("worker_decision")
             if not isinstance(request, dict) or not isinstance(crossing_decision, dict):
@@ -827,11 +839,27 @@ def _model_authored_replay_matches(
     return controller.events == events
 
 
-def two_action_chain_report(
+def chain_report(
     events: list[dict[str, Any]],
     process_records: list[dict[str, Any]],
+    *,
+    actions: int,
 ) -> dict[str, bool]:
-    """Validate one linked commitment-successor-context-commitment chain."""
+    """Validate one linked chain of ``actions`` commitment-successor-context steps.
+
+    Every check here was written against two actions and is now applied across
+    the whole run: each action must link to its own successor, and each successor
+    must be the observation the next commitment was authored against. Nothing is
+    checked pairwise-only, because a chain that holds at its ends and sags in the
+    middle is exactly the artifact this is meant to reject.
+
+    ``two_action_chain_report`` is this function at ``actions=2``, so the case the
+    2-action tests already cover is the same code the 44-action run is judged by.
+    """
+
+    if actions < 1:
+        raise ValueError("a chain needs at least one action")
+    observation_count = actions + 1
 
     by_type = {
         event_type: [
@@ -848,11 +876,11 @@ def two_action_chain_report(
         )
     }
     expected_counts = {
-        "commitment": 2,
-        "transition_occurrence": 2,
-        "prediction_result": 2,
-        "observation": 3,
-        "context_assembled": 2,
+        "commitment": actions,
+        "transition_occurrence": actions,
+        "prediction_result": actions,
+        "observation": observation_count,
+        "context_assembled": actions,
     }
     shape_ok = all(
         len(by_type[event_type]) == count
@@ -861,65 +889,54 @@ def two_action_chain_report(
     if not shape_ok:
         return {"linked_event_shape": False}
 
-    first_index, first = by_type["commitment"][0]
-    second_index, second = by_type["commitment"][1]
-    initial_index, initial_event = by_type["observation"][0]
-    first_context_index, first_context_event = by_type["context_assembled"][0]
-    transition_index, transition_event = by_type["transition_occurrence"][0]
-    prediction_index, prediction = by_type["prediction_result"][0]
-    successor_index, successor_event = by_type["observation"][1]
-    context_index, context_event = by_type["context_assembled"][1]
-    second_transition_index, second_transition_event = by_type[
-        "transition_occurrence"
-    ][1]
-    second_prediction_index, second_prediction = by_type["prediction_result"][1]
-    final_successor_index, final_successor_event = by_type["observation"][2]
-    initial = initial_event.get("record")
-    transition = transition_event.get("record")
-    successor = successor_event.get("record")
-    second_transition = second_transition_event.get("record")
-    final_successor = final_successor_event.get("record")
-    ids_linked = (
-        first.get("action_id") == 1
-        and second.get("action_id") == 2
-        and isinstance(initial, dict)
-        and [
-            initial.get("step"),
-            successor.get("step") if isinstance(successor, dict) else None,
-            final_successor.get("step")
-            if isinstance(final_successor, dict)
-            else None,
-        ]
-        == [0, 1, 2]
-        and first.get("before_step") == initial.get("step")
-        and first.get("before_evidence_id") == initial.get("evidence_id")
-        and isinstance(transition, dict)
-        and transition.get("action_id") == 1
-        and prediction.get("action_id") == 1
-        and isinstance(successor, dict)
-        and transition.get("before_evidence_id") == first.get("before_evidence_id")
-        and transition.get("before_evidence_id") == prediction.get("before_evidence_id")
-        and transition.get("after_evidence_id") == prediction.get("after_evidence_id")
-        and transition.get("after_evidence_id") == successor.get("evidence_id")
-        and second.get("before_evidence_id") == successor.get("evidence_id")
-        and second.get("before_step") == successor.get("step")
-        and transition.get("action") == first.get("action")
-        and transition.get("data") == first.get("data")
-        and isinstance(second_transition, dict)
-        and second_transition.get("action_id") == 2
-        and second_prediction.get("action_id") == 2
-        and isinstance(final_successor, dict)
-        and second_transition.get("before_evidence_id")
-        == second.get("before_evidence_id")
-        and second_transition.get("before_evidence_id")
-        == second_prediction.get("before_evidence_id")
-        and second_transition.get("after_evidence_id")
-        == second_prediction.get("after_evidence_id")
-        and second_transition.get("after_evidence_id")
-        == final_successor.get("evidence_id")
-        and second_transition.get("action") == second.get("action")
-        and second_transition.get("data") == second.get("data")
+    commitment_indexed = by_type["commitment"]
+    context_indexed = by_type["context_assembled"]
+    transition_indexed = by_type["transition_occurrence"]
+    prediction_indexed = by_type["prediction_result"]
+    observation_indexed = by_type["observation"]
+
+    commitments = [event for _index, event in commitment_indexed]
+    predictions = [event for _index, event in prediction_indexed]
+    transition_events = [event for _index, event in transition_indexed]
+    observation_events = [event for _index, event in observation_indexed]
+    context_events = [event for _index, event in context_indexed]
+
+    transitions = [event.get("record") for event in transition_events]
+    observation_records = [event.get("record") for event in observation_events]
+
+    ids_linked = all(
+        commitment.get("action_id") == action_id + 1
+        for action_id, commitment in enumerate(commitments)
+    ) and all(
+        isinstance(record, dict) and record.get("step") == step
+        for step, record in enumerate(observation_records)
     )
+    for action_id in range(actions):
+        commitment = commitments[action_id]
+        transition = transitions[action_id]
+        prediction = predictions[action_id]
+        before = observation_records[action_id]
+        after = observation_records[action_id + 1]
+        ids_linked = (
+            ids_linked
+            and isinstance(before, dict)
+            and isinstance(after, dict)
+            and isinstance(transition, dict)
+            and commitment.get("before_step") == before.get("step")
+            and commitment.get("before_evidence_id") == before.get("evidence_id")
+            and transition.get("action_id") == action_id + 1
+            and prediction.get("action_id") == action_id + 1
+            and transition.get("before_evidence_id")
+            == commitment.get("before_evidence_id")
+            and transition.get("before_evidence_id")
+            == prediction.get("before_evidence_id")
+            and transition.get("after_evidence_id")
+            == prediction.get("after_evidence_id")
+            and transition.get("after_evidence_id") == after.get("evidence_id")
+            and transition.get("action") == commitment.get("action")
+            and transition.get("data") == commitment.get("data")
+        )
+
     content_ids_valid = all(
         isinstance(record, dict)
         and record.get("evidence_id")
@@ -928,25 +945,30 @@ def two_action_chain_report(
             "observation_occurrence",
             {key: value for key, value in record.items() if key != "evidence_id"},
         )
-        for record in (initial, successor, final_successor)
+        for record in observation_records
     ) and all(
         isinstance(event.get("record"), dict)
         and event.get("transition_id")
         == _content_id("trn-", "transition_occurrence", event["record"])
-        for event in (transition_event, second_transition_event)
+        for event in transition_events
     )
-    event_order = (
-        initial_index
-        < first_context_index
-        < first_index
-        < transition_index
-        < prediction_index
-        < successor_index
-        < context_index
-        < second_index
-        < second_transition_index
-        < second_prediction_index
-        < final_successor_index
+
+    # observation 0, then for each action: context, commitment, transition,
+    # prediction, successor observation.
+    expected_event_order = [observation_indexed[0][0]]
+    for action_id in range(actions):
+        expected_event_order.extend(
+            [
+                context_indexed[action_id][0],
+                commitment_indexed[action_id][0],
+                transition_indexed[action_id][0],
+                prediction_indexed[action_id][0],
+                observation_indexed[action_id + 1][0],
+            ]
+        )
+    event_order = all(
+        earlier < later
+        for earlier, later in zip(expected_event_order, expected_event_order[1:])
     )
 
     contexts_indexed = [
@@ -1028,17 +1050,9 @@ def two_action_chain_report(
         if record.get("kind") == "worker_stopped"
     ]
     contexts = [record for _index, record in contexts_indexed]
-    requests = [
-        record
-        for _index, record in requests_indexed
-        if record.get("action_point_id") not in rejected_crossing_ids
-    ]
+    requests = [record for _index, record in requests_indexed]
     admitted = [record for _index, record in admitted_indexed]
-    crossings = [
-        record
-        for _index, record in crossings_indexed
-        if record.get("action_point_id") not in rejected_crossing_ids
-    ]
+    crossings = [record for _index, record in crossings_indexed]
     validated = [record for _index, record in validated_indexed]
     recorded_transitions = [
         record for _index, record in recorded_transitions_indexed
@@ -1048,20 +1062,19 @@ def two_action_chain_report(
     ]
     expected_process_kinds = [
         "worker_started",
-        "competence_context_assembled",
-        "action_request",
-        "model_crossing",
-        "decision_validated",
-        "competence_action_admitted",
-        "transition_recorded",
-        "competence_successor_observed",
-        "competence_context_assembled",
-        "action_request",
-        "model_crossing",
-        "decision_validated",
-        "competence_action_admitted",
-        "transition_recorded",
-        "competence_successor_observed",
+        *(
+            kind
+            for _action_id in range(actions)
+            for kind in (
+                "competence_context_assembled",
+                "action_request",
+                "model_crossing",
+                "decision_validated",
+                "competence_action_admitted",
+                "transition_recorded",
+                "competence_successor_observed",
+            )
+        ),
         "worker_stopped",
     ]
     process_keys = {
@@ -1152,8 +1165,45 @@ def two_action_chain_report(
         for record in process_records
         if isinstance(record.get("run_id"), str) and record.get("run_id")
     }
+    expected_step_sequence = list(range(actions))
+    # A truncated log is the artifact this exists to reject, so the ordering
+    # sequence is only built once every spine is known to be complete. Indexing
+    # into a short list would raise out of a verifier whose whole job is to
+    # return False.
+    spine_counts_ok = (
+        len(started_indexed)
+        == len(stopped_indexed)
+        == 1
+        and len(contexts_indexed)
+        == len(requests_indexed)
+        == len(crossings_indexed)
+        == len(validated_indexed)
+        == len(admitted_indexed)
+        == len(recorded_transitions_indexed)
+        == len(successor_process_indexed)
+        == actions
+    )
+    # One interleaved spine per action, in the one order that means the model saw
+    # the context before it decided and the environment moved after it did.
+    expected_process_order: list[int] = []
+    if spine_counts_ok:
+        expected_process_order.append(started_indexed[0][0])
+        for action_id in range(actions):
+            expected_process_order.extend(
+                [
+                    contexts_indexed[action_id][0],
+                    requests_indexed[action_id][0],
+                    crossings_indexed[action_id][0],
+                    validated_indexed[action_id][0],
+                    admitted_indexed[action_id][0],
+                    recorded_transitions_indexed[action_id][0],
+                    successor_process_indexed[action_id][0],
+                ]
+            )
+        expected_process_order.append(stopped_indexed[0][0])
     process_shape = (
-        [record.get("kind") for record in spine_records] == expected_process_kinds
+        spine_counts_ok
+        and [record.get("kind") for record in spine_records] == expected_process_kinds
         and all(
             isinstance((kind := record.get("kind")), str)
             and kind in process_keys
@@ -1167,47 +1217,23 @@ def two_action_chain_report(
         and isinstance(started_indexed[0][1].get("runtime_python"), str)
         and bool(started_indexed[0][1]["runtime_python"])
         and isinstance(stopped_indexed[0][1].get("stderr"), str)
-        and [record.get("action_point_id") for record in contexts] == [0, 1]
-        and [record.get("step") for record in requests] == [0, 1]
-        and [record.get("step") for record in crossings] == [0, 1]
-        and [record.get("step") for record in validated] == [0, 1]
-        and [record.get("step") for record in admitted] == [0, 1]
+        and [record.get("action_point_id") for record in contexts]
+        == expected_step_sequence
+        and [record.get("step") for record in requests] == expected_step_sequence
+        and [record.get("step") for record in crossings] == expected_step_sequence
+        and [record.get("step") for record in validated] == expected_step_sequence
+        and [record.get("step") for record in admitted] == expected_step_sequence
         and [record.get("action_point_id") for record in recorded_transitions]
-        == [0, 1]
+        == expected_step_sequence
         and [record.get("action_point_id") for record in successor_process_records]
-        == [0, 1]
-        and len(contexts_indexed)
-        == len(requests_indexed)
-        == len(crossings_indexed)
-        == len(validated_indexed)
-        == len(admitted_indexed)
-        == len(recorded_transitions_indexed)
-        == len(successor_process_indexed)
-        == 2
-        and len(started_indexed) == len(stopped_indexed) == 1
-        and started_indexed[0][0]
-        < contexts_indexed[0][0]
-        and contexts_indexed[0][0]
-        < requests_indexed[0][0]
-        < crossings_indexed[0][0]
-        < validated_indexed[0][0]
-        < admitted_indexed[0][0]
-        < recorded_transitions_indexed[0][0]
-        < successor_process_indexed[0][0]
-        < contexts_indexed[1][0]
-        < requests_indexed[1][0]
-        < crossings_indexed[1][0]
-        < validated_indexed[1][0]
-        < admitted_indexed[1][0]
-        < recorded_transitions_indexed[1][0]
-        < successor_process_indexed[1][0]
-        < stopped_indexed[0][0]
+        == expected_step_sequence
+        and all(
+            earlier < later
+            for earlier, later in zip(
+                expected_process_order, expected_process_order[1:]
+            )
+        )
     )
-    process_run_ids = {
-        record.get("run_id")
-        for record in process_records
-        if isinstance(record.get("run_id"), str) and record.get("run_id")
-    }
     schemas_valid = all(
         event.get("schema") == COMPETENCE_SCHEMA for event in events
     ) and (
@@ -1218,11 +1244,10 @@ def two_action_chain_report(
             for record in process_records
         )
     )
-    first_packet: object = None
-    second_packet: object = None
+    packets: list[object] = [None] * actions
     competence_wrappers: list[object] = []
     if process_shape:
-        packets: list[object] = []
+        collected: list[object] = []
         for request_record in requests:
             request = request_record.get("request")
             observation = request.get("observation") if isinstance(request, dict) else None
@@ -1230,24 +1255,18 @@ def two_action_chain_report(
                 observation.get("competence") if isinstance(observation, dict) else None
             )
             competence_wrappers.append(competence)
-            packets.append(
+            collected.append(
                 competence.get("context") if isinstance(competence, dict) else None
             )
-        first_packet, second_packet = packets
+        packets = collected
     schemas_valid = schemas_valid and all(
         isinstance(value, dict) and value.get("schema") == COMPETENCE_SCHEMA
         for value in (
-            first,
-            second,
-            initial,
-            transition,
-            prediction,
-            successor,
-            second_transition,
-            second_prediction,
-            final_successor,
-            first_packet,
-            second_packet,
+            *commitments,
+            *observation_records,
+            *transitions,
+            *predictions,
+            *packets,
         )
     )
     schemas_valid = schemas_valid and all(
@@ -1256,81 +1275,108 @@ def two_action_chain_report(
         for wrapper in competence_wrappers
     )
     schemas_valid = schemas_valid and all(
-        isinstance(value, dict) and value.get("kind") == kind
-        for value, kind in (
-            (initial, "observation_occurrence"),
-            (successor, "observation_occurrence"),
-            (final_successor, "observation_occurrence"),
-            (transition, "transition_occurrence"),
-            (second_transition, "transition_occurrence"),
-        )
-    )
-    prediction_core = {
-        key: value for key, value in prediction.items() if key != "type"
-    }
-    packet_linked = False
-    if (
-        isinstance(first_packet, dict)
-        and isinstance(second_packet, dict)
-        and isinstance(initial, dict)
-        and isinstance(transition, dict)
-    ):
-        continuity = {
-            "action_id": 1,
-            "before_evidence_id": transition.get("before_evidence_id"),
-            "after_evidence_id": transition.get("after_evidence_id"),
-            "outcome": prediction.get("outcome"),
-        }
-        packet_linked = (
-            first_packet.get("current_observation")
-            == {
-                "step": initial.get("step"),
-                "evidence_id": initial.get("evidence_id"),
-            }
-            and first_packet.get("last_prediction_result") is None
-            and contexts[0].get("competence_packet_sha256")
-            == canonical_digest(first_packet)
-            and first_context_event.get("packet_sha256")
-            == competence_packet_digest(first_packet)
-            and isinstance(successor, dict)
-            and second_packet.get("current_observation")
-            == {
-                "step": successor.get("step"),
-                "evidence_id": transition.get("after_evidence_id"),
-            }
-            and second_packet.get("last_prediction_result") == prediction_core
-            and continuity in second_packet.get("recent_continuity", [])
-            and contexts[1].get("competence_packet_sha256")
-            == canonical_digest(second_packet)
-            and context_event.get("packet_sha256")
-            == competence_packet_digest(second_packet)
-        )
-    observation_records = (initial, successor, final_successor)
-    observation_steps = [
-        record.get("step") if isinstance(record, dict) else None
+        isinstance(record, dict) and record.get("kind") == "observation_occurrence"
         for record in observation_records
+    ) and all(
+        isinstance(record, dict) and record.get("kind") == "transition_occurrence"
+        for record in transitions
+    )
+
+    prediction_cores = [
+        {key: value for key, value in prediction.items() if key != "type"}
+        for prediction in predictions
     ]
+    packet_linked = all(isinstance(packet, dict) for packet in packets) and all(
+        isinstance(record, dict) for record in (*observation_records, *transitions)
+    )
+    if packet_linked:
+        for action_id in range(actions):
+            packet = packets[action_id]
+            before = observation_records[action_id]
+            expected_current = {
+                "step": before.get("step"),
+                "evidence_id": before.get("evidence_id"),
+            }
+            if action_id == 0:
+                expected_result = None
+            else:
+                expected_result = prediction_cores[action_id - 1]
+                previous = transitions[action_id - 1]
+                continuity = {
+                    "action_id": action_id,
+                    "before_evidence_id": previous.get("before_evidence_id"),
+                    "after_evidence_id": previous.get("after_evidence_id"),
+                    "outcome": predictions[action_id - 1].get("outcome"),
+                }
+                if continuity not in packet.get("recent_continuity", []):
+                    packet_linked = False
+                    break
+            if not (
+                packet.get("current_observation") == expected_current
+                and packet.get("last_prediction_result") == expected_result
+                and contexts[action_id].get("competence_packet_sha256")
+                == canonical_digest(packet)
+                and context_events[action_id].get("packet_sha256")
+                == competence_packet_digest(packet)
+            ):
+                packet_linked = False
+                break
+
     observation_legal_actions = [
         record.get("public", {}).get("available_actions")
         if isinstance(record, dict) and isinstance(record.get("public"), dict)
         else None
-        for record in observation_records[:2]
+        for record in observation_records[:actions]
     ]
     event_step_authority = (
-        observation_steps == [0, 1, 2]
+        [
+            record.get("step") if isinstance(record, dict) else None
+            for record in observation_records
+        ]
+        == list(range(observation_count))
         and all(
             isinstance(record, dict)
-            and _public_observation_valid(record.get("public"), expected_step=index)
-            for index, record in enumerate(observation_records)
+            and _public_observation_valid(record.get("public"), expected_step=step)
+            for step, record in enumerate(observation_records)
         )
-        and first.get("before_step") == observation_steps[0]
-        and second.get("before_step") == observation_steps[1]
+        and all(
+            commitments[action_id].get("before_step")
+            == observation_records[action_id].get("step")
+            for action_id in range(actions)
+        )
     )
+    # The frozen worker shows the model only the last max_recent_transitions of
+    # them, so past that window the expected list is the tail, not the whole
+    # history. Before action 9 of a live run the two are the same list, which is
+    # why two actions never needed this.
+    recent_transition_window: int | None = None
+    if requests:
+        spec = requests[0].get("request", {}).get("paired_run_spec")
+        if isinstance(spec, dict):
+            window = spec.get("max_recent_transitions")
+            if type(window) is int and window >= 0:
+                recent_transition_window = window
+
+    def _expected_recent(action_id: int) -> list[object]:
+        preceding = [
+            record.get("transition")
+            for record in recorded_transitions[:action_id]
+            if isinstance(record.get("transition"), dict)
+        ]
+        if recent_transition_window is None:
+            return preceding
+        if recent_transition_window == 0:
+            return []
+        return preceding[-recent_transition_window:]
+
     process_linked = (
         process_shape
         and event_step_authority
-        and requests[0].get("request", {}).get("paired_run_spec")
-        == requests[1].get("request", {}).get("paired_run_spec")
+        and all(
+            record.get("request", {}).get("paired_run_spec")
+            == requests[0].get("request", {}).get("paired_run_spec")
+            for record in requests
+        )
         and stopped_indexed[0][1].get("returncode") == 0
         # A refusal used to disqualify the chain outright, because it could only
         # end the run. It can now be answered, so it disqualifies nothing on its
@@ -1346,170 +1392,179 @@ def two_action_chain_report(
         )
         and all(
             _process_action_linked(
-                action_point_id=action_point_id,
-                packet=packet,
-                available_actions=observation_legal_actions[action_point_id],
-                commitment=commitment,
-                before_observation=observation_records[action_point_id],
-                after_observation=observation_records[action_point_id + 1],
-                expected_recent_transitions=[
-                    record.get("transition")
-                    for record in recorded_transitions[:action_point_id]
-                    if isinstance(record.get("transition"), dict)
-                ],
-                context_record=contexts[action_point_id],
-                request_record=requests[action_point_id],
-                crossing_record=crossings[action_point_id],
-                validated_record=validated[action_point_id],
-                admitted_record=admitted[action_point_id],
-                transition_record=recorded_transitions[action_point_id],
-                successor_record=successor_process_records[action_point_id],
+                action_point_id=action_id,
+                packet=packets[action_id],
+                available_actions=observation_legal_actions[action_id],
+                commitment=commitments[action_id],
+                before_observation=observation_records[action_id],
+                after_observation=observation_records[action_id + 1],
+                expected_recent_transitions=_expected_recent(action_id),
+                context_record=contexts[action_id],
+                request_record=requests[action_id],
+                crossing_record=crossings[action_id],
+                validated_record=validated[action_id],
+                admitted_record=admitted[action_id],
+                transition_record=recorded_transitions[action_id],
+                successor_record=successor_process_records[action_id],
             )
-            for action_point_id, (packet, commitment) in enumerate(
-                ((first_packet, first), (second_packet, second))
-            )
+            for action_id in range(actions)
         )
     )
     model_authored_replay = _model_authored_replay_matches(
         events=events,
-        observations=[initial, successor, final_successor],
+        observations=observation_records,
         requests=requests,
         crossings=crossings,
+        actions=actions,
     )
 
-    raw_first_claim_ids = first.get("claim_ids")
-    raw_second_claim_ids = second.get("claim_ids")
-    first_claim_list = (
-        raw_first_claim_ids if isinstance(raw_first_claim_ids, list) else []
-    )
-    second_claim_list = (
-        raw_second_claim_ids if isinstance(raw_second_claim_ids, list) else []
-    )
-    claim_id_shapes = (
-        isinstance(raw_first_claim_ids, list)
-        and bool(first_claim_list)
-        and all(isinstance(claim_id, str) for claim_id in first_claim_list)
-        and len(first_claim_list) == len(set(first_claim_list))
-        and isinstance(raw_second_claim_ids, list)
-        and all(isinstance(claim_id, str) for claim_id in second_claim_list)
-        and len(second_claim_list) == len(set(second_claim_list))
-    )
-    first_claim_ids = set(first_claim_list) if claim_id_shapes else set()
-    second_claim_ids = set(second_claim_list) if claim_id_shapes else set()
+    raw_claim_ids = [commitment.get("claim_ids") for commitment in commitments]
+    claim_lists = [
+        raw if isinstance(raw, list) else [] for raw in raw_claim_ids
+    ]
+    claim_id_shapes = all(
+        isinstance(raw, list)
+        and all(isinstance(claim_id, str) for claim_id in claim_list)
+        and len(claim_list) == len(set(claim_list))
+        for raw, claim_list in zip(raw_claim_ids, claim_lists)
+    ) and bool(claim_lists[0])
     ledger_indexed = [
         (index, event)
         for index, event in enumerate(events)
         if event.get("type") == "ledger"
     ]
-    first_ledger = [
-        event
-        for index, event in ledger_indexed
-        if first_context_index < index < first_index
+    ledger_segments = [
+        [
+            event
+            for index, event in ledger_indexed
+            if context_indexed[action_id][0] < index < commitment_indexed[action_id][0]
+        ]
+        for action_id in range(actions)
     ]
-    second_ledger = [
-        event for index, event in ledger_indexed if context_index < index < second_index
-    ]
-    ledger_placement = (
-        len(ledger_indexed) == len(first_ledger) + len(second_ledger)
-        and all(event.get("action_id") == 1 for event in first_ledger)
-        and all(event.get("action_id") == 2 for event in second_ledger)
+    ledger_placement = len(ledger_indexed) == sum(
+        len(segment) for segment in ledger_segments
+    ) and all(
+        event.get("action_id") == action_id + 1
+        for action_id, segment in enumerate(ledger_segments)
+        for event in segment
     )
-    after_first, first_ledger_valid = _apply_ledger_events({}, first_ledger)
-    after_second, second_ledger_valid = _apply_ledger_events(after_first, second_ledger)
-    expected_working_claims = (
-        [after_first[claim_id] for claim_id in first_claim_list]
-        if claim_id_shapes
-        and all(
-            claim_id in after_first and after_first[claim_id].get("status") == "active"
-            for claim_id in first_claim_list
-        )
-        else None
-    )
-    changed_first_claim_ids = {
-        operation["claim_id"]
-        for event in second_ledger
-        if isinstance((operation := event.get("operation")), dict)
-        and operation.get("claim_id") in first_claim_ids
-        and operation.get("op") in {"revise", "retire"}
-    }
-    selected_second_claims_valid = claim_id_shapes and all(
-        claim_id in after_second and after_second[claim_id].get("status") == "active"
-        for claim_id in second_claim_list
-    )
-    claim_linked = (
-        claim_id_shapes
-        and ledger_placement
-        and first_ledger_valid
-        and second_ledger_valid
-        and isinstance(second_packet, dict)
-        and second_packet.get("working_claims") == expected_working_claims
-        and selected_second_claims_valid
-        and first_claim_ids <= (second_claim_ids | changed_first_claim_ids)
-    )
+    ledger_states: list[dict[str, Any]] = []
+    ledger_valid = True
+    state: dict[str, Any] = {}
+    for segment in ledger_segments:
+        state, applied_ok = _apply_ledger_events(state, segment)
+        ledger_valid = ledger_valid and applied_ok
+        ledger_states.append(state)
 
-    expected_unresolved, first_prediction_valid = _prediction_mismatches(
-        first, prediction, initial, successor
-    )
-    _second_mismatches, second_prediction_valid = _prediction_mismatches(
-        second, second_prediction, successor, final_successor
-    )
-    unresolved = (
-        second_packet.get("unresolved_mismatches", [])
-        if isinstance(second_packet, dict)
-        else []
-    )
-    reconciliation_events = [
-        event
-        for index, event in enumerate(events)
-        if context_index < index < second_index
-        and event.get("type") == "reconciliation"
-    ]
-    if expected_unresolved:
-        unresolved_ids = {
-            item["mismatch_id"]
-            for item in unresolved
-            if isinstance(item, dict) and isinstance(item.get("mismatch_id"), str)
-        }
-        reconciliation = second.get("reconciliation")
-        reconciliation_ids = (
-            {
+    claim_linked = claim_id_shapes and ledger_placement and ledger_valid
+    if claim_linked:
+        for action_id in range(actions):
+            selected = claim_lists[action_id]
+            state_here = ledger_states[action_id]
+            if not all(
+                claim_id in state_here
+                and state_here[claim_id].get("status") == "active"
+                for claim_id in selected
+            ):
+                claim_linked = False
+                break
+            if action_id + 1 >= actions:
+                break
+            # The claims an action worked from must be answered by the next one:
+            # carried forward, or explicitly revised or retired. Silently dropping
+            # a claim is how a ledger stops being a ledger.
+            next_packet = packets[action_id + 1]
+            expected_working_claims = [
+                state_here[claim_id] for claim_id in selected
+            ]
+            changed = {
+                operation["claim_id"]
+                for event in ledger_segments[action_id + 1]
+                if isinstance((operation := event.get("operation")), dict)
+                and operation.get("claim_id") in set(selected)
+                and operation.get("op") in {"revise", "retire"}
+            }
+            if not (
+                isinstance(next_packet, dict)
+                and next_packet.get("working_claims") == expected_working_claims
+                and set(selected) <= (set(claim_lists[action_id + 1]) | changed)
+            ):
+                claim_linked = False
+                break
+
+    predictions_valid = True
+    expected_unresolved_by_action: list[list[Any]] = []
+    for action_id in range(actions):
+        expected_unresolved, valid = _prediction_mismatches(
+            commitments[action_id],
+            predictions[action_id],
+            observation_records[action_id],
+            observation_records[action_id + 1],
+        )
+        expected_unresolved_by_action.append(expected_unresolved)
+        predictions_valid = predictions_valid and valid
+
+    reconciliation_linked = True
+    for action_id in range(1, actions):
+        packet = packets[action_id]
+        unresolved = (
+            packet.get("unresolved_mismatches", []) if isinstance(packet, dict) else []
+        )
+        expected_unresolved = expected_unresolved_by_action[action_id - 1]
+        reconciliation_events = [
+            event
+            for index, event in enumerate(events)
+            if context_indexed[action_id][0] < index < commitment_indexed[action_id][0]
+            and event.get("type") == "reconciliation"
+        ]
+        reconciliation = commitments[action_id].get("reconciliation")
+        if expected_unresolved:
+            unresolved_ids = {
                 item["mismatch_id"]
-                for item in reconciliation
+                for item in unresolved
                 if isinstance(item, dict) and isinstance(item.get("mismatch_id"), str)
             }
-            if isinstance(reconciliation, list)
-            else set()
-        )
-        reconciliation_entries_valid = isinstance(reconciliation, list) and all(
-            isinstance(item, dict)
-            and set(item) == {"mismatch_id", "disposition", "note"}
-            and isinstance(item.get("mismatch_id"), str)
-            and 1 <= len(item["mismatch_id"]) <= 100
-            and item.get("disposition") in {"ABANDON", "NARROW", "RETAIN"}
-            and isinstance(item.get("note"), str)
-            and 1 <= len(item["note"]) <= 1_000
-            for item in reconciliation
-        )
-        reconciliation_linked = (
-            first_prediction_valid
-            and unresolved == expected_unresolved
-            and bool(unresolved_ids)
-            and reconciliation_ids == unresolved_ids
-            and reconciliation_entries_valid
-            and (
-                len(reconciliation) if isinstance(reconciliation, list) else -1
+            reconciliation_ids = (
+                {
+                    item["mismatch_id"]
+                    for item in reconciliation
+                    if isinstance(item, dict)
+                    and isinstance(item.get("mismatch_id"), str)
+                }
+                if isinstance(reconciliation, list)
+                else set()
             )
-            == len(expected_unresolved)
-            and len(reconciliation_events) == 1
-            and reconciliation_events[0].get("items") == reconciliation
-        )
-    else:
-        reconciliation_linked = (
-            first_prediction_valid
-            and unresolved == []
-            and second.get("reconciliation") is None
-            and not reconciliation_events
-        )
+            reconciliation_entries_valid = isinstance(reconciliation, list) and all(
+                isinstance(item, dict)
+                and set(item) == {"mismatch_id", "disposition", "note"}
+                and isinstance(item.get("mismatch_id"), str)
+                and 1 <= len(item["mismatch_id"]) <= 100
+                and item.get("disposition") in {"ABANDON", "NARROW", "RETAIN"}
+                and isinstance(item.get("note"), str)
+                and 1 <= len(item["note"]) <= 1_000
+                for item in reconciliation
+            )
+            step_ok = (
+                unresolved == expected_unresolved
+                and bool(unresolved_ids)
+                and reconciliation_ids == unresolved_ids
+                and reconciliation_entries_valid
+                and (
+                    len(reconciliation) if isinstance(reconciliation, list) else -1
+                )
+                == len(expected_unresolved)
+                and len(reconciliation_events) == 1
+                and reconciliation_events[0].get("items") == reconciliation
+            )
+        else:
+            step_ok = (
+                unresolved == []
+                and reconciliation is None
+                and not reconciliation_events
+            )
+        reconciliation_linked = reconciliation_linked and step_ok
+    reconciliation_linked = reconciliation_linked and predictions_valid
+
     # A refused crossing counts as evidence only where it belongs: before the
     # crossing that carried the same action, under a distinct id, and never
     # after an action was already released.
@@ -1545,9 +1600,16 @@ def two_action_chain_report(
         "refused_crossings_precede_their_action": repairs_linked,
         "model_authored_semantic_replay": model_authored_replay,
         "successor_context_packet_linked": packet_linked,
-        "claim_continuity_linked_to_action_2": claim_linked,
-        "prediction_results_derived_from_commitments": (
-            first_prediction_valid and second_prediction_valid
-        ),
+        "claim_continuity_linked_across_actions": claim_linked,
+        "prediction_results_derived_from_commitments": predictions_valid,
         "reconciliation_linked_to_observed_mismatch": reconciliation_linked,
     }
+
+
+def two_action_chain_report(
+    events: list[dict[str, Any]],
+    process_records: list[dict[str, Any]],
+) -> dict[str, bool]:
+    """Validate one linked commitment-successor-context-commitment chain."""
+
+    return chain_report(events, process_records, actions=2)

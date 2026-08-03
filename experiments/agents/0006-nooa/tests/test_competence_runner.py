@@ -28,6 +28,7 @@ from competence_runner import (
     attach_competence_context,
 )
 from evidence_chain import canonical_digest, two_action_chain_report
+from host.runner import NooaProcessAgent
 
 from experiments.harness import Observation, Transition
 from experiments.harness.runner import public_observation
@@ -458,6 +459,54 @@ class CompetenceRunnerTests(unittest.TestCase):
             self.assertIn("derived_evidence", event_types)
             derived = next(event for event in events if event["type"] == "derived_evidence")
             self.assertEqual(len(derived["record"]["evidence_id"].removeprefix("derived-")), 64)
+
+    def test_the_control_arm_crosses_the_frozen_worker_untreated(self) -> None:
+        """The control must be the frozen worker, not a quieter treatment.
+
+        A comparison is only worth its hour if the control arm carries none of
+        the mechanism under test. This crosses the same real frozen worker the
+        treatment test crosses, through the class the runner picks for
+        ``--arm control``, and checks the negative directly: the observation the
+        model receives has no competence key anywhere in it, and a plain
+        free-text reason -- illegal under the treatment contract -- is admitted.
+        """
+
+        pixels = np.array([[[0, 1], [0, 0]]], dtype=EXPECTED_PROJECTION_DTYPE)
+        pixels.setflags(write=False)
+        observation = Observation(
+            pixels=pixels,
+            available_actions=(1,),
+            levels_completed=0,
+            state="NOT_FINISHED",
+            full_reset=False,
+        )
+
+        def fixture(_step: int, _observation: Observation) -> list[str]:
+            return [
+                "return_result({'action': 1, 'data': None, "
+                "'reason': 'moving left to see what happens'})"
+            ]
+
+        frozen_root = ROOT.parent / "0002-nooa"
+        with tempfile.TemporaryDirectory() as directory:
+            run_root = Path(directory) / "run"
+            with NooaProcessAgent(
+                runtime_root=frozen_root / "nooa-runtime",
+                run_root=run_root,
+                fixture_policy=fixture,
+            ) as agent:
+                decision = agent.act(observation)
+                self.assertEqual(decision.action, 1)
+
+            requests = [
+                json.loads(line)
+                for line in (run_root / "ipc" / "requests.jsonl").read_text().splitlines()
+                if line.strip()
+            ]
+            actions = [record for record in requests if record.get("kind") != "stop"]
+            self.assertEqual(len(actions), 1)
+            self.assertNotIn("competence", json.dumps(actions[0]))
+            self.assertFalse((run_root / "competence.jsonl").exists())
 
 
 if __name__ == "__main__":

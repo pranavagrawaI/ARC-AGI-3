@@ -52,8 +52,18 @@ def parsed_args() -> argparse.Namespace:
 
 
 def two_action_fixture(
-    *, mismatch: bool = False, retire_claim: bool = False
+    *, mismatch: bool = False, retire_claim: bool = False, actions: int = 2
 ) -> tuple[list[dict], list[dict]]:
+    """Build a linked chain of ``actions`` action points.
+
+    Two is the default and the path is unchanged there, so every test written
+    against this fixture is testing what it always was. Past two, each further
+    action carries a distinct successor and reconciles whatever the previous
+    prediction left outstanding -- which is what a long run does, and the
+    condition a chain verifier that only ever saw two actions was never asked to
+    hold.
+    """
+
     controller = CompetenceController()
     public = {
         "step": 0,
@@ -130,6 +140,59 @@ def two_action_fixture(
     second = controller.admit(second_decision, legal_actions=[1, 2])
     final_successor = {**successor, "step": 2}
     controller.receive_observation(final_successor)
+
+    action_points = [
+        (0, first_packet, first, first_decision, public, successor),
+        (1, second_packet, second, second_decision, successor, final_successor),
+    ]
+    working_claim = "claim-successor" if retire_claim else "claim-control"
+    before_observation = final_successor
+    for action_point in range(2, actions):
+        packet = controller.context_packet()
+        outstanding = packet["unresolved_mismatches"]
+        decision = {
+            "action": 1,
+            "data": None,
+            "working_state": {},
+            "test": f"action {action_point + 1}",
+            "claim_ids": [working_claim],
+            "ledger": [],
+            "assertions": [{"observable": "changed_cells", "op": ">", "value": 0}],
+            "evidence_requests": [],
+            "reconciliation": (
+                [
+                    {
+                        "mismatch_id": item["mismatch_id"],
+                        "disposition": "RETAIN",
+                        "note": "carry the open mismatch forward",
+                    }
+                    for item in outstanding
+                ]
+                or None
+            ),
+        }
+        commitment = controller.admit(decision, legal_actions=[1, 2])
+        after_observation = {
+            **before_observation,
+            "step": action_point + 1,
+            # A distinct frame each time, so the assertion above holds and the
+            # action leaves a mismatch behind only where the fixture means to.
+            "pixels": [[[action_point + 1]]],
+            "full_reset": False,
+        }
+        controller.receive_observation(after_observation)
+        action_points.append(
+            (
+                action_point,
+                packet,
+                commitment,
+                decision,
+                before_observation,
+                after_observation,
+            )
+        )
+        before_observation = after_observation
+
     process_protocol = "0002-nooa-ipc-v1"
     run_id = "fixture-run"
     process_records: list[dict] = [
@@ -261,10 +324,7 @@ def two_action_fixture(
         }
 
     prior_transitions: list[dict] = []
-    for action_point, packet, commitment, authored, before, after in (
-        (0, first_packet, first, first_decision, public, successor),
-        (1, second_packet, second, second_decision, successor, final_successor),
-    ):
+    for action_point, packet, commitment, authored, before, after in action_points:
         reason = json.dumps(
             {
                 key: value
@@ -461,12 +521,14 @@ class LiveProbeTests(unittest.TestCase):
             run_root=Path(args.run_root),
             source_state=source_state,
             route_name="pinned",
+            arm="treatment",
         )
         second = MODULE["_approval_request"](
             spec=spec,
             run_root=Path("/tmp/different-run"),
             source_state=source_state,
             route_name="pinned",
+            arm="treatment",
         )
         self.assertNotEqual(first["required_confirmation"], second["required_confirmation"])
 
@@ -477,8 +539,22 @@ class LiveProbeTests(unittest.TestCase):
             run_root=Path(args.run_root),
             source_state=changed_state,
             route_name="pinned",
+            arm="treatment",
         )
         self.assertNotEqual(first["required_confirmation"], third["required_confirmation"])
+
+        # An arm that could be swapped between approval and execution would not
+        # be a control: one approved digest would authorize either half of the
+        # comparison.
+        control = MODULE["_approval_request"](
+            spec=spec,
+            run_root=Path(args.run_root),
+            source_state=source_state,
+            route_name="pinned",
+            arm="control",
+        )
+        self.assertNotEqual(first["required_confirmation"], control["required_confirmation"])
+        self.assertEqual(control["authorization"]["arm"], "control")
 
         with tempfile.TemporaryDirectory() as directory:
             request_path = Path(directory) / "approval.json"
@@ -521,7 +597,11 @@ class LiveProbeTests(unittest.TestCase):
                 (field, maximum + 1)
                 for field, maximum in MODULE["SMOKE_MAXIMA"].items()
             ),
-            ("transport_max_retries", 1),
+            # Retries are now a range rather than a pin, because a 44-action arm
+            # cannot survive one 429 at zero. The ceiling still binds.
+            ("transport_max_retries", 3),
+            ("transport_max_retries", -1),
+            ("arm", "neither"),
         ):
             invalid = deepcopy(args)
             setattr(invalid, field, value)
@@ -1024,7 +1104,8 @@ class LiveProbeTests(unittest.TestCase):
                 spec=spec,
                 run_root=run_root,
                 source_state=source_state,
-            route_name="pinned",
+                route_name="pinned",
+                arm="treatment",
             )
             consumed_approval = root / "approval.json.consumed"
             consumed_approval.write_text(json.dumps(approval), encoding="utf-8")
@@ -1304,6 +1385,56 @@ class LiveProbeTests(unittest.TestCase):
             )
             self.assertEqual(help_result.returncode, 0, help_result.stderr)
             self.assertIn("--provider", help_result.stdout)
+
+    def test_the_control_arm_is_judged_on_distance_not_on_commitments(self) -> None:
+        """Treatment checks would be vacuous against an arm that cannot produce them.
+
+        The control owes the comparison that it ran the same distance on the same
+        audited substrate. It also owes the negative: competence records in a
+        control run mean the arm was not the arm it claimed to be, and that must
+        fail rather than pass unnoticed.
+        """
+
+        summary = {
+            "actions": 44,
+            "observed_successors": 44,
+            "stop_reason": "action_budget",
+            "clean_shutdown": True,
+            "trace_complete": True,
+        }
+        verdict = MODULE["_operational_verdict"](
+            summary,
+            competence_events=[],
+            process_records=[],
+            provider_success=True,
+            required_actions=44,
+            arm="control",
+        )
+        self.assertTrue(verdict["success"])
+        self.assertEqual(verdict["goal"], "44-action-control-arm")
+        self.assertEqual(verdict["arm"], "control")
+
+        events, process_records = two_action_fixture()
+        contaminated = MODULE["_operational_verdict"](
+            summary,
+            competence_events=events,
+            process_records=process_records,
+            provider_success=True,
+            required_actions=44,
+            arm="control",
+        )
+        self.assertFalse(contaminated["success"])
+        self.assertFalse(contaminated["checks"]["no_competence_records"])
+
+        short = MODULE["_operational_verdict"](
+            {**summary, "actions": 43},
+            competence_events=[],
+            process_records=[],
+            provider_success=True,
+            required_actions=44,
+            arm="control",
+        )
+        self.assertFalse(short["success"])
 
     def test_operational_verdict_requires_predecessor_result_exposure(self) -> None:
         summary = {
@@ -2076,6 +2207,7 @@ class LiveProbeTests(unittest.TestCase):
             run_root=Path("/tmp/run"),
             phase="environment_create",
             error=RuntimeError("boom"),
+            arm="treatment",
         )
         self.assertEqual(summary["stop_reason"], "stage_exception")
         self.assertEqual(summary["failure_phase"], "environment_create")
@@ -2108,6 +2240,7 @@ class LiveProbeTests(unittest.TestCase):
                 run_root=run_root,
                 phase="environment_step",
                 error=RuntimeError("boom"),
+                arm="control",
             )
             self.assertEqual(summary["attempted_actions"], 2)
             self.assertEqual(summary["observed_successors"], 1)
@@ -2344,6 +2477,117 @@ class InlineReturnRouteTests(unittest.TestCase):
         }
         self.assertTrue(binds([call], decision))
         self.assertFalse(binds([call], {**decision, "action": 2}))
+
+
+class LongChainTests(unittest.TestCase):
+    """The 44-action run is judged by this code; two actions never exercised it."""
+
+    def test_a_long_chain_is_accepted_and_every_action_is_linked(self) -> None:
+        # Two is the fixture's floor: it builds the first two action points
+        # unconditionally, and chain_report at actions=1 is unreachable in
+        # production because the one-action goal has its own verdict branch.
+        for actions in (2, 3, 6, 12):
+            with self.subTest(actions=actions):
+                events, process = two_action_fixture(actions=actions)
+                report = MODULE_CHAIN["chain_report"](
+                    events, process, actions=actions
+                )
+                self.assertTrue(all(report.values()), report)
+
+    def test_the_two_action_entry_point_is_the_general_one(self) -> None:
+        """Equivalence is what makes the generalization safe to trust: the case
+        already covered by the mutant suite is the same code path."""
+
+        for kwargs in ({}, {"mismatch": True}, {"retire_claim": True}):
+            with self.subTest(**kwargs):
+                events, process = two_action_fixture(**kwargs)
+                self.assertEqual(
+                    MODULE_CHAIN["two_action_chain_report"](events, process),
+                    MODULE_CHAIN["chain_report"](events, process, actions=2),
+                )
+
+    def test_a_chain_that_sags_in_the_middle_is_rejected(self) -> None:
+        """A verifier that only checked the ends would pass every one of these.
+
+        Each mutation damages an action that is neither the first nor the last,
+        which is the whole class of defect two actions cannot express.
+        """
+
+        def report(events: list[dict], process: list[dict]) -> dict[str, bool]:
+            return MODULE_CHAIN["chain_report"](events, process, actions=6)
+
+        baseline_events, baseline_process = two_action_fixture(actions=6)
+        self.assertTrue(all(report(baseline_events, baseline_process).values()))
+
+        # A middle commitment claims an action the environment never carried out.
+        forged_action = deepcopy(baseline_events)
+        middle = [
+            event for event in forged_action if event.get("type") == "commitment"
+        ][3]
+        middle["action"] = 2
+        self.assertFalse(all(report(forged_action, baseline_process).values()))
+
+        # A middle successor is replaced, breaking the link to the next
+        # commitment while leaving both ends of the chain intact.
+        broken_link = deepcopy(baseline_events)
+        observations = [
+            event for event in broken_link if event.get("type") == "observation"
+        ]
+        observations[3]["record"]["evidence_id"] = "obs-" + "0" * 64
+        self.assertFalse(all(report(broken_link, baseline_process).values()))
+
+        # A middle action point is dropped from the process log entirely.
+        short_process = [
+            record
+            for record in deepcopy(baseline_process)
+            if not (
+                record.get("kind") == "competence_action_admitted"
+                and record.get("action_point_id") == 3
+            )
+        ]
+        self.assertFalse(all(report(baseline_events, short_process).values()))
+
+        # Two middle action points are transposed, so the run reads as though the
+        # model answered a context it had not been given yet.
+        reordered = deepcopy(baseline_process)
+        third = [
+            index
+            for index, record in enumerate(reordered)
+            if record.get("action_point_id") == 3
+        ]
+        fourth = [
+            index
+            for index, record in enumerate(reordered)
+            if record.get("action_point_id") == 4
+        ]
+        for source, target in zip(third, fourth):
+            reordered[source], reordered[target] = reordered[target], reordered[source]
+        self.assertFalse(all(report(baseline_events, reordered).values()))
+
+    def test_the_expected_action_count_is_enforced(self) -> None:
+        """A short run must not pass by being judged as the run it managed to be."""
+
+        events, process = two_action_fixture(actions=3)
+        self.assertFalse(
+            all(MODULE_CHAIN["chain_report"](events, process, actions=6).values())
+        )
+        with self.assertRaises(ValueError):
+            MODULE_CHAIN["chain_report"](events, process, actions=0)
+
+
+class FrozenControlPinTests(unittest.TestCase):
+    def test_the_contract_names_the_revision_the_runner_executes(self) -> None:
+        """Nothing bound these two, so CONTRACT.md drifted a revision behind.
+
+        It named e878370 — the repair that rewrote the consumed call as
+        assistant prose — while the runner executed eeba4c0, which answers the
+        call instead. The bytes were right and the audit-facing document was
+        wrong, which is the worse way round.
+        """
+
+        revision = MODULE["FROZEN_CONTROL_REVISION"]
+        contract = (ROOT / "CONTRACT.md").read_text(encoding="utf-8")
+        self.assertIn(f"`{revision}` is frozen", contract)
 
 
 if __name__ == "__main__":

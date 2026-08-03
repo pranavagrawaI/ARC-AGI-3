@@ -4,11 +4,15 @@ Status: first executable treatment slice. It licenses the protocol below, not
 gameplay competence, a treatment effect, or a claim that the target model uses
 the protocol well.
 
-`0002-NOOA` at revision `e878370` is frozen. The earlier `dfb2d2b` freeze was
-reopened on 2026-08-02 to stop the consumed `return_result` call being replayed
-as an open tool call, which ModelRun refuses and which blocked every second
-action point of this treatment; that directory's `QUALIFICATION.md` records the
-defect and why G9 did not catch it.
+`0002-NOOA` at revision `eeba4c0` is frozen, matching
+`run_live_probe.py::FROZEN_CONTROL_REVISION`. The `dfb2d2b` freeze was reopened
+on 2026-08-02 to stop the consumed `return_result` call being replayed as an
+open tool call, which ModelRun refuses and which blocked every second action
+point of this treatment. That repair, `e878370`, rewrote the consumed call as
+assistant prose, which the model then imitated instead of acting; `eeba4c0`
+answers the call with the `function_call_output` every other call receives. That
+directory's `QUALIFICATION.md` records both defects and why G9 did not catch the
+first.
 
 This directory is the only owner of the competence treatment. It invokes the
 frozen worker unchanged; it does not edit that worker, its provider transport,

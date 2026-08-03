@@ -40,9 +40,9 @@ for path in (REPO, CONTROL_ROOT, TREATMENT_ROOT, TREATMENT_ROOT / "host"):
 import arc_agi
 from arc_agi.base import OperationMode
 from competence_runner import NooaCompetenceProcessAgent
-from evidence_chain import two_action_chain_report as _two_action_chain_report
+from evidence_chain import chain_report as _chain_report
 from host.qualification import PairedRunSpec, ProviderRequestProfile
-from host.runner import NooaWorkerError
+from host.runner import NooaProcessAgent, NooaWorkerError
 
 from experiments.harness import JsonlTraceWriter, run_episode
 
@@ -56,18 +56,34 @@ EXPECTED_GAME = "ls20"
 EXPECTED_MODEL = "openai/google/gemma-4-31b-it"
 EXPECTED_WIRE_MODEL = "google/gemma-4-31b-it"
 EXPECTED_API_BASE = "https://openrouter.ai/api/v1"
+# The two arms of the matched comparison. The control is the frozen 0002 worker
+# invoked exactly as 0002 invokes it -- no competence packet, no typed
+# commitment, no reconciliation gate. Both arms travel this runner, this approval
+# flow, and this pinned route, so the arm is the only authorized difference
+# between them. It is bound into the approval digest for that reason: an arm
+# that could be swapped after approval would not be a control.
+ARMS = ("control", "treatment")
 SMOKE_MAXIMA = {
-    "max_actions": 3,
-    # Two actions at the round ceiling is sixteen calls, plus room for repairs.
-    "max_model_calls": 20,
+    # 44 actions is the established long-horizon budget in this repo: 0002's own
+    # ls20 tracer and the p9 cd82 arms all ran it, so a comparison at 44 lands
+    # beside existing evidence instead of starting a new convention.
+    "max_actions": 44,
+    # 44 actions at the round ceiling, plus room for repairs.
+    "max_model_calls": 400,
     # A round costs more than the one before it, because the transcript it
     # carries is longer: run 20260802T205910Z spent 2,769 then 5,129 then 4,330
-    # then 8,600 over four rounds of one action. Extending the round ceiling to
-    # eight without extending this one would only move the failure from round
-    # exhaustion to token exhaustion. The bound is set for the worst case of two
-    # actions that both run to the round ceiling, which at the observed rate is
-    # roughly $0.05.
-    "max_reported_tokens": 262_144,
+    # then 8,600 over four rounds of one action. Extending the round ceiling
+    # without extending this one would only move the failure from round
+    # exhaustion to token exhaustion.
+    #
+    # Across actions the cost plateaus rather than compounding, because the
+    # frozen worker keeps a six-turn sliding window (agent.py::_max_context_turns)
+    # and evicts older ones. 0002's 44-action ls20 tracer spent 749,940 tokens
+    # over 44 single-round crossings -- about 17k a crossing, for $0.086. The
+    # worst case here is 44 actions that all run to the eight-round ceiling,
+    # roughly 352 crossings at that rate, so the bound is set to cover it and
+    # the worst-case bill is near a dollar rather than a cent.
+    "max_reported_tokens": 8_388_608,
     "max_output_tokens": 16_384,
     # Four rounds was not enough to orient in a 64x64 grid and then commit: run
     # 20260802T205910Z spent all four inspecting the observation and never
@@ -165,6 +181,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Required exact digest-bound value from the approval request.",
     )
     parser.add_argument(
+        "--arm",
+        choices=sorted(ARMS),
+        default="treatment",
+        help=(
+            "treatment attaches the competence packet and the admission "
+            "protocol; control invokes the frozen 0002 worker unchanged. The "
+            "arm is bound into the approval digest."
+        ),
+    )
+    parser.add_argument(
         "--provider-route",
         choices=sorted(PROVIDER_ROUTES),
         default="pinned",
@@ -192,8 +218,21 @@ def _validate_live_args(args: argparse.Namespace) -> None:
         "reasoning_effort": "medium",
         "request_timeout_seconds": 180.0,
         "workspace_timeout_seconds": 20.0,
-        "transport_max_retries": 0,
     }
+    # Retries were pinned at zero when this ran three actions: fail fast, and a
+    # dead run costs a minute. A 44-action arm is a few hundred crossings against
+    # one endpoint's shared capacity, and 429s are what killed the earlier runs --
+    # at zero retries a single one throws away an hour. Retrying does not change
+    # which endpoint served the generation, and the post-run generation audit
+    # still checks the returned provider identity for every crossing, so the pin
+    # keeps the property that makes it evidence. 0002's own 44-action tracer ran
+    # with two.
+    if not 0 <= args.transport_max_retries <= 2:
+        raise ValueError(
+            f"transport_max_retries must be between 0 and 2, got {args.transport_max_retries}"
+        )
+    if args.arm not in ARMS:
+        raise ValueError(f"arm must be one of {ARMS}, got {args.arm!r}")
     for field, expected in exact.items():
         actual = getattr(args, field)
         if actual != expected:
@@ -276,6 +315,9 @@ def _source_paths() -> set[Path]:
         REPO / "experiments" / "agents" / "__init__.py",
         TREATMENT_ROOT / "competence.py",
         TREATMENT_ROOT / "evidence_chain.py",
+        # Not executed by a run, but it decides the comparison the run feeds, so
+        # binding it here means the measure cannot be swapped after approval.
+        TREATMENT_ROOT / "inert_action_rate.py",
         TREATMENT_ROOT / "replay_failed_crossing.py",
         PROVIDER_RUNTIME_LAUNCHER,
         TREATMENT_ROOT / "run_live_probe.py",
@@ -761,10 +803,14 @@ def _approval_request(
     run_root: Path,
     source_state: dict[str, Any],
     route_name: str,
+    arm: str,
 ) -> dict[str, Any]:
     authorization = {
-        "schema": "0006-nooa-live-authorization-v2",
-        "claim_boundary": "single-arm live interface-and-behavior smoke; no treatment effect",
+        "schema": "0006-nooa-live-authorization-v3",
+        "arm": arm,
+        "claim_boundary": (
+            "one arm of a matched comparison; a treatment effect requires both arms"
+        ),
         "provider_routing": {
             "mode": PROVIDER_ROUTE_MODES[route_name],
             "request": PROVIDER_ROUTES[route_name],
@@ -780,7 +826,7 @@ def _approval_request(
         "source_state": source_state,
     }
     return {
-        "schema": "0006-nooa-live-approval-request-v2",
+        "schema": "0006-nooa-live-approval-request-v3",
         "authorization": authorization,
         "required_confirmation": CONFIRMATION_PREFIX + _canonical_sha256(authorization),
     }
@@ -1475,6 +1521,7 @@ def _operational_verdict(
     required_actions: int,
     integrity_success: bool = True,
     route_name: str = "pinned",
+    arm: str = "treatment",
 ) -> dict[str, Any]:
     event_types = [event.get("type") for event in competence_events]
     # An open route cannot qualify a gate. The unanswered-tool-call defect fixed
@@ -1483,6 +1530,30 @@ def _operational_verdict(
     # landed on the lenient provider. An open run shows the loop closes; it is
     # not evidence that it closes everywhere.
     qualifies = route_name == "pinned"
+    if arm == "control":
+        # The control produces no commitments, no ledger, and no competence.jsonl,
+        # so every treatment-shaped check would either be vacuous or fail. What
+        # the control still owes the comparison is that it ran the same distance
+        # on the same audited substrate: the actions happened, the successors were
+        # observed, and the approved bytes did not move.
+        checks = {
+            "exact_actions": summary.get("actions") == required_actions,
+            "exact_successors": summary.get("observed_successors") == required_actions,
+            "non_blocking_stop": summary.get("stop_reason") in {"action_budget", "terminal"},
+            "clean_shutdown": summary.get("clean_shutdown") is True,
+            "trace_complete": summary.get("trace_complete") is True,
+            "no_competence_records": not competence_events,
+            "provider_profile_matches": provider_success,
+            "approved_bytes_remained_immutable": integrity_success,
+            "route_can_qualify": qualifies,
+        }
+        return {
+            "goal": f"{required_actions}-action-control-arm",
+            "success": all(checks.values()),
+            "checks": checks,
+            "route": route_name,
+            "arm": arm,
+        }
     if required_actions == 1:
         checks = {
             "one_action_admitted": summary.get("actions") == 1,
@@ -1501,8 +1572,11 @@ def _operational_verdict(
             "success": all(checks.values()),
             "checks": checks,
             "route": route_name,
+            "arm": arm,
         }
-    chain_checks = _two_action_chain_report(competence_events, process_records or [])
+    chain_checks = _chain_report(
+        competence_events, process_records or [], actions=required_actions
+    )
     checks = {
         "exact_actions": summary.get("actions") == required_actions,
         "exact_attempted_actions": summary.get("attempted_actions") == required_actions,
@@ -1521,6 +1595,7 @@ def _operational_verdict(
         "success": all(checks.values()),
         "checks": checks,
         "route": route_name,
+        "arm": arm,
     }
 
 
@@ -1531,11 +1606,15 @@ def _failure_summary(
     run_root: Path,
     phase: str,
     error: BaseException,
+    arm: str,
 ) -> dict[str, Any]:
     counts = _artifact_counts(run_root)
     return {
-        "schema": "0006-nooa-single-arm-provider-smoke-v2",
-        "claim_boundary": "single-arm live interface-and-behavior smoke; no treatment effect",
+        "schema": "0006-nooa-single-arm-provider-smoke-v3",
+        "arm": arm,
+        "claim_boundary": (
+            "one arm of a matched comparison; a treatment effect requires both arms"
+        ),
         "game": game,
         "environment_seed": environment_seed,
         "actions": counts["observed_successors"],
@@ -1609,7 +1688,14 @@ def _run_stage(
         if environment is None:
             raise RuntimeError(f"could not create requested game: {args.game}")
         phase = "worker_start_or_episode"
-        with NooaCompetenceProcessAgent(
+        # The whole treatment lives in this one choice. The control is the frozen
+        # worker's own agent, invoked the way 0002 invokes it: no competence
+        # packet appended to the observation, no typed commitment demanded of the
+        # model, no reconciliation gate between it and the next action.
+        agent_class = (
+            NooaCompetenceProcessAgent if args.arm == "treatment" else NooaProcessAgent
+        )
+        with agent_class(
             runtime_root=provider_runtime_root,
             run_root=run_root / "worker",
             paired_run_spec=spec,
@@ -1624,8 +1710,11 @@ def _run_stage(
             )
             phase = "worker_shutdown"
         summary = {
-            "schema": "0006-nooa-single-arm-provider-smoke-v2",
-            "claim_boundary": "single-arm live interface-and-behavior smoke; no treatment effect",
+            "schema": "0006-nooa-single-arm-provider-smoke-v3",
+            "arm": args.arm,
+            "claim_boundary": (
+                "one arm of a matched comparison; a treatment effect requires both arms"
+            ),
             "game": args.game,
             "environment_seed": args.environment_seed,
             "actions": result.actions,
@@ -1645,6 +1734,7 @@ def _run_stage(
             run_root=run_root,
             phase=phase,
             error=error,
+            arm=args.arm,
         )
         summary["trace_complete"] = _trace_complete(run_root / "trace.jsonl")
         summary["runtime_overlay"] = runtime_overlay
@@ -1674,6 +1764,7 @@ def main(argv: list[str] | None = None) -> int:
             spec=spec,
             run_root=run_root,
             source_state=source_state,
+            arm=args.arm,
         )
         if args.prepare_approval_request is not None:
             request_path = args.prepare_approval_request.resolve()
@@ -1843,6 +1934,7 @@ def main(argv: list[str] | None = None) -> int:
         required_actions=spec.max_actions,
         integrity_success=integrity_success,
         route_name=args.provider_route,
+        arm=args.arm,
     )
     summary["provider_profile_report"] = provider_report
     summary["provider_identity_report"] = provider_identity
