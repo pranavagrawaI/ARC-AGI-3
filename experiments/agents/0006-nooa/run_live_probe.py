@@ -33,6 +33,8 @@ CONTROL_RUNTIME_ROOT = CONTROL_ROOT / "nooa-runtime"
 PROVIDER_RUNTIME_LAUNCHER = TREATMENT_ROOT / "provider_runtime_launcher.py"
 BASELINE_ROOT = TREATMENT_ROOT.parent / "0002-llm-repl-agent"
 P9_ROOT = TREATMENT_ROOT.parent / "0006-capability-environment" / "p9"
+KNOWN_WORLD_ROOT = TREATMENT_ROOT / "prototypes" / "known_world"
+LS20_SOURCE = REPO / "environment_files" / "ls20" / "9607627b" / "ls20.py"
 for path in (REPO, CONTROL_ROOT, TREATMENT_ROOT, TREATMENT_ROOT / "host"):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
@@ -63,6 +65,7 @@ EXPECTED_API_BASE = "https://openrouter.ai/api/v1"
 # between them. It is bound into the approval digest for that reason: an arm
 # that could be swapped after approval would not be a control.
 ARMS = ("control", "treatment")
+KNOWLEDGE_CONDITIONS = ("none", "rules", "source", "executable")
 SMOKE_MAXIMA = {
     # 44 actions is the established long-horizon budget in this repo: 0002's own
     # ls20 tracer and the p9 cd82 arms all ran it, so a comparison at 44 lands
@@ -200,6 +203,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--knowledge-condition",
+        choices=KNOWLEDGE_CONDITIONS,
+        default="none",
+        help=(
+            "PROTOTYPE: rules adds a complete tutorial; source adds readable "
+            "ls20.py; executable adds ls20.py plus an executable ARCEngine bundle."
+        ),
+    )
+    parser.add_argument(
         "--approved-snapshot-handoff",
         type=Path,
         help=argparse.SUPPRESS,
@@ -233,6 +245,11 @@ def _validate_live_args(args: argparse.Namespace) -> None:
         )
     if args.arm not in ARMS:
         raise ValueError(f"arm must be one of {ARMS}, got {args.arm!r}")
+    if args.knowledge_condition not in KNOWLEDGE_CONDITIONS:
+        raise ValueError(
+            "knowledge_condition must be one of "
+            f"{KNOWLEDGE_CONDITIONS}, got {args.knowledge_condition!r}"
+        )
     for field, expected in exact.items():
         actual = getattr(args, field)
         if actual != expected:
@@ -281,7 +298,7 @@ def _paired_spec(args: argparse.Namespace) -> PairedRunSpec:
         environment_profile=f"arc-agi-3:{args.mode.value}:{args.game}",
         environment_seed=args.environment_seed,
     )
-    return replace(
+    spec = replace(
         spec,
         max_actions=args.max_actions,
         max_model_calls=args.max_model_calls,
@@ -291,6 +308,45 @@ def _paired_spec(args: argparse.Namespace) -> PairedRunSpec:
         transport_max_retries=args.transport_max_retries,
         workspace_timeout_seconds=args.workspace_timeout_seconds,
     )
+    instruction = _knowledge_instruction(args.knowledge_condition)
+    return replace(
+        spec,
+        usability_probe_instruction=instruction,
+        host_workspace_initialization=PairedRunSpec.workspace_initialization_for(
+            instruction
+        ),
+    )
+
+
+def _knowledge_instruction(condition: str) -> str | None:
+    if condition == "none":
+        return None
+    files = {
+        "rules": "RULES.md",
+        "source": "ls20.py",
+        "executable": "EXECUTABLE_WORLD.md, ls20_world.py, ls20.py, and arcengine/",
+    }[condition]
+    return (
+        f"ASSISTED LS20 PROTOTYPE CONDITION: {condition}.\n"
+        f"Before choosing a live action, inspect {files}. These host-provided files "
+        "are ground-truth assistance for this run, not hypotheses to rediscover. "
+        "The probe succeeds when levels_completed reaches 1 and otherwise stops "
+        "after 44 live actions. Plan to solve level 1; the bottom horizontal bar is "
+        "a move budget, not progress.\n"
+    )
+
+
+def _arcengine_source_root() -> Path:
+    candidates = sorted(
+        path
+        for path in (REPO / ".venv").glob("lib/python*/site-packages/arcengine")
+        if path.is_dir()
+    )
+    if len(candidates) != 1:
+        raise RuntimeError(
+            f"expected one installed ARCEngine source tree, found {candidates}"
+        )
+    return candidates[0]
 
 
 def _git_record() -> dict[str, Any]:
@@ -331,6 +387,10 @@ def _source_paths() -> set[Path]:
         *(BASELINE_ROOT / "llm_repl_agent").glob("*.py"),
         *P9_ROOT.glob("*.py"),
         *(REPO / "experiments" / "harness").glob("*.py"),
+        LS20_SOURCE,
+        *(KNOWN_WORLD_ROOT).glob("*.md"),
+        *(KNOWN_WORLD_ROOT).glob("*.py"),
+        *(_arcengine_source_root()).glob("*.py"),
     }
 
 
@@ -804,13 +864,14 @@ def _approval_request(
     source_state: dict[str, Any],
     route_name: str,
     arm: str,
+    knowledge_condition: str = "none",
 ) -> dict[str, Any]:
+    claim_boundary = _claim_boundary(knowledge_condition)
     authorization = {
         "schema": "0006-nooa-live-authorization-v3",
         "arm": arm,
-        "claim_boundary": (
-            "one arm of a matched comparison; a treatment effect requires both arms"
-        ),
+        "knowledge_condition": knowledge_condition,
+        "claim_boundary": claim_boundary,
         "provider_routing": {
             "mode": PROVIDER_ROUTE_MODES[route_name],
             "request": PROVIDER_ROUTES[route_name],
@@ -830,6 +891,15 @@ def _approval_request(
         "authorization": authorization,
         "required_confirmation": CONFIRMATION_PREFIX + _canonical_sha256(authorization),
     }
+
+
+def _claim_boundary(knowledge_condition: str) -> str:
+    if knowledge_condition == "none":
+        return "one arm of a matched comparison; a treatment effect requires both arms"
+    return (
+        "assisted level-1 capability probe; tests use of supplied knowledge, "
+        "not unassisted gameplay or a treatment effect"
+    )
 
 
 def _require_approved_request(
@@ -998,6 +1068,88 @@ def _require_game_environment(environments_dir: Path, game: str) -> None:
         raise RuntimeError(
             f"game {game!r} is absent from {environments_dir}; available: {available}"
         )
+
+
+def _install_knowledge_files(workspace: Path, condition: str) -> None:
+    """PROTOTYPE: materialize exactly one assisted-information condition."""
+
+    if condition == "none":
+        return
+    if condition == "rules":
+        shutil.copyfile(KNOWN_WORLD_ROOT / "RULES.md", workspace / "RULES.md")
+        return
+
+    shutil.copyfile(LS20_SOURCE, workspace / "ls20.py")
+    if condition == "source":
+        return
+    if condition != "executable":
+        raise ValueError(f"unknown knowledge condition: {condition}")
+
+    shutil.copyfile(
+        KNOWN_WORLD_ROOT / "EXECUTABLE_WORLD.md",
+        workspace / "EXECUTABLE_WORLD.md",
+    )
+    engine_destination = workspace / "arcengine"
+    engine_destination.mkdir()
+    for source in _arcengine_source_root().glob("*.py"):
+        if source.name == "enums.py":
+            continue
+        data = source.read_text(encoding="utf-8")
+        if source.name == "base_game.py":
+            # The sandbox intentionally blocks os. This exact engine branch only
+            # affects the ONLY_RESET_LEVELS environment variable, which is absent
+            # from fresh simulations; removing it preserves the probe semantics.
+            data = data.replace("import os\n", "")
+            data = data.replace(
+                'if os.getenv("ONLY_RESET_LEVELS") == "true" and self._state != GameState.WIN:',
+                "if False and self._state != GameState.WIN:",
+            )
+        (engine_destination / source.name).write_text(data, encoding="utf-8")
+    shutil.copyfile(
+        KNOWN_WORLD_ROOT / "arcengine_enums.py",
+        engine_destination / "enums.py",
+    )
+    (workspace / "ls20_world.py").write_text(
+        _standalone_world_source(), encoding="utf-8"
+    )
+
+
+def _standalone_world_source() -> str:
+    """Build one exec-able file because model-authored modules are not importable."""
+
+    parts = ["from __future__ import annotations\n"]
+    ordered_engine_files = (
+        KNOWN_WORLD_ROOT / "arcengine_enums.py",
+        _arcengine_source_root() / "sprites.py",
+        _arcengine_source_root() / "interfaces.py",
+        _arcengine_source_root() / "camera.py",
+        _arcengine_source_root() / "level.py",
+        _arcengine_source_root() / "base_game.py",
+    )
+    for source in ordered_engine_files:
+        data = source.read_text(encoding="utf-8")
+        data = data.replace("from __future__ import annotations\n", "")
+        data = "\n".join(
+            line for line in data.splitlines() if not line.startswith("from .")
+        )
+        if source.name == "base_game.py":
+            data = data.replace("import os\n", "")
+            data = data.replace(
+                'if os.getenv("ONLY_RESET_LEVELS") == "true" and self._state != GameState.WIN:',
+                "if False and self._state != GameState.WIN:",
+            )
+        parts.append(data)
+
+    game = LS20_SOURCE.read_text(encoding="utf-8")
+    game = re.sub(r"from arcengine import \(\n.*?\n\)\n", "", game, flags=re.S)
+    parts.append(game)
+
+    facade = (KNOWN_WORLD_ROOT / "ls20_world.py").read_text(encoding="utf-8")
+    facade = facade.replace("from __future__ import annotations\n", "")
+    facade = facade.replace("from arcengine import ActionInput, GameAction\n", "")
+    facade = facade.replace("from ls20 import Ls20\n", "")
+    parts.append(facade)
+    return "\n\n".join(parts) + "\n"
 
 
 def _load_snapshot_handoff(
@@ -1701,20 +1853,23 @@ def _run_stage(
             paired_run_spec=spec,
             response_timeout=response_timeout,
         ) as agent, JsonlTraceWriter(run_root / "trace.jsonl") as trace:
+            _install_knowledge_files(agent.workspace, args.knowledge_condition)
             result = run_episode(
                 environment,
                 agent,
                 max_actions=spec.max_actions,
                 trace=trace,
+                stop_after_levels=(
+                    1 if args.knowledge_condition != "none" else None
+                ),
                 stop_on_exceptions={NooaWorkerError: "agent_error"},
             )
             phase = "worker_shutdown"
         summary = {
             "schema": "0006-nooa-single-arm-provider-smoke-v3",
             "arm": args.arm,
-            "claim_boundary": (
-                "one arm of a matched comparison; a treatment effect requires both arms"
-            ),
+            "knowledge_condition": args.knowledge_condition,
+            "claim_boundary": _claim_boundary(args.knowledge_condition),
             "game": args.game,
             "environment_seed": args.environment_seed,
             "actions": result.actions,
@@ -1765,6 +1920,7 @@ def main(argv: list[str] | None = None) -> int:
             run_root=run_root,
             source_state=source_state,
             arm=args.arm,
+            knowledge_condition=args.knowledge_condition,
         )
         if args.prepare_approval_request is not None:
             request_path = args.prepare_approval_request.resolve()
@@ -1811,8 +1967,9 @@ def main(argv: list[str] | None = None) -> int:
     response_timeout = _response_timeout(args)
     manifest = {
         "schema": "0006-nooa-single-arm-execution-manifest-v2",
-        "claim_boundary": "single-arm live interface-and-behavior smoke; no treatment effect",
+        "claim_boundary": _claim_boundary(args.knowledge_condition),
         "created_at": datetime.now(UTC).isoformat(),
+        "knowledge_condition": args.knowledge_condition,
         "approval_request_sha256": _canonical_sha256(approval_request),
         "consumed_approval_request": str(consumed_approval),
         "source_state": source_state,
