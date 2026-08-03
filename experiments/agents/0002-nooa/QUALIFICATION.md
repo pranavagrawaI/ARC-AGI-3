@@ -49,10 +49,29 @@ through the retained ones, and only the assembled request sees both. Two
 regression tests passed against the retained path while the live repair crossing
 still failed.
 
-What the consumed call said is preserved as text on the same message. Deleting it
-outright would also delete the model's record of the cell that produced its own
-action -- the workspace keeps those variables, but the transcript would not, and
-the eviction gate caught exactly that regression.
+### The consumed call is answered, not rewritten
+
+Preserving the consumed call as assistant text was itself a defect, and it cost
+run `20260803T062052Z` its second action. The transcript then ended in an
+assistant turn whose entire content was narration wrapping a code block, and at
+the next action point the model reproduced that narration verbatim as its answer
+instead of acting. NOOA read the result as `return_result(result=<str>)` and
+refused it: *"'result' has wrong type. Expected: ActionDecision. Got: str"*. Ten
+generations bought one action.
+
+A transcript teaches by example whether or not it means to. The host's account of
+what it did therefore belongs in the host's slot, not in a turn attributed to the
+model. The consumed `function_call` now keeps its own shape and receives the
+`function_call_output` it never got, which is what every other call in the
+transcript receives and what no model turn resembles. Deleting the call outright
+was rejected for the same reason as before -- it would delete the model's record
+of the cell that produced its own action -- and this keeps that record in the
+model's own voice rather than a paraphrase of it.
+
+This also answers ModelRun's requirement directly rather than by avoidance:
+every tool call in the request now has a reply. The fix is verified against the
+recorded request from the run that failed, where it leaves no unanswered call and
+authors no assistant turn.
 
 **G9 must be re-run against a pinned single provider before this gate is claimed
 again.** The prior artifact stands as a record of what was run, not as evidence

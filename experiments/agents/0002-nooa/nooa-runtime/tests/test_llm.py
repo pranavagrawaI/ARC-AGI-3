@@ -16,6 +16,7 @@ from PIL import Image
 
 from agent import NooaControlAgent, PublicActionPoint
 from llm import (
+    CONSUMED_CALL_OUTPUT,
     ActualCrossingRecorder,
     AuditedProviderClient,
     InjectedTransportFailure,
@@ -166,13 +167,18 @@ def test_provider_adapter_flattens_nooa_response_batches_for_the_successor() -> 
         client.close()
 
     assert instructions is None
-    # The batch is still flattened, but a call the host consumed is not replayed
-    # as an open tool call. Its text is kept so the model does not lose the record
-    # of the cell that produced its own action.
-    assert len(transformed) == 1
-    assert transformed[0]["role"] == "assistant"
-    assert "return_result" in transformed[0]["content"]
-    assert '{"result":{"action":1}}' in transformed[0]["content"]
+    # The batch is still flattened, and a call the host consumed is not replayed
+    # as an open tool call. It keeps its own shape and gains the reply the host
+    # owes it, so the model's record of the cell that produced its own action
+    # survives without the host authoring a model turn.
+    assert len(transformed) == 2
+    assert transformed[0]["type"] == "function_call"
+    assert transformed[0]["arguments"] == '{"result":{"action":1}}'
+    assert transformed[1] == {
+        "type": "function_call_output",
+        "call_id": "call-1",
+        "output": CONSUMED_CALL_OUTPUT,
+    }
 
 
 def test_build_llm_never_discovers_credentials_or_falls_back(
@@ -530,7 +536,7 @@ def test_external_transport_failures_are_classified_conservatively() -> None:
     assert classify_transport_failure(unavailable) is TransportDisposition.UNCERTAIN
 
 
-def test_live_response_batch_loses_only_its_unanswered_calls() -> None:
+def test_live_response_batch_answers_its_consumed_call_and_keeps_the_rest() -> None:
     """Drive the real envelope from run 20260802T160203Z.
 
     Three earlier attempts at this fix passed against FakeLLMClient's chat shape
@@ -542,7 +548,11 @@ def test_live_response_batch_loses_only_its_unanswered_calls() -> None:
     without the test noticing.
 
     Past reasoning is required for model performance, so the reasoning item must
-    survive exactly.
+    survive exactly. So must the model's own authoring cell: a fourth attempt
+    rewrote the consumed call into assistant prose, and run 20260803T062052Z then
+    ended its second action point by reproducing that prose verbatim instead of
+    acting. Every item the model wrote now reaches the provider unchanged, and
+    the only addition is the host's reply in the host's own slot.
     """
 
     envelope = json.loads(
@@ -579,19 +589,34 @@ def test_live_response_batch_loses_only_its_unanswered_calls() -> None:
         for item in transformed
         if item.get("type") == "function_call"
     ]
-    assert surviving == [consumed[0]], surviving
+    assert surviving == consumed, "the model's own calls must reach the provider intact"
 
     reasoning = [item for item in transformed if item.get("type") == "reasoning"]
     assert len(reasoning) == 1, "past reasoning must reach the provider"
     assert reasoning[0] == original["_batch"][0], "reasoning must be untouched"
 
-    replayed = json.dumps(transformed)
-    assert consumed[1] not in replayed or any(
-        item.get("role") == "assistant" and consumed[1] not in str(item.get("content"))
+    # Every call is answered, which is what ModelRun requires, and each reply
+    # follows the call it answers.
+    answers = {
+        item["call_id"]: index
+        for index, item in enumerate(transformed)
+        if item.get("type") == "function_call_output"
+    }
+    calls = {
+        item["call_id"]: index
+        for index, item in enumerate(transformed)
+        if item.get("type") == "function_call"
+    }
+    assert set(answers) == set(consumed), "every call must be answered"
+    assert all(answers[call_id] > calls[call_id] for call_id in consumed)
+
+    consumed_answer = transformed[answers[consumed[1]]]
+    assert consumed_answer["output"] == CONSUMED_CALL_OUTPUT
+
+    # The host speaks only in its own slot. Nothing the model did not write may
+    # appear as a model turn, because the next action point learns from shape.
+    assert not [
+        item
         for item in transformed
-    )
-    assert any(
-        item.get("role") == "assistant"
-        and "the host consumed" in str(item.get("content"))
-        for item in transformed
-    ), "the consumed call must survive as text"
+        if item.get("role") == "assistant" and item not in original["_batch"]
+    ], "the host must not author an assistant turn"
