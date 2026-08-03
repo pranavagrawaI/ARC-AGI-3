@@ -21,6 +21,16 @@ This directory is the only owner of the competence treatment. It invokes the
 frozen worker unchanged; it does not edit that worker, its provider transport,
 action schema, sandbox, or host environment API.
 
+The exploratory `rules_supervised` condition adds one Luna crossing before
+each Gemma action point. Both receive the same `RULES.md`; Luna receives a
+bounded subset of Gemma's admissible game evidence. Luna selects a bounded
+immediate goal and observable one-action success test but may not supply an
+action or route; Gemma retains environment action authority. The exact
+information and authority boundary is recorded in
+`prototypes/supervised_player/README.md`. This is a prototype capability probe,
+not part of the completed 0002-versus-0006 comparison and not an admissible
+single-model contestant result.
+
 ## Decision boundary
 
 At each action point the 0006 host:

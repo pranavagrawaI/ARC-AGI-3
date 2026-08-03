@@ -8,6 +8,7 @@ provider profile is explicit, credentials are inherited only as
 from __future__ import annotations
 
 import argparse
+from base64 import b64encode
 import json
 import os
 import re
@@ -35,6 +36,7 @@ BASELINE_ROOT = TREATMENT_ROOT.parent / "0002-llm-repl-agent"
 P9_ROOT = TREATMENT_ROOT.parent / "0006-capability-environment" / "p9"
 KNOWN_WORLD_ROOT = TREATMENT_ROOT / "prototypes" / "known_world"
 CONTROLLER_ROOT = TREATMENT_ROOT / "prototypes" / "commitment_controller"
+SUPERVISED_ROOT = TREATMENT_ROOT / "prototypes" / "supervised_player"
 # The model-facing controller protocol. It becomes the workspace NOTES.md, whose
 # sha256 the paired run spec binds into the approval, so its text cannot drift
 # between approval and execution.
@@ -50,10 +52,18 @@ for path in (REPO, CONTROL_ROOT, TREATMENT_ROOT, TREATMENT_ROOT / "host"):
 
 import arc_agi
 from arc_agi.base import OperationMode
-from competence_runner import NooaCompetenceProcessAgent
+from competence_runner import MAX_COMMITMENT_REPAIRS, NooaCompetenceProcessAgent
 from evidence_chain import chain_report as _chain_report
 from host.qualification import PairedRunSpec, ProviderRequestProfile
 from host.runner import NooaProcessAgent, NooaWorkerError
+from supervision import (
+    LUNA_MAX_OUTPUT_TOKENS,
+    LUNA_MODEL,
+    LUNA_PROVIDER_ROUTE,
+    LUNA_REASONING_EFFORT,
+    LunaSupervisorClient,
+    SupervisorSession,
+)
 
 from experiments.harness import JsonlTraceWriter, run_episode
 
@@ -86,7 +96,15 @@ MODEL_PROFILES = {
 # between them. It is bound into the approval digest for that reason: an arm
 # that could be swapped after approval would not be a control.
 ARMS = ("control", "treatment")
-KNOWLEDGE_CONDITIONS = ("none", "rules", "source", "executable", "rules_controller")
+SUPERVISED_CONDITION = "rules_supervised"
+KNOWLEDGE_CONDITIONS = (
+    "none",
+    "rules",
+    "source",
+    "executable",
+    "rules_controller",
+    SUPERVISED_CONDITION,
+)
 # rules_controller is "rules" plus the fixed commitment-preserving controller.
 # It is the smallest causal test of the claim that Gemma's LS20 failure is
 # executive rather than perceptual: same tutorial, same budgets, same harness,
@@ -177,6 +195,13 @@ def _operation_mode(value: str) -> OperationMode:
         raise argparse.ArgumentTypeError(
             "mode must be one of: normal, online, offline, competition"
         ) from error
+
+
+def _require_supervised_player(knowledge_condition: str, model: str) -> None:
+    if knowledge_condition == SUPERVISED_CONDITION and model != EXPECTED_MODEL:
+        raise ValueError(
+            f"{SUPERVISED_CONDITION} requires Gemma as the player: {EXPECTED_MODEL!r}"
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -289,14 +314,15 @@ def _validate_live_args(args: argparse.Namespace) -> None:
             "knowledge_condition must be one of "
             f"{KNOWLEDGE_CONDITIONS}, got {args.knowledge_condition!r}"
         )
-    if args.knowledge_condition == CONTROLLER_CONDITION and args.arm != "treatment":
+    if args.knowledge_condition in {CONTROLLER_CONDITION, SUPERVISED_CONDITION} and args.arm != "treatment":
         # The controller reads working_state, which only the treatment arm's
         # typed commitment produces. On the control arm it would silently do
         # nothing and the run would be an unlabelled plain rules run.
         raise ValueError(
-            f"{CONTROLLER_CONDITION} requires --arm treatment; the control arm "
+            f"{args.knowledge_condition} requires --arm treatment; the control arm "
             "authors no working_state for the controller to check"
         )
+    _require_supervised_player(args.knowledge_condition, args.model)
     model_profile = MODEL_PROFILES.get(args.model)
     if model_profile is None:
         raise ValueError(f"model must be one of {tuple(MODEL_PROFILES)}, got {args.model!r}")
@@ -386,6 +412,7 @@ def _knowledge_instruction(condition: str) -> str | None:
         "source": "ls20.py",
         "executable": "EXECUTABLE_WORLD.md, ls20_world.py, ls20.py, and arcengine/",
         CONTROLLER_CONDITION: "RULES.md",
+        SUPERVISED_CONDITION: "RULES.md",
     }[condition]
     preamble = (
         f"ASSISTED LS20 PROTOTYPE CONDITION: {condition}.\n"
@@ -395,7 +422,7 @@ def _knowledge_instruction(condition: str) -> str | None:
         "after 44 live actions. Plan to solve level 1; the bottom horizontal bar is "
         "a move budget, not progress.\n"
     )
-    if condition != CONTROLLER_CONDITION:
+    if condition not in {CONTROLLER_CONDITION, SUPERVISED_CONDITION}:
         return preamble
     # The whole point of seeding the protocol here rather than as another
     # workspace file: the frozen worker echoes NOTES.md at the top of *every*
@@ -473,6 +500,10 @@ def _source_paths() -> set[Path]:
         # notes that change as the probe is written up, and binding them would
         # invalidate a live approval for an edit the run never reads.
         CONTROLLER_STATE_BLOCK,
+        # These define the semantic action-withholding judgment required before
+        # a supervised gameplay result can be interpreted.
+        SUPERVISED_ROOT / "README.md",
+        SUPERVISED_ROOT / "score_assignments.py",
         *(_arcengine_source_root()).glob("*.py"),
     }
 
@@ -940,6 +971,27 @@ def _canonical_sha256(value: object) -> str:
     return sha256(payload).hexdigest()
 
 
+def _supervisor_request_profile(spec: PairedRunSpec) -> dict[str, object]:
+    return {
+        "schema": "0006-nooa-supervisor-request-v1",
+        "model": LUNA_MODEL,
+        "api_base": spec.provider_request_profile.api_base,
+        "api_surface": "responses",
+        "provider": LUNA_PROVIDER_ROUTE,
+        "reasoning_effort": LUNA_REASONING_EFFORT,
+        "max_output_tokens_per_call": LUNA_MAX_OUTPUT_TOKENS,
+        "max_calls": spec.max_actions * (MAX_COMMITMENT_REPAIRS + 1),
+        "max_total_output_tokens": (
+            spec.max_actions * (MAX_COMMITMENT_REPAIRS + 1) * LUNA_MAX_OUTPUT_TOKENS
+        ),
+        "call_policy": (
+            "one before each Gemma action point, plus at most one revision when "
+            "Gemma submits a bound CONTRADICT response; contradiction releases no action"
+        ),
+        "environment_action_authority": False,
+    }
+
+
 def _approval_request(
     *,
     spec: PairedRunSpec,
@@ -969,6 +1021,8 @@ def _approval_request(
         "paired_run_spec": spec.as_record(),
         "source_state": source_state,
     }
+    if knowledge_condition == SUPERVISED_CONDITION:
+        authorization["supervisor_request_profile"] = _supervisor_request_profile(spec)
     return {
         "schema": "0006-nooa-live-approval-request-v3",
         "authorization": authorization,
@@ -1013,6 +1067,48 @@ def _claim_boundary(knowledge_condition: str) -> str:
         "assisted level-1 capability probe; tests use of supplied knowledge, "
         "not unassisted gameplay or a treatment effect"
     )
+
+
+def _send_luna_supervisor_request(
+    body: dict[str, object],
+    *,
+    api_base: str,
+    api_key: str,
+    timeout_seconds: float,
+) -> dict[str, object]:
+    """One non-streaming, provider-pinned Luna Responses crossing."""
+
+    request = Request(
+        api_base.rstrip("/") + "/responses",
+        data=json.dumps(body, separators=(",", ":")).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with build_opener(_NoRedirectHandler()).open(
+            request, timeout=timeout_seconds
+        ) as response:
+            raw = response.read()
+            status = response.status
+    except HTTPError as error:
+        message = error.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"Luna supervisor provider returned HTTP {error.code}: {message[:500]}"
+        ) from error
+    except URLError as error:
+        raise RuntimeError(f"Luna supervisor transport failed: {error.reason}") from error
+    if status != 200:
+        raise RuntimeError(f"Luna supervisor provider returned HTTP {status}")
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("Luna supervisor provider returned non-JSON") from error
+    if not isinstance(decoded, dict):
+        raise RuntimeError("Luna supervisor provider response must be an object")
+    return decoded
 
 
 def _require_approved_request(
@@ -1188,7 +1284,7 @@ def _install_knowledge_files(workspace: Path, condition: str) -> None:
 
     if condition == "none":
         return
-    if condition in {"rules", CONTROLLER_CONDITION}:
+    if condition in {"rules", CONTROLLER_CONDITION, SUPERVISED_CONDITION}:
         # Identical assistance in both. The controller condition differs only in
         # the seeded NOTES.md protocol and the host-side continuity check, which
         # is what keeps it a test of executive discipline rather than of
@@ -1526,6 +1622,29 @@ def _generation_usage_by_id(
                 else None
             ),
             "cost_usd": usage.get("cost") if isinstance(usage, dict) else None,
+        }
+    return usage_by_id
+
+
+def _supervisor_usage_by_id(
+    records: list[dict[str, Any]],
+) -> dict[str, dict[str, int | float | None]]:
+    usage_by_id: dict[str, dict[str, int | float | None]] = {}
+    for record in records:
+        if record.get("phase") != "finished":
+            continue
+        generation_id = record.get("generation_id")
+        usage = record.get("usage")
+        if not isinstance(generation_id, str) or not isinstance(usage, dict):
+            continue
+        details = usage.get("output_tokens_details")
+        usage_by_id[generation_id] = {
+            "input_tokens": usage.get("input_tokens"),
+            "output_tokens": usage.get("output_tokens"),
+            "reasoning_tokens": (
+                details.get("reasoning_tokens") if isinstance(details, dict) else None
+            ),
+            "cost_usd": usage.get("cost"),
         }
     return usage_by_id
 
@@ -2130,8 +2249,32 @@ def _run_stage(
             NooaCompetenceProcessAgent if args.arm == "treatment" else NooaProcessAgent
         )
         agent_kwargs: dict[str, Any] = {}
-        if args.knowledge_condition == CONTROLLER_CONDITION:
+        supervisor_client: LunaSupervisorClient | None = None
+        if args.knowledge_condition in {CONTROLLER_CONDITION, SUPERVISED_CONDITION}:
             agent_kwargs["commitment_controller"] = True
+        if args.knowledge_condition == SUPERVISED_CONDITION:
+            api_key = os.environ.get("ARC_LLM_API_KEY")
+            if not api_key:
+                raise RuntimeError("ARC_LLM_API_KEY is required for Luna supervision")
+            frame_path = run_root / "worker" / "model-frame.png"
+            supervisor_client = LunaSupervisorClient(
+                transport=lambda body: _send_luna_supervisor_request(
+                    body,
+                    api_base=args.api_base,
+                    api_key=api_key,
+                    timeout_seconds=args.request_timeout_seconds,
+                ),
+                frame_data_url=lambda: (
+                    "data:image/png;base64," + b64encode(frame_path.read_bytes()).decode()
+                ),
+                audit_path=run_root / "worker" / "supervisor.jsonl",
+            )
+            agent_kwargs.update(
+                supervisor=SupervisorSession(supervisor_client),
+                supervisor_rules=(KNOWN_WORLD_ROOT / "RULES.md").read_text(
+                    encoding="utf-8"
+                ),
+            )
         with agent_class(
             runtime_root=provider_runtime_root,
             run_root=run_root / "worker",
@@ -2169,6 +2312,26 @@ def _run_stage(
             "runtime_overlay": runtime_overlay,
             "run_root": str(run_root),
             **({"commitment_controller": controller_report} if controller_report else {}),
+            **(
+                {
+                    "supervision": {
+                        "schema": "0006-nooa-supervisor-summary-v1",
+                        "model": LUNA_MODEL,
+                        "calls": len(supervisor_client.records),
+                        "successful_calls": sum(
+                            record.get("disposition") == "success"
+                            for record in supervisor_client.records
+                        ),
+                        "generation_ids": [
+                            record["generation_id"]
+                            for record in supervisor_client.records
+                            if record.get("disposition") == "success"
+                        ],
+                    }
+                }
+                if supervisor_client is not None
+                else {}
+            ),
         }
     except Exception as error:  # noqa: BLE001 - preserve every post-manifest failure.
         summary = _failure_summary(
@@ -2274,6 +2437,8 @@ def main(argv: list[str] | None = None) -> int:
         "paired_run_spec": spec.as_record(),
         "worker_response_timeout_seconds": response_timeout,
     }
+    if args.knowledge_condition == SUPERVISED_CONDITION:
+        manifest["supervisor_request_profile"] = _supervisor_request_profile(spec)
     _write_json(run_root / "execution-manifest.json", manifest)
     _write_json(run_root / "paired-run-spec.json", spec.as_record())
     summary = _run_stage(
@@ -2346,6 +2511,76 @@ def main(argv: list[str] | None = None) -> int:
         }
         finalization_errors.append(provider_identity["error"])
     _write_json(run_root / "provider-identity-report.json", provider_identity)
+    supervisor_identity: dict[str, Any] = {
+        "schema": "0006-nooa-supervisor-provider-identity-v1",
+        "success": args.knowledge_condition != SUPERVISED_CONDITION,
+        "disposition": "not_applicable",
+    }
+    if args.knowledge_condition == SUPERVISED_CONDITION:
+        try:
+            supervisor_records = _read_jsonl(
+                run_root / "worker" / "supervisor.jsonl"
+            )
+            finished_records = [
+                record
+                for record in supervisor_records
+                if record.get("phase") == "finished"
+            ]
+            for record in finished_records:
+                generation_id = record.get("generation_id")
+                if generation_id is None and record.get("response_sha256") is None:
+                    continue
+                if (
+                    not isinstance(generation_id, str)
+                    or re.fullmatch(r"gen-[A-Za-z0-9_-]{1,128}", generation_id) is None
+                ):
+                    raise RuntimeError(
+                        "finished Luna response has no valid generation identity"
+                    )
+            auditable_records = [
+                record
+                for record in finished_records
+                if isinstance(record.get("generation_id"), str)
+            ]
+            supervisor_generation_ids = [
+                str(record["generation_id"]) for record in auditable_records
+            ]
+            if len(supervisor_generation_ids) != len(set(supervisor_generation_ids)):
+                raise RuntimeError("Luna generation identity was reused")
+            supervisor_payloads, supervisor_fetch = _retrieve_generation_payloads(
+                supervisor_generation_ids,
+                run_root=run_root,
+            )
+            supervisor_identity = _provider_identity_report(
+                supervisor_generation_ids,
+                supervisor_payloads,
+                expected_wire_model=LUNA_MODEL,
+                expected_provider_name="OpenAI",
+                requested_quantization=None,
+                crossing_usage=_supervisor_usage_by_id(auditable_records),
+            )
+            supervisor_identity["schema"] = (
+                "0006-nooa-supervisor-provider-identity-v1"
+            )
+            supervisor_identity["fetch"] = supervisor_fetch
+            if not supervisor_identity.get("success"):
+                finalization_errors.append(
+                    {
+                        "type": "SupervisorProviderIdentityError",
+                        "message": "Luna provider identity or usage did not verify",
+                    }
+                )
+        except Exception as error:  # noqa: BLE001 - dual-model audit fails closed.
+            supervisor_identity = {
+                "schema": "0006-nooa-supervisor-provider-identity-v1",
+                "success": False,
+                "error": {"type": type(error).__name__, "message": str(error)},
+            }
+            finalization_errors.append(supervisor_identity["error"])
+    _write_json(
+        run_root / "supervisor-provider-identity-report.json",
+        supervisor_identity,
+    )
     try:
         competence_events = _read_jsonl(run_root / "worker" / "competence.jsonl")
         process_records = _read_jsonl(run_root / "worker" / "process.jsonl")
@@ -2376,6 +2611,7 @@ def main(argv: list[str] | None = None) -> int:
         provider_success=(
             provider_report.get("success") is True
             and provider_identity.get("success") is True
+            and supervisor_identity.get("success") is True
         ),
         required_actions=spec.max_actions,
         integrity_success=integrity_success,
@@ -2385,6 +2621,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     summary["provider_profile_report"] = provider_report
     summary["provider_identity_report"] = provider_identity
+    summary["supervisor_provider_identity_report"] = supervisor_identity
     summary["operational_verdict"] = verdict
     summary["finalization_errors"] = finalization_errors
     _write_json(run_root / "summary.json", summary)

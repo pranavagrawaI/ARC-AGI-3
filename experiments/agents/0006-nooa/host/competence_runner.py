@@ -56,6 +56,15 @@ from commitment_controller import (
     CommitmentController,
     Rejected,
 )
+from supervision import (
+    AssignmentRejected,
+    LUNA_MODEL,
+    SupervisorAssignment,
+    SupervisorSession,
+    build_supervisor_view,
+    gemma_supervision_context,
+    parse_gemma_supervision_response,
+)
 
 # A correctable rejection may be answered this many times within one action
 # point. It is a 0006 bound, not a frozen 0002 one, so it is pinned by the
@@ -107,6 +116,14 @@ class ModelCorrectableError(NooaWorkerError):
     repair crossing has one class to catch rather than a list of message
     prefixes.
     """
+
+
+class SupervisorContradictionError(ModelCorrectableError):
+    """Gemma rejected the current assignment with admissible evidence."""
+
+    def __init__(self, evidence: str) -> None:
+        super().__init__(f"Gemma contradicted the supervisor assignment: {evidence}")
+        self.evidence = evidence
 
 # arc_agi declares the frame dtype at remote_wrapper.py:242,
 # np.array(frame_layer, dtype=np.int8), and experiments/harness/runner.py:53
@@ -263,6 +280,7 @@ def attach_competence_context(
     *,
     rejection: Mapping[str, object] | None = None,
     commitment_controller: CommitmentController | None = None,
+    supervisor_assignment: SupervisorAssignment | None = None,
 ) -> dict[str, object]:
     """Add the fixed treatment viewport without granting a new host affordance."""
 
@@ -418,6 +436,10 @@ def attach_competence_context(
         },
         "context": deepcopy(dict(packet)),
     }
+    if supervisor_assignment is not None:
+        model_observation["supervision"] = gemma_supervision_context(
+            supervisor_assignment
+        )
     if commitment_controller is not None:
         model_observation["competence"]["reason_authoring_schema"]["working_state"] = (
             _controller_working_state_schema(commitment_controller)
@@ -472,6 +494,8 @@ class NooaCompetenceProcessAgent(NooaProcessAgent):
         *args: Any,
         max_commitment_repairs: int = MAX_COMMITMENT_REPAIRS,
         commitment_controller: bool = False,
+        supervisor: SupervisorSession | None = None,
+        supervisor_rules: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -479,6 +503,14 @@ class NooaCompetenceProcessAgent(NooaProcessAgent):
         # Off unless the rules_controller knowledge condition asked for it, so
         # every other condition and the control arm are byte-identical to before.
         self.commitment = CommitmentController() if commitment_controller else None
+        if supervisor is not None and (
+            self.commitment is None or not isinstance(supervisor_rules, str)
+        ):
+            raise ValueError(
+                "supervision requires the commitment controller and RULES.md text"
+            )
+        self.supervisor = supervisor
+        self.supervisor_rules = supervisor_rules
         self.competence_events_path = self.run_root / "competence.jsonl"
         self._competence_event_offset = 0
         self._competence_step: int | None = None
@@ -592,6 +624,39 @@ class NooaCompetenceProcessAgent(NooaProcessAgent):
             "current_observation_file": "current_observation.json",
             "observations_glob": "observations/step-*.json",
         }
+        def request_supervision(
+            gemma_contradiction: str | None = None,
+        ) -> SupervisorAssignment:
+            if self.supervisor is None:
+                raise NooaWorkerError("supervision was requested while disabled")
+            supervisor_view = build_supervisor_view(
+                rules=self.supervisor_rules or "",
+                current_observation=host_public,
+                available_actions=observation.available_actions,
+                recent_transitions=self._history,
+                current_state=self.commitment.state.render(),  # type: ignore[union-attr]
+                previous_assignment=self.supervisor.previous_assignment,
+                gemma_contradiction=gemma_contradiction,
+            )
+            assignment = self.supervisor.assign(supervisor_view)
+            self._write_process(
+                "supervisor_assignment",
+                action_point_id=self._step,
+                step=self._step,
+                supervisor_model=LUNA_MODEL,
+                view_sha256=sha256(
+                    json.dumps(
+                        supervisor_view, sort_keys=True, separators=(",", ":")
+                    ).encode("utf-8")
+                ).hexdigest(),
+                assignment=assignment.as_record(),
+                crossing=self.supervisor.last_record,
+            )
+            return assignment
+
+        supervisor_assignment: SupervisorAssignment | None = None
+        if self.supervisor is not None:
+            supervisor_assignment = request_supervision()
         def build_request(
             crossing_id: int, rejection: Mapping[str, Any] | None
         ) -> dict[str, Any]:
@@ -604,6 +669,7 @@ class NooaCompetenceProcessAgent(NooaProcessAgent):
                     competence_packet,
                     rejection=rejection,
                     commitment_controller=self.commitment,
+                    supervisor_assignment=supervisor_assignment,
                 ),
                 "legal_actions": list(observation.available_actions),
                 "coordinate_actions": coordinate_actions,
@@ -670,6 +736,29 @@ class NooaCompetenceProcessAgent(NooaProcessAgent):
                 raise ModelCorrectableError(
                     f"competence commitment rejected: {error}"
                 ) from error
+            if supervisor_assignment is not None:
+                try:
+                    supervised_response = parse_gemma_supervision_response(
+                        raw_commitment.get("test"),
+                        assignment=supervisor_assignment,
+                    )
+                except AssignmentRejected as error:
+                    raise ModelCorrectableError(
+                        f"supervision response rejected: {error}"
+                    ) from error
+                self._write_process(
+                    "supervision_response",
+                    action_point_id=self._step,
+                    step=self._step,
+                    assignment_sha256=supervised_response.assignment_sha256,
+                    disposition=supervised_response.disposition,
+                    prediction=supervised_response.prediction,
+                    contradiction_evidence=supervised_response.contradiction_evidence,
+                )
+                if supervised_response.disposition == "CONTRADICT":
+                    raise SupervisorContradictionError(
+                        supervised_response.contradiction_evidence or ""
+                    )
             try:
                 admitted, candidate = admit_transactionally(
                     self.commitment,
@@ -737,6 +826,8 @@ class NooaCompetenceProcessAgent(NooaProcessAgent):
                 )
                 if attempts_remaining <= 0:
                     raise
+                if isinstance(error, SupervisorContradictionError):
+                    supervisor_assignment = request_supervision(error.evidence)
                 rejection = rejection_notice(
                     str(error), attempts_remaining=attempts_remaining
                 )
