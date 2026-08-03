@@ -218,13 +218,40 @@ def _inline_return_closes_the_turn(final_tool_call: dict[str, object]) -> bool:
         tree = ast.parse(payload["code"])
     except SyntaxError:
         return False
-    final = tree.body[-1] if tree.body else None
-    return (
-        isinstance(final, ast.Expr)
-        and isinstance(final.value, ast.Call)
-        and isinstance(final.value.func, ast.Name)
-        and final.value.func.id == "return_result"
-    )
+    return bool(tree.body) and _statement_calls_return_result(tree.body[-1])
+
+
+def _statement_calls_return_result(statement: ast.stmt) -> bool:
+    """True when running this statement calls ``return_result``.
+
+    Not necessarily as a bare expression. Run 20260803T064129Z wrapped the call
+    defensively -- ``try: return_result(...) except NameError: ...`` -- to check
+    the tool was in scope before relying on it. The host received that decision
+    and released the action; only this verifier objected, and it objected to the
+    shape of a guard rather than to anything about the decision.
+
+    Definitions are stepped over, because naming a call is not making one. A
+    final statement whose only ``return_result`` sits inside a ``def`` body has
+    not invoked anything, and the turn did not end because the model returned.
+    """
+
+    deferred = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+    if isinstance(statement, deferred):
+        return False
+    pending: list[ast.AST] = [statement]
+    while pending:
+        node = pending.pop()
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "return_result"
+        ):
+            return True
+        pending.extend(
+            child for child in ast.iter_child_nodes(node)
+            if not isinstance(child, deferred)
+        )
+    return False
 
 
 def _last_model_call_returns_decision(

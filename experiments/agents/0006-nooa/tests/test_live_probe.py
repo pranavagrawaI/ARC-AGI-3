@@ -2192,9 +2192,6 @@ class LiveProbeTests(unittest.TestCase):
             self.assertFalse(run_root.exists())
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class ProviderRouteTests(unittest.TestCase):
     def test_an_open_route_cannot_qualify_a_gate(self) -> None:
@@ -2294,6 +2291,26 @@ class InlineReturnRouteTests(unittest.TestCase):
             )
         )
 
+    def test_a_guarded_inline_return_still_closes_the_turn(self) -> None:
+        """A model may protect its own call without losing the route.
+
+        Run 20260803T064129Z wrapped the call in ``try/except NameError`` to
+        check the tool was in scope before relying on it. The host received that
+        decision and released the action; only this verifier objected, and it
+        objected to the shape of a guard rather than to anything about the
+        decision.
+        """
+
+        inline = MODULE_CHAIN["_inline_return_closes_the_turn"]
+        payload = "{'action': action, 'data': data, 'reason': reason}"
+        for cell in (
+            f"try:\n    return_result({payload})\nexcept NameError:\n    print('absent')",
+            f"if 'return_result' in dir():\n    return_result({payload})",
+            f"result = return_result({payload})",
+        ):
+            with self.subTest(cell=cell.splitlines()[0]):
+                self.assertTrue(inline(self._cell(cell)))
+
     def test_a_cell_that_does_not_end_in_return_result_does_not_close_it(self) -> None:
         inline = MODULE_CHAIN["_inline_return_closes_the_turn"]
         # Computing the payload is not returning it. Run 20260802T124434Z spent
@@ -2302,6 +2319,11 @@ class InlineReturnRouteTests(unittest.TestCase):
         self.assertFalse(inline(self._cell("return_result({'a': 1})\nprint('after')")))
         self.assertFalse(inline(self._cell("not valid python (")))
         self.assertFalse(inline({"id": "x", "name": "execute_python"}))
+        # Naming the call is not making it. A definition defers its body, so a
+        # cell ending in one has invoked nothing and the turn did not close.
+        self.assertFalse(inline(self._cell("def send():\n    return_result({'a': 1})")))
+        self.assertFalse(inline(self._cell("send = lambda: return_result({'a': 1})")))
+        self.assertFalse(inline(self._cell("handlers = [return_result]")))
 
     def test_the_separate_tool_route_still_binds_the_literal_decision(self) -> None:
         binds = MODULE_CHAIN["_last_model_call_returns_decision"]
@@ -2322,3 +2344,7 @@ class InlineReturnRouteTests(unittest.TestCase):
         }
         self.assertTrue(binds([call], decision))
         self.assertFalse(binds([call], {**decision, "action": 2}))
+
+
+if __name__ == "__main__":
+    unittest.main()
