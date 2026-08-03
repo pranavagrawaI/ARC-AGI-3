@@ -188,10 +188,13 @@ def _expand_response_batches(
     return expanded
 
 
-def _without_unanswered_tool_calls(
+CONSUMED_CALL_OUTPUT = "status: consumed by host and released as the environment action"
+
+
+def _answer_consumed_tool_calls(
     items: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Drop tool calls the host consumed instead of answering.
+    """Answer tool calls the host consumed, in the host's own voice.
 
     An action point ends the moment ``return_result`` supplies its argument: the
     host takes it and releases the environment action, so whichever call carried
@@ -205,13 +208,22 @@ def _without_unanswered_tool_calls(
     continues" -- and CoreWeave accepts, so load balancing hid this until a run
     pinned one endpoint.
 
+    The call keeps its own shape and gains the reply it never got. Rewriting it
+    into assistant prose instead cost run 20260803T062052Z its second action:
+    the transcript then ended in an assistant turn that consisted of narrating a
+    code block, and at the next action point the model reproduced that narration
+    verbatim as its answer rather than acting. A transcript teaches by example
+    whether or not it means to, so the host's account of what it did belongs in
+    the host's slot -- a ``function_call_output``, which is what every other call
+    in the transcript receives, and which no model turn looks like.
+
     This runs on the final Responses items, after ``_expand_response_batches``,
     because that is the only point where every route into the request has one
     shape. Filtering the agent's message list instead misses ``_batch``
     envelopes, whose ``function_call`` items do not exist yet.
 
-    Reasoning items are never removed. Past reasoning is required for model
-    performance, and only unanswered ``function_call`` items are dropped.
+    Nothing is removed. Past reasoning is required for model performance, and
+    the model's own authoring cell stays exactly as it wrote it.
     """
 
     answered = {
@@ -219,32 +231,23 @@ def _without_unanswered_tool_calls(
         for item in items
         if isinstance(item, dict) and item.get("type") == "function_call_output"
     }
-    kept: list[dict[str, Any]] = []
+    replied: list[dict[str, Any]] = []
     for item in items:
+        replied.append(item)
         consumed = (
             isinstance(item, dict)
             and item.get("type") == "function_call"
             and item.get("call_id") not in answered
         )
-        if not consumed:
-            kept.append(item)
-            continue
-        # Keep what the call said. Dropping it outright would also drop the
-        # model's record of the cell that produced its own action, which the
-        # workspace keeps but the transcript would not.
-        kept.append(
-            {
-                "role": "assistant",
-                "content": (
-                    f"[this action point ended inside the {item.get('name')} call "
-                    "below, whose result the host consumed and released as the "
-                    "environment action; it is recorded here as text because no "
-                    "tool reply exists for it]\n"
-                    f"{item.get('arguments')}"
-                ),
-            }
-        )
-    return kept
+        if consumed:
+            replied.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": item.get("call_id"),
+                    "output": CONSUMED_CALL_OUTPUT,
+                }
+            )
+    return replied
 
 
 class ResponsesClient(_NooaResponsesClient):
@@ -267,7 +270,7 @@ class ResponsesClient(_NooaResponsesClient):
                     item.get("content"),
                 )
             normalized.append(item)
-        return _without_unanswered_tool_calls(normalized), instructions
+        return _answer_consumed_tool_calls(normalized), instructions
 
 
 def build_llm(
