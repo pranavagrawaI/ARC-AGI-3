@@ -23,10 +23,100 @@ from host.control_surface import normalize_quoted_null_message  # noqa: E402
 from llm_repl_agent.agent import parse_decision_message  # noqa: E402
 from llm_repl_agent.client import ChatResponse  # noqa: E402
 from run_paired_probe import (  # noqa: E402
+    PROVIDER_ROUTES,
     _control_client_for_live,
+    _materialize_runtime_overlay,
     _provider_profile_report,
     main,
 )
+
+
+class ProviderRouteTests(unittest.TestCase):
+    """The pin has to reach both arms, which are reached by different means.
+
+    The control client is host-owned and in-process, so it takes the route
+    directly. The candidate runs in a separate process against the frozen
+    runtime, so its route arrives through an overlay launcher. A pin that
+    reached only one arm would leave the gate exactly as uninformative as the
+    unpinned run it replaces, while looking pinned.
+    """
+
+    def _profile(self) -> ProviderRequestProfile:
+        return ProviderRequestProfile.responses(
+            model="openai/google/gemma-4-31b-it",
+            wire_model="google/gemma-4-31b-it",
+            api_base="https://openrouter.ai/api/v1",
+            max_output_tokens=1_024,
+            reasoning_effort="medium",
+            request_timeout_seconds=30.0,
+        )
+
+    def test_the_control_client_carries_the_route_it_was_given(self) -> None:
+        for name, route in PROVIDER_ROUTES.items():
+            client = _control_client_for_live(
+                self._profile(), "test-secret", provider_route=route
+            )
+            payload = client._payload([{"role": "user", "content": "hi"}], [])
+            with self.subTest(route=name):
+                if route:
+                    self.assertEqual(payload["provider"], route)
+                else:
+                    self.assertNotIn("provider", payload)
+
+    def test_an_absent_route_leaves_the_request_exactly_as_it_was(self) -> None:
+        unrouted = _control_client_for_live(self._profile(), "test-secret")
+        self.assertNotIn(
+            "provider", unrouted._payload([{"role": "user", "content": "hi"}], [])
+        )
+
+    def test_the_overlay_points_at_the_frozen_runtime_without_copying_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_root = Path(directory) / "pair"
+            run_root.mkdir()
+            overlay = _materialize_runtime_overlay(
+                run_root, PROVIDER_ROUTES["pinned"]
+            )
+
+            config = json.loads((overlay / "transport-config.json").read_text())
+            self.assertEqual(
+                config["schema"], "0002-nooa-provider-runtime-overlay-v1"
+            )
+            self.assertEqual(config["provider"], PROVIDER_ROUTES["pinned"])
+            base = Path(config["base_runtime_root"])
+            self.assertTrue((base / "launcher.py").is_file())
+            self.assertEqual(base, (CONTROL_ROOT / "nooa-runtime").resolve())
+
+            # The worker is started as <runtime>/.venv/bin/python <runtime>/launcher.py,
+            # so both have to resolve inside the overlay.
+            self.assertTrue((overlay / "launcher.py").is_file())
+            self.assertTrue((overlay / ".venv").exists())
+            self.assertEqual(
+                (overlay / "launcher.py").read_bytes(),
+                (CONTROL_ROOT / "provider_runtime_launcher.py").read_bytes(),
+            )
+            # The frozen runtime is pointed at, never rewritten.
+            self.assertNotEqual(
+                (overlay / "launcher.py").read_bytes(),
+                (base / "launcher.py").read_bytes(),
+            )
+
+    def test_the_overlay_launcher_refuses_a_route_it_does_not_know(self) -> None:
+        sys.path.insert(0, str(CONTROL_ROOT))
+        from provider_runtime_launcher import _load_overlay_config
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "transport-config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema": "0002-nooa-provider-runtime-overlay-v1",
+                        "base_runtime_root": str(CONTROL_ROOT / "nooa-runtime"),
+                        "provider": {"order": ["somewhere-else"]},
+                    }
+                )
+            )
+            with self.assertRaisesRegex(RuntimeError, "unknown provider route"):
+                _load_overlay_config(path)
 
 
 class PairedProbeRunnerTests(unittest.TestCase):
@@ -365,6 +455,12 @@ class PairedProbeRunnerTests(unittest.TestCase):
 
             self.assertEqual(status, 0)
             pair = json.loads((run_root / "summary.json").read_text())
+            # Pinned is the default, because a gate that does not say which
+            # endpoint served it is the gate that already passed a broken
+            # substrate once.
+            self.assertEqual(pair["provider_route_name"], "pinned")
+            self.assertTrue(pair["route_can_qualify"])
+            self.assertTrue(pair["qualifies_g9"])
             self.assertEqual(pair["mode"], "offline-fixture")
             self.assertEqual(pair["claim_boundary"], "interface usability only")
             self.assertTrue(pair["operational_success"])
@@ -428,6 +524,42 @@ class PairedProbeRunnerTests(unittest.TestCase):
             self.assertTrue(
                 all(record["paired_run_spec"] == frozen_spec for record in action_requests)
             )
+
+    def test_an_open_route_runs_the_pair_but_cannot_qualify_the_gate(self) -> None:
+        """Succeeding is not the same as being evidence.
+
+        An open route is legitimate for shakedown, so the run still reports its
+        operational result. It just cannot stand as G9 evidence, because it does
+        not say which endpoint served it -- which is exactly how the previous
+        gate passed a substrate that one provider refused outright.
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            run_root = Path(directory) / "pair"
+            with redirect_stdout(StringIO()):
+                status = main(
+                    [
+                        "--offline",
+                        "--provider-route",
+                        "open",
+                        "--max-actions",
+                        "2",
+                        "--max-model-calls",
+                        "4",
+                        "--max-model-rounds-per-action",
+                        "2",
+                        "--run-root",
+                        str(run_root),
+                    ]
+                )
+
+            pair = json.loads((run_root / "summary.json").read_text())
+            self.assertEqual(status, 0)
+            self.assertTrue(pair["operational_success"])
+            self.assertEqual(pair["provider_route_name"], "open")
+            self.assertEqual(pair["provider_route"], {})
+            self.assertFalse(pair["route_can_qualify"])
+            self.assertFalse(pair["qualifies_g9"])
 
 
 if __name__ == "__main__":

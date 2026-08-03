@@ -23,6 +23,23 @@ from uuid import uuid4
 REPO = Path(__file__).resolve().parents[3]
 CONTROL_ROOT = Path(__file__).resolve().parent
 RUNTIME_ROOT = CONTROL_ROOT / "nooa-runtime"
+PROVIDER_RUNTIME_LAUNCHER = CONTROL_ROOT / "provider_runtime_launcher.py"
+# G9 exists to say the substrate works, so it runs pinned by default. The prior
+# gate passed unpinned, and the pass was routing luck: OpenRouter load-balanced
+# g9-20260801T152726Z-fbf2ce0d across a provider that refuses an unanswered tool
+# call and one that accepts, and three action points completed only because the
+# accepting one served the later requests. An open route can show the pair runs;
+# it cannot show it runs anywhere in particular.
+PROVIDER_ROUTES: dict[str, dict[str, Any]] = {
+    "pinned": {
+        "order": ["modelrun/fp4"],
+        "only": ["modelrun/fp4"],
+        "allow_fallbacks": False,
+        "require_parameters": False,
+        "quantizations": ["fp4"],
+    },
+    "open": {},
+}
 BASELINE_ROOT = REPO / "experiments" / "agents" / "0002-llm-repl-agent"
 P9_PARENT = REPO / "experiments" / "agents" / "0006-capability-environment"
 for source_root in (REPO, CONTROL_ROOT, BASELINE_ROOT, P9_PARENT):
@@ -144,6 +161,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--game")
     parser.add_argument("--mode", type=_operation_mode, default=OperationMode.OFFLINE)
     parser.add_argument("--environment-seed", type=int, default=0)
+    parser.add_argument(
+        "--provider-route",
+        choices=sorted(PROVIDER_ROUTES),
+        default="pinned",
+        help="pinned fixes one endpoint and is required to qualify the gate; "
+        "open lets the gateway route freely and cannot.",
+    )
     parser.add_argument("--model")
     parser.add_argument("--wire-model")
     parser.add_argument("--api-base")
@@ -239,8 +263,12 @@ def _candidate_fixture(step: int, observation: Observation) -> list[str]:
 def _control_client_for_live(
     profile: ProviderRequestProfile,
     api_key: str,
+    *,
+    provider_route: dict[str, Any] | None = None,
 ) -> OpenAICompatibleResponsesClient:
-    return OpenAICompatibleResponsesClient(profile, api_key)
+    return OpenAICompatibleResponsesClient(
+        profile, api_key, provider_route=provider_route
+    )
 
 
 def _probe_file_evidence(path: Path) -> dict[str, Any]:
@@ -352,6 +380,33 @@ def _run_control(
     return summary
 
 
+def _materialize_runtime_overlay(run_root: Path, route: dict[str, Any]) -> Path:
+    """Build the per-run runtime the candidate worker is launched from.
+
+    The frozen runtime is never edited or copied. The overlay holds a launcher
+    that imports it, adds the route to every request, and hands control to the
+    frozen entry point, so what the worker executes is still the frozen bytes.
+    The environment is shared by symlink rather than copied: this is a gate run
+    inside a run directory, not an approved immutable execution boundary.
+    """
+
+    runtime_root = run_root / "provider-runtime"
+    runtime_root.mkdir(parents=True, exist_ok=False)
+    (runtime_root / "launcher.py").write_bytes(
+        PROVIDER_RUNTIME_LAUNCHER.read_bytes()
+    )
+    _write_json(
+        runtime_root / "transport-config.json",
+        {
+            "schema": "0002-nooa-provider-runtime-overlay-v1",
+            "base_runtime_root": str(RUNTIME_ROOT.resolve()),
+            "provider": route,
+        },
+    )
+    (runtime_root / ".venv").symlink_to(RUNTIME_ROOT / ".venv")
+    return runtime_root
+
+
 def _run_candidate(
     *,
     spec: PairedRunSpec,
@@ -359,10 +414,11 @@ def _run_candidate(
     environment: Any,
     response_timeout: float,
     offline: bool,
+    runtime_root: Path = RUNTIME_ROOT,
 ) -> dict[str, Any]:
     worker_root = run_root / "worker"
     with NooaProcessAgent(
-        runtime_root=RUNTIME_ROOT,
+        runtime_root=runtime_root,
         run_root=worker_root,
         fixture_policy=_candidate_fixture if offline else None,
         paired_run_spec=spec,
@@ -629,12 +685,17 @@ def main(argv: list[str] | None = None) -> int:
     _write_json(run_root / "paired-run-spec.json", spec.as_record())
     _write_json(run_root / "source-state.json", source_state)
 
+    route = PROVIDER_ROUTES[args.provider_route]
+    candidate_runtime_root = RUNTIME_ROOT
     if args.offline:
         environment_factory, control_client = _offline_inputs(args)
     else:
         environment_factory = _live_factory(args, run_root)
         assert spec.provider_request_profile is not None and api_key is not None
-        control_client = _control_client_for_live(spec.provider_request_profile, api_key)
+        control_client = _control_client_for_live(
+            spec.provider_request_profile, api_key, provider_route=route
+        )
+        candidate_runtime_root = _materialize_runtime_overlay(run_root, route)
 
     control_arcade = None
     candidate_arcade = None
@@ -673,6 +734,7 @@ def main(argv: list[str] | None = None) -> int:
             environment=candidate_environment,
             response_timeout=response_timeout,
             offline=args.offline,
+            runtime_root=candidate_runtime_root,
         )
     except Exception as error:
         candidate_summary = _failed_arm_summary("0002-NOOA", error)
@@ -709,15 +771,22 @@ def main(argv: list[str] | None = None) -> int:
         )
         _write_json(run_root / "provider-profile-report.json", provider_report)
         provider_success = provider_report["success"]
+    # A run on an open route can still succeed operationally; it just cannot
+    # stand as gate evidence, because it does not say which endpoint served it.
+    route_can_qualify = args.provider_route == "pinned"
     operational_success = all(
         verdict["success"] for verdict in arm_verdicts.values()
     ) and provider_success
     summary = {
-        "schema": "0002-nooa-g9-pair-v1",
+        "schema": "0002-nooa-g9-pair-v2",
         "pair_id": pair_id,
         "mode": "offline-fixture" if args.offline else "live",
         "claim_boundary": "interface usability only",
         "operational_success": operational_success,
+        "provider_route_name": args.provider_route,
+        "provider_route": route,
+        "route_can_qualify": route_can_qualify,
+        "qualifies_g9": operational_success and route_can_qualify,
         "arm_verdicts": arm_verdicts,
         "provider_profile_report": provider_report,
         "paired_run_spec_sha256": sha256(

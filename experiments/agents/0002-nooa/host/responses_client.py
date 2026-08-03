@@ -250,11 +250,22 @@ def _responses_tools(tools: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]
 class OpenAICompatibleResponsesClient:
     """Project one frozen provider profile onto a raw ``/responses`` request."""
 
-    def __init__(self, profile: ProviderRequestProfile, api_key: str) -> None:
+    def __init__(
+        self,
+        profile: ProviderRequestProfile,
+        api_key: str,
+        *,
+        provider_route: Mapping[str, Any] | None = None,
+    ) -> None:
         if not api_key:
             raise ValueError("api_key must be explicit")
         self.profile = profile
         self.api_key = api_key
+        # Which endpoint behind the gateway serves the request is a transport
+        # choice, not a request-shape commitment, so it is supplied per run
+        # rather than frozen into the profile. An empty or absent route lets the
+        # gateway choose, which is the behaviour every run had before this.
+        self.provider_route = dict(provider_route) if provider_route else {}
         self.actual_crossings: list[dict[str, Any]] = []
 
     def _payload(
@@ -283,6 +294,8 @@ class OpenAICompatibleResponsesClient:
             payload["temperature"] = self.profile.temperature
         if self.profile.seed is not None:
             payload["seed"] = self.profile.seed
+        if self.provider_route:
+            payload["provider"] = dict(self.provider_route)
         return payload
 
     def complete(
