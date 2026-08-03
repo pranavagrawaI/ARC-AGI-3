@@ -122,7 +122,7 @@ def two_action_fixture(
                 else []
             ),
             "assertions": [
-                {"observable": "levels_completed", "op": "==", "value": 0}
+                {"observable": "changed_cells", "op": ">", "value": 0}
             ],
             "evidence_requests": [],
             "reconciliation": reconciliation,

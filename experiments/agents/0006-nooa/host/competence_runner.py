@@ -210,6 +210,17 @@ def attach_competence_context(
                     "to check and teaches you nothing. At least one assertion is "
                     "required; an empty list is refused and releases no action."
                 ),
+                "constraint": (
+                    "at least one assertion must be one the successor could "
+                    "falsify, and the host refuses the commitment otherwise. An "
+                    "assertion about state or levels_completed is at risk only "
+                    "if it contradicts the value in current_metadata: asserting "
+                    "the value you were just given predicts nothing, because it "
+                    "is what you would observe if the action did nothing. "
+                    "changed_cells has no current value, so any count you name "
+                    "is a real prediction, including zero; only a comparison "
+                    "true of every possible count, such as >= 0, is refused."
+                ),
                 "items": {
                     "numeric": {
                         "exactKeys": ["observable", "op", "value"],

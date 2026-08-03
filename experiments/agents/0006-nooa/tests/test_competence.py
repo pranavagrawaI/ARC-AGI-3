@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 import unittest
+from hashlib import sha256
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +15,7 @@ if str(ROOT) not in sys.path:
 from competence import (
     CompetenceController,
     ContractError,
+    _assertion_is_at_risk,
     parse_model_reason,
 )
 
@@ -64,6 +66,122 @@ class CompetenceControllerTests(unittest.TestCase):
                 with self.assertRaisesRegex(ContractError, message):
                     controller.admit({**base, field: []}, legal_actions=(1,))
 
+    def test_an_assertion_earns_its_place_by_being_able_to_fail(self) -> None:
+        """The boundary between a prediction and a restatement of the present.
+
+        The current observation is NOT_FINISHED with no levels completed on a
+        four-cell grid, so ``changed_cells`` can only land in 0..4. Assertions
+        that hold across that whole range, or that repeat a value the model was
+        just handed, cannot be falsified by any successor and are refused.
+        Predicting an exact count, including zero, remains a real claim about
+        the action rather than a restatement of the present.
+        """
+
+        base = {
+            "action": 1,
+            "data": None,
+            "working_state": {},
+            "test": "prose the host never checks",
+            "claim_ids": ["claim-1"],
+            "ledger": [
+                {
+                    "op": "create",
+                    "claim_id": "claim-1",
+                    "statement": "action 1 has an observable effect",
+                }
+            ],
+            "evidence_requests": [],
+            "reconciliation": None,
+        }
+        state_quo = {"observable": "state", "op": "==", "value": "NOT_FINISHED"}
+        at_risk = {"observable": "changed_cells", "op": ">", "value": 0}
+
+        for assertion, expected in (
+            (state_quo, False),
+            ({"observable": "state", "op": "!=", "value": "NOT_FINISHED"}, True),
+            ({"observable": "levels_completed", "op": "==", "value": 0}, False),
+            ({"observable": "levels_completed", "op": ">=", "value": 0}, False),
+            ({"observable": "levels_completed", "op": ">", "value": 0}, True),
+            ({"observable": "changed_cells", "op": ">=", "value": 0}, False),
+            ({"observable": "changed_cells", "op": "<=", "value": 4}, False),
+            ({"observable": "changed_cells", "op": "<=", "value": 3}, True),
+            ({"observable": "changed_cells", "op": "==", "value": 0}, True),
+            (at_risk, True),
+        ):
+            controller = CompetenceController()
+            controller.receive_observation(observation(0, pixels=[[0, 0], [0, 0]]))
+            decision = {**base, "assertions": [assertion]}
+            with self.subTest(assertion=assertion):
+                if expected:
+                    commitment = controller.admit(decision, legal_actions=(1,))
+                    self.assertTrue(commitment["assertions"][0]["at_risk"])
+                    self.assertEqual(
+                        commitment["prediction_coverage_status"], "complete"
+                    )
+                else:
+                    with self.assertRaisesRegex(ContractError, "falsify"):
+                        controller.admit(decision, legal_actions=(1,))
+
+        controller = CompetenceController()
+        controller.receive_observation(observation(0, pixels=[[0, 0], [0, 0]]))
+        mixed = controller.admit(
+            {**base, "assertions": [state_quo, at_risk]}, legal_actions=(1,)
+        )
+        self.assertEqual(
+            [item["at_risk"] for item in mixed["assertions"]], [False, True]
+        )
+        self.assertEqual(mixed["prediction_coverage_status"], "partial")
+
+    def test_the_rule_refuses_what_live_runs_actually_authored(self) -> None:
+        """Drive the real commitments from four live ls20 runs through the rule.
+
+        The invented fixtures above fix the boundary; these fix the target. Every
+        assertion here was written by the model against a real 64x64 observation,
+        and three of the six commitments assert nothing the successor could
+        contradict - including both actions of 20260802T182855Z, which completed,
+        reported two matches, and established nothing. The one that predicts
+        ``state != NOT_FINISHED`` survives, as it should: it was a real claim,
+        and the environment falsified it.
+        """
+
+        preserved = json.loads(
+            (Path(__file__).parent / "live_commitments_ls20.json").read_text()
+        )
+        observations = preserved["observations"]
+        verdicts = []
+        for commitment in preserved["commitments"]:
+            public = observations[commitment["observation_sha256"]]
+            self.assertEqual(
+                sha256(
+                    json.dumps(public, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest(),
+                commitment["observation_sha256"],
+                "the preserved observation is not the one the model was shown",
+            )
+            at_risk = [
+                _assertion_is_at_risk(assertion, current=public)
+                for assertion in commitment["assertions"]
+            ]
+            verdicts.append(
+                (
+                    commitment["run"],
+                    commitment["before_step"],
+                    "refused" if not any(at_risk) else "admitted",
+                )
+            )
+
+        self.assertEqual(
+            verdicts,
+            [
+                ("20260802T114747Z", 0, "refused"),
+                ("20260802T182855Z", 0, "refused"),
+                ("20260802T182855Z", 1, "refused"),
+                ("20260803T061050Z", 0, "admitted"),
+                ("20260803T061050Z", 1, "admitted"),
+                ("20260803T062052Z", 0, "admitted"),
+            ],
+        )
+
     def test_host_grid_diff_handles_the_real_multi_layer_observation_shape(self) -> None:
         controller = CompetenceController()
         controller.receive_observation(
@@ -112,7 +230,7 @@ class CompetenceControllerTests(unittest.TestCase):
                     "statement": "this action has an observable effect",
                 }
             ],
-            "assertions": [{"observable": "state", "op": "==", "value": "NOT_FINISHED"}],
+            "assertions": [{"observable": "changed_cells", "op": ">", "value": 0}],
             "evidence_requests": [],
             "reconciliation": None,
         }
@@ -173,7 +291,7 @@ class CompetenceControllerTests(unittest.TestCase):
                     "test": "act again without accounting for the result",
                     "claim_ids": ["claim-1"],
                     "ledger": [],
-                    "assertions": [{"observable": "state", "op": "==", "value": "NOT_FINISHED"}],
+                    "assertions": [{"observable": "changed_cells", "op": ">", "value": 0}],
                     "evidence_requests": [],
                     "reconciliation": None,
                 },
@@ -194,7 +312,7 @@ class CompetenceControllerTests(unittest.TestCase):
                         "statement": "action 1 did not change the tested frame",
                     }
                 ],
-                "assertions": [{"observable": "state", "op": "==", "value": "NOT_FINISHED"}],
+                "assertions": [{"observable": "changed_cells", "op": ">", "value": 0}],
                 "evidence_requests": [
                     {"operator": "transition", "action_id": 1},
                 ],
@@ -267,7 +385,7 @@ class CompetenceControllerTests(unittest.TestCase):
                     "claim_ids": ["claim-1"],
                     "ledger": [],
                     "assertions": [
-                        {"observable": "state", "op": "==", "value": "NOT_FINISHED"}
+                        {"observable": "changed_cells", "op": ">", "value": 0}
                     ],
                     "evidence_requests": [],
                 },
@@ -296,7 +414,7 @@ class CompetenceControllerTests(unittest.TestCase):
                         "statement": "this remains in the ledger only",
                     },
                 ],
-                "assertions": [{"observable": "state", "op": "==", "value": "NOT_FINISHED"}],
+                "assertions": [{"observable": "changed_cells", "op": ">", "value": 0}],
                 "evidence_requests": [],
                 "reconciliation": None,
             },
@@ -345,7 +463,7 @@ class CompetenceControllerTests(unittest.TestCase):
                 "test": "continue while keeping the anomaly explicit",
                 "claim_ids": ["claim-1"],
                 "ledger": [],
-                "assertions": [{"observable": "state", "op": "==", "value": "NOT_FINISHED"}],
+                "assertions": [{"observable": "changed_cells", "op": ">", "value": 0}],
                 "evidence_requests": [],
                 "reconciliation": [
                     {
@@ -397,7 +515,7 @@ class CompetenceControllerTests(unittest.TestCase):
                     "test": "this candidate must be rejected",
                     "claim_ids": ["claim-1"],
                     "ledger": [],
-                    "assertions": [{"observable": "state", "op": "==", "value": "NOT_FINISHED"}],
+                    "assertions": [{"observable": "changed_cells", "op": ">", "value": 0}],
                     "evidence_requests": [{"operator": "not-an-operator", "action_id": 1}],
                     "reconciliation": [
                         {

@@ -416,6 +416,51 @@ def _assertion(raw: object, *, index: int) -> dict[str, object]:
     raise ContractError(f"assertions[{index}].observable is not permitted")
 
 
+def _assertion_is_at_risk(
+    assertion: Mapping[str, object], *, current: Mapping[str, object]
+) -> bool:
+    """True when some successor the host could observe would falsify this assertion.
+
+    An assertion earns its place by being able to fail. One that cannot teaches
+    nothing whatever the environment does, and a run full of them completes,
+    reports matches, and establishes no competence at all. Two live runs did
+    exactly that: 20260802T184631Z asserted ``state == NOT_FINISHED`` and
+    ``levels_completed == 0`` while both were already true, and 20260803T062052Z
+    repeated the first of those.
+
+    The two observables that carry a value the model can already read are at
+    risk only when they contradict it. Asserting the value already in hand
+    predicts the status quo persisting, which is what happens when an action
+    does nothing, so it separates no outcome from any other. This is the same
+    rule as requiring an objective progress check to be false when written.
+
+    ``changed_cells`` has no such value: it exists only across the transition,
+    so nothing about the current observation makes any particular count more or
+    less expected. Here the only assertion that cannot fail is one true of every
+    reachable count, which the bounded grid makes decidable by enumeration.
+    Predicting ``changed_cells == 0`` therefore stays legitimate - claiming an
+    action is inert is a real claim about the action, and a wrong one is exactly
+    the kind of mistake worth making early.
+    """
+
+    observable = str(assertion["observable"])
+    operator = str(assertion["op"])
+    expected = assertion["value"]
+    if observable in {"state", "levels_completed"}:
+        return _compare(current.get(observable), operator, expected) is not True
+    layers = _layers(current)
+    if layers is None:
+        # Without a decodable grid the reachable range is unknown, and refusing
+        # a commitment over a host-side decoding failure would blame the model
+        # for it. Unverifiable is not the same as vacuous.
+        return True
+    reachable = sum(len(layer) * len(layer[0]) for layer in layers)
+    return any(
+        _compare(count, operator, expected) is not True
+        for count in range(reachable + 1)
+    )
+
+
 class CompetenceController:
     """The 0006 treatment state machine behind a one-action NOOA method."""
 
@@ -534,7 +579,22 @@ class CompetenceController:
         raw_assertions = decision.get("assertions")
         if not isinstance(raw_assertions, list) or not 1 <= len(raw_assertions) <= 5:
             raise ContractError("decision.assertions must contain one to five assertions")
-        assertions = [_assertion(item, index=index) for index, item in enumerate(raw_assertions)]
+        parsed = [_assertion(item, index=index) for index, item in enumerate(raw_assertions)]
+        assertions = [
+            {
+                **assertion,
+                "at_risk": _assertion_is_at_risk(assertion, current=self._current.public),
+            }
+            for assertion in parsed
+        ]
+        at_risk = sum(1 for assertion in assertions if assertion["at_risk"])
+        if not at_risk:
+            raise ContractError(
+                "decision.assertions must contain at least one assertion the "
+                "successor could falsify; every one of these is already true of "
+                "the current observation or of every reachable outcome"
+            )
+        coverage_status = "complete" if at_risk == len(assertions) else "partial"
         claim_ids = self._claim_ids(decision.get("claim_ids"))
         ledger_ops = decision.get("ledger")
         if not isinstance(ledger_ops, list):
@@ -593,6 +653,7 @@ class CompetenceController:
             "test": test,
             "claim_ids": claim_ids,
             "assertions": assertions,
+            "prediction_coverage_status": coverage_status,
             "reconciliation": reconciliations,
         }
         self._pending = deepcopy(commitment)
