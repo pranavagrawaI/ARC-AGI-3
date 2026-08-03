@@ -56,14 +56,22 @@ EXPECTED_WIRE_MODEL = "google/gemma-4-31b-it"
 EXPECTED_API_BASE = "https://openrouter.ai/api/v1"
 SMOKE_MAXIMA = {
     "max_actions": 3,
-    "max_model_calls": 12,
-    # One action costs about 16.6k reported tokens: run 20260802T114747Z spent
-    # 16,581 over three calls and then exhausted a 16,384 gate before action 2.
-    # A second action carries a larger packet, so the previous 32,768 ceiling
-    # could not admit the two-action smoke it was meant to bound.
-    "max_reported_tokens": 65_536,
+    # Two actions at the round ceiling is sixteen calls, plus room for repairs.
+    "max_model_calls": 20,
+    # A round costs more than the one before it, because the transcript it
+    # carries is longer: run 20260802T205910Z spent 2,769 then 5,129 then 4,330
+    # then 8,600 over four rounds of one action. Extending the round ceiling to
+    # eight without extending this one would only move the failure from round
+    # exhaustion to token exhaustion. The bound is set for the worst case of two
+    # actions that both run to the round ceiling, which at the observed rate is
+    # roughly $0.05.
+    "max_reported_tokens": 262_144,
     "max_output_tokens": 16_384,
-    "max_model_rounds_per_action": 4,
+    # Four rounds was not enough to orient in a 64x64 grid and then commit: run
+    # 20260802T205910Z spent all four inspecting the observation and never
+    # authored a decision. The bound exists to keep the smoke finite, not
+    # because four is a meaningful number of looks.
+    "max_model_rounds_per_action": 8,
     "max_decision_repairs": 2,
 }
 # Two routes, both carried through the same audited overlay so the launcher is
