@@ -4,6 +4,13 @@
 vertical slice makes one action prospectively testable without giving the host
 semantic action authority.
 
+The first matched 44-action comparison is complete. It produced no performance
+signal while the treatment used materially more inference. A missing terminal
+control host observation means the exact pre-registered primary is not
+evaluable; both bounded post-hoc analyses are null at `p = 1.0`. The frozen
+evidence bindings, deviation, and verifier reconciliation are recorded in
+[COMPARISON.md](./COMPARISON.md).
+
 The treatment code is intentionally small:
 
 - `competence.py` — archive, neutral evidence operation, claim ledger,
@@ -147,7 +154,9 @@ model-authored commitment as a dictionary, and serializes `reason` with
 `json.dumps`. The model still authors every semantic value; the host neither
 guesses nor repairs malformed or semantically invalid commitments.
 
-This is a live interface-and-behavior smoke, not a matched 0002-vs-0006 result.
+One arm from this entry point is live interface-and-behavior evidence, not by
+itself a matched 0002-vs-0006 result. The completed matched pair and its limits
+are recorded separately in [COMPARISON.md](./COMPARISON.md).
 The request pins ModelRun FP4 with fallbacks disabled; this establishes requested
 routing, not independently returned quantization. The post-run generation lookup
 verifies the returned provider identity, model revision, finish reasons, tokens,

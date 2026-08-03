@@ -15,7 +15,11 @@ from competence import (
     _transition_output,
     parse_model_reason,
 )
-from competence_runner import EXPECTED_PROJECTION_DTYPE, attach_competence_context
+from competence_runner import (
+    EXPECTED_PROJECTION_DTYPE,
+    MAX_COMMITMENT_REPAIRS,
+    attach_competence_context,
+)
 from llm_repl_agent.observations import action_requirements
 
 COMPETENCE_SCHEMA = "0006-nooa-competence-v1"
@@ -413,6 +417,35 @@ def _content_id(prefix: str, domain: str, value: object) -> str:
     return prefix + canonical_digest({"domain": domain, "value": value})
 
 
+def _rejection_notice_from_record(record: dict[str, Any]) -> dict[str, object] | None:
+    """Reconstruct the frozen notice independently from its preceding rejection."""
+
+    error = record.get("error")
+    attempts_remaining = record.get("attempts_remaining")
+    if (
+        not isinstance(error, dict)
+        or not isinstance(error.get("message"), str)
+        or type(attempts_remaining) is not int
+        or not 0 <= attempts_remaining <= MAX_COMMITMENT_REPAIRS
+    ):
+        return None
+    # This intentional duplication keeps acceptance independent of the producer's
+    # formatter. A wording change is a protocol change and must update both sides.
+    return {
+        "schema": "0006-nooa-rejection-notice-v1",
+        "rejected_reason": error["message"],
+        "attempts_remaining": attempts_remaining,
+        "instruction": (
+            "Your previous commitment was refused for the stated reason and no "
+            "environment action was released. The Python workspace is unchanged, "
+            "so any variable your last cell defined is still in scope. If you "
+            "already serialized a commitment there, pass that exact string as "
+            "reason rather than retyping it. Otherwise author a new commitment. "
+            "The host will not repair or complete a commitment for you."
+        ),
+    }
+
+
 def _apply_ledger_events(
     initial: dict[str, dict[str, object]],
     events: list[dict[str, Any]],
@@ -504,7 +537,7 @@ def _prediction_mismatches(
             expected_observed, str(assertion.get("op")), assertion.get("value")
         )
         if (
-            type(matched) is not bool
+            (matched is not None and type(matched) is not bool)
             or observed != expected_observed
             or matched != expected_matched
             or {key: value for key, value in check.items() if key not in {"observed", "matched"}}
@@ -521,7 +554,14 @@ def _prediction_mismatches(
                     "observed": observed,
                 }
             )
-    expected_outcome = "mismatch" if mismatches else "match"
+    outcomes = [check.get("matched") for check in checks if isinstance(check, dict)]
+    expected_outcome = (
+        "mismatch"
+        if False in outcomes
+        else "match"
+        if all(outcomes)
+        else "inconclusive"
+    )
     return mismatches, checks_valid and prediction.get("outcome") == expected_outcome
 
 
@@ -541,6 +581,7 @@ def _process_action_linked(
     admitted_record: dict[str, Any],
     transition_record: dict[str, Any],
     successor_record: dict[str, Any],
+    expected_rejection: dict[str, object] | None,
 ) -> bool:
     request = request_record.get("request")
     if not isinstance(request, dict) or not isinstance(packet, dict):
@@ -608,7 +649,9 @@ def _process_action_linked(
         "observations_glob",
         "competence",
     }
-    expected_wrapper = attach_competence_context({}, packet).get("competence")
+    expected_wrapper = attach_competence_context(
+        {}, packet, rejection=expected_rejection
+    ).get("competence")
     host_observation = request_record.get("host_observation")
     successor_host_observation = successor_record.get("host_observation")
     workspace_commitment = validated_record.get("workspace_commitment")
@@ -1017,6 +1060,44 @@ def chain_report(
     rejected_crossing_ids = {
         record.get("action_point_id") for _index, record in rejected_indexed
     }
+    pending_rejection_by_environment_step: dict[int, dict[str, object]] = {}
+    expected_rejection_by_environment_step: dict[int, dict[str, object]] = {}
+    rejection_records_valid = True
+    for record in process_records:
+        environment_step = record.get("step")
+        if type(environment_step) is not int:
+            continue
+        if record.get("kind") == "competence_rejected":
+            notice = _rejection_notice_from_record(record)
+            if notice is None:
+                rejection_records_valid = False
+            else:
+                pending_rejection_by_environment_step[environment_step] = notice
+        elif record.get("kind") == "action_request":
+            request = record.get("request")
+            observation = request.get("observation") if isinstance(request, dict) else None
+            competence = (
+                observation.get("competence")
+                if isinstance(observation, dict)
+                else None
+            )
+            if not isinstance(competence, dict):
+                rejection_records_valid = False
+                continue
+            expected_rejection = pending_rejection_by_environment_step.pop(
+                environment_step, None
+            )
+            if (
+                expected_rejection is not None
+                and expected_rejection["attempts_remaining"] <= 0
+            ):
+                rejection_records_valid = False
+            if competence.get("rejection") != expected_rejection:
+                rejection_records_valid = False
+            if record.get("action_point_id") not in rejected_crossing_ids:
+                expected_rejection_by_environment_step[environment_step] = (
+                    expected_rejection
+                )
     repair_records = [
         record
         for record in process_records
@@ -1406,6 +1487,9 @@ def chain_report(
                 admitted_record=admitted[action_id],
                 transition_record=recorded_transitions[action_id],
                 successor_record=successor_process_records[action_id],
+                expected_rejection=expected_rejection_by_environment_step.get(
+                    observation_records[action_id].get("step")
+                ),
             )
             for action_id in range(actions)
         )
@@ -1572,7 +1656,9 @@ def chain_report(
         record.get("step"): index for index, record in admitted_indexed
     }
     repairs_linked = (
-        len(rejected_crossing_ids) == len(rejected_indexed)
+        rejection_records_valid
+        and not pending_rejection_by_environment_step
+        and len(rejected_crossing_ids) == len(rejected_indexed)
         and all(
             record.get("action_point_id") not in admitted_index_by_step.values()
             and isinstance(record.get("error"), dict)

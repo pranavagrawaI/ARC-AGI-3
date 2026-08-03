@@ -1,8 +1,11 @@
 # 0006-NOOA competence contract
 
-Status: first executable treatment slice. It licenses the protocol below, not
-gameplay competence, a treatment effect, or a claim that the target model uses
-the protocol well.
+Status: executable treatment with one completed matched comparison. It licenses
+the protocol below, not gameplay competence, a beneficial treatment effect, or
+a claim that the target model uses the protocol well. The first comparison
+found no signal, with a terminal-observation deviation that prevents calling it
+a clean evaluation of the pre-registered primary; see
+[COMPARISON.md](./COMPARISON.md).
 
 `0002-NOOA` at revision `eeba4c0` is frozen, matching
 `run_live_probe.py::FROZEN_CONTROL_REVISION`. The `dfb2d2b` freeze was reopened
@@ -112,8 +115,10 @@ over the contract's integer-only canonical JSON domain. The successor records
 and prediction result are flushed during `observe`, before another model call
 or a final episode close. The host process log records the competence-packet
 digest, worker crossing, commitment admission, frozen action validation, and
-successor transition. The frozen 0002 run remains the unchanged control for a
-later matched comparison; this slice has not run that comparison.
+successor transition. The frozen 0002 run was the unchanged control in the
+first matched 44-action comparison. Its no-signal result, measurement deviation,
+and post-run verifier correction are recorded in
+[COMPARISON.md](./COMPARISON.md).
 
 The executable verifier is the offline end-to-end test: it crosses a real
 frozen NOOA worker, records a typed commitment, admits one action, forwards a

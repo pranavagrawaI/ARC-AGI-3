@@ -25,7 +25,11 @@ MODULE = runpy.run_path(str(RUNNER))
 MODULE_CHAIN = runpy.run_path(str(ROOT / "evidence_chain.py"))
 
 from competence import CompetenceController
-from competence_runner import EXPECTED_PROJECTION_DTYPE, attach_competence_context
+from competence_runner import (
+    EXPECTED_PROJECTION_DTYPE,
+    attach_competence_context,
+    rejection_notice,
+)
 from evidence_chain import (
     _changed_pixels,
     canonical_digest,
@@ -52,7 +56,11 @@ def parsed_args() -> argparse.Namespace:
 
 
 def two_action_fixture(
-    *, mismatch: bool = False, retire_claim: bool = False, actions: int = 2
+    *,
+    mismatch: bool = False,
+    retire_claim: bool = False,
+    inconclusive: bool = False,
+    actions: int = 2,
 ) -> tuple[list[dict], list[dict]]:
     """Build a linked chain of ``actions`` action points.
 
@@ -99,7 +107,12 @@ def two_action_fixture(
             "reconciliation": None,
         }
     first = controller.admit(first_decision, legal_actions=[1, 2])
-    successor = {**public, "step": 1, "pixels": [[[1]]], "full_reset": False}
+    successor = {
+        **public,
+        "step": 1,
+        "pixels": [[[0]], [[1]]] if inconclusive else [[[1]]],
+        "full_reset": False,
+    }
     controller.receive_observation(successor)
     second_packet = controller.context_packet()
     reconciliation = None
@@ -138,7 +151,11 @@ def two_action_fixture(
             "reconciliation": reconciliation,
         }
     second = controller.admit(second_decision, legal_actions=[1, 2])
-    final_successor = {**successor, "step": 2}
+    final_successor = {
+        **successor,
+        "step": 2,
+        "pixels": [[[0]], [[2]]] if inconclusive else successor["pixels"],
+    }
     controller.receive_observation(final_successor)
 
     action_points = [
@@ -364,7 +381,11 @@ def two_action_fixture(
                     "levels_completed": before["levels_completed"],
                     "state": before["state"],
                     "full_reset": before["full_reset"],
-                    "frame": {"layers": 1, "height": 1, "width": 1},
+                    "frame": {
+                        "layers": len(before["pixels"]),
+                        "height": 1,
+                        "width": 1,
+                    },
                 },
                 "representations": representations(before),
                 "recent_transitions": deepcopy(prior_transitions),
@@ -1924,6 +1945,22 @@ class LiveProbeTests(unittest.TestCase):
                 "attempts_remaining": 1,
             }
             triple = [request, crossing, refusal]
+            if not after_admission:
+                repaired_request = next(
+                    record
+                    for record in process
+                    if record.get("kind") == "action_request"
+                    and record.get("step") == refusal["step"]
+                )
+                repaired_request["request"]["observation"]["competence"][
+                    "rejection"
+                ] = rejection_notice(
+                    refusal["error"]["message"],
+                    attempts_remaining=refusal["attempts_remaining"],
+                )
+                repaired_request["request_sha256"] = canonical_digest(
+                    repaired_request["request"]
+                )
             anchor_kind = (
                 "competence_action_admitted" if after_admission else "action_request"
             )
@@ -1935,8 +1972,105 @@ class LiveProbeTests(unittest.TestCase):
 
         events, _baseline = two_action_fixture()
 
-        report = two_action_chain_report(events, with_refusal(after_admission=False))
+        repaired = with_refusal(after_admission=False)
+        report = two_action_chain_report(events, repaired)
         self.assertTrue(all(report.values()), report)
+
+        forged_notice = deepcopy(repaired)
+        repaired_request = next(
+            record
+            for record in forged_notice
+            if record.get("kind") == "action_request"
+            and record.get("request", {})
+            .get("observation", {})
+            .get("competence", {})
+            .get("rejection")
+        )
+        repaired_request["request"]["observation"]["competence"]["rejection"][
+            "rejected_reason"
+        ] = "forged rejection"
+        repaired_request["request_sha256"] = canonical_digest(
+            repaired_request["request"]
+        )
+        forged = two_action_chain_report(events, forged_notice)
+        self.assertFalse(forged["linked_process_records"])
+
+        exhausted = deepcopy(repaired)
+        exhausted_rejection = next(
+            record
+            for record in exhausted
+            if record.get("kind") == "competence_rejected"
+        )
+        exhausted_rejection["attempts_remaining"] = 0
+        exhausted_request = next(
+            record
+            for record in exhausted
+            if record.get("kind") == "action_request"
+            and record.get("request", {})
+            .get("observation", {})
+            .get("competence", {})
+            .get("rejection")
+        )
+        exhausted_request["request"]["observation"]["competence"]["rejection"] = (
+            rejection_notice(
+                exhausted_rejection["error"]["message"],
+                attempts_remaining=0,
+            )
+        )
+        exhausted_request["request_sha256"] = canonical_digest(
+            exhausted_request["request"]
+        )
+        exhausted_report = two_action_chain_report(events, exhausted)
+        self.assertFalse(
+            exhausted_report["refused_crossings_precede_their_action"]
+        )
+
+        future_notice = deepcopy(repaired)
+        repaired_request_index = next(
+            index
+            for index, record in enumerate(future_notice)
+            if record.get("kind") == "action_request"
+            and record.get("request", {})
+            .get("observation", {})
+            .get("competence", {})
+            .get("rejection")
+        )
+        repaired_request = future_notice.pop(repaired_request_index)
+        repaired_request["request"]["observation"]["competence"].pop("rejection")
+        repaired_request["request_sha256"] = canonical_digest(
+            repaired_request["request"]
+        )
+        rejection_index = next(
+            index
+            for index, record in enumerate(future_notice)
+            if record.get("kind") == "competence_rejected"
+        )
+        future_notice.insert(rejection_index, repaired_request)
+        future = two_action_chain_report(events, future_notice)
+        self.assertFalse(future["refused_crossings_precede_their_action"])
+
+        malformed_rejection = deepcopy(repaired)
+        rejection = next(
+            record
+            for record in malformed_rejection
+            if record.get("kind") == "competence_rejected"
+        )
+        rejection["error"]["message"] = ["not", "text"]
+        repaired_request = next(
+            record
+            for record in malformed_rejection
+            if record.get("kind") == "action_request"
+            and record.get("request", {})
+            .get("observation", {})
+            .get("competence", {})
+            .get("rejection")
+        )
+        repaired_request["request"]["observation"]["competence"].pop("rejection")
+        repaired_request["request_sha256"] = canonical_digest(
+            repaired_request["request"]
+        )
+        malformed = two_action_chain_report(events, malformed_rejection)
+        self.assertFalse(malformed["refused_crossings_precede_their_action"])
 
         # A refusal recorded after the action was released is not a repair.
         late = two_action_chain_report(events, with_refusal(after_admission=True))
@@ -2505,6 +2639,36 @@ class LongChainTests(unittest.TestCase):
                     MODULE_CHAIN["two_action_chain_report"](events, process),
                     MODULE_CHAIN["chain_report"](events, process, actions=2),
                 )
+
+    def test_a_layer_count_change_is_a_valid_inconclusive_prediction(self) -> None:
+        """The public producer may add or remove rendered layers between actions.
+
+        Run treatment-44-20260803T080119Z did this at actions 43 and 44. The
+        competence controller correctly recorded an inconclusive changed-cell
+        prediction; the acceptance verifier must preserve that third outcome.
+        """
+
+        events, process = two_action_fixture(inconclusive=True)
+        report = MODULE_CHAIN["chain_report"](events, process, actions=2)
+
+        self.assertTrue(all(report.values()), report)
+
+    def test_local_completed_44_action_artifact_passes_offline_acceptance(self) -> None:
+        run = ROOT / "artifacts/runs/treatment-44-20260803T080119Z/worker"
+        if not run.exists():
+            self.skipTest("ignored live-run artifact is not present in this checkout")
+        events = [
+            json.loads(line)
+            for line in (run / "competence.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        process = [
+            json.loads(line)
+            for line in (run / "process.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+
+        report = MODULE_CHAIN["chain_report"](events, process, actions=44)
+
+        self.assertTrue(all(report.values()), report)
 
     def test_a_chain_that_sags_in_the_middle_is_rejected(self) -> None:
         """A verifier that only checked the ends would pass every one of these.

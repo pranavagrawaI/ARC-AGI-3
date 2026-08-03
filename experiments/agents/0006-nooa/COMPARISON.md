@@ -100,3 +100,109 @@ with compute and must be reported as such.**
 ---
 
 <!-- PRE-REGISTRATION ENDS HERE. Results below this line only. -->
+
+## Result — 2026-08-03: null/no signal with a measurement deviation
+
+Run pair:
+
+- control: `control-44-20260803T080119Z`
+- treatment: `treatment-44-20260803T080119Z`
+- source revision executed by both arms: `664668478db93f9f59f5f836a716b6c392a46e22`
+- frozen control revision: `eeba4c0166eac685d81bf5c6c087e2d395564d72`
+
+Both arms reached the 44-action budget, completed zero levels, remained
+`NOT_FINISHED`, preserved complete public traces, and shut down cleanly.
+
+### Pre-registered primary measure
+
+The pre-registered primary cannot be evaluated exactly as written. It requires
+44 transitions per arm computed only from `worker/host-observations`, but the
+frozen control worker archived only steps 0–43:
+
+| Arm | Host-only inert | Host-only non-inert | Host-only rate |
+|---|---:|---:|---:|
+| Control | 34 / 43 | 9 / 43 | 79.1% |
+| Treatment | 34 / 44 | 10 / 44 | 77.3% |
+
+That asymmetry is a protocol deviation, not permission to silently change the
+primary after seeing the run. Two bounded post-hoc analyses establish whether
+the missing successor could change the decision:
+
+| Analysis | Control | Treatment | Two-sided Fisher |
+|---|---:|---:|---:|
+| Shared 43-transition host-only prefix | 34 / 43 inert | 33 / 43 inert | `p = 1.0` |
+| Terminal trace supplementation | 34 / 44 inert | 34 / 44 inert | `p = 1.0` |
+
+The second analysis uses the common runner's frozen `trace.jsonl` only for the
+control successor at step 44. The executable sensitivity measure requires the
+trace to equal host observations at every overlapping step, refuses every
+interior host-observation gap, and supplements only a missing terminal
+successor. Control step 44 has 50 changed play-area cells and is non-inert. No
+transition in either arm violates the pre-registered 0-or-50 pattern.
+
+The exact pre-registered test is therefore **not evaluable**, but both analyses
+are null at `p = 1.0`. The recorded experimental outcome is no signal that the
+treatment reduced inert action rate, with the measurement deviation kept
+explicit rather than laundered into a clean pre-registered result.
+
+### Secondary and resource measures
+
+| Arm | Action 1 | Action 2 | Action 3 | Action 4 | Calls | Input tokens | Output tokens | Reasoning tokens | Cost |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Control | 5 | 31 | 5 | 3 | 50 | 573,629 | 37,281 | 31,594 | $0.13679573 |
+| Treatment | 39 | 2 | 1 | 2 | 98 | 2,747,069 | 55,752 | 32,419 | $0.50888758 |
+
+The treatment arm had a sharply different action distribution and used 1.96×
+the model calls, 4.79× the input tokens, and 3.72× the cost, without a better
+result in either bounded action-performance analysis. It incurred one refused
+model crossing that was repaired before an action was released. These are
+descriptive arm differences, not treatment effects, in a one-pair sample.
+
+### Verifier reconciliation
+
+The treatment's frozen `summary.json` records three failed acceptance checks:
+`linked_process_records`, `prediction_results_derived_from_commitments`, and
+`reconciliation_linked_to_observed_mismatch`. Offline replay located two
+acceptor defects rather than malformed run evidence:
+
+1. a changed-cell assertion became legitimately `inconclusive` when the public
+   producer changed layer count, but the acceptor allowed only boolean match or
+   mismatch; and
+2. the acceptor did not independently reconstruct and bind the rejection notice
+   carried into the repaired crossing.
+
+The repaired offline verifier accepts all checks on the local immutable
+44-action treatment artifact. The original summary remains unchanged as part of
+the frozen run; this appended record states the post-run correction rather than
+rewriting historical output. The full artifacts are intentionally ignored and
+therefore absent from a clean checkout; the tracked synthetic regressions prove
+the repaired boundaries, while the local-artifact regression is conditional on
+those exact bytes being present.
+
+Artifact bindings used for this result:
+
+Host-observation tree bindings are SHA-256 over the lexically ordered bytes
+emitted by `sha256sum step-*.json`; this commits every relative filename and
+file digest without treating directory metadata as evidence.
+
+| Artifact | SHA-256 |
+|---|---|
+| control `summary.json` | `c7604a54e6540b0df03d466943eeb7d547acec00c27a44ad9a651774244a2e60` |
+| control `trace.jsonl` | `28338d3c363052b2fa8ffa56098706f308792e75da01e52986ab15c15952c08c` |
+| control `worker/process.jsonl` | `f9e201f8b8a6ce1f6084aa0176403111049a670f65572167de9277d5a941d247` |
+| control `worker/host-observations` tree, 44 files | `eaec68c5748ccb8732e083ada61646a9fb27ee285df2375636935ba92a7062b3` |
+| treatment `summary.json` | `98ca78e28e5b586e90af5ff28ab57a90acf7b9c0af2b372b0ab527ba8fbbd46f` |
+| treatment `trace.jsonl` | `5830b3c852810643c71a5e1adb5388cd648aea79192e0f98c063eee925550168` |
+| treatment `worker/process.jsonl` | `7dfe1d77c7620f0a4d5bcfcf6dc1f46ce78e395c7b52875a529ddba26d01c323` |
+| treatment `worker/competence.jsonl` | `0da62893456918e60a45be610985c9e8fe5286b1ae6582c2c6387ef24bbbfbd3` |
+| treatment `worker/host-observations` tree, 45 files | `f11d1a188738608bb37918e93addfdb6fda1a76ad8290ad6c4be6bc0af0c441f` |
+
+### Decision
+
+Do not replicate this treatment unchanged. The treatment arm did substantially
+more work and selected different actions, but neither bounded analysis shows
+better action performance. The next question is mechanistic: what work did the
+protocol elicit, and why did that work fail to control action quality? A
+replication could dominate this decision only if estimating sampling variation
+is worth the treatment's 3.72× observed cost despite the exact tie in the
+terminal-supplement analysis.
