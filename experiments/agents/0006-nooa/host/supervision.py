@@ -42,9 +42,40 @@ LUNA_PROVIDER_ROUTE = {
     "require_parameters": False,
 }
 
+STATE_CONTINUITY = {
+    "PLAYER_BINDING": (
+        "The verbatim accepted value. The controller treats it as opaque persistent "
+        "text, so changing it invokes the binding-continuity rules."
+    ),
+    "CURRENT_APPROX_POSITION": (
+        "A separate position estimate that Gemma may update independently without "
+        "rewriting PLAYER_BINDING."
+    ),
+}
+
 
 class AssignmentRejected(ValueError):
     """Luna's response does not satisfy the supervision boundary."""
+
+
+@dataclass(frozen=True)
+class SupervisorStateView:
+    """Typed projection of accepted controller state exposed to Luna."""
+
+    player_binding: str
+    current_approx_position: str
+    local_objective: str
+    last_action: int | None
+    last_outcome: str | None
+
+    def as_record(self) -> dict[str, object]:
+        return {
+            "PLAYER_BINDING": self.player_binding,
+            "CURRENT_APPROX_POSITION": self.current_approx_position,
+            "LOCAL_OBJECTIVE": self.local_objective,
+            "LAST_ACTION": self.last_action,
+            "LAST_OUTCOME": self.last_outcome,
+        }
 
 
 def _bounded_text(value: object, *, field: str) -> str:
@@ -117,7 +148,7 @@ def build_supervisor_view(
     current_observation: Mapping[str, object],
     available_actions: Sequence[int],
     recent_transitions: Sequence[Mapping[str, object]],
-    current_state: str,
+    current_state: SupervisorStateView,
     previous_assignment: SupervisorAssignment | Mapping[str, object] | None,
     gemma_contradiction: str | None = None,
 ) -> dict[str, object]:
@@ -134,7 +165,10 @@ def build_supervisor_view(
         "schema": "0006-nooa-supervisor-view-v1",
         "role": (
             "Select one immediate objective for Gemma. Do not provide an action, "
-            "action number, route, or multi-step plan. Return exactly the four "
+            "action number, route, multi-step plan, cardinal or relative movement "
+            "direction, adjacent target cell, or prose that uniquely determines one "
+            "legal action under the supplied rules. State the desired observable "
+            "change without selecting how Gemma achieves it. Return exactly the four "
             f"fields {list(FIELDS)}. SUCCESS_TEST must be observable after one action."
         ),
         "rules": rules,
@@ -143,7 +177,8 @@ def build_supervisor_view(
         "recent_transitions": deepcopy(
             [dict(item) for item in recent_transitions[-MAX_RECENT_TRANSITIONS:]]
         ),
-        "current_state": current_state,
+        "current_state": current_state.as_record(),
+        "state_continuity": deepcopy(STATE_CONTINUITY),
         "previous_assignment": prior,
         "gemma_contradiction": gemma_contradiction,
     }
@@ -216,8 +251,9 @@ def build_luna_request(
                         "type": "input_text",
                         "text": (
                             "You supervise one Gemma action point. Select the immediate "
-                            "problem, not the action. Never emit an action number, route, "
-                            "or multi-step plan. Use only supplied admissible evidence."
+                            "problem, not the action. Follow the action-withholding "
+                            "boundary in the supplied view role and use only supplied "
+                            "admissible evidence."
                         ),
                     }
                 ],
@@ -294,9 +330,13 @@ def gemma_supervision_context(
         "instruction": (
             "Work only on this action point. Choose one legal action intended to "
             "satisfy SUCCESS_TEST and predict its immediate observable effect. "
-            "Do not replace LOCAL_GOAL. If admissible evidence contradicts the "
-            "assignment, return a precise CONTRADICTION with the evidence instead."
+            "Do not replace LOCAL_GOAL. Apply state_continuity below: update "
+            "CURRENT_APPROX_POSITION independently when the position estimate changes, "
+            "without rewriting the opaque PLAYER_BINDING merely to track movement. If "
+            "admissible evidence contradicts the assignment, return a precise "
+            "CONTRADICTION with the evidence instead."
         ),
+        "state_continuity": deepcopy(STATE_CONTINUITY),
         "authority": {
             "LOCAL_GOAL": "binding for this action point",
             "SUCCESS_TEST": "binding evaluation criterion for this action point",

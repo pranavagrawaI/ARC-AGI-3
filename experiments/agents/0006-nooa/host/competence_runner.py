@@ -60,6 +60,7 @@ from supervision import (
     AssignmentRejected,
     LUNA_MODEL,
     SupervisorAssignment,
+    SupervisorStateView,
     SupervisorSession,
     build_supervisor_view,
     gemma_supervision_context,
@@ -629,12 +630,21 @@ class NooaCompetenceProcessAgent(NooaProcessAgent):
         ) -> SupervisorAssignment:
             if self.supervisor is None:
                 raise NooaWorkerError("supervision was requested while disabled")
+            if self.commitment is None:
+                raise NooaWorkerError("supervision requires the commitment controller")
+            state = self.commitment.state
             supervisor_view = build_supervisor_view(
                 rules=self.supervisor_rules or "",
                 current_observation=host_public,
                 available_actions=observation.available_actions,
                 recent_transitions=self._history,
-                current_state=self.commitment.state.render(),  # type: ignore[union-attr]
+                current_state=SupervisorStateView(
+                    player_binding=state.PLAYER_BINDING,
+                    current_approx_position=state.CURRENT_APPROX_POSITION,
+                    local_objective=state.LOCAL_OBJECTIVE,
+                    last_action=state.LAST_ACTION,
+                    last_outcome=state.LAST_OUTCOME,
+                ),
                 previous_assignment=self.supervisor.previous_assignment,
                 gemma_contradiction=gemma_contradiction,
             )

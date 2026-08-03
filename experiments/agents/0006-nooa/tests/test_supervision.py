@@ -23,6 +23,7 @@ from experiments.harness import Observation
 from supervision import (
     AssignmentRejected,
     LunaSupervisorClient,
+    SupervisorStateView,
     SupervisorSession,
     build_luna_request,
     build_supervisor_view,
@@ -68,7 +69,13 @@ class SupervisorViewTests(unittest.TestCase):
             current_observation={"step": 7, "pixels": [[[1, 2], [3, 4]]]},
             available_actions=(1, 2, 3, 4),
             recent_transitions=[{"action": 1, "after": {"step": 7}}],
-            current_state="PLAYER_BINDING: unknown",
+            current_state=SupervisorStateView(
+                player_binding="blue block at (41, 32)",
+                current_approx_position="(37, 32)",
+                local_objective="reach the target",
+                last_action=1,
+                last_outcome="moved",
+            ),
             previous_assignment=assignment(),
         )
 
@@ -76,6 +83,20 @@ class SupervisorViewTests(unittest.TestCase):
         self.assertEqual(view["current_observation"]["step"], 7)
         self.assertEqual(view["available_actions"], [1, 2, 3, 4])
         self.assertEqual(len(view["recent_transitions"]), 1)
+        self.assertEqual(
+            view["current_state"],
+            {
+                "PLAYER_BINDING": "blue block at (41, 32)",
+                "CURRENT_APPROX_POSITION": "(37, 32)",
+                "LOCAL_OBJECTIVE": "reach the target",
+                "LAST_ACTION": 1,
+                "LAST_OUTCOME": "moved",
+            },
+        )
+        self.assertNotIn("ROUTE1", repr(view["current_state"]))
+        self.assertIn("opaque", view["state_continuity"]["PLAYER_BINDING"])
+        self.assertIn("independently", view["state_continuity"]["CURRENT_APPROX_POSITION"])
+        self.assertNotIn("stale baggage", repr(view))
         self.assertNotIn("workspace", repr(view).lower())
         self.assertNotIn("reasoning", repr(view).lower())
 
@@ -85,7 +106,13 @@ class SupervisorViewTests(unittest.TestCase):
             current_observation={"step": 0},
             available_actions=(1, 2, 3, 4),
             recent_transitions=[],
-            current_state="PLAYER_BINDING: unknown",
+            current_state=SupervisorStateView(
+                player_binding="unknown",
+                current_approx_position="unknown",
+                local_objective="unknown",
+                last_action=None,
+                last_outcome=None,
+            ),
             previous_assignment=None,
         )
         request = build_luna_request(view, frame_data_url="data:image/png;base64,AAAA")
@@ -94,6 +121,8 @@ class SupervisorViewTests(unittest.TestCase):
         self.assertIn("shared rules", rendered)
         self.assertIn("data:image/png;base64,AAAA", rendered)
         self.assertIn("json_schema", rendered)
+        self.assertIn("cardinal", rendered.lower())
+        self.assertIn("uniquely determines", rendered.lower())
         self.assertNotIn("tools", request)
 
     def test_luna_response_extracts_only_the_structured_assignment(self) -> None:
@@ -231,6 +260,8 @@ class GemmaHandoffTests(unittest.TestCase):
         self.assertIn("binding", supervision["authority"]["LOCAL_GOAL"])
         self.assertIn("advice", supervision["authority"]["RELEVANT_EVIDENCE"])
         self.assertIn("contradiction", supervision["response_contract"])
+        self.assertIn("state_continuity", supervision["instruction"])
+        self.assertIn("opaque", supervision["state_continuity"]["PLAYER_BINDING"])
 
     def test_follow_receipt_is_bound_to_the_exact_assignment(self) -> None:
         parsed = parse_assignment(assignment())
