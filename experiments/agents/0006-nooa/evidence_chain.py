@@ -160,7 +160,11 @@ def _model_call_audit_valid(
             or not isinstance(crossing.get("request"), dict)
             or not isinstance(crossing.get("response"), dict)
             or type(crossing.get("sequence")) is not int
-            or crossing["sequence"] <= 0
+            # Zero-based. The frozen recorder assigns this as an index into its
+            # own list (0002-nooa/nooa-runtime/llm.py:470), so the first HTTP
+            # crossing a worker makes is legitimately sequence 0. Demanding a
+            # positive value here failed every run at its very first crossing.
+            or crossing["sequence"] < 0
             for crossing in crossings
         )
         or attempts

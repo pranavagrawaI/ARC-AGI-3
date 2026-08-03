@@ -646,9 +646,13 @@ class CompetenceController:
         }
 
     def _claim_ids(self, value: object) -> list[str]:
-        if not isinstance(value, list) or len(value) > _MAX_WORKING_CLAIMS:
+        # At least one, for the same reason assertions require at least one. A
+        # commitment carrying no claim leaves the next action nothing to
+        # continue, revise, or retire, so the continuity this treatment exists
+        # to observe has no subject.
+        if not isinstance(value, list) or not 1 <= len(value) <= _MAX_WORKING_CLAIMS:
             raise ContractError(
-                f"decision.claim_ids must be a list of at most {_MAX_WORKING_CLAIMS} IDs"
+                f"decision.claim_ids must name one to {_MAX_WORKING_CLAIMS} active claims"
             )
         result = [_text(item, field="claim id", limit=80) for item in value]
         if len(result) != len(set(result)):

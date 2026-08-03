@@ -28,6 +28,42 @@ def observation(step: int, *, pixels: list[list[int]], state: str = "NOT_FINISHE
 
 
 class CompetenceControllerTests(unittest.TestCase):
+    def test_a_commitment_that_predicts_or_holds_nothing_is_refused(self) -> None:
+        """Both empty lists cost a live run before the contract refused them.
+
+        Run 20260802T184631Z admitted actions whose assertions were empty, so
+        nothing was checked against the successor. Run 20260803T061050Z admitted
+        two actions whose claim_ids were empty, so action two had no claim from
+        action one to continue and the chain could not qualify. Each field was
+        individually optional and jointly the whole point, and in both cases the
+        run completed, looked healthy, and proved nothing.
+        """
+
+        base = {
+            "action": 1,
+            "data": None,
+            "working_state": {},
+            "test": "prose the host never checks",
+            "claim_ids": ["claim-1"],
+            "ledger": [
+                {
+                    "op": "create",
+                    "claim_id": "claim-1",
+                    "statement": "action 1 has an observable effect",
+                }
+            ],
+            "assertions": [{"observable": "changed_cells", "op": ">", "value": 0}],
+            "evidence_requests": [],
+            "reconciliation": None,
+        }
+
+        for field, message in (("assertions", "assertions"), ("claim_ids", "claim_ids")):
+            controller = CompetenceController()
+            controller.receive_observation(observation(0, pixels=[[0, 0], [0, 0]]))
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ContractError, message):
+                    controller.admit({**base, field: []}, legal_actions=(1,))
+
     def test_host_grid_diff_handles_the_real_multi_layer_observation_shape(self) -> None:
         controller = CompetenceController()
         controller.receive_observation(
@@ -39,8 +75,14 @@ class CompetenceControllerTests(unittest.TestCase):
                 "data": None,
                 "working_state": {},
                 "test": "test whether an immediate grid difference is visible",
-                "claim_ids": [],
-                "ledger": [],
+                "claim_ids": ["claim-1"],
+                "ledger": [
+                    {
+                        "op": "create",
+                        "claim_id": "claim-1",
+                        "statement": "this action has an observable effect",
+                    }
+                ],
                 "assertions": [
                     {"observable": "changed_cells", "op": "==", "value": 1},
                 ],
@@ -62,8 +104,14 @@ class CompetenceControllerTests(unittest.TestCase):
         payload = {
             "working_state": {"candidate": "test action 1"},
             "test": "test one action",
-            "claim_ids": [],
-            "ledger": [],
+            "claim_ids": ["claim-1"],
+            "ledger": [
+                {
+                    "op": "create",
+                    "claim_id": "claim-1",
+                    "statement": "this action has an observable effect",
+                }
+            ],
             "assertions": [{"observable": "state", "op": "==", "value": "NOT_FINISHED"}],
             "evidence_requests": [],
             "reconciliation": None,
@@ -123,7 +171,7 @@ class CompetenceControllerTests(unittest.TestCase):
                     "data": None,
                     "working_state": {},
                     "test": "act again without accounting for the result",
-                    "claim_ids": [],
+                    "claim_ids": ["claim-1"],
                     "ledger": [],
                     "assertions": [{"observable": "state", "op": "==", "value": "NOT_FINISHED"}],
                     "evidence_requests": [],
@@ -216,7 +264,7 @@ class CompetenceControllerTests(unittest.TestCase):
                     "data": None,
                     "working_state": {},
                     "test": "omit the field while a mismatch is outstanding",
-                    "claim_ids": [],
+                    "claim_ids": ["claim-1"],
                     "ledger": [],
                     "assertions": [
                         {"observable": "state", "op": "==", "value": "NOT_FINISHED"}
@@ -272,8 +320,14 @@ class CompetenceControllerTests(unittest.TestCase):
                 "data": None,
                 "working_state": {},
                 "test": "test a change that will not occur",
-                "claim_ids": [],
-                "ledger": [],
+                "claim_ids": ["claim-1"],
+                "ledger": [
+                    {
+                        "op": "create",
+                        "claim_id": "claim-1",
+                        "statement": "this action has an observable effect",
+                    }
+                ],
                 "assertions": [{"observable": "changed_cells", "op": ">", "value": 0}],
                 "evidence_requests": [],
                 "reconciliation": None,
@@ -289,7 +343,7 @@ class CompetenceControllerTests(unittest.TestCase):
                 "data": None,
                 "working_state": {},
                 "test": "continue while keeping the anomaly explicit",
-                "claim_ids": [],
+                "claim_ids": ["claim-1"],
                 "ledger": [],
                 "assertions": [{"observable": "state", "op": "==", "value": "NOT_FINISHED"}],
                 "evidence_requests": [],
@@ -317,8 +371,14 @@ class CompetenceControllerTests(unittest.TestCase):
                 "data": None,
                 "working_state": {},
                 "test": "test a change",
-                "claim_ids": [],
-                "ledger": [],
+                "claim_ids": ["claim-1"],
+                "ledger": [
+                    {
+                        "op": "create",
+                        "claim_id": "claim-1",
+                        "statement": "this action has an observable effect",
+                    }
+                ],
                 "assertions": [{"observable": "changed_cells", "op": ">", "value": 0}],
                 "evidence_requests": [],
                 "reconciliation": None,
@@ -335,7 +395,7 @@ class CompetenceControllerTests(unittest.TestCase):
                     "data": None,
                     "working_state": {},
                     "test": "this candidate must be rejected",
-                    "claim_ids": [],
+                    "claim_ids": ["claim-1"],
                     "ledger": [],
                     "assertions": [{"observable": "state", "op": "==", "value": "NOT_FINISHED"}],
                     "evidence_requests": [{"operator": "not-an-operator", "action_id": 1}],

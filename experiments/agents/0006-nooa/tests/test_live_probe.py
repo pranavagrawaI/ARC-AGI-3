@@ -105,9 +105,19 @@ def two_action_fixture(
             "data": None,
             "working_state": {},
             "test": "second",
-            "claim_ids": [] if retire_claim else ["claim-control"],
+            # Retiring the first action's claim is legitimate continuity, but a
+            # commitment still has to work from some claim, so the retirement
+            # comes with the claim that replaces it.
+            "claim_ids": ["claim-successor"] if retire_claim else ["claim-control"],
             "ledger": (
-                [{"op": "retire", "claim_id": "claim-control"}]
+                [
+                    {"op": "retire", "claim_id": "claim-control"},
+                    {
+                        "op": "create",
+                        "claim_id": "claim-successor",
+                        "statement": "Action 2 is under test instead.",
+                    },
+                ]
                 if retire_claim
                 else []
             ),
@@ -356,7 +366,11 @@ def two_action_fixture(
                                 provider_request_profile=paired_run_spec[
                                     "provider_request_profile"
                                 ],
-                                sequence=action_point + 1,
+                                # Zero-based, as the frozen recorder numbers
+                                # them. The fixture used to start at one, which
+                                # is why no test saw the verifier reject the
+                                # first crossing of every real run.
+                                sequence=action_point,
                             )
                         ]
                     },

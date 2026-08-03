@@ -161,13 +161,28 @@ def attach_competence_context(
             },
             "claim_ids": {
                 "type": "array",
+                "minItems": 1,
                 "maxItems": 4,
                 "uniqueItems": True,
                 "items": {"type": "string", "minLength": 1, "maxLength": 80},
                 "constraint": "each ID must name an active claim after ledger operations",
+                "purpose": (
+                    "the claims you are working from on this action, which is "
+                    "what carries your understanding across actions. On the "
+                    "first action no claim exists yet, so create one in ledger "
+                    "and name it here. At least one is required; an empty list "
+                    "is refused and releases no action."
+                ),
             },
             "ledger": {
                 "type": "array",
+                "purpose": (
+                    "how you change the claims themselves: create a claim you "
+                    "did not hold before, revise one the successor changed your "
+                    "mind about, retire one you no longer hold. Operations are "
+                    "applied before claim_ids is resolved, so a claim created "
+                    "here can be named there on the same action."
+                ),
                 "items": {
                     "create_or_revise": {
                         "exactKeys": ["op", "claim_id", "statement"],
