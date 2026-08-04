@@ -233,6 +233,92 @@ class LlmOutputViewerPageTests(unittest.TestCase):
             ],
         )
 
+    def test_learning_loop_commitments_and_results_are_first_class_events(self) -> None:
+        viewer = _load_viewer()
+        commitment = {
+            "working_state": {"belief": "blue moves right"},
+            "test": "click blue",
+            "prediction": [
+                {"observable": "changed_pixels", "op": ">", "value": 0}
+            ],
+            "history_steps": [1],
+            "reconciliation": None,
+        }
+        checks = [
+            {
+                "observable": "changed_pixels",
+                "op": ">",
+                "value": 0,
+                "observed": 0,
+                "matched": False,
+            }
+        ]
+        objective_result = {
+            "claim": "clicking arbitrary cells is the objective",
+            "outcome": "falsified",
+            "remaining_steps": 0,
+            "check": {
+                "observable": "levels_completed",
+                "op": ">",
+                "value": 0,
+                "observed": 0,
+                "matched": False,
+            },
+        }
+        with TemporaryDirectory() as directory:
+            runs_root = Path(directory)
+            run_dir = runs_root / "run-test"
+            run_dir.mkdir()
+            (run_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "environment": {
+                            "model": "google/gemma-4-31b-it",
+                            "game": "cd82",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            records = [
+                {
+                    "type": "decision",
+                    "event_index": 1,
+                    "action_step": 1,
+                    "action": 6,
+                    "data": {"x": 2, "y": 3},
+                    "reasoning": {
+                        "reason": "click blue",
+                        "commitment": commitment,
+                    },
+                },
+                {
+                    "type": "prediction_result",
+                    "event_index": 2,
+                    "action_step": 1,
+                    "outcome": "mismatch",
+                    "checks": checks,
+                    "objective_result": objective_result,
+                },
+            ]
+            (run_dir / "process.jsonl").write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+
+            data = viewer.load_run(runs_root, "run-test")
+            page = viewer.render_page(data=data, run_names=["run-test"]).decode()
+
+        self.assertEqual(data["events"][0]["commitment"], commitment)
+        self.assertEqual(data["events"][1]["outcome"], "mismatch")
+        self.assertEqual(data["events"][1]["checks"], checks)
+        self.assertEqual(data["events"][1]["objective_result"], objective_result)
+        self.assertEqual(data["summary"]["model"], "google/gemma-4-31b-it")
+        self.assertEqual(data["summary"]["game"], "cd82")
+        self.assertIn("Learning-loop commitment", page)
+        self.assertIn("Prediction result", page)
+        self.assertIn("Objective result:", page)
+
     def test_selecting_a_reasoning_step_does_not_scroll_the_whole_page(self) -> None:
         viewer = _load_viewer()
 

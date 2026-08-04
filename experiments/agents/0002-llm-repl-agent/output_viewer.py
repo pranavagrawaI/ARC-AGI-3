@@ -228,7 +228,7 @@ def _normalize_event(
         action_step = raw_step if isinstance(raw_step, int) else 0
     observation_step = (
         action_step
-        if event_type in {"transition", "human_feedback"}
+        if event_type in {"transition", "human_feedback", "prediction_result"}
         else max(0, action_step - 1)
     )
 
@@ -290,6 +290,16 @@ def _normalize_event(
             action=record.get("action"),
             data=record.get("data"),
             reason=reasoning.get("reason") if isinstance(reasoning, dict) else None,
+            commitment=(
+                reasoning.get("commitment") if isinstance(reasoning, dict) else None
+            ),
+        )
+    elif event_type == "prediction_result":
+        event.update(
+            outcome=record.get("outcome"),
+            checks=record.get("checks") or [],
+            objective_result=record.get("objective_result"),
+            schema=record.get("schema"),
         )
     elif event_type == "transition":
         event.update(
@@ -451,6 +461,9 @@ def load_run(runs_root: Path, run_name: str) -> dict[str, Any]:
     total_levels = scorecard.get("total_levels_completed")
     if not isinstance(total_levels, int):
         total_levels = manifest.get("levels_completed")
+    environment = manifest.get("environment")
+    if not isinstance(environment, dict):
+        environment = {}
 
     return {
         "run_name": run_name,
@@ -458,9 +471,9 @@ def load_run(runs_root: Path, run_name: str) -> dict[str, Any]:
         "summary": {
             "status": effective_status,
             "stop_reason": stop_reason,
-            "model": manifest.get("model", "unknown"),
+            "model": manifest.get("model") or environment.get("model", "unknown"),
             "prompt": manifest.get("policy_prompt_variant", "neutral"),
-            "game": manifest.get("game", "unknown"),
+            "game": manifest.get("game") or environment.get("game", "unknown"),
             "actions": manifest.get("actions", len(transitions)),
             "levels_completed": total_levels,
             "model_calls": len(model_responses),
