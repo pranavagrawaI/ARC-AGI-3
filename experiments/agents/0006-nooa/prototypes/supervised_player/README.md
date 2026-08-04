@@ -22,7 +22,7 @@ Luna returns exactly:
 ```text
 LOCAL_GOAL
 RELEVANT_EVIDENCE       # one to three items
-SUCCESS_TEST            # observable after one action
+SUCCESS_TEST            # observable one-action completion or progress
 IF_TEST_FAILS
 ```
 
@@ -44,11 +44,22 @@ a different objective. The same procedural continuity boundary is attached to
 Gemma's handoff: it can update `CURRENT_APPROX_POSITION` without rewriting the
 opaque `PLAYER_BINDING` merely to track ordinary movement.
 
-Gemma binds every response to the assignment hash and marks it `FOLLOW` or
-`CONTRADICT`. `FOLLOW` includes an immediate prediction. `CONTRADICT` includes
-the conflicting admissible evidence and releases no environment action; Luna
-may revise once, using the existing single repair opportunity. A second
-contradiction ends the action point without acting.
+If `LOCAL_GOAL` cannot finish in one action, Luna must make `SUCCESS_TEST`
+measure one-step progress rather than completion.
+
+Gemma binds every response to a short opaque token that the host issues once per
+assignment within the run. It returns exactly one plain-text line:
+
+```text
+FOLLOW <token>: <immediate observable prediction>
+CONTRADICT <token>: <precise admissible evidence>
+```
+
+The process log maps each unique run-local token to the full assignment hash;
+the full hash is not placed in Gemma's handoff.
+`CONTRADICT` releases no environment action; Luna may revise once, using the
+existing single repair opportunity. A second contradiction ends the action
+point without acting.
 
 The host checks only structure and continuity. It does not decide whether
 Luna's goal or evidence is correct, whether the success test occurred, or which
@@ -62,6 +73,5 @@ covered by `tests/test_supervision.py`. The Luna request uses the Responses API,
 pins the OpenAI provider, attaches the same annotated PNG, requests strict JSON,
 and records credential-free request/frame commitments plus the generation ID.
 
-No live supervised run has been executed. A live request still passes through
-the existing digest-bound approval flow and requires its own explicit
-confirmation.
+Each live supervised run passes through the existing digest-bound approval
+flow and requires its own explicit confirmation.

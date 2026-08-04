@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from base64 import b64decode
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from collections.abc import Mapping, Sequence
 from hashlib import sha256
 import json
@@ -23,15 +23,10 @@ FIELDS = (
     "SUCCESS_TEST",
     "IF_TEST_FAILS",
 )
-GEMMA_RESPONSE_FIELDS = (
-    "assignment_sha256",
-    "disposition",
-    "prediction",
-    "contradiction_evidence",
-)
 MAX_TEXT_CHARS = 500
 MAX_EVIDENCE_ITEMS = 3
 MAX_RECENT_TRANSITIONS = 6
+LINE_BOUNDARIES = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
 LUNA_MODEL = "openai/gpt-5.6-luna"
 LUNA_REASONING_EFFORT = "medium"
 LUNA_MAX_OUTPUT_TOKENS = 2_000
@@ -93,6 +88,7 @@ class SupervisorAssignment:
     relevant_evidence: tuple[str, ...]
     success_test: str
     if_test_fails: str
+    _token: str | None = field(default=None, repr=False, compare=False)
 
     def as_record(self) -> dict[str, object]:
         return {
@@ -109,6 +105,12 @@ class SupervisorAssignment:
                 self.as_record(), sort_keys=True, separators=(",", ":")
             ).encode("utf-8")
         ).hexdigest()
+
+    @property
+    def token(self) -> str:
+        if self._token is None:
+            raise RuntimeError("supervisor assignment token has not been issued")
+        return self._token
 
 
 @dataclass(frozen=True)
@@ -169,7 +171,9 @@ def build_supervisor_view(
             "direction, adjacent target cell, or prose that uniquely determines one "
             "legal action under the supplied rules. State the desired observable "
             "change without selecting how Gemma achieves it. Return exactly the four "
-            f"fields {list(FIELDS)}. SUCCESS_TEST must be observable after one action."
+            f"fields {list(FIELDS)}. SUCCESS_TEST must be observable after one action. "
+            "If LOCAL_GOAL cannot be completed in one action, SUCCESS_TEST must measure "
+            "one-step progress rather than completion."
         ),
         "rules": rules,
         "current_observation": deepcopy(dict(current_observation)),
@@ -190,33 +194,37 @@ def parse_gemma_supervision_response(
     """Bind Gemma's action-point response to the assignment it received."""
 
     if not isinstance(raw_test, str):
-        raise AssignmentRejected("supervised test must be a JSON string")
-    try:
-        raw = json.loads(raw_test)
-    except json.JSONDecodeError as error:
-        raise AssignmentRejected("supervised test is not valid JSON") from error
-    if not isinstance(raw, Mapping) or set(raw) != set(GEMMA_RESPONSE_FIELDS):
+        raise AssignmentRejected("supervised test must be one receipt line")
+    if raw_test != raw_test.strip() or any(
+        character in LINE_BOUNDARIES for character in raw_test
+    ):
+        raise AssignmentRejected("supervised test must contain exactly one line")
+    header, separator, payload = raw_test.partition(": ")
+    disposition, space, token = header.partition(" ")
+    if (
+        not separator
+        or not space
+        or " " in token
+        or "\t" in header
+        or payload != payload.strip()
+    ):
         raise AssignmentRejected(
-            f"supervised test must contain exactly {list(GEMMA_RESPONSE_FIELDS)}"
+            "supervised test must be FOLLOW <token>: <prediction> or "
+            "CONTRADICT <token>: <evidence>"
         )
-    assignment_sha256 = raw["assignment_sha256"]
-    if assignment_sha256 != assignment.sha256:
-        raise AssignmentRejected("Gemma response names the wrong supervisor assignment")
-    disposition = raw["disposition"]
     if disposition not in {"FOLLOW", "CONTRADICT"}:
         raise AssignmentRejected("disposition must be FOLLOW or CONTRADICT")
-    prediction = raw["prediction"]
-    evidence = raw["contradiction_evidence"]
+    if token != assignment.token:
+        raise AssignmentRejected("Gemma response names the wrong supervisor assignment")
+    bounded_payload = _bounded_text(payload, field="supervision receipt payload")
     if disposition == "FOLLOW":
-        prediction = _bounded_text(prediction, field="prediction")
-        if evidence is not None:
-            raise AssignmentRejected("FOLLOW requires null contradiction_evidence")
-    if disposition == "CONTRADICT":
-        if prediction is not None:
-            raise AssignmentRejected("CONTRADICT requires null prediction")
-        evidence = _bounded_text(evidence, field="contradiction_evidence")
+        prediction = bounded_payload
+        evidence = None
+    else:
+        prediction = None
+        evidence = bounded_payload
     return GemmaSupervisionResponse(
-        assignment_sha256=assignment_sha256,
+        assignment_sha256=assignment.sha256,
         disposition=disposition,
         prediction=prediction,
         contradiction_evidence=evidence,
@@ -344,14 +352,12 @@ def gemma_supervision_context(
             "IF_TEST_FAILS": "defeasible advice for the next state update",
         },
         "response_contract": (
-            "The competence test field must be a compact JSON string with exactly "
-            f"{list(GEMMA_RESPONSE_FIELDS)}. assignment_sha256 must equal the value "
-            "below. disposition is FOLLOW or CONTRADICT. prediction is the immediate "
-            "observable effect. FOLLOW requires a prediction and null "
-            "contradiction_evidence. CONTRADICT requires null prediction plus precise "
-            "admissible evidence and releases no action."
+            "The competence test field must be exactly one plain-text receipt line: "
+            f"FOLLOW {assignment.token}: <immediate observable prediction> or "
+            f"CONTRADICT {assignment.token}: <precise admissible evidence>. "
+            "CONTRADICT releases no action. Do not use JSON."
         ),
-        "assignment_sha256": assignment.sha256,
+        "assignment_token": assignment.token,
         "assignment": assignment.as_record(),
     }
 
@@ -372,10 +378,14 @@ class SupervisorSession:
 
     def assign(self, view: dict[str, object]) -> SupervisorAssignment:
         raw, crossing = self._call(deepcopy(view))
-        assignment = parse_assignment(raw)
+        call_number = self.calls + 1
+        assignment = replace(
+            parse_assignment(raw),
+            _token=f"asgn-{call_number:04d}",
+        )
         self.last_record = deepcopy(crossing)
         self.previous_assignment = assignment
-        self.calls += 1
+        self.calls = call_number
         return assignment
 
 

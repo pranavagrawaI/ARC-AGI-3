@@ -659,6 +659,8 @@ class NooaCompetenceProcessAgent(NooaProcessAgent):
                         supervisor_view, sort_keys=True, separators=(",", ":")
                     ).encode("utf-8")
                 ).hexdigest(),
+                assignment_token=assignment.token,
+                assignment_sha256=assignment.sha256,
                 assignment=assignment.as_record(),
                 crossing=self.supervisor.last_record,
             )

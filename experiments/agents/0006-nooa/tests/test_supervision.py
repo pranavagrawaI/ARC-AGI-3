@@ -23,6 +23,7 @@ from experiments.harness import Observation
 from supervision import (
     AssignmentRejected,
     LunaSupervisorClient,
+    SupervisorAssignment,
     SupervisorStateView,
     SupervisorSession,
     build_luna_request,
@@ -51,15 +52,19 @@ def assignment(**overrides: object) -> dict[str, object]:
     return value
 
 
-def gemma_receipt(parsed: object, **overrides: object) -> str:
-    value: dict[str, object] = {
-        "assignment_sha256": parsed.sha256,
-        "disposition": "FOLLOW",
-        "prediction": "the tracked player changes position toward the target",
-        "contradiction_evidence": None,
-    }
-    value.update(overrides)
-    return __import__("json").dumps(value)
+def gemma_receipt(
+    parsed: SupervisorAssignment,
+    *,
+    disposition: str = "FOLLOW",
+    token: str | None = None,
+    payload: str = "the tracked player changes position toward the target",
+) -> str:
+    return f"{disposition} {token or parsed.token}: {payload}"
+
+
+def issued_assignment(**overrides: object) -> SupervisorAssignment:
+    session = SupervisorSession(lambda _view: (assignment(**overrides), None))
+    return session.assign({"schema": "fixture"})
 
 
 class SupervisorViewTests(unittest.TestCase):
@@ -123,6 +128,7 @@ class SupervisorViewTests(unittest.TestCase):
         self.assertIn("json_schema", rendered)
         self.assertIn("cardinal", rendered.lower())
         self.assertIn("uniquely determines", rendered.lower())
+        self.assertIn("one-step progress", rendered.lower())
         self.assertNotIn("tools", request)
 
     def test_luna_response_extracts_only_the_structured_assignment(self) -> None:
@@ -235,20 +241,24 @@ class AssignmentTests(unittest.TestCase):
         with self.assertRaises(AssignmentRejected):
             parse_assignment(assignment(RELEVANT_EVIDENCE=["a", "b", "c", "d"]))
 
-    def test_one_session_call_produces_one_assignment(self) -> None:
+    def test_session_issues_a_unique_opaque_token_per_assignment(self) -> None:
         seen: list[dict[str, object]] = []
         session = SupervisorSession(
             lambda view: (seen.append(view) or assignment(), None)
         )
-        parsed = session.assign({"schema": "fixture"})
-        self.assertEqual(parsed.local_goal, assignment()["LOCAL_GOAL"])
-        self.assertEqual(session.calls, 1)
-        self.assertEqual(seen, [{"schema": "fixture"}])
+        first = session.assign({"schema": "first"})
+        second = session.assign({"schema": "second"})
+        self.assertEqual(first.local_goal, assignment()["LOCAL_GOAL"])
+        self.assertEqual(first.sha256, second.sha256)
+        self.assertEqual(first.token, "asgn-0001")
+        self.assertEqual(second.token, "asgn-0002")
+        self.assertEqual(session.calls, 2)
+        self.assertEqual(seen, [{"schema": "first"}, {"schema": "second"}])
 
 
 class GemmaHandoffTests(unittest.TestCase):
     def test_assignment_is_present_with_explicit_authority(self) -> None:
-        parsed = parse_assignment(assignment())
+        parsed = issued_assignment()
         observed = attach_competence_context(
             {"step": 7},
             {"schema": "fixture"},
@@ -259,34 +269,67 @@ class GemmaHandoffTests(unittest.TestCase):
         self.assertEqual(supervision["assignment"], parsed.as_record())
         self.assertIn("binding", supervision["authority"]["LOCAL_GOAL"])
         self.assertIn("advice", supervision["authority"]["RELEVANT_EVIDENCE"])
-        self.assertIn("contradiction", supervision["response_contract"])
+        self.assertIn("contradict", supervision["response_contract"].lower())
+        self.assertEqual(supervision["assignment_token"], parsed.token)
+        self.assertIn(f"FOLLOW {parsed.token}:", supervision["response_contract"])
+        self.assertNotIn("assignment_sha256", supervision)
         self.assertIn("state_continuity", supervision["instruction"])
         self.assertIn("opaque", supervision["state_continuity"]["PLAYER_BINDING"])
 
     def test_follow_receipt_is_bound_to_the_exact_assignment(self) -> None:
-        parsed = parse_assignment(assignment())
+        parsed = issued_assignment()
         response = parse_gemma_supervision_response(
             gemma_receipt(parsed), assignment=parsed
         )
         self.assertEqual(response.disposition, "FOLLOW")
         self.assertEqual(response.assignment_sha256, parsed.sha256)
 
-    def test_wrong_assignment_hash_and_empty_contradiction_are_rejected(self) -> None:
-        parsed = parse_assignment(assignment())
+    def test_wrong_assignment_token_and_empty_contradiction_are_rejected(self) -> None:
+        parsed = issued_assignment()
         for receipt in (
-            gemma_receipt(parsed, assignment_sha256="0" * 64),
+            gemma_receipt(parsed, token="asgn-deadbeef0000"),
             gemma_receipt(
                 parsed,
                 disposition="CONTRADICT",
-                prediction=None,
-                contradiction_evidence="",
+                payload="",
             ),
         ):
             with self.subTest(receipt=receipt), self.assertRaises(AssignmentRejected):
                 parse_gemma_supervision_response(receipt, assignment=parsed)
 
+    def test_old_nested_json_receipt_is_rejected(self) -> None:
+        parsed = issued_assignment()
+        receipt = __import__("json").dumps(
+            {
+                "assignment_sha256": parsed.sha256,
+                "disposition": "FOLLOW",
+                "prediction": "the tracked player changes position",
+                "contradiction_evidence": None,
+            }
+        )
+        with self.assertRaises(AssignmentRejected):
+            parse_gemma_supervision_response(receipt, assignment=parsed)
+
+    def test_malformed_spacing_and_line_boundaries_are_rejected(self) -> None:
+        parsed = issued_assignment()
+        valid = gemma_receipt(parsed)
+        for receipt in (
+            f" {valid}",
+            f"{valid} ",
+            valid.replace("FOLLOW ", "FOLLOW  ", 1),
+            valid.replace("FOLLOW ", "FOLLOW\t", 1),
+            valid.replace(": ", ":  ", 1),
+            f"{valid}\vcontinued",
+            f"{valid}\x85continued",
+            f"{valid}\u2028continued",
+        ):
+            with self.subTest(receipt=repr(receipt)), self.assertRaises(
+                AssignmentRejected
+            ):
+                parse_gemma_supervision_response(receipt, assignment=parsed)
+
     def test_repair_crossing_keeps_the_same_assignment(self) -> None:
-        parsed = parse_assignment(assignment())
+        parsed = issued_assignment()
         first = attach_competence_context(
             {"step": 7}, {"schema": "fixture"}, supervisor_assignment=parsed
         )
@@ -367,6 +410,8 @@ class LiveConditionTests(unittest.TestCase):
         session = SupervisorSession(lambda _view: (parsed.as_record(), None))
 
         def fixture(_step: int, _observation: Observation) -> list[str]:
+            current = session.previous_assignment
+            assert current is not None
             commitment = {
                 "working_state": {
                     "PLAYER_BINDING": "unknown",
@@ -378,7 +423,7 @@ class LiveConditionTests(unittest.TestCase):
                     "NEXT_STEP": 1,
                     "CONTRADICTION": "",
                 },
-                "test": gemma_receipt(parsed),
+                "test": gemma_receipt(current),
                 "claim_ids": ["goal"],
                 "ledger": [
                     {
@@ -422,6 +467,8 @@ class LiveConditionTests(unittest.TestCase):
                 decision = agent.act(observation)
             self.assertEqual(decision.action, 1)
             self.assertEqual(session.calls, 1)
+            current = session.previous_assignment
+            assert current is not None
             requests = [
                 __import__("json").loads(line)
                 for line in (run_root / "ipc" / "requests.jsonl").read_text().splitlines()
@@ -429,9 +476,18 @@ class LiveConditionTests(unittest.TestCase):
             ]
             action_request = next(item for item in requests if "observation" in item)
             self.assertEqual(
-                action_request["observation"]["supervision"]["assignment_sha256"],
-                parsed.sha256,
+                action_request["observation"]["supervision"]["assignment_token"],
+                current.token,
             )
+            process = [
+                __import__("json").loads(line)
+                for line in (run_root / "process.jsonl").read_text().splitlines()
+            ]
+            assignment_record = next(
+                item for item in process if item["kind"] == "supervisor_assignment"
+            )
+            self.assertEqual(assignment_record["assignment_token"], current.token)
+            self.assertEqual(assignment_record["assignment_sha256"], current.sha256)
 
     def test_contradiction_releases_no_action_and_reaches_revised_assignment(self) -> None:
         first = parse_assignment(assignment())
@@ -452,7 +508,8 @@ class LiveConditionTests(unittest.TestCase):
 
         def fixture(_step: int, _observation: Observation) -> list[str]:
             nonlocal fixture_calls
-            current = first if fixture_calls == 0 else revised
+            current = session.previous_assignment
+            assert current is not None
             disposition = "CONTRADICT" if fixture_calls == 0 else "FOLLOW"
             fixture_calls += 1
             commitment = {
@@ -469,15 +526,10 @@ class LiveConditionTests(unittest.TestCase):
                 "test": gemma_receipt(
                     current,
                     disposition=disposition,
-                    prediction=(
-                        None
-                        if disposition == "CONTRADICT"
-                        else "the tracked object changes position"
-                    ),
-                    contradiction_evidence=(
+                    payload=(
                         "the assignment assumes a tracked player that is still unknown"
                         if disposition == "CONTRADICT"
-                        else None
+                        else "the tracked object changes position"
                     ),
                 ),
                 "claim_ids": ["goal"],
