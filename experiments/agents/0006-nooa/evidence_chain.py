@@ -130,6 +130,48 @@ def _sha256_string(value: object) -> bool:
     )
 
 
+def _attempts_end_in_one_success(attempts: object, crossings: list[Any]) -> bool:
+    """One success, reached through retryable failures and nothing else.
+
+    This demanded a single attempt until the treatment overlay made a 429
+    retryable, which is a real change to what an honest audit looks like: a
+    retried call carries the refused attempt as well as the served one. What
+    must still hold is that only retryable failures precede the success, that
+    the attempts are numbered without a gap, and that their crossings
+    concatenate to exactly the call's own record -- so a retry cannot be used to
+    hide a crossing or to reclassify a failure the frozen rules call fatal.
+    """
+
+    if not isinstance(attempts, list) or not attempts:
+        return False
+    *earlier, final = attempts
+    if final != {
+        "attempt": len(attempts),
+        "outcome": "success",
+        "actual_provider_crossings": attempts[-1].get("actual_provider_crossings")
+        if isinstance(attempts[-1], dict)
+        else None,
+    }:
+        return False
+    for index, attempt in enumerate(earlier):
+        failure = attempt.get("failure") if isinstance(attempt, dict) else None
+        if not (
+            isinstance(attempt, dict)
+            and set(attempt)
+            == {"attempt", "outcome", "failure", "actual_provider_crossings"}
+            and attempt["attempt"] == index + 1
+            and attempt["outcome"] == "retryable_failure"
+            and isinstance(failure, dict)
+            and failure.get("disposition") == "retryable"
+            and isinstance(attempt["actual_provider_crossings"], list)
+        ):
+            return False
+    replayed: list[Any] = []
+    for attempt in attempts:
+        replayed.extend(attempt["actual_provider_crossings"])
+    return replayed == crossings
+
+
 def _model_call_audit_valid(
     call: object,
     *,
@@ -186,14 +228,7 @@ def _model_call_audit_valid(
             or crossing["sequence"] < 0
             for crossing in crossings
         )
-        or attempts
-        != [
-            {
-                "attempt": 1,
-                "outcome": "success",
-                "actual_provider_crossings": crossings,
-            }
-        ]
+        or not _attempts_end_in_one_success(attempts, crossings)
         or not isinstance(outcome, dict)
         or set(outcome) != {"kind", "response"}
         or outcome.get("kind") != "success"

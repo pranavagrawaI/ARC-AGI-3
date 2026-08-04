@@ -17,6 +17,7 @@ from copy import deepcopy
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
@@ -91,6 +92,15 @@ def supervisor_assignment_record(action_point: int) -> dict[str, object]:
         "SUCCESS_TEST": "after one action the observation differs",
         "IF_TEST_FAILS": "reassess the position and set a new local goal",
     }
+
+
+def first_model_call(process: list[dict]) -> dict:
+    """The first crossing's audited model call, located by kind not position."""
+
+    crossing = next(
+        record for record in process if record.get("kind") == "model_crossing"
+    )
+    return crossing["audit"]["model_calls"][0]
 
 
 def two_action_fixture(
@@ -2677,6 +2687,190 @@ class LiveProbeTests(unittest.TestCase):
             self.assertFalse(request.with_name(request.name + ".consumed").exists())
             self.assertFalse(run_root.exists())
 
+
+
+class RateLimitRecoveryTests(unittest.TestCase):
+    """Three runs died at 0, 1 and 13 actions on a 429 nothing had consumed.
+
+    The route asks OpenRouter to fall through to another provider, the overlay
+    makes a 429 that still reaches us retryable, and the audit has to admit the
+    retried call without admitting anything else.
+    """
+
+    LAUNCHER = runpy.run_path(str(ROOT / "provider_runtime_launcher.py"))
+
+    def test_the_preferred_route_orders_without_forbidding_fallback(self) -> None:
+        route = MODULE["PROVIDER_ROUTES"]["preferred"]
+        self.assertEqual(route["order"], ["modelrun/fp4"])
+        self.assertTrue(route["allow_fallbacks"])
+        # `only` would defeat the point: it is what makes a busy pool fatal.
+        self.assertNotIn("only", route)
+        self.assertIn(route, self.LAUNCHER["EXPECTED_PROVIDER_ROUTES"])
+
+    def test_the_preferred_route_cannot_qualify_a_gate(self) -> None:
+        """It buys availability with provider identity, so it must not be
+        mistaken for the pinned evidence route."""
+
+        verdict = MODULE["_operational_verdict"](
+            {"actions": 1, "attempted_actions": 1, "observed_successors": 1,
+             "stop_reason": "action_budget", "clean_shutdown": True,
+             "trace_complete": True},
+            competence_events=[],
+            process_records=[],
+            provider_success=True,
+            required_actions=1,
+            integrity_success=True,
+            route_name="preferred",
+            arm="treatment",
+        )
+        self.assertFalse(verdict["checks"]["route_can_qualify"])
+
+    def test_a_rate_limit_is_retryable_and_everything_else_is_unchanged(self) -> None:
+        frozen = SimpleNamespace(
+            classify_transport_failure=lambda error: "frozen-answer",
+            TransportDisposition=SimpleNamespace(RETRYABLE="retryable"),
+        )
+        classify = self.LAUNCHER["_rate_limit_is_retryable"](frozen)
+
+        rate_limited = RuntimeError("rate limited")
+        rate_limited.status_code = 429
+        self.assertEqual(classify(rate_limited), "retryable")
+
+        for status in (200, 400, 404, 500, 503):
+            other = RuntimeError("something else")
+            other.status_code = status
+            with self.subTest(status=status):
+                self.assertEqual(classify(other), "frozen-answer")
+        self.assertEqual(classify(RuntimeError("no status at all")), "frozen-answer")
+
+    def test_a_rate_limited_call_waits_before_it_is_retried(self) -> None:
+        """An instant retry into a pool that just refused is a wasted attempt."""
+
+        slept: list[float] = []
+
+        class Refusing:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def acall(self, *args: object, **kwargs: object) -> str:
+                self.calls += 1
+                if self.calls == 1:
+                    error = RuntimeError("rate limited")
+                    error.status_code = 429
+                    raise error
+                return "served"
+
+        client = self.LAUNCHER["_RateLimitBackoffClient"](Refusing())
+
+        async def fake_sleep(delay: float) -> None:
+            slept.append(delay)
+
+        async def drive() -> str:
+            with mock.patch("asyncio.sleep", fake_sleep):
+                with self.assertRaises(RuntimeError):
+                    await client.acall()
+                return await client.acall()
+
+        self.assertEqual(asyncio.run(drive()), "served")
+        self.assertEqual(slept, [self.LAUNCHER["RATE_LIMIT_BACKOFF_SECONDS"][0]])
+
+    def test_every_route_gets_the_backoff_wrapper(self) -> None:
+        """The classifier only decides that a retry is allowed. Without the
+        wrapper the retry is instant, which the pool answers with another 429."""
+
+        for route in self.LAUNCHER["EXPECTED_PROVIDER_ROUTES"]:
+            with self.subTest(route=route):
+                client = self.LAUNCHER["_pin_client"](
+                    SimpleNamespace(config={}, close=lambda: None), dict(route)
+                )
+                self.assertIsInstance(
+                    client, self.LAUNCHER["_RateLimitBackoffClient"]
+                )
+
+    def test_a_retried_crossing_is_accepted_by_the_audit(self) -> None:
+        events, process = two_action_fixture()
+        call = first_model_call(process)
+        served = call["attempts"][0]["actual_provider_crossings"]
+        refused = [{"request": {}, "response": {"error": {"code": 429}}, "sequence": 99}]
+        call["attempts"] = [
+            {
+                "attempt": 1,
+                "outcome": "retryable_failure",
+                "failure": {"disposition": "retryable", "status_code": 429},
+                "actual_provider_crossings": refused,
+            },
+            {"attempt": 2, "outcome": "success", "actual_provider_crossings": served},
+        ]
+        call["actual_provider_crossings"] = refused + served
+
+        report = MODULE_CHAIN["chain_report"](events, process, actions=2)
+
+        self.assertTrue(all(report.values()), report)
+
+    def test_the_audit_still_refuses_what_a_retry_could_hide(self) -> None:
+        """A retry must not become a way to launder a fatal failure, drop a
+        crossing, or renumber the attempts."""
+
+        def with_attempts(attempts: object, crossings: object = None) -> dict[str, bool]:
+            events, process = two_action_fixture()
+            call = first_model_call(process)
+            served = call["attempts"][0]["actual_provider_crossings"]
+            call["attempts"] = attempts(served)
+            if crossings is not None:
+                call["actual_provider_crossings"] = crossings(served)
+            return MODULE_CHAIN["chain_report"](events, process, actions=2)
+
+        refused = [{"request": {}, "response": {}, "sequence": 99}]
+
+        # A fatal failure relabelled as a retry.
+        self.assertFalse(
+            all(
+                with_attempts(
+                    lambda served: [
+                        {
+                            "attempt": 1,
+                            "outcome": "retryable_failure",
+                            "failure": {"disposition": "fatal", "status_code": 400},
+                            "actual_provider_crossings": refused,
+                        },
+                        {"attempt": 2, "outcome": "success",
+                         "actual_provider_crossings": served},
+                    ],
+                    lambda served: refused + served,
+                ).values()
+            )
+        )
+        # A refused attempt whose crossing never reaches the call record.
+        self.assertFalse(
+            all(
+                with_attempts(
+                    lambda served: [
+                        {
+                            "attempt": 1,
+                            "outcome": "retryable_failure",
+                            "failure": {"disposition": "retryable", "status_code": 429},
+                            "actual_provider_crossings": refused,
+                        },
+                        {"attempt": 2, "outcome": "success",
+                         "actual_provider_crossings": served},
+                    ]
+                ).values()
+            )
+        )
+        # Two successes in one call.
+        self.assertFalse(
+            all(
+                with_attempts(
+                    lambda served: [
+                        {"attempt": 1, "outcome": "success",
+                         "actual_provider_crossings": served},
+                        {"attempt": 2, "outcome": "success",
+                         "actual_provider_crossings": served},
+                    ],
+                    lambda served: served + served,
+                ).values()
+            )
+        )
 
 
 class ProviderRouteTests(unittest.TestCase):

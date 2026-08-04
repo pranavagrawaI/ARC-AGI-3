@@ -163,6 +163,22 @@ PROVIDER_ROUTES = {
         "quantizations": ["fp4"],
     },
     "open": {},
+    # "preferred" asks for the pinned endpoint first and lets OpenRouter fall
+    # through only when it cannot serve. The 429s that ended three pinned runs
+    # came from ModelRun's shared upstream pool; with fallbacks enabled
+    # OpenRouter answers that on its own side, so the frozen transport never
+    # sees the failure it is forbidden to retry.
+    #
+    # No allowlist beyond the first entry. The open run was served by Morph,
+    # ModelRun, SiliconFlow and Crusoe, one of which returned an unparseable
+    # 200, and that call left no generation record. Nothing in the evidence
+    # names the culprit, so enumerating "vetted" providers here would be a guess
+    # wearing a safety label. Ordering is what the evidence actually supports.
+    "preferred": {
+        "order": ["modelrun/fp4"],
+        "allow_fallbacks": True,
+        "require_parameters": False,
+    },
     "openai": {
         "order": ["openai"],
         "only": ["openai"],
@@ -173,11 +189,13 @@ PROVIDER_ROUTES = {
 PROVIDER_ROUTE_MODES = {
     "pinned": "openrouter-exact-endpoint-pin",
     "open": "openrouter-automatic-routing",
+    "preferred": "openrouter-ordered-fallback",
     "openai": "openrouter-exact-provider-pin",
 }
 PROVIDER_IDENTITY_EXPECTATIONS = {
     "pinned": {"expected_provider_name": "ModelRun", "requested_quantization": "fp4"},
     "open": {"expected_provider_name": "ModelRun", "requested_quantization": "fp4"},
+    "preferred": {"expected_provider_name": "ModelRun", "requested_quantization": "fp4"},
     "openai": {"expected_provider_name": "OpenAI", "requested_quantization": None},
 }
 PROVIDER_ROUTE = PROVIDER_ROUTES["pinned"]
