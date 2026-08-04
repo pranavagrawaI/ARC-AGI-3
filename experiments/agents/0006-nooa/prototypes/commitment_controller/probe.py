@@ -117,7 +117,7 @@ def replay_luna() -> int:
             "LAST_ACTION": turns[i - 1]["action"] if i else None,
             "LAST_OUTCOME": prior,
             "NEXT_STEP": turn["action"],
-            "CONTRADICTION": "",
+            "CONTRADICTION": None,
         }
         legal = tuple(turn["available_actions"]) or LEGAL
         try:
@@ -197,7 +197,7 @@ def replay_drift() -> int:
             "LAST_ACTION": None,
             "LAST_OUTCOME": None,
             "NEXT_STEP": 1,
-            "CONTRADICTION": "",
+            "CONTRADICTION": None,
         }
         controller.propose(base, legal=LEGAL)
         # R9 needs the streak built up first.

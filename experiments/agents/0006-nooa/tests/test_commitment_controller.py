@@ -50,7 +50,7 @@ def block(**overrides: object) -> dict[str, object]:
         "LAST_ACTION": None,
         "LAST_OUTCOME": None,
         "NEXT_STEP": 1,
-        "CONTRADICTION": "",
+        "CONTRADICTION": None,
     }
     base.update(overrides)
     return base
@@ -118,6 +118,29 @@ class WorkingStateParsingTests(unittest.TestCase):
                 )
             self.assertEqual(caught.exception.rule, "R0_FIELDS")
 
+    def test_textual_absence_is_rejected_in_favor_of_json_null(self) -> None:
+        for contradiction in ("", "none", " None ", "null", " Null "):
+            with self.subTest(contradiction=contradiction):
+                controller = CommitmentController()
+                with self.assertRaises(Rejected) as caught:
+                    controller.admit_working_state(
+                        block(CONTRADICTION=contradiction),
+                        action=1,
+                        legal_actions=LEGAL,
+                    )
+                self.assertEqual(caught.exception.rule, "R0_FIELDS")
+                self.assertIn("JSON null", caught.exception.detail)
+
+    def test_replay_and_live_paths_share_the_contradiction_contract(self) -> None:
+        controller = CommitmentController()
+        with self.assertRaises(Rejected) as caught:
+            controller.propose(
+                block(ROUTE1=(1, 1, 3), CONTRADICTION="none"),
+                legal=LEGAL,
+            )
+        self.assertEqual(caught.exception.rule, "R0_FIELDS")
+        self.assertIn("JSON null", caught.exception.detail)
+
 
 class ContinuityRuleTests(unittest.TestCase):
     def _settle(self) -> CommitmentController:
@@ -161,6 +184,19 @@ class ContinuityRuleTests(unittest.TestCase):
         )
         self.assertEqual(state.LAST_ACTION, 1)
 
+    def test_null_contradiction_remains_absent_across_turns(self) -> None:
+        controller = CommitmentController()
+        first = controller.admit_working_state(
+            block(CONTRADICTION=None), action=1, legal_actions=LEGAL
+        )
+        second = controller.admit_working_state(
+            block(CONTRADICTION=None, LAST_ACTION=1, LAST_OUTCOME="moved"),
+            action=1,
+            legal_actions=LEGAL,
+        )
+        self.assertIsNone(first.CONTRADICTION)
+        self.assertIsNone(second.CONTRADICTION)
+
     def test_a_named_contradiction_licenses_exactly_one_rebinding(self) -> None:
         controller = self._settle()
         controller.admit_working_state(
@@ -200,7 +236,7 @@ class ContinuityRuleTests(unittest.TestCase):
             action=1,
             legal_actions=LEGAL,
         )
-        self.assertEqual(state.CONTRADICTION, "")
+        self.assertIsNone(state.CONTRADICTION)
         self.assertEqual(controller.metrics()["identity_reversals"], 1)
 
     def test_a_wall_reroutes_without_touching_the_objective(self) -> None:
@@ -307,6 +343,19 @@ class PacketTests(unittest.TestCase):
         self.assertEqual(working_state["exactKeys"], list(FIELDS))
         self.assertIn("R1", working_state["rules"])
         self.assertIn("two-colour 5x5 block", working_state["current_block"])
+
+    def test_the_model_sees_json_null_as_the_only_absent_contradiction(self) -> None:
+        controller = CommitmentController()
+        packet = attach_competence_context(
+            {"step": 0}, {"schema": "x"}, commitment_controller=controller
+        )
+        working_state = packet["competence"]["reason_authoring_schema"]["working_state"]
+        self.assertEqual(working_state["CONTRADICTION"]["type"], "string-or-null")
+        self.assertEqual(
+            working_state["CONTRADICTION"]["absence"],
+            "use JSON null exactly",
+        )
+        self.assertIn("CONTRADICTION: null", working_state["current_block"])
 
     def test_the_host_never_labels_the_outcome_for_the_model(self) -> None:
         """The moved/blocked mapping is the thing being measured, not given."""

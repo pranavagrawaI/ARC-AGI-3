@@ -62,7 +62,7 @@ class State:
     LAST_ACTION: int | None = None
     LAST_OUTCOME: str | None = None
     NEXT_STEP: int | None = None
-    CONTRADICTION: str = ""
+    CONTRADICTION: str | None = None
     # Bookkeeping the model never writes.
     settled: bool = False
     uncertain_streak: int = 0
@@ -71,6 +71,7 @@ class State:
     def render(self) -> str:
         """The exact text seeded into NOTES.md and echoed every model round."""
         route = ",".join(str(a) for a in self.ROUTE1) if self.ROUTE1 else UNKNOWN
+        contradiction = self.CONTRADICTION if self.CONTRADICTION is not None else "null"
         lines = [
             f"PLAYER_BINDING: {self.PLAYER_BINDING}",
             f"LOCAL_OBJECTIVE: {self.LOCAL_OBJECTIVE or UNKNOWN}",
@@ -79,7 +80,7 @@ class State:
             f"LAST_ACTION: {self.LAST_ACTION if self.LAST_ACTION is not None else 'none'}",
             f"LAST_OUTCOME: {self.LAST_OUTCOME or 'none'}",
             f"NEXT_STEP: {self.NEXT_STEP if self.NEXT_STEP is not None else UNKNOWN}",
-            f"CONTRADICTION: {self.CONTRADICTION or 'none'}",
+            f"CONTRADICTION: {contradiction}",
         ]
         return "\n".join(lines)
 
@@ -128,6 +129,20 @@ def _is_local_repair(old: tuple[int, ...], new: tuple[int, ...], *, detour: int)
     return False
 
 
+def _canonical_contradiction(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        evidence = value.strip()
+        if evidence and evidence.casefold() not in {"none", "null"}:
+            return evidence
+    raise Rejected(
+        "R0_FIELDS",
+        "CONTRADICTION must be JSON null or a non-empty evidence string; "
+        "use JSON null for no contradiction",
+    )
+
+
 class CommitmentController:
     """Enforces commitment preservation across one action per turn."""
 
@@ -156,7 +171,7 @@ class CommitmentController:
         objective = str(new.get("LOCAL_OBJECTIVE", old.LOCAL_OBJECTIVE))
         route = tuple(new.get("ROUTE1", old.ROUTE1))  # type: ignore[arg-type]
         outcome = new.get("LAST_OUTCOME", old.LAST_OUTCOME)
-        contradiction = str(new.get("CONTRADICTION", "") or "")
+        contradiction = new.get("CONTRADICTION", old.CONTRADICTION)
         last_action = new.get("LAST_ACTION", old.LAST_ACTION)
         nxt = new.get("NEXT_STEP", None)
 
@@ -259,6 +274,11 @@ class CommitmentController:
         """
 
         old = self.state
+        update = dict(update)
+        contradiction = _canonical_contradiction(
+            update.get("CONTRADICTION", old.CONTRADICTION)
+        )
+        update["CONTRADICTION"] = contradiction
         try:
             self._check(old, update, legal)
         except Rejected as rejection:
@@ -283,7 +303,7 @@ class CommitmentController:
             LAST_ACTION=update.get("LAST_ACTION", old.LAST_ACTION),  # type: ignore[arg-type]
             LAST_OUTCOME=outcome,  # type: ignore[arg-type]
             NEXT_STEP=update["NEXT_STEP"],  # type: ignore[index]
-            CONTRADICTION=str(update.get("CONTRADICTION", "") or ""),
+            CONTRADICTION=contradiction,
             settled=old.settled or binding != UNKNOWN,
             uncertain_streak=old.uncertain_streak + 1 if outcome == "uncertain" else 0,
             history=old.history + (binding,),

@@ -248,11 +248,13 @@ def _controller_working_state_schema(
             "constraint": "must equal decision.action and be currently legal",
         },
         "CONTRADICTION": {
-            "type": "string",
+            "type": "string-or-null",
+            "absence": "use JSON null exactly",
             "purpose": (
-                "empty, or one sentence naming the transition that broke a "
-                "settled binding. It licenses exactly one reinterpretation and "
-                "must be cleared on the next action."
+                "JSON null, or one non-empty sentence naming the transition that "
+                "broke a settled binding. Never use an empty string or the text "
+                "'none' or 'null'. Evidence licenses exactly one reinterpretation "
+                "and must return to JSON null on the next action."
             ),
         },
         "rules": {
@@ -266,7 +268,7 @@ def _controller_working_state_schema(
             "contradiction and does not license rebinding",
             "R5": "only special_event licenses focused semantic inspection",
             "R7": "NEXT_STEP is exactly one legal action and equals decision.action",
-            "R8": "clear CONTRADICTION on the action after the one that set it",
+            "R8": "set CONTRADICTION to JSON null on the action after evidence",
             "R9": "at most two consecutive 'uncertain' outcomes",
             "not_enforced": "replacing ROUTE1 is recorded but never rejected; "
             "re-planning after you learn the map is ordinary play",

@@ -15,7 +15,7 @@ CURRENT_APPROX_POSITION:
 LAST_ACTION:
 LAST_OUTCOME:
 NEXT_STEP:
-CONTRADICTION:
+CONTRADICTION: null
 ```
 
 - `PLAYER_BINDING` — which object you control, and its attributes. `unknown` is
@@ -26,8 +26,9 @@ CONTRADICTION:
 - `LAST_ACTION` — the action id you took last.
 - `LAST_OUTCOME` — one of `moved`, `blocked`, `special_event`, `uncertain`.
 - `NEXT_STEP` — the single action id you are taking now.
-- `CONTRADICTION` — empty, or one sentence naming the transition that broke a
-  settled binding.
+- `CONTRADICTION` — JSON `null`, or one non-empty sentence naming the transition
+  that broke a settled binding. Never write an empty string or the text `none`
+  or `null`.
 
 ## Order of work
 
@@ -57,7 +58,8 @@ game; it says your new block is not a legal continuation of your old one.
 - **R4** `PLAYER_BINDING`, `CURRENT_APPROX_POSITION` and `ROUTE1` may stay
   `unknown`. Unknown is not a contradiction and does not license rebinding.
 - **R7** `NEXT_STEP` is exactly one legal action and equals your chosen action.
-- **R8** A `CONTRADICTION` licenses one reinterpretation. Clear it next action.
+- **R8** A `CONTRADICTION` licenses one reinterpretation. Set it back to JSON
+  `null` on the next action.
 - **R9** At most two consecutive `uncertain` outcomes.
 
 Replacing `ROUTE1` is recorded but never rejected. Re-planning once you learn

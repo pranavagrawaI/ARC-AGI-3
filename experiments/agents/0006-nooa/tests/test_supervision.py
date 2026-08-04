@@ -421,7 +421,7 @@ class LiveConditionTests(unittest.TestCase):
                     "LAST_ACTION": None,
                     "LAST_OUTCOME": None,
                     "NEXT_STEP": 1,
-                    "CONTRADICTION": "",
+                    "CONTRADICTION": None,
                 },
                 "test": gemma_receipt(current),
                 "claim_ids": ["goal"],
@@ -521,7 +521,7 @@ class LiveConditionTests(unittest.TestCase):
                     "LAST_ACTION": None,
                     "LAST_OUTCOME": None,
                     "NEXT_STEP": 1,
-                    "CONTRADICTION": "",
+                    "CONTRADICTION": None,
                 },
                 "test": gemma_receipt(
                     current,
