@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import ast
 import json
+from dataclasses import replace
 from hashlib import sha256
 from typing import Any
 
 import numpy as np
+from commitment_controller import CommitmentController, Rejected
 from competence import (
     CompetenceController,
     _assertion_value,
@@ -21,9 +23,22 @@ from competence_runner import (
     attach_competence_context,
 )
 from llm_repl_agent.observations import action_requirements
+from supervision import (
+    AssignmentRejected,
+    gemma_supervision_context,
+    parse_assignment,
+)
 
 COMPETENCE_SCHEMA = "0006-nooa-competence-v1"
 PROCESS_PROTOCOL = "0002-nooa-ipc-v1"
+# The two conditions that add process records and change the model-visible
+# request. Each is detected from the run's own evidence rather than passed in,
+# and detection is symmetric: a supervised run must carry the supervision key on
+# every observation, and an unsupervised one must carry it on none. Dropping the
+# records to relax a check therefore fails the other half.
+ASSIGNMENT_KIND = "supervisor_assignment"
+SUPERVISION_RESPONSE_KIND = "supervision_response"
+CONTROLLER_STATE_KIND = "commitment_controller_state"
 PUBLIC_OBSERVATION_KEYS = {
     "step",
     "pixels",
@@ -582,6 +597,8 @@ def _process_action_linked(
     transition_record: dict[str, Any],
     successor_record: dict[str, Any],
     expected_rejection: dict[str, object] | None,
+    supervision_context: object | None = None,
+    commitment_controller: CommitmentController | None = None,
 ) -> bool:
     request = request_record.get("request")
     if not isinstance(request, dict) or not isinstance(packet, dict):
@@ -649,8 +666,16 @@ def _process_action_linked(
         "observations_glob",
         "competence",
     }
+    # Conditional on the arm in both directions. A supervised action point must
+    # carry the handoff, and an unsupervised one must not; widening the set
+    # unconditionally would let a dropped handoff pass as an ordinary run.
+    if supervision_context is not None:
+        observation_keys = observation_keys | {"supervision"}
     expected_wrapper = attach_competence_context(
-        {}, packet, rejection=expected_rejection
+        {},
+        packet,
+        rejection=expected_rejection,
+        commitment_controller=commitment_controller,
     ).get("competence")
     host_observation = request_record.get("host_observation")
     successor_host_observation = successor_record.get("host_observation")
@@ -729,6 +754,7 @@ def _process_action_linked(
         and request_record.get("step") == action_point_id
         and isinstance(observation, dict)
         and set(observation) == observation_keys
+        and observation.get("supervision") == supervision_context
         and observation.get("step") == action_point_id
         and observation.get("recent_transitions") == expected_recent_transitions
         and current_metadata == expected_metadata
@@ -1054,6 +1080,23 @@ def chain_report(
         for index, record in enumerate(process_records)
         if record.get("kind") == "competence_rejected"
     ]
+    assignments_indexed = [
+        (index, record)
+        for index, record in enumerate(process_records)
+        if record.get("kind") == ASSIGNMENT_KIND
+    ]
+    supervision_responses_indexed = [
+        (index, record)
+        for index, record in enumerate(process_records)
+        if record.get("kind") == SUPERVISION_RESPONSE_KIND
+    ]
+    controller_states_indexed = [
+        (index, record)
+        for index, record in enumerate(process_records)
+        if record.get("kind") == CONTROLLER_STATE_KIND
+    ]
+    supervised = bool(assignments_indexed)
+    controller_condition = bool(controller_states_indexed)
     # A refused crossing is recorded in full, as its own request/crossing/
     # rejection triple, so the log shows how many attempts an action took.
     # Removing those triples must leave exactly the admitted spine.
@@ -1141,20 +1184,34 @@ def chain_report(
     successor_process_records = [
         record for _index, record in successor_process_indexed
     ]
+    assignments = [record for _index, record in assignments_indexed]
+    supervision_responses = [
+        record for _index, record in supervision_responses_indexed
+    ]
+    controller_states = [record for _index, record in controller_states_indexed]
+    # The supervised records are placed in the spine rather than skipped, and
+    # their positions are the point: the assignment must precede the context
+    # Gemma was given, and Gemma's receipt must precede the decision the host
+    # validated. A supervised claim rests on that order, so the verifier binds
+    # it here instead of trusting the runner to have emitted them in sequence.
+    action_spine_kinds = (
+        *((ASSIGNMENT_KIND,) if supervised else ()),
+        "competence_context_assembled",
+        "action_request",
+        "model_crossing",
+        *((SUPERVISION_RESPONSE_KIND,) if supervised else ()),
+        "decision_validated",
+        "competence_action_admitted",
+        *((CONTROLLER_STATE_KIND,) if controller_condition else ()),
+        "transition_recorded",
+        "competence_successor_observed",
+    )
     expected_process_kinds = [
         "worker_started",
         *(
             kind
             for _action_id in range(actions)
-            for kind in (
-                "competence_context_assembled",
-                "action_request",
-                "model_crossing",
-                "decision_validated",
-                "competence_action_admitted",
-                "transition_recorded",
-                "competence_successor_observed",
-            )
+            for kind in action_spine_kinds
         ),
         "worker_stopped",
     ]
@@ -1233,6 +1290,40 @@ def chain_report(
             "error",
             "attempts_remaining",
         },
+        ASSIGNMENT_KIND: {
+            "protocol",
+            "kind",
+            "run_id",
+            "action_point_id",
+            "step",
+            "assignment",
+            "assignment_sha256",
+            "assignment_token",
+            "crossing",
+            "supervisor_model",
+            "view_sha256",
+        },
+        SUPERVISION_RESPONSE_KIND: {
+            "protocol",
+            "kind",
+            "run_id",
+            "action_point_id",
+            "step",
+            "assignment_sha256",
+            "disposition",
+            "prediction",
+            "contradiction_evidence",
+        },
+        CONTROLLER_STATE_KIND: {
+            "protocol",
+            "kind",
+            "run_id",
+            "action_point_id",
+            "step",
+            "state",
+            "metrics",
+            "notes_written",
+        },
         "worker_stopped": {
             "protocol",
             "kind",
@@ -1263,6 +1354,13 @@ def chain_report(
         == len(recorded_transitions_indexed)
         == len(successor_process_indexed)
         == actions
+        and len(assignments_indexed) == (actions if supervised else 0)
+        and len(supervision_responses_indexed) == (actions if supervised else 0)
+        and len(controller_states_indexed)
+        == (actions if controller_condition else 0)
+        # Supervision is built on the controller, so a run cannot claim the
+        # supervised shape without the controller records that carry its state.
+        and (controller_condition or not supervised)
     )
     # One interleaved spine per action, in the one order that means the model saw
     # the context before it decided and the environment moved after it did.
@@ -1272,11 +1370,24 @@ def chain_report(
         for action_id in range(actions):
             expected_process_order.extend(
                 [
+                    *(
+                        [assignments_indexed[action_id][0]] if supervised else []
+                    ),
                     contexts_indexed[action_id][0],
                     requests_indexed[action_id][0],
                     crossings_indexed[action_id][0],
+                    *(
+                        [supervision_responses_indexed[action_id][0]]
+                        if supervised
+                        else []
+                    ),
                     validated_indexed[action_id][0],
                     admitted_indexed[action_id][0],
+                    *(
+                        [controller_states_indexed[action_id][0]]
+                        if controller_condition
+                        else []
+                    ),
                     recorded_transitions_indexed[action_id][0],
                     successor_process_indexed[action_id][0],
                 ]
@@ -1308,6 +1419,21 @@ def chain_report(
         == expected_step_sequence
         and [record.get("action_point_id") for record in successor_process_records]
         == expected_step_sequence
+        # These three kinds disagree with the spine on what action_point_id
+        # means -- the controller record carries the crossing id, which advances
+        # on a refused crossing, while the supervision records carry the action
+        # index. ``step`` is the action index in all three, so the chain is bound
+        # on ``step`` alone and action_point_id is left to the records that own
+        # it.
+        and [record.get("step") for record in assignments] == (
+            expected_step_sequence if supervised else []
+        )
+        and [record.get("step") for record in supervision_responses] == (
+            expected_step_sequence if supervised else []
+        )
+        and [record.get("step") for record in controller_states] == (
+            expected_step_sequence if controller_condition else []
+        )
         and all(
             earlier < later
             for earlier, later in zip(
@@ -1450,9 +1576,85 @@ def chain_report(
             return []
         return preceding[-recent_transition_window:]
 
+    # Replay the commitment controller from the model's own commitments, the
+    # same discipline model_authored_semantic_replay already applies to the
+    # competence controller. The block the model was shown before action i is
+    # the state this replay holds before admitting action i, so the published
+    # schema is bound to authored commitments rather than to a host-written
+    # convenience record -- which the replay then checks instead of trusting.
+    controller_snapshots: list[CommitmentController | None] = [None] * actions
+    controller_replay_valid = not controller_condition
+    if controller_condition and process_shape and event_step_authority:
+        controller_replay_valid = True
+        replay = CommitmentController()
+        for action_id in range(actions):
+            snapshot = CommitmentController()
+            snapshot.state = replay.state
+            controller_snapshots[action_id] = snapshot
+            legal = observation_legal_actions[action_id]
+            try:
+                replay.admit_working_state(
+                    commitments[action_id].get("working_state"),
+                    action=commitments[action_id].get("action"),
+                    legal_actions=tuple(legal) if isinstance(legal, list) else (),
+                )
+            except (Rejected, TypeError, ValueError):
+                controller_replay_valid = False
+                break
+            record = controller_states[action_id]
+            if (
+                record.get("state") != replay.state.render()
+                or record.get("metrics") != replay.metrics()
+                # The round-level half of the protocol is instructed, never
+                # enforced, so a null needs this counter to be interpretable.
+                # The verifier binds its presence and type, not its value.
+                or type(record.get("notes_written")) is not bool
+            ):
+                controller_replay_valid = False
+                break
+
+    # Rebuild what the supervised observation must have carried from the
+    # recorded assignment, so the handoff is proved to be the assignment the
+    # supervisor authored for this action point rather than any well-formed one.
+    supervision_contexts: list[object] = [None] * actions
+    supervision_valid = True
+    if supervised and process_shape:
+        for action_id in range(actions):
+            record = assignments[action_id]
+            response = supervision_responses[action_id]
+            token = record.get("assignment_token")
+            digest = record.get("assignment_sha256")
+            try:
+                assignment = parse_assignment(record.get("assignment"))
+            except AssignmentRejected:
+                supervision_valid = False
+                break
+            prediction = response.get("prediction")
+            if (
+                not isinstance(token, str)
+                or not token
+                or assignment.sha256 != digest
+                or response.get("assignment_sha256") != digest
+                # A CONTRADICT releases no environment action, so every receipt
+                # on an admitted spine followed its assignment. The revision
+                # path has not been observed live; when it is, it needs its own
+                # recorded shape here rather than a silent pass.
+                or response.get("disposition") != "FOLLOW"
+                or not isinstance(prediction, str)
+                or not prediction
+                or response.get("contradiction_evidence") is not None
+            ):
+                supervision_valid = False
+                break
+            supervision_contexts[action_id] = gemma_supervision_context(
+                replace(assignment, _token=token)
+            )
+
     process_linked = (
         process_shape
         and event_step_authority
+        and controller_replay_valid
+        and supervision_valid
         and all(
             record.get("request", {}).get("paired_run_spec")
             == requests[0].get("request", {}).get("paired_run_spec")
@@ -1490,6 +1692,8 @@ def chain_report(
                 expected_rejection=expected_rejection_by_environment_step.get(
                     observation_records[action_id].get("step")
                 ),
+                supervision_context=supervision_contexts[action_id],
+                commitment_controller=controller_snapshots[action_id],
             )
             for action_id in range(actions)
         )

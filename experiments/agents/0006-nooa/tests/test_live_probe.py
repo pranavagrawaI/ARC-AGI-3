@@ -14,6 +14,7 @@ import sys
 import tempfile
 import unittest
 from copy import deepcopy
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from unittest import mock
@@ -25,6 +26,7 @@ RUNNER = ROOT / "run_live_probe.py"
 MODULE = runpy.run_path(str(RUNNER))
 MODULE_CHAIN = runpy.run_path(str(ROOT / "evidence_chain.py"))
 
+from commitment_controller import CommitmentController, Rejected
 from competence import CompetenceController
 from competence_runner import (
     EXPECTED_PROJECTION_DTYPE,
@@ -37,6 +39,7 @@ from evidence_chain import (
     competence_packet_digest,
     two_action_chain_report,
 )
+from supervision import gemma_supervision_context, parse_assignment
 
 
 def parsed_args() -> argparse.Namespace:
@@ -56,12 +59,49 @@ def parsed_args() -> argparse.Namespace:
     )
 
 
+def controller_block(
+    *, action: int, last_action: int | None, first: bool
+) -> dict[str, object]:
+    """One legal eight-field continuation for the fixture's action sequence.
+
+    Every value here is what a model would author. The binding and the objective
+    are deliberately constant: R2 forbids changing them after a ``moved`` outcome
+    without naming a contradiction, so a fixture that drifted would be exercising
+    the controller's rejection path while claiming to build an accepted chain.
+    """
+
+    return {
+        "PLAYER_BINDING": "fixture block",
+        "LOCAL_OBJECTIVE": "reach the fixture target",
+        "ROUTE1": "unknown",
+        "CURRENT_APPROX_POSITION": "unknown",
+        "LAST_ACTION": last_action,
+        "LAST_OUTCOME": None if first else "moved",
+        "NEXT_STEP": action,
+        "CONTRADICTION": None,
+    }
+
+
+def supervisor_assignment_record(action_point: int) -> dict[str, object]:
+    """A well-formed assignment naming no action, direction, or cell."""
+
+    return {
+        "LOCAL_GOAL": f"make one step of progress at action point {action_point}",
+        "RELEVANT_EVIDENCE": [f"the observation at step {action_point}"],
+        "SUCCESS_TEST": "after one action the observation differs",
+        "IF_TEST_FAILS": "reassess the position and set a new local goal",
+    }
+
+
 def two_action_fixture(
     *,
     mismatch: bool = False,
     retire_claim: bool = False,
     inconclusive: bool = False,
     actions: int = 2,
+    controller_condition: bool = False,
+    supervised: bool = False,
+    forged_continuation: bool = False,
 ) -> tuple[list[dict], list[dict]]:
     """Build a linked chain of ``actions`` action points.
 
@@ -72,6 +112,28 @@ def two_action_fixture(
     condition a chain verifier that only ever saw two actions was never asked to
     hold.
     """
+
+    def action_for(action_point: int) -> int:
+        """The fixture's action sequence: 1, 2, then 1 for every later action."""
+
+        return 2 if action_point == 1 else 1
+
+    def working_state(action_point: int) -> dict[str, object]:
+        if not controller_condition:
+            return {}
+        block = controller_block(
+            action=action_for(action_point),
+            last_action=(
+                None if action_point == 0 else action_for(action_point - 1)
+            ),
+            first=action_point == 0,
+        )
+        if forged_continuation and action_point == 1:
+            # R1: a settled binding changes only with a named contradiction.
+            # The live host could never have admitted this, so an artifact that
+            # records it as admitted is claiming a run that did not happen.
+            block["PLAYER_BINDING"] = "a different object entirely"
+        return block
 
     controller = CompetenceController()
     public = {
@@ -87,7 +149,7 @@ def two_action_fixture(
     first_decision = {
             "action": 1,
             "data": None,
-            "working_state": {},
+            "working_state": working_state(0),
             "test": "first",
             "claim_ids": ["claim-control"],
             "ledger": [
@@ -127,7 +189,7 @@ def two_action_fixture(
     second_decision = {
             "action": 2,
             "data": None,
-            "working_state": {},
+            "working_state": working_state(1),
             "test": "second",
             # Retiring the first action's claim is legitimate continuity, but a
             # commitment still has to work from some claim, so the retirement
@@ -171,7 +233,7 @@ def two_action_fixture(
         decision = {
             "action": 1,
             "data": None,
-            "working_state": {},
+            "working_state": working_state(action_point),
             "test": f"action {action_point + 1}",
             "claim_ids": [working_claim],
             "ledger": [],
@@ -342,6 +404,10 @@ def two_action_fixture(
         }
 
     prior_transitions: list[dict] = []
+    # The commitment controller is replayed alongside the records, exactly as
+    # the live host advances it, so the block published to the model at action i
+    # is the state left by action i-1 rather than a value the fixture invents.
+    replay = CommitmentController() if controller_condition else None
     for action_point, packet, commitment, authored, before, after in action_points:
         reason = json.dumps(
             {
@@ -367,6 +433,21 @@ def two_action_fixture(
             "before_file": f"observations/step-{action_point:05d}.json",
             "after_file": f"observations/step-{action_point + 1:05d}.json",
         }
+        snapshot = None
+        if replay is not None:
+            snapshot = CommitmentController()
+            snapshot.state = replay.state
+        supervision_context = None
+        assignment_record = None
+        assignment_token = None
+        if supervised:
+            assignment_record = supervisor_assignment_record(action_point)
+            assignment_token = f"asgn-{action_point + 1:04d}"
+            supervision_context = gemma_supervision_context(
+                replace(
+                    parse_assignment(assignment_record), _token=assignment_token
+                )
+            )
         request = {
             "protocol": process_protocol,
             "run_id": run_id,
@@ -393,7 +474,14 @@ def two_action_fixture(
                 "full_history_file": "public_history.jsonl",
                 "current_observation_file": "current_observation.json",
                 "observations_glob": "observations/step-*.json",
-                "competence": attach_competence_context({}, packet)["competence"]
+                "competence": attach_competence_context(
+                    {}, packet, commitment_controller=snapshot
+                )["competence"],
+                **(
+                    {"supervision": supervision_context}
+                    if supervised
+                    else {}
+                ),
             },
             "legal_actions": [1, 2],
             "coordinate_actions": [],
@@ -406,8 +494,41 @@ def two_action_fixture(
             "data": commitment["data"],
             "reason": reason,
         }
+        if replay is not None:
+            try:
+                replay.admit_working_state(
+                    authored["working_state"],
+                    action=commitment["action"],
+                    legal_actions=[1, 2],
+                )
+            except Rejected:
+                # Only reachable under forged_continuation, where the point is
+                # to emit a controller record for a block the host refused.
+                if not forged_continuation:
+                    raise
         process_records.extend(
             [
+                *(
+                    [
+                        {
+                            "protocol": process_protocol,
+                            "kind": "supervisor_assignment",
+                            "run_id": run_id,
+                            "action_point_id": action_point,
+                            "step": action_point,
+                            "assignment": assignment_record,
+                            "assignment_sha256": parse_assignment(
+                                assignment_record
+                            ).sha256,
+                            "assignment_token": assignment_token,
+                            "crossing": {"assignment": assignment_record},
+                            "supervisor_model": "fixture/supervisor",
+                            "view_sha256": "c" * 64,
+                        }
+                    ]
+                    if supervised
+                    else []
+                ),
                 {
                     "protocol": process_protocol,
                     "kind": "competence_context_assembled",
@@ -459,6 +580,25 @@ def two_action_fixture(
                     "worker_decision": worker_decision,
                     "worker_error": None,
                 },
+                *(
+                    [
+                        {
+                            "protocol": process_protocol,
+                            "kind": "supervision_response",
+                            "run_id": run_id,
+                            "action_point_id": action_point,
+                            "step": action_point,
+                            "assignment_sha256": parse_assignment(
+                                assignment_record
+                            ).sha256,
+                            "disposition": "FOLLOW",
+                            "prediction": "the observation changes",
+                            "contradiction_evidence": None,
+                        }
+                    ]
+                    if supervised
+                    else []
+                ),
                 {
                     "protocol": process_protocol,
                     "kind": "decision_validated",
@@ -483,6 +623,27 @@ def two_action_fixture(
                     "step": action_point,
                     "commitment": commitment,
                 },
+                *(
+                    [
+                        {
+                            "protocol": process_protocol,
+                            "kind": "commitment_controller_state",
+                            "run_id": run_id,
+                            # The live host writes the crossing id here while
+                            # every other supervised record writes the action
+                            # index; the fixture reproduces that disagreement
+                            # rather than tidying it, because the verifier binds
+                            # the chain on ``step`` precisely because of it.
+                            "action_point_id": action_point + 1,
+                            "step": action_point,
+                            "state": replay.state.render(),
+                            "metrics": replay.metrics(),
+                            "notes_written": False,
+                        }
+                    ]
+                    if replay is not None
+                    else []
+                ),
                 {
                     "protocol": process_protocol,
                     "kind": "transition_recorded",
@@ -2926,6 +3087,274 @@ class LongChainTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             MODULE_CHAIN["chain_report"](events, process, actions=0)
+
+
+class SupervisedChainTests(unittest.TestCase):
+    """The controller and supervised conditions add evidence, so they must be
+    judged, not excused.
+
+    Run supervised-probe-rules_supervised-l1-3-v5 failed four acceptance checks
+    for three reasons that were all the verifier's: three process kinds it did
+    not know, a `supervision` key on the observation its closed key set forbade,
+    and a working-state schema it regenerated without the controller that
+    produced it. None of them were defects in the run. These tests pin the
+    repair and, more importantly, pin what the repair must still reject -- the
+    failure mode of a fix like this is a gate that now admits everything.
+    """
+
+    def report(self, events: list[dict], process: list[dict], actions: int) -> dict:
+        return MODULE_CHAIN["chain_report"](events, process, actions=actions)
+
+    def find(self, process: list[dict], kind: str) -> list[dict]:
+        return [record for record in process if record.get("kind") == kind]
+
+    def reseal(self, process: list[dict]) -> list[dict]:
+        """Recompute request digests after a mutation.
+
+        Without this every mutation below would be caught by the request hash
+        first, and the test would pass while proving nothing about the check it
+        names.
+        """
+
+        for record in process:
+            if record.get("kind") == "action_request":
+                record["request_sha256"] = canonical_digest(record["request"])
+        return process
+
+    def test_the_controller_condition_is_accepted(self) -> None:
+        for actions in (2, 4):
+            with self.subTest(actions=actions):
+                events, process = two_action_fixture(
+                    actions=actions, controller_condition=True
+                )
+                report = self.report(events, process, actions)
+                self.assertTrue(all(report.values()), report)
+
+    def test_the_supervised_condition_is_accepted(self) -> None:
+        for actions in (2, 4):
+            with self.subTest(actions=actions):
+                events, process = two_action_fixture(
+                    actions=actions, controller_condition=True, supervised=True
+                )
+                report = self.report(events, process, actions)
+                self.assertTrue(all(report.values()), report)
+
+    def test_local_supervised_artifact_passes_offline_acceptance(self) -> None:
+        run = (
+            ROOT
+            / "artifacts/runs/supervised-probe-rules_supervised-l1-3-v5/worker"
+        )
+        if not run.exists():
+            self.skipTest("ignored live-run artifact is not present in this checkout")
+        events = [
+            json.loads(line)
+            for line in (run / "competence.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.strip()
+        ]
+        process = [
+            json.loads(line)
+            for line in (run / "process.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.strip()
+        ]
+
+        report = self.report(events, process, 3)
+
+        self.assertTrue(all(report.values()), report)
+
+    def test_a_missing_handoff_fails_a_supervised_run(self) -> None:
+        """The arm is detected from the records, so dropping the key the records
+        imply must not pass as an ordinary run."""
+
+        events, process = two_action_fixture(
+            controller_condition=True, supervised=True
+        )
+        self.find(process, "action_request")[1]["request"]["observation"].pop(
+            "supervision"
+        )
+
+        report = self.report(events, self.reseal(process), 2)
+
+        self.assertFalse(report["linked_process_records"])
+
+    def test_a_handoff_fails_a_run_with_no_supervisor(self) -> None:
+        """And symmetrically: an unsupervised arm may not carry the key. Widening
+        the key set unconditionally passed this, which is why it was rejected."""
+
+        events, process = two_action_fixture(controller_condition=True)
+        self.find(process, "action_request")[0]["request"]["observation"][
+            "supervision"
+        ] = {"schema": "0006-nooa-supervision-handoff-v1"}
+
+        report = self.report(events, self.reseal(process), 2)
+
+        self.assertFalse(report["linked_process_records"])
+
+    def test_dropping_the_assignment_records_does_not_relax_the_check(self) -> None:
+        """The cheapest attack on a symmetric gate is to delete the evidence that
+        selects the strict side."""
+
+        events, process = two_action_fixture(
+            controller_condition=True, supervised=True
+        )
+        stripped = [
+            record
+            for record in process
+            if record.get("kind")
+            not in {"supervisor_assignment", "supervision_response"}
+        ]
+
+        report = self.report(events, stripped, 2)
+
+        self.assertFalse(all(report.values()))
+
+    def test_the_handoff_must_carry_the_assignment_that_was_recorded(self) -> None:
+        """Presence is not the claim; identity is. The run's whole supervised
+        reading is that Gemma acted on *this* assignment."""
+
+        events, process = two_action_fixture(
+            controller_condition=True, supervised=True
+        )
+        swapped = {
+            "LOCAL_GOAL": "a different local goal entirely",
+            "RELEVANT_EVIDENCE": ["a different observation"],
+            "SUCCESS_TEST": "a different test",
+            "IF_TEST_FAILS": "a different fallback",
+        }
+        digest = parse_assignment(swapped).sha256
+        record = self.find(process, "supervisor_assignment")[1]
+        record["assignment"] = swapped
+        record["assignment_sha256"] = digest
+        record["crossing"] = {"assignment": swapped}
+        self.find(process, "supervision_response")[1]["assignment_sha256"] = digest
+
+        report = self.report(events, self.reseal(process), 2)
+
+        self.assertFalse(report["linked_process_records"])
+
+    def test_an_assignment_written_after_the_context_is_rejected(self) -> None:
+        """The ordering is the supervised claim: the assignment has to precede
+        the context Gemma was given, or it did not inform the decision."""
+
+        events, process = two_action_fixture(
+            controller_condition=True, supervised=True
+        )
+        assignment_index = next(
+            index
+            for index, record in enumerate(process)
+            if record.get("kind") == "supervisor_assignment"
+        )
+        process[assignment_index], process[assignment_index + 1] = (
+            process[assignment_index + 1],
+            process[assignment_index],
+        )
+
+        report = self.report(events, process, 2)
+
+        self.assertFalse(report["linked_process_records"])
+
+    def test_a_receipt_that_contradicted_cannot_hold_an_admitted_action(self) -> None:
+        """CONTRADICT releases no action, so it may not appear on the admitted
+        spine. The revision path has not been observed live; this fails loudly
+        until a real run supplies its shape rather than passing on a guess."""
+
+        events, process = two_action_fixture(
+            controller_condition=True, supervised=True
+        )
+        response = self.find(process, "supervision_response")[0]
+        response["disposition"] = "CONTRADICT"
+        response["prediction"] = None
+        response["contradiction_evidence"] = "the frame did not change"
+
+        report = self.report(events, process, 2)
+
+        self.assertFalse(report["linked_process_records"])
+
+    def test_a_controller_record_must_match_the_replayed_state(self) -> None:
+        """The recorded block is checked against a replay of the commitments,
+        not trusted as the authority for what the controller held."""
+
+        events, process = two_action_fixture(controller_condition=True)
+        self.find(process, "commitment_controller_state")[1]["state"] = (
+            "PLAYER_BINDING: something the model never wrote"
+        )
+
+        report = self.report(events, process, 2)
+
+        self.assertFalse(report["linked_process_records"])
+
+    def test_controller_metrics_must_match_the_replay(self) -> None:
+        events, process = two_action_fixture(controller_condition=True)
+        self.find(process, "commitment_controller_state")[1]["metrics"] = {
+            "identity_reversals": 7,
+            "rejections": 0,
+            "route_replacements": 0,
+            "turns": 2,
+        }
+
+        report = self.report(events, process, 2)
+
+        self.assertFalse(report["linked_process_records"])
+
+    def test_notes_written_must_be_present_and_boolean(self) -> None:
+        """A null result cannot be read without it: the round-level half of the
+        protocol is instructed, never enforced, so `notes_written` is the only
+        evidence that the model saw the block between rounds."""
+
+        events, process = two_action_fixture(controller_condition=True)
+        self.find(process, "commitment_controller_state")[0]["notes_written"] = "no"
+
+        report = self.report(events, process, 2)
+
+        self.assertFalse(report["linked_process_records"])
+
+    def test_a_forged_continuation_is_rejected(self) -> None:
+        """An artifact that records the host admitting a block the rules forbid
+        is claiming a run that did not happen."""
+
+        events, process = two_action_fixture(
+            controller_condition=True, forged_continuation=True
+        )
+
+        report = self.report(events, process, 2)
+
+        self.assertFalse(report["linked_process_records"])
+
+    def test_the_published_schema_must_be_the_controller_variant(self) -> None:
+        """The original defect in reverse: a controller run that published the
+        base working-state schema would mean the model was never given the
+        eight-field contract the run claims to have tested."""
+
+        events, process = two_action_fixture(controller_condition=True)
+        for record in self.find(process, "action_request"):
+            observation = record["request"]["observation"]
+            observation["competence"] = attach_competence_context(
+                {}, observation["competence"]["context"]
+            )["competence"]
+
+        report = self.report(events, self.reseal(process), 2)
+
+        self.assertFalse(report["linked_process_records"])
+
+    def test_supervision_without_the_controller_is_rejected(self) -> None:
+        """The runner refuses to supervise without the commitment controller, so
+        an artifact claiming otherwise is malformed."""
+
+        events, process = two_action_fixture(
+            controller_condition=True, supervised=True
+        )
+        stripped = [
+            record
+            for record in process
+            if record.get("kind") != "commitment_controller_state"
+        ]
+
+        report = self.report(events, stripped, 2)
+
+        self.assertFalse(all(report.values()))
 
 
 class FrozenControlPinTests(unittest.TestCase):
