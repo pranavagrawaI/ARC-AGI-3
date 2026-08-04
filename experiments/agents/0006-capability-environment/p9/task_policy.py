@@ -95,8 +95,14 @@ class TaskPolicy:
             )
         self.requests.append(payload)
 
-        step, results, tool_available = _read_turn(messages)
+        step, results, tool_available, capability_packet = _read_turn(messages)
         decision = self._decide(step, results, tool_available)
+        if "action" in decision and capability_packet is not None:
+            decision["reason"] = _learning_loop_reason(
+                step,
+                capability_packet,
+                str(decision["reason"]),
+            )
         return _respond(payload, decision, self.calls)
 
     def _decide(
@@ -132,18 +138,23 @@ class TaskPolicy:
 
 def _read_turn(
     messages: Sequence[Mapping[str, Any]],
-) -> tuple[int, list[dict[str, Any]], bool]:
+) -> tuple[int, list[dict[str, Any]], bool, dict[str, Any] | None]:
     """Recover the current step, this turn's tool results, and tool availability."""
 
     step = 0
     boundary = 0
+    capability_packet: dict[str, Any] | None = None
     for index, message in enumerate(messages):
         content = message.get("content")
         if isinstance(content, list):
             for part in content:
                 if isinstance(part, Mapping) and part.get("type") == "text":
                     try:
-                        step = int(json.loads(part["text"])["step"])
+                        observation_payload = json.loads(part["text"])
+                        step = int(observation_payload["step"])
+                        packet = observation_payload.get("capability_packet")
+                        if isinstance(packet, dict):
+                            capability_packet = packet
                     except (json.JSONDecodeError, KeyError, TypeError, ValueError):
                         continue
             boundary = index
@@ -158,7 +169,61 @@ def _read_turn(
         if message.get("role") == "user" and isinstance(message.get("content"), str):
             if "final deliberation round" in message["content"]:
                 tool_available = False
-    return step, results, tool_available
+    return step, results, tool_available, capability_packet
+
+
+def _learning_loop_reason(
+    step: int,
+    packet: Mapping[str, Any],
+    test: str,
+) -> dict[str, Any]:
+    """Exercise the capability contract; the offline policy makes no gameplay claim."""
+
+    last_result = packet.get("last_prediction_result")
+    local_contradicted = (
+        isinstance(last_result, Mapping)
+        and last_result.get("outcome") == "mismatch"
+    )
+    objective_result = packet.get("last_objective_result")
+    objective_contradicted = (
+        isinstance(objective_result, Mapping)
+        and objective_result.get("outcome") == "falsified"
+    )
+    objective_active = isinstance(packet.get("active_objective"), Mapping)
+    return {
+        "working_state": {
+            "fixture_policy": "contract exercise only",
+            "observed_steps": step,
+        },
+        "test": test,
+        "prediction": [
+            {"observable": "changed_pixels", "op": ">=", "value": 0}
+        ],
+        # Fixture replay cannot establish gameplay potency. It deliberately lets a
+        # level-progress objective expire while every local mechanism check matches.
+        "objective": (
+            None
+            if objective_active
+            else {
+                "claim": f"fixture objective candidate after step {step}",
+                "progress": {
+                    "observable": "levels_completed",
+                    "op": ">",
+                    "value": 0,
+                },
+                "horizon": 2,
+            }
+        ),
+        "history_steps": [step] if step > 0 else [],
+        "reconciliation": (
+            "The bounded objective prediction expired without level progress; "
+            "the next candidate is mechanically distinct."
+            if objective_contradicted
+            else "The local mechanism prediction was contradicted."
+            if local_contradicted
+            else None
+        ),
+    }
 
 
 def _respond(payload: Mapping[str, Any], decision: Mapping[str, Any], call: int) -> ChatResponse:

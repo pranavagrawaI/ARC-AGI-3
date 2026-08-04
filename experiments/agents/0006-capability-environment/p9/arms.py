@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from hashlib import sha256
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +26,7 @@ from llm_repl_agent.process_log import ProcessLog
 from llm_repl_agent.workspace import MODEL_OUTPUT_CHAR_LIMIT, PythonWorkspace
 
 from .agent import ARM_SYSTEM_PROMPT_ADDENDUM, SharedArmAgent
-from .capabilities import TREATMENT_CAPABILITIES, capability_prompt_addendum
+from .capabilities import capability_prompt_addendum
 from .conversation import omission_notice_template_sha256
 from .failures import failure_taxonomy
 from .transport import RetryingChatClient
@@ -135,7 +136,13 @@ def build_arm(spec: ArmSpec, *, run_dir: Path, inner_client: ChatClient) -> Arm:
         if spec.color_permutation_seed is not None
         else ColorPermutation.identity()
     )
-    agent = SharedArmAgent(
+    agent_class = SharedArmAgent
+    if "learning_loop" in spec.treatment_capabilities:
+        # Keep treatment cognition outside the frozen control import closure. The
+        # shared factory selects it only for the declared capability.
+        module = import_module(f"{__package__}.learning_loop_agent")
+        agent_class = module.LearningLoopAgent
+    agent = agent_class(
         arm_id=spec.arm_id,
         treatment_capabilities=spec.treatment_capabilities,
         client=client,
@@ -230,11 +237,15 @@ def arm_manifest(arm: Arm) -> dict[str, Any]:
                 "host_authored_summary": False,
             },
             "failure_taxonomy": failure_taxonomy(),
-            "decision_contract": {
-                "parser": "llm_repl_agent.agent.parse_decision_message",
-                "fields": ["action", "data", "reason"],
-                "legality_checked_against": "observation.available_actions",
-            },
+            "decision_contract": (
+                agent.decision_contract()
+                if hasattr(agent, "decision_contract")
+                else {
+                    "parser": "llm_repl_agent.agent.parse_decision_message",
+                    "fields": ["action", "data", "reason"],
+                    "legality_checked_against": "observation.available_actions",
+                }
+            ),
             "treatment_capabilities": [
                 {
                     "name": capability.name,
@@ -255,7 +266,13 @@ def arm_manifest(arm: Arm) -> dict[str, Any]:
                 "treatment_capabilities": list(arm.spec.treatment_capabilities),
             },
             "transport_retry_policy": arm.client.policy(),
-            "capability_registry": sorted(TREATMENT_CAPABILITIES),
+            # The registry as a whole is deliberately absent. Listing every declared
+            # capability made an arm's manifest depend on capabilities it does not
+            # enable, so registering a treatment moved the control's manifest digest
+            # and forced a re-pin — a moving baseline, and the exact failure the
+            # freeze exists to catch. Scoped to what this arm enables, the field is
+            # spec.treatment_capabilities above. What else was declared that run is
+            # recoverable from capabilities.py, which runtime_digest() covers.
             "source_sha256": participating_sources(),
         },
     }

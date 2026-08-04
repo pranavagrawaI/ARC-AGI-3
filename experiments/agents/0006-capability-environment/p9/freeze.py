@@ -59,13 +59,24 @@ RUNTIME_MODULES = (
 # one digest keeps that true without duplicating 0002's list here, where it would rot.
 BASELINE_PROTOCOL_KEY = "0002-protocol"
 
-# Pinned 2026-07-29, after the second live capability pair and the final verifier
-# pass closed HTTP-error response handles. The model-visible manifest did not move.
-# This is the 0002-R every 0006 comparison is measured against; moving it means the
-# baseline moved.
-FROZEN_RUNTIME_DIGEST = "1db0308a4badf92dd7b7348f8091d9d02263116f992df49e0de0f4c3a2d86afc"
+# Re-pinned 2026-08-02, for two changes taken together.
+#
+# The learning_loop capability was declared in the registry. That moves runtime only:
+# the control does not enable it, so nothing the model sees differs.
+#
+# It moved the control manifest too, until this pin. ``host_only.capability_registry``
+# listed every declared capability, so registering any treatment changed the control's
+# manifest and forced a re-pin — the moving baseline this file's opening paragraph
+# exists to prevent, arriving through the audit fields rather than the model-visible
+# ones. The field is gone from ``arm_manifest``; scoped to what an arm enables it was
+# ``host_only.spec.treatment_capabilities``, already recorded beside it.
+#
+# Verified on this pin: registering learning_loop leaves the control manifest digest
+# at the value below and moves runtime alone. That is the pair reading its two digests
+# were meant to produce — the control moved, and not where the model can see.
+FROZEN_RUNTIME_DIGEST = "b00dbcd9e3eb13b5a3bb3c23caf87c9840574e47940eab7f9b17829d8cb4e9fe"
 FROZEN_CONTROL_MANIFEST_DIGEST = (
-    "4482de944f17fdb26b76f66f23c95b7a73b0b1f2b602868d7f96445688abd5c6"
+    "5a6ee9f886a1f2b43374880edda85a2e2b9d88bfc8c72ef2a634a708c8b29ef3"
 )
 
 # Per-component digests exist only so a failure names the file that moved. A scalar
@@ -75,8 +86,8 @@ FROZEN_RUNTIME_COMPONENTS: dict[str, str] = {
     "0002-protocol": "5fc34b7a9927af0905810a6aed747b286da0d958e695bd1cd5a0a0d1cb6a9616",
     "p9/agent.py": "17ed0f1833486d34d76f1b363ec972f68273789133f206b265c4bae1dcabc7a7",
     "p9/annotated_frame.py": "3c9c0627e04ad6f20541bba535bc40b27e889669c9400c7dd2fd4818141084d1",
-    "p9/arms.py": "20ae6eb68d52670a0a9a50e97c496a1d0b65d6407a283c0afd91c80fee13942f",
-    "p9/capabilities.py": "6967f882830fcf4acaa6acd025b276fe2c64b66c0e632b3d7413c474cf81e123",
+    "p9/arms.py": "31e5bccb39b521387f7b5a11b885a72c61b7f57972aeb3307c4eaf84c683ef28",
+    "p9/capabilities.py": "f7dd816493f7e6ef32ca1ffe8e543fa99e84df857e019d0662a34122df095eab",
     "p9/conversation.py": "4b467dabac9a6c67a504fcde51d1f4eadcec8ca60c1d4fb2a714901e135cafc4",
     "p9/failures.py": "8216b7aae6f97c9044fa2817dd8e774803e906f02c9ea1a5d5a6afecb000fa20",
     "p9/frame_tools.py": "5aa1f87809daba7c3aec012eb9a50b586af1a79907f4382771b466cb89a008e0",

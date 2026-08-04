@@ -32,7 +32,7 @@ from p9 import (
     p9_4_harness_task,
     run_arm,
 )
-from p9 import freeze
+from p9 import capabilities, freeze
 from p9.arm_diff import compare_arms, flatten, is_authorized, normalize_request_payload
 from p9.arms import ArmSpec, control_spec, treatment_spec
 from p9.capabilities import (
@@ -708,6 +708,38 @@ class FreezeTests(unittest.TestCase):
         manifest = freeze.control_manifest()
         self.assertNotIn("source_sha256", manifest.get("host_only", {}))
         self.assertNotIn("run_dir", manifest.get("host_only", {}))
+
+    def test_registering_a_capability_does_not_move_the_control(self) -> None:
+        """The control's manifest may not depend on capabilities it does not enable.
+
+        ``host_only.capability_registry`` listed every declared capability, so adding
+        a treatment moved the control's manifest digest and forced a re-pin. That is
+        a moving baseline reached through the audit fields instead of the
+        model-visible ones, and it costs the pair its whole reading: runtime alone
+        moving is what says the control changed somewhere the model cannot see.
+        """
+
+        probe = capabilities.TreatmentCapability(
+            name="unrelated_probe",
+            summary="Declared but never enabled by the control.",
+            manifest_paths=("model_visible.tools",),
+            request_payload_paths=(),
+            prompt_addendum="Never reaches the control.",
+        )
+        # The registry is mutated in place rather than patched onto the module.
+        # ``from .capabilities import TREATMENT_CAPABILITIES`` binds the dict in each
+        # consumer's own globals, so rebinding the attribute here leaves those
+        # bindings pointing at the original and the test passes against the very
+        # regression it exists to catch. Mutating the shared object reaches them all.
+        registry = capabilities.TREATMENT_CAPABILITIES
+        self.assertNotIn("unrelated_probe", registry)
+        before = freeze.control_manifest_digest()
+        registry["unrelated_probe"] = probe
+        try:
+            after = freeze.control_manifest_digest()
+        finally:
+            del registry["unrelated_probe"]
+        self.assertEqual(before, after)
 
     def test_control_manifest_closes_the_constructed_arm(self) -> None:
         """Reading the freeze must not leave its workspace worker and log open."""

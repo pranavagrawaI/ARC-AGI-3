@@ -36,6 +36,46 @@ class TreatmentCapability:
 
 
 TREATMENT_CAPABILITIES: dict[str, TreatmentCapability] = {
+    "learning_loop": TreatmentCapability(
+        name="learning_loop",
+        summary=(
+            "Preserves an arbitrary model-authored working state, returns only exact "
+            "model-selected transition records, separates immediate mechanism predictions "
+            "from bounded objective-progress claims, and reports both mechanical results. "
+            "The host does not create, rank, or revise hypotheses."
+        ),
+        manifest_paths=(
+            "model_visible.decision_contract",
+            "model_visible.observation_message.payload_keys",
+            "model_visible.treatment_capabilities",
+            "model_visible.workspace.reserved_paths",
+        ),
+        request_payload_paths=(
+            "messages.*.content.*.observation_payload.capability_packet",
+        ),
+        prompt_addendum=(
+            "The learning_loop capability adds capability_packet to each observation. "
+            "It echoes your prior working_state, the mechanical result of your preceding "
+            "mechanism prediction, active_objective, last_objective_result, and exact "
+            "transition records for history_steps you selected on your preceding action. "
+            "Observation pixels remain at the packet's file paths. "
+            "For every action, reason must be an object with exactly: working_state (any "
+            "JSON object you own), test (a brief mechanism test), prediction (1-5 immediate "
+            "public mechanism assertions), objective, history_steps (0-4 already recorded "
+            "integer steps to retrieve next turn), and reconciliation. An assertion is "
+            "{observable:'changed_pixels'|'levels_completed',op:'=='|'!='|'<'|'<='|'>'|'>=',value:nonnegative integer}, "
+            "{observable:'state',op:'=='|'!=',value:string}, or "
+            "{observable:'cell',x:column,y:row,op:'=='|'!=',value:integer}; cell reads the "
+            "public final layer. When active_objective is null, objective must be "
+            "{claim:string,progress:{observable:'levels_completed',op:'>',value:CURRENT_LEVELS_COMPLETED},horizon:1..8}. "
+            "This is a bounded game-progress claim, not another local visual prediction. "
+            "While active_objective exists, objective must be null so its horizon cannot be "
+            "reset. reconciliation must be null unless the preceding mechanism prediction "
+            "mismatched or last_objective_result is falsified; after either, it must explain "
+            "your response. A falsified objective requires a new model-authored objective. "
+            "The host preserves and checks this material but never decides what it means."
+        ),
+    ),
     "connected_components": TreatmentCapability(
         name="connected_components",
         summary=(
