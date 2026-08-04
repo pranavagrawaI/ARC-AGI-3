@@ -1,0 +1,162 @@
+diff --git a/examples/arc_agi_3/arc_llm.py b/examples/arc_agi_3/arc_llm.py
+index 2c0ee0f..da95af4 100644
+--- a/examples/arc_agi_3/arc_llm.py
++++ b/examples/arc_agi_3/arc_llm.py
+@@ -85,6 +85,32 @@ def build_llm(
+             }
+         else:
+             extra["reasoning_effort"] = reasoning_effort
++    # Preserve the project's existing OpenRouter routing contract when reproducing
++    # the ARC example with the same Gemma/provider path.  The upstream example is
++    # gateway-oriented and otherwise offers no provider pin, allowing OpenRouter to
++    # select a different implementation of the same model between runs.
++    if "openrouter.ai" in os.environ["ARC_LLM_BASE_URL"]:
++        existing_body = extra.get("extra_body")
++        extra_body: dict[str, object] = (
++            dict(existing_body) if isinstance(existing_body, dict) else {}
++        )
++        provider_only = os.environ.get("OPENROUTER_PROVIDER_ONLY", "").strip()
++        if provider_only:
++            only = [item.strip() for item in provider_only.split(",") if item.strip()]
++            extra_body["provider"] = {
++                "order": only,
++                "only": only,
++                "allow_fallbacks": False,
++            }
++        reasoning = os.environ.get("OPENROUTER_REASONING", "").strip().lower()
++        if reasoning in {"1", "true", "on", "yes"}:
++            extra_body["reasoning"] = {"enabled": True, "exclude": False}
++        elif reasoning in {"0", "false", "off", "no"}:
++            extra_body["reasoning"] = {"enabled": False, "exclude": False}
++        elif reasoning:
++            raise ValueError("OPENROUTER_REASONING must be on or off")
++        if extra_body:
++            extra["extra_body"] = extra_body
+     # gpt-5.x on this gateway must use the Responses API (like the reference profiles'
+     # use_responses_api profiles): chat-completions with tools + reasoning_effort
+     # gets rerouted gateway-side with a mangled model id → 403 key_model_access_denied.
+diff --git a/examples/arc_agi_3/tests/test_llm_routing_and_pricing.py b/examples/arc_agi_3/tests/test_llm_routing_and_pricing.py
+index bd85077..9ea271c 100644
+--- a/examples/arc_agi_3/tests/test_llm_routing_and_pricing.py
++++ b/examples/arc_agi_3/tests/test_llm_routing_and_pricing.py
+@@ -54,6 +54,27 @@ def test_non_gpt5_model_uses_completions(monkeypatch):
+     assert type(arc_llm.build_llm()) is CompletionClient
+ 
+ 
++def test_openrouter_gemma_preserves_provider_pin_and_reasoning(monkeypatch):
++    monkeypatch.setenv("ARC_LLM_MODEL", "google/gemma-4-31b-it")
++    monkeypatch.setenv("ARC_LLM_BASE_URL", "https://openrouter.ai/api/v1")
++    monkeypatch.setenv("ARC_LLM_API_KEY", "test-key")
++    monkeypatch.setenv("OPENROUTER_PROVIDER_ONLY", "deepinfra,chutes,together")
++    monkeypatch.setenv("OPENROUTER_REASONING", "on")
++
++    import arc_llm
++
++    client = arc_llm.build_llm()
++
++    assert client.config["extra_body"] == {
++        "provider": {
++            "order": ["deepinfra", "chutes", "together"],
++            "only": ["deepinfra", "chutes", "together"],
++            "allow_fallbacks": False,
++        },
++        "reasoning": {"enabled": True, "exclude": False},
++    }
++
++
+ def test_use_responses_env_override(monkeypatch):
+     monkeypatch.setenv("ARC_LLM_MODEL", "openai/openai/gpt-4o")  # would default to completions
+     monkeypatch.setenv("ARC_LLM_BASE_URL", "http://gateway.invalid")
+diff --git a/src/nooa/unifiedllm/unifiedllm.py b/src/nooa/unifiedllm/unifiedllm.py
+index 0ce01be..ff05242 100644
+--- a/src/nooa/unifiedllm/unifiedllm.py
++++ b/src/nooa/unifiedllm/unifiedllm.py
+@@ -1805,10 +1805,13 @@ class CompletionClient(UnifiedLLM):
+         def _make_call():
+             raw_response = _collect_sync(litellm.completion(**api_params))
+             reasoning, _ = _extract_reasoning_and_usage(raw_response)
+-            text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
++            response_message = raw_response.choices[0].message  # type: ignore[union-attr]
++            text_content = response_message.content or ""
++            tool_calls = response_message.tool_calls
+ 
+-            # Raise EmptyContentError to trigger retry if configured
+-            if not text_content and reasoning and retry_on_empty:
++            # A tool-only assistant message legitimately has no text content.
++            # Retry only when the response contains neither text nor an action.
++            if not text_content and not tool_calls and reasoning and retry_on_empty:
+                 raise EmptyContentError(reasoning)
+ 
+             return raw_response
+@@ -1981,10 +1984,13 @@ class CompletionClient(UnifiedLLM):
+         async def _make_call():
+             raw_response = await _collect_async(await _litellm_acompletion(api_params))
+             reasoning, _ = _extract_reasoning_and_usage(raw_response)
+-            text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
++            response_message = raw_response.choices[0].message  # type: ignore[union-attr]
++            text_content = response_message.content or ""
++            tool_calls = response_message.tool_calls
+ 
+-            # Raise EmptyContentError to trigger retry if configured
+-            if not text_content and reasoning and retry_on_empty:
++            # A tool-only assistant message legitimately has no text content.
++            # Retry only when the response contains neither text nor an action.
++            if not text_content and not tool_calls and reasoning and retry_on_empty:
+                 raise EmptyContentError(reasoning)
+ 
+             return raw_response
+diff --git a/tests/unifiedllm/test_empty_content_retry.py b/tests/unifiedllm/test_empty_content_retry.py
+index a8e6638..c88a934 100644
+--- a/tests/unifiedllm/test_empty_content_retry.py
++++ b/tests/unifiedllm/test_empty_content_retry.py
+@@ -250,6 +250,25 @@ class TestCompletionClientEmptyContentRetry:
+             assert len(response.tool_calls) == 1
+             assert mock_acompletion.call_count == 1  # No retry for tool calls
+ 
++    @pytest.mark.asyncio
++    async def test_tool_calls_with_reasoning_bypass_retry(self, client_with_retry):
++        """Tool-only responses remain valid when the provider also returns reasoning."""
++        mock_tool_call = make_tool_call(
++            id="call_123", name="test_function", arguments='{"arg": "value"}'
++        )
++        mock_response = make_mock_response(
++            content="", reasoning="I should call the tool.", tool_calls=[mock_tool_call]
++        )
++
++        with patch("litellm.acompletion", new_callable=AsyncMock) as mock_acompletion:
++            mock_acompletion.return_value = mock_response
++
++            response = await client_with_retry.acall([{"role": "user", "content": "Hi"}])
++
++            assert response.finish_reason == "tool_calls"
++            assert len(response.tool_calls) == 1
++            assert mock_acompletion.call_count == 1
++
+     @pytest.mark.asyncio
+     async def test_tool_calls_with_none_content_stores_empty_string_in_assistant_message(
+         self, client_with_retry
+@@ -299,6 +318,24 @@ class TestCompletionClientSyncEmptyContentRetry:
+             assert response.content == "Done!"
+             assert call_count == 3
+ 
++    def test_sync_tool_calls_with_reasoning_bypass_retry(self, client_with_retry):
++        """The sync client accepts a tool-only response with reasoning."""
++        mock_tool_call = make_tool_call(
++            id="call_123", name="test_function", arguments='{"arg": "value"}'
++        )
++        mock_response = make_mock_response(
++            content="", reasoning="I should call the tool.", tool_calls=[mock_tool_call]
++        )
++
++        with patch("litellm.completion") as mock_completion:
++            mock_completion.return_value = mock_response
++
++            response = client_with_retry.call([{"role": "user", "content": "Hi"}])
++
++            assert response.finish_reason == "tool_calls"
++            assert len(response.tool_calls) == 1
++            assert mock_completion.call_count == 1
++
+ 
+ class SentimentResponse(BaseModel):
+     value: str

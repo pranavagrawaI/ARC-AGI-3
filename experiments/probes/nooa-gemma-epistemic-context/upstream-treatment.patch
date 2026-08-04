@@ -1,0 +1,436 @@
+diff --git a/examples/arc_agi_3/arc_llm.py b/examples/arc_agi_3/arc_llm.py
+index 2c0ee0f..da95af4 100644
+--- a/examples/arc_agi_3/arc_llm.py
++++ b/examples/arc_agi_3/arc_llm.py
+@@ -85,6 +85,32 @@ def build_llm(
+             }
+         else:
+             extra["reasoning_effort"] = reasoning_effort
++    # Preserve the project's existing OpenRouter routing contract when reproducing
++    # the ARC example with the same Gemma/provider path.  The upstream example is
++    # gateway-oriented and otherwise offers no provider pin, allowing OpenRouter to
++    # select a different implementation of the same model between runs.
++    if "openrouter.ai" in os.environ["ARC_LLM_BASE_URL"]:
++        existing_body = extra.get("extra_body")
++        extra_body: dict[str, object] = (
++            dict(existing_body) if isinstance(existing_body, dict) else {}
++        )
++        provider_only = os.environ.get("OPENROUTER_PROVIDER_ONLY", "").strip()
++        if provider_only:
++            only = [item.strip() for item in provider_only.split(",") if item.strip()]
++            extra_body["provider"] = {
++                "order": only,
++                "only": only,
++                "allow_fallbacks": False,
++            }
++        reasoning = os.environ.get("OPENROUTER_REASONING", "").strip().lower()
++        if reasoning in {"1", "true", "on", "yes"}:
++            extra_body["reasoning"] = {"enabled": True, "exclude": False}
++        elif reasoning in {"0", "false", "off", "no"}:
++            extra_body["reasoning"] = {"enabled": False, "exclude": False}
++        elif reasoning:
++            raise ValueError("OPENROUTER_REASONING must be on or off")
++        if extra_body:
++            extra["extra_body"] = extra_body
+     # gpt-5.x on this gateway must use the Responses API (like the reference profiles'
+     # use_responses_api profiles): chat-completions with tools + reasoning_effort
+     # gets rerouted gateway-side with a mangled model id → 403 key_model_access_denied.
+diff --git a/examples/arc_agi_3/harness.py b/examples/arc_agi_3/harness.py
+index ec4cd11..2131a38 100644
+--- a/examples/arc_agi_3/harness.py
++++ b/examples/arc_agi_3/harness.py
+@@ -108,6 +108,14 @@ def apply_action_cap(actions: list[str], cap: int) -> list[str]:
+     return actions if cap <= 0 else actions[:cap]
+ 
+ 
++def apply_total_environment_cap(
++    actions: list[str], *, max_env_steps: int, env_steps: int
++) -> list[str]:
++    """Hard-stop a batch at the run-wide environment-action limit."""
++    remaining = max(0, max_env_steps - env_steps)
++    return actions[:remaining]
++
++
+ def truncation_note(*, executed: int, requested: int) -> str:
+     """State note telling the agent its batch tail was dropped ('' if it wasn't).
+ 
+@@ -519,6 +527,9 @@ def main() -> int:
+         actions = [a for a in batch.get("actions", []) if isinstance(a, str)]
+         requested_actions = len(actions)
+         actions = apply_action_cap(actions, args.max_actions_per_turn)
++        actions = apply_total_environment_cap(
++            actions, max_env_steps=args.max_env_steps, env_steps=env_steps
++        )
+         # A dropped tail must be LOUD on the next state: the agent may have
+         # truncated at submit time (truncated_from in the batch entry) or the
+         # backstop cap above may have cut a directly-written oversized batch.
+diff --git a/examples/arc_agi_3/launcher.py b/examples/arc_agi_3/launcher.py
+index a39d040..bee2d45 100644
+--- a/examples/arc_agi_3/launcher.py
++++ b/examples/arc_agi_3/launcher.py
+@@ -29,6 +29,11 @@ from solver_agent import MdArcSolverAgent, MemArcSolverAgent  # noqa: E402
+ DEFAULT_SKILL = "grid-game-solver"
+ 
+ 
++def _activate_memory_for_treatment(treatment: str) -> bool:
++    """Evidence-only withholds every model-authored cross-turn memory channel."""
++    return treatment != "evidence_only"
++
++
+ def _skill_path(name: str) -> Path | None:
+     """Resolve a skill by directory name under ``skills/`` (e.g. ``grid-game-solver``).
+     Falls back to the default skill, then to None if neither SKILL.md exists."""
+@@ -285,7 +290,8 @@ async def run() -> None:
+     store_path = run_dir / "store" / "memory.sqlite"
+     ws_store = workspace / "memory.sqlite"
+ 
+-    if args.variant == "memory":
++    activate_memory = _activate_memory_for_treatment(agent._epistemic_treatment)
++    if args.variant == "memory" and activate_memory:
+         from nooa_memory.generative import llm_reasoner, llm_reconciler
+         from nooa_memory.memory_skill import MemorySkill
+ 
+@@ -310,6 +316,14 @@ async def run() -> None:
+             ),
+         )
+         agent.skills.activate(["nemo.memory"])
++    elif args.variant == "memory":
++        agent.context["knowledge_api"] = (
++            "EVIDENCE-ONLY TREATMENT:\n"
++            "- Prior generated explanations and long-term memories are intentionally withheld.\n"
++            "- Do not reconstruct a claim from familiarity or assume repetition is evidence.\n"
++            "- Use <authoritative_action_evidence>, the current state, and self.trajectory() only.\n"
++            "- Treat every hypothesis as provisional and make the next action a falsifiable probe."
++        )
+ 
+     # Kickoff parity with the TUI runner: run_solver used to type this message
+     # into the TUI once the first game state existed. Deliver the same message
+diff --git a/examples/arc_agi_3/solver_agent.py b/examples/arc_agi_3/solver_agent.py
+index 625eb44..5cef233 100644
+--- a/examples/arc_agi_3/solver_agent.py
++++ b/examples/arc_agi_3/solver_agent.py
+@@ -51,6 +51,7 @@ with hidden:
+     from nooa.config import CodeActConfig
+     from nooa.interactive import SummarizationConfig, install_summarizer
+     from nooa.runtime.channels import Channel, _ChannelReader
++    from nooa.runtime.event_query import EventQuery
+     from nooa.runtime.restrictions import (
+         DEFAULT_BLOCKED_MODULES,
+         RestrictionsConfig,
+@@ -510,6 +511,20 @@ def _grid_png_bytes(grid, scale: int) -> bytes:
+     return buf.getvalue()
+ 
+ 
++_EPISTEMIC_TREATMENTS = {"control", "evidence_only", "contradiction_first"}
++
++
++def _normalize_epistemic_treatment(raw: str | None) -> str:
++    """Resolve the experimental context arm, failing closed on typos."""
++    treatment = (raw or "").strip().lower() or "control"
++    if treatment not in _EPISTEMIC_TREATMENTS:
++        choices = ", ".join(sorted(_EPISTEMIC_TREATMENTS))
++        raise ValueError(
++            f"ARC_EPISTEMIC_TREATMENT must be one of {choices}; got {raw!r}"
++        )
++    return treatment
++
++
+ class ArcSolverBase(InteractiveAgent):
+     """You are an interactive grid-game-solving agent. You discover the unknown rules of an
+     interactive 64x64 grid game by experimenting, then solve all its levels.
+@@ -537,6 +552,7 @@ class ArcSolverBase(InteractiveAgent):
+     workspace: Annotated[Path, hidden]
+     helpers_dir: Annotated[Path, hidden]
+     ipc_dir: Annotated[Path, hidden]
++    _epistemic_treatment: Annotated[str, hidden]
+ 
+     def __init__(
+         self,
+@@ -558,6 +574,9 @@ class ArcSolverBase(InteractiveAgent):
+         # cap entirely (the harness must be launched with the same setting so its
+         # backstop truncation is off too — run_multi forwards one config key to both).
+         self._max_actions_per_turn = int(max_actions_per_turn)
++        self._epistemic_treatment = _normalize_epistemic_treatment(
++            os.environ.get("ARC_EPISTEMIC_TREATMENT")
++        )
+         # Visual input mode (off|only|additive): 'only'/'additive' auto-show the
+         # current settled grid to the LLM each turn as a color PNG
+         # ((png_scale*64)x(png_scale*64), 16-color palette) — the picture the
+@@ -669,6 +688,20 @@ class ArcSolverBase(InteractiveAgent):
+         if skill_path is not None:
+             self.context["arc_skill"] = Path(skill_path).read_text()
+         self.context.set_dynamic("arc_game", "self.format_game_context()")
++        if self._epistemic_treatment == "evidence_only":
++            # Keep this CodeAct call's tool loop, but remove all earlier calls
++            # containing accumulated generated prose and code comments. The
++            # dynamic ledger restores complete host-owned action evidence.
++            self.event_query = EventQuery.current_call()
++            self.context.set_dynamic(
++                "authoritative_action_evidence", "self.format_authoritative_evidence()"
++            )
++        elif self._epistemic_treatment == "contradiction_first":
++            # Preserve the control history and add a prominent host-owned audit
++            # before the event history is rendered.
++            self.context.set_dynamic(
++                "authoritative_successor_check", "self.format_contradiction_first()"
++            )
+ 
+         # Step reasoning_effort down the ladder as a turn runs long (wraps
+         # self._llm.acall — must come after super().__init__ set self._llm).
+@@ -733,6 +766,102 @@ class ArcSolverBase(InteractiveAgent):
+                 return json.loads(line)
+         return None
+ 
++    @hidden
++    def _state_records(self) -> list[dict]:
++        records = []
++        for line in self._states_path.read_text().splitlines():
++            line = line.strip()
++            if line:
++                records.append(json.loads(line))
++        return records
++
++    @hidden
++    def _authoritative_action_rows(self) -> list[dict]:
++        """Flatten host action results without importing generated rationales."""
++        rows: list[dict] = []
++        for state in self._state_records():
++            results = state.get("action_results") or []
++            end_step = int(state.get("step") or 0)
++            start_step = end_step - len(results) + 1
++            for offset, result in enumerate(results):
++                rows.append(
++                    {
++                        "step": start_step + offset,
++                        "turn": state.get("turn"),
++                        "action": result.get("action"),
++                        "diff_pixels": int(result.get("diff_pixels") or 0),
++                        "reward": float(result.get("reward") or 0.0),
++                        "level_completed": bool(result.get("level_completed")),
++                        "state": result.get("state") or state.get("state"),
++                    }
++                )
++        return rows
++
++    @hidden
++    def format_authoritative_evidence(self) -> str:
++        """Neutral complete action ledger for the evidence-only treatment."""
++        lines = [
++            "AUTHORITATIVE ACTION EVIDENCE (host observations; explanations excluded)",
++            "Treat prior hypotheses as absent. Infer only from these outcomes and the current state.",
++        ]
++        rows = self._authoritative_action_rows()
++        if not rows:
++            lines.append("No environment action has been executed yet.")
++            return "\n".join(lines)
++        for row in rows:
++            lines.append(
++                "step={step} action={action} diff_pixels={diff_pixels} reward={reward:g} "
++                "level_completed={level_completed} state={state}".format(**row)
++            )
++        return "\n".join(lines)
++
++    @hidden
++    def format_contradiction_first(self) -> str:
++        """Prominent successor audit; semantic interpretation remains agent-owned."""
++        records = self._state_records()
++        latest_with_results = next(
++            (state for state in reversed(records) if state.get("action_results")), None
++        )
++        lines = [
++            "AUTHORITATIVE SUCCESSOR CHECK",
++            "Environment observations outrank every prior explanation, including repeated ones.",
++        ]
++        if latest_with_results is None:
++            lines.append("No previous action batch exists. Make the next action a falsifiable probe.")
++            return "\n".join(lines)
++
++        results = latest_with_results.get("action_results") or []
++        changed = sum(int(result.get("diff_pixels") or 0) > 0 for result in results)
++        noops = len(results) - changed
++        reward_sum = sum(float(result.get("reward") or 0.0) for result in results)
++        completions = sum(bool(result.get("level_completed")) for result in results)
++
++        rows = self._authoritative_action_rows()
++        trailing_action = rows[-1]["action"] if rows and rows[-1]["diff_pixels"] == 0 else None
++        trailing_noops = 0
++        if trailing_action is not None:
++            for row in reversed(rows):
++                if row["action"] != trailing_action or row["diff_pixels"] != 0:
++                    break
++                trailing_noops += 1
++
++        lines.extend(
++            [
++                f"previous batch: {len(results)} actions; {changed} changed; {noops} no-op",
++                f"reward sum: {reward_sum:g}",
++                f"level completions: {completions}",
++                (
++                    f"trailing repeated no-op streak: {trailing_noops} × {trailing_action}"
++                    if trailing_noops
++                    else "trailing repeated no-op streak: 0"
++                ),
++                "Before acting, compare these outcomes with your last prediction.",
++                "State whether the hypothesis is KEEP, REVISE, or ABANDON. KEEP requires fresh supporting evidence.",
++                "If predicted change or public progress did not occur, do not repeat the same plan; propose a competing explanation and one discriminating probe.",
++            ]
++        )
++        return "\n".join(lines)
++
+     @hidden
+     def _last_submitted_turn(self) -> int | None:
+         lines = self._actions_path.read_text().strip().splitlines()
+diff --git a/examples/arc_agi_3/tests/test_llm_routing_and_pricing.py b/examples/arc_agi_3/tests/test_llm_routing_and_pricing.py
+index bd85077..9ea271c 100644
+--- a/examples/arc_agi_3/tests/test_llm_routing_and_pricing.py
++++ b/examples/arc_agi_3/tests/test_llm_routing_and_pricing.py
+@@ -54,6 +54,27 @@ def test_non_gpt5_model_uses_completions(monkeypatch):
+     assert type(arc_llm.build_llm()) is CompletionClient
+ 
+ 
++def test_openrouter_gemma_preserves_provider_pin_and_reasoning(monkeypatch):
++    monkeypatch.setenv("ARC_LLM_MODEL", "google/gemma-4-31b-it")
++    monkeypatch.setenv("ARC_LLM_BASE_URL", "https://openrouter.ai/api/v1")
++    monkeypatch.setenv("ARC_LLM_API_KEY", "test-key")
++    monkeypatch.setenv("OPENROUTER_PROVIDER_ONLY", "deepinfra,chutes,together")
++    monkeypatch.setenv("OPENROUTER_REASONING", "on")
++
++    import arc_llm
++
++    client = arc_llm.build_llm()
++
++    assert client.config["extra_body"] == {
++        "provider": {
++            "order": ["deepinfra", "chutes", "together"],
++            "only": ["deepinfra", "chutes", "together"],
++            "allow_fallbacks": False,
++        },
++        "reasoning": {"enabled": True, "exclude": False},
++    }
++
++
+ def test_use_responses_env_override(monkeypatch):
+     monkeypatch.setenv("ARC_LLM_MODEL", "openai/openai/gpt-4o")  # would default to completions
+     monkeypatch.setenv("ARC_LLM_BASE_URL", "http://gateway.invalid")
+diff --git a/examples/arc_agi_3/tests/test_no_action_cap.py b/examples/arc_agi_3/tests/test_no_action_cap.py
+index d3592cd..078c168 100644
+--- a/examples/arc_agi_3/tests/test_no_action_cap.py
++++ b/examples/arc_agi_3/tests/test_no_action_cap.py
+@@ -123,6 +123,24 @@ def test_harness_cap_disabled_passes_everything(cap):
+     assert hz.apply_action_cap(BIG_BATCH, cap) == BIG_BATCH
+ 
+ 
++def test_total_environment_cap_truncates_final_batch_to_exact_remaining_actions():
++    actions = ["UP"] * 20
++    assert hz.apply_total_environment_cap(actions, max_env_steps=44, env_steps=40) == [
++        "UP"
++    ] * 4
++
++
++def test_total_environment_cap_admits_nothing_after_limit():
++    assert hz.apply_total_environment_cap(
++        ["UP"], max_env_steps=44, env_steps=44
++    ) == []
++
++
++def test_total_environment_cap_keeps_batch_when_budget_is_large_enough():
++    actions = ["UP"] * 20
++    assert hz.apply_total_environment_cap(actions, max_env_steps=44, env_steps=0) == actions
++
++
+ def test_harness_truncation_note_tells_the_agent_what_was_dropped():
+     """The next state's note must say the tail was not executed."""
+     note = hz.truncation_note(executed=20, requested=26)
+diff --git a/src/nooa/unifiedllm/unifiedllm.py b/src/nooa/unifiedllm/unifiedllm.py
+index 0ce01be..ff05242 100644
+--- a/src/nooa/unifiedllm/unifiedllm.py
++++ b/src/nooa/unifiedllm/unifiedllm.py
+@@ -1805,10 +1805,13 @@ class CompletionClient(UnifiedLLM):
+         def _make_call():
+             raw_response = _collect_sync(litellm.completion(**api_params))
+             reasoning, _ = _extract_reasoning_and_usage(raw_response)
+-            text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
++            response_message = raw_response.choices[0].message  # type: ignore[union-attr]
++            text_content = response_message.content or ""
++            tool_calls = response_message.tool_calls
+ 
+-            # Raise EmptyContentError to trigger retry if configured
+-            if not text_content and reasoning and retry_on_empty:
++            # A tool-only assistant message legitimately has no text content.
++            # Retry only when the response contains neither text nor an action.
++            if not text_content and not tool_calls and reasoning and retry_on_empty:
+                 raise EmptyContentError(reasoning)
+ 
+             return raw_response
+@@ -1981,10 +1984,13 @@ class CompletionClient(UnifiedLLM):
+         async def _make_call():
+             raw_response = await _collect_async(await _litellm_acompletion(api_params))
+             reasoning, _ = _extract_reasoning_and_usage(raw_response)
+-            text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
++            response_message = raw_response.choices[0].message  # type: ignore[union-attr]
++            text_content = response_message.content or ""
++            tool_calls = response_message.tool_calls
+ 
+-            # Raise EmptyContentError to trigger retry if configured
+-            if not text_content and reasoning and retry_on_empty:
++            # A tool-only assistant message legitimately has no text content.
++            # Retry only when the response contains neither text nor an action.
++            if not text_content and not tool_calls and reasoning and retry_on_empty:
+                 raise EmptyContentError(reasoning)
+ 
+             return raw_response
+diff --git a/tests/unifiedllm/test_empty_content_retry.py b/tests/unifiedllm/test_empty_content_retry.py
+index a8e6638..c88a934 100644
+--- a/tests/unifiedllm/test_empty_content_retry.py
++++ b/tests/unifiedllm/test_empty_content_retry.py
+@@ -250,6 +250,25 @@ class TestCompletionClientEmptyContentRetry:
+             assert len(response.tool_calls) == 1
+             assert mock_acompletion.call_count == 1  # No retry for tool calls
+ 
++    @pytest.mark.asyncio
++    async def test_tool_calls_with_reasoning_bypass_retry(self, client_with_retry):
++        """Tool-only responses remain valid when the provider also returns reasoning."""
++        mock_tool_call = make_tool_call(
++            id="call_123", name="test_function", arguments='{"arg": "value"}'
++        )
++        mock_response = make_mock_response(
++            content="", reasoning="I should call the tool.", tool_calls=[mock_tool_call]
++        )
++
++        with patch("litellm.acompletion", new_callable=AsyncMock) as mock_acompletion:
++            mock_acompletion.return_value = mock_response
++
++            response = await client_with_retry.acall([{"role": "user", "content": "Hi"}])
++
++            assert response.finish_reason == "tool_calls"
++            assert len(response.tool_calls) == 1
++            assert mock_acompletion.call_count == 1
++
+     @pytest.mark.asyncio
+     async def test_tool_calls_with_none_content_stores_empty_string_in_assistant_message(
+         self, client_with_retry
+@@ -299,6 +318,24 @@ class TestCompletionClientSyncEmptyContentRetry:
+             assert response.content == "Done!"
+             assert call_count == 3
+ 
++    def test_sync_tool_calls_with_reasoning_bypass_retry(self, client_with_retry):
++        """The sync client accepts a tool-only response with reasoning."""
++        mock_tool_call = make_tool_call(
++            id="call_123", name="test_function", arguments='{"arg": "value"}'
++        )
++        mock_response = make_mock_response(
++            content="", reasoning="I should call the tool.", tool_calls=[mock_tool_call]
++        )
++
++        with patch("litellm.completion") as mock_completion:
++            mock_completion.return_value = mock_response
++
++            response = client_with_retry.call([{"role": "user", "content": "Hi"}])
++
++            assert response.finish_reason == "tool_calls"
++            assert len(response.tool_calls) == 1
++            assert mock_completion.call_count == 1
++
+ 
+ class SentimentResponse(BaseModel):
+     value: str
