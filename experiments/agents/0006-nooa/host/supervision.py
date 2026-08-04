@@ -29,7 +29,15 @@ MAX_RECENT_TRANSITIONS = 6
 LINE_BOUNDARIES = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
 LUNA_MODEL = "openai/gpt-5.6-luna"
 LUNA_REASONING_EFFORT = "medium"
-LUNA_MAX_OUTPUT_TOKENS = 2_000
+# Reasoning is drawn from this same ceiling, so a ceiling close to the
+# reasoning length truncates the answer rather than the thinking. Across the
+# eight recorded 44-action attempts Luna's first assignment reasoned for either
+# ~1,034 or ~1,552 tokens; four of those eight instead reported exactly 2,000
+# reasoning tokens with `finish_reason=length`, returned no output_text at all,
+# and killed the run before a single action. The old 2,000 left ~250 tokens of
+# headroom over the longer mode, which is not headroom. Luna costs about
+# $0.0015 a call; the ceiling is not where this experiment should economise.
+LUNA_MAX_OUTPUT_TOKENS = 6_000
 LUNA_PROVIDER_ROUTE = {
     "order": ["openai"],
     "only": ["openai"],

@@ -22,6 +22,7 @@ from competence_runner import EXPECTED_PROJECTION_DTYPE, NooaCompetenceProcessAg
 from experiments.harness import Observation
 from supervision import (
     AssignmentRejected,
+    LUNA_MAX_OUTPUT_TOKENS,
     LunaSupervisorClient,
     SupervisorAssignment,
     SupervisorStateView,
@@ -130,6 +131,50 @@ class SupervisorViewTests(unittest.TestCase):
         self.assertIn("uniquely determines", rendered.lower())
         self.assertIn("one-step progress", rendered.lower())
         self.assertNotIn("tools", request)
+
+    def test_the_output_ceiling_clears_the_observed_reasoning_length(self) -> None:
+        """Reasoning is spent from the same ceiling as the answer.
+
+        Four of the eight recorded 44-action attempts died before their first
+        action with `reasoning_tokens == max_output_tokens` and no output_text
+        at all. The successful first calls reasoned for ~1,034 or ~1,552
+        tokens, so 2,000 sat inside the noise of the longer mode. What this
+        pins is the margin, not the number.
+        """
+
+        observed_longest_reasoning = 1_552
+        self.assertGreaterEqual(
+            LUNA_MAX_OUTPUT_TOKENS, observed_longest_reasoning * 3
+        )
+        view = build_supervisor_view(
+            rules="shared rules",
+            current_observation={"step": 0},
+            available_actions=(1, 2, 3, 4),
+            recent_transitions=[],
+            current_state=SupervisorStateView(
+                player_binding="unknown",
+                current_approx_position="unknown",
+                local_objective="unknown",
+                last_action=None,
+                last_outcome=None,
+            ),
+            previous_assignment=None,
+        )
+        request = build_luna_request(view, frame_data_url="data:image/png;base64,AAAA")
+        self.assertEqual(request["max_output_tokens"], LUNA_MAX_OUTPUT_TOKENS)
+
+    def test_a_truncated_luna_response_is_refused_not_guessed(self) -> None:
+        """The ceiling failure stays loud. A response that spent its whole
+        budget thinking carries no assignment, and inventing one would put
+        words in the supervisor's mouth."""
+
+        truncated = {
+            "id": "gen-1",
+            "output": [{"type": "reasoning", "summary": []}],
+            "incomplete_details": {"reason": "max_output_tokens"},
+        }
+        with self.assertRaises(AssignmentRejected):
+            parse_luna_response(truncated)
 
     def test_luna_response_extracts_only_the_structured_assignment(self) -> None:
         response = {
