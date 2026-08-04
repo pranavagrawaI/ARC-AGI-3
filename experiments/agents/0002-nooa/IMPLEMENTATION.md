@@ -44,7 +44,7 @@ Initial implementation:
 
 This layout is contingent. A future compatible in-process runtime may replace it without changing the contract if qualification still proves the same model-visible boundary.
 
-## Planned tree
+## Current tree
 
 ```text
 experiments/agents/0002-nooa/
@@ -53,6 +53,8 @@ experiments/agents/0002-nooa/
 ├── QUALIFICATION.md
 ├── IMPLEMENTATION.md
 ├── SOURCE_MANIFEST.json
+├── run_live_probe.py
+├── run_paired_probe.py
 ├── nooa-runtime/
 │   ├── pyproject.toml
 │   ├── uv.lock
@@ -60,16 +62,19 @@ experiments/agents/0002-nooa/
 │   ├── launcher.py
 │   └── llm.py
 ├── host/
-│   ├── runner.py
-│   ├── ipc.py
-│   └── parity.py
+│   ├── qualification.py
+│   ├── responses_client.py
+│   └── runner.py
 ├── tests/
+│   ├── test_host.py
+│   ├── test_paired_probe.py
+│   └── test_qualification.py
 └── third_party/nooa/
     ├── LICENSE
     └── THIRD_PARTY_NOTICES.md
 ```
 
-Directories are created only when their first exercised artifact is written.
+The nested runtime also owns its Python 3.12 tests and lockfile.
 
 ## Copy-and-prune source
 
@@ -89,13 +94,32 @@ Do not copy the NOOA framework, harness, recorder, viewer, experiment fleet, ski
 
 ## First-green order
 
-1. Copy the three known-working ARC integration files with attribution and source markers.
-2. Make the copied launcher instantiate one temporary agent variant without changing its upstream behavior.
-3. Close one offline NOOA model→Python→result→action loop through the shared host.
-4. Add a failing test for one forbidden surface.
-5. Delete that surface and make the test pass.
-6. Repeat for runtime introspection, hidden events, memory, retrieval, summarization, reflection, skills, action batching, and host fallback.
-7. Replace broad copied modules with the smallest surviving skeleton only after deletion reveals the irreducible seams.
+The tracer bullet completed the source-copy, nested-runtime, cumulative-loop,
+forbidden-surface, and first parity slices. The remaining first-green work is:
+
+- [x] Replace the offline fixture client with the copied-and-pruned Responses
+  adapter without changing the audited model-visible surface.
+- [x] Freeze the credential-free provider request profile in `PairedRunSpec`.
+- [x] Disable both NOOA retry budgets and LiteLLM retries; keep the bounded
+  transport loop explicit and audited.
+- [x] Record canonical and actual HTTP crossings with credential/image
+  commitments instead of credential/image bodies.
+- [x] Inject retryable, fatal, and uncertain transport failures; prove fatal
+  and uncertain outcomes cannot enter NOOA's generation-repair loop, and prove
+  fatal, uncertain, and exhausted-retryable outcomes produce no host-selected
+  action with exact attempt evidence.
+- [x] Finish the G3/G4/G5/G8 negative and mutation matrices.
+- [x] Extend G7 from the exercised provider crossing to the complete parity
+  catalogue and rerun G1-G8.
+- [x] Construct and offline-test the paired 0002-R-minimal/0002-NOOA G9 runner after
+  G1-G8 became green.
+- [x] Run the current-byte bounded live pair after the operator chooses the
+  explicit game/model/endpoint. Accepted run
+  `g9-20260801T152726Z-fbf2ce0d` qualifies clean revision `94b31b0`.
+  Historical predecessor evidence
+  `g9-20260731T153745Z-d253eb4b` passed LS20/OpenRouter/Gemma before the final
+  helper deletion and compatibility-arm rename; it does not qualify this
+  surface. `run_live_probe.py` remains a single-arm smoke helper, not G9.
 
 Do not reimplement provider normalization, dispatch, yield semantics, or lifecycle from memory before the copied path has run.
 
@@ -160,13 +184,16 @@ The goal is not a polished adaptation of NVIDIA's ARC agent. It is the smallest 
 
 ## Current implementation limitations
 
-Until exercised, do not claim:
+Do not yet claim:
 
 - hostile-code security;
-- endpoint compatibility;
+- endpoint compatibility beyond the exercised OpenRouter Responses profile;
 - provider determinism;
-- clean crash recovery;
 - cross-platform Python/runtime compatibility;
-- that the proposed IPC and nested-project layout survived first contact.
+- gameplay parity or cross-game generality.
 
-These are engineering risks and qualification targets, not semantic clauses in `CONTRACT.md`.
+The Linux/WSL nested-project and IPC path has survived deterministic fixtures,
+including timeout and process-death cleanup, plus one bounded live LS20 pair.
+That is evidence for this substrate, not a cross-platform or general gameplay
+claim. These are engineering risks and qualification targets, not semantic
+clauses in `CONTRACT.md`.

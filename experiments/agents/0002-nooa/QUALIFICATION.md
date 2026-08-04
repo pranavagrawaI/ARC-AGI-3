@@ -1,12 +1,255 @@
 # Qualifying 0002-NOOA
 
-Status: executable qualification plan for the pre-freeze candidate. This file may change as tests expose missing or unnecessary checks; it does not define the semantic identity of `0002-NOOA`.
+Status: accepted qualification record for the frozen minimal substrate. It does
+not license gameplay-competence or treatment-effect claims.
 
 The stable authority boundary is in [`CONTRACT.md`](./CONTRACT.md). Engineering choices are in [`IMPLEMENTATION.md`](./IMPLEMENTATION.md). Upstream provenance is in [`SOURCE_MANIFEST.json`](./SOURCE_MANIFEST.json).
 
+## The freeze was reopened on 2026-08-02
+
+`dfb2d2b` was frozen with a defect G9 could not have caught, and G9's pass was
+routing luck rather than evidence of correctness.
+
+`return_result` ends an action point: the host takes its argument and releases
+the environment action, so no tool message ever replies to that call. The
+retained conversation replayed it anyway, leaving an unanswered `tool_call` in
+every request after the first action point. Providers disagree about whether that
+is legal. ModelRun refuses it — *"every tool_call must be answered by a tool
+message before the conversation continues"* — while CoreWeave accepts it.
+
+`g9-20260801T152726Z-fbf2ce0d` sent no provider pin, so OpenRouter load-balanced
+it: its first generation went to ModelRun and its later ones to CoreWeave, which
+is why three action points completed. The fault surfaced only when `0006-NOOA`
+pinned `modelrun/fp4` exclusively with fallbacks disabled and every second action
+point failed with HTTP 400. It is reproducible from the preserved request body
+once the redacted frame image is restored from `worker/model-frame.png`, whose
+sha256 the audit records.
+
+The assembled request now drops any tool call that was never answered. Dropping only
+`return_result` was insufficient: when the model returns inline, the cell itself
+ends the action point, so the enclosing `execute_python` call is the one left
+unanswered. The rule is therefore stated over replies, not over tool names.
+
+Filtering the agent's message list was not enough, at either site. A real
+Responses turn arrives as a ``{"_batch": [...]}`` envelope carrying the
+provider's output items verbatim, and its ``function_call`` items do not exist
+until ``_expand_response_batches`` runs inside the client. Three successive fixes
+passed against ``FakeLLMClient``'s chat shape -- ``{"role": "assistant",
+"tool_calls": [...]}`` -- which production never emits, and each still failed
+live. The filter now runs on the final Responses items, the one point where every
+route into the request has one shape, and its test is driven by the recorded
+envelope from run 20260802T160203Z.
+
+Reasoning items are never dropped; past reasoning is required for model
+performance and the test asserts the item survives byte-for-byte.
+
+Filtering at retention was also not enough. A repair crossing reissues one action
+point, so the consumed call reaches the provider through the live turn as well as
+through the retained ones, and only the assembled request sees both. Two
+regression tests passed against the retained path while the live repair crossing
+still failed.
+
+### The consumed call is answered, not rewritten
+
+Preserving the consumed call as assistant text was itself a defect, and it cost
+run `20260803T062052Z` its second action. The transcript then ended in an
+assistant turn whose entire content was narration wrapping a code block, and at
+the next action point the model reproduced that narration verbatim as its answer
+instead of acting. NOOA read the result as `return_result(result=<str>)` and
+refused it: *"'result' has wrong type. Expected: ActionDecision. Got: str"*. Ten
+generations bought one action.
+
+A transcript teaches by example whether or not it means to. The host's account of
+what it did therefore belongs in the host's slot, not in a turn attributed to the
+model. The consumed `function_call` now keeps its own shape and receives the
+`function_call_output` it never got, which is what every other call in the
+transcript receives and what no model turn resembles. Deleting the call outright
+was rejected for the same reason as before -- it would delete the model's record
+of the cell that produced its own action -- and this keeps that record in the
+model's own voice rather than a paraphrase of it.
+
+This also answers ModelRun's requirement directly rather than by avoidance:
+every tool call in the request now has a reply. The fix is verified against the
+recorded request from the run that failed, where it leaves no unanswered call and
+authors no assistant turn.
+
+### The reopening is closed by a pinned G9
+
+The condition this section set — *G9 must be re-run against a pinned single
+provider before this gate is claimed again* — is met by
+[`g9-20260803T070026Z-1ff52c26`](./artifacts/paired-usability-probes/g9-20260803T070026Z-1ff52c26/summary.json),
+recorded under **Accepted pinned live G9** below.
+
+Meeting it required building the pin, because G9 never had one. This runner
+hardcoded the runtime root and built the control client with no route, so every
+G9 ever run took whatever endpoint the gateway chose. The instruction to re-run
+pinned was unexecutable on the day it was written, which is worth stating plainly:
+the gap that let a broken substrate pass was not that someone forgot to pin, but
+that pinning was not among the things this gate could do.
+
+`g9-20260801T152726Z-fbf2ce0d` stands as a record of what was run. It is not
+evidence that the substrate is correct across providers, and it is superseded as
+current-byte G9 evidence.
+
+## Current gate state
+
+The minimal tracer is qualified through G9. Current-byte live run
+`g9-20260803T070026Z-1ff52c26` passed on LS20 through OpenRouter with Gemma from
+clean revision `77c31aa`, with every crossing pinned to one provider endpoint and
+every generation confirmed to have been served by it. The provider-routing caveat
+that qualified the previous entry no longer applies.
+
+| Gate | State | Current evidence | Remaining load-bearing gap |
+|---|---|---|---|
+| G1 | pass offline + live commitment | pinned source bytes and notices; pruned provider source; full generated-code import/file/runtime route matrix; forbidden-affordance mutations; live source-state records clean revision, runtimes, and 51 source hashes | none |
+| G2 | pass offline + live | cumulative memory/file loop crosses a successor through host IPC; both live arms reused the committed probe file after a successor | none |
+| G3 | pass offline | forced eviction matches the 0002-R boundary; host retains audit events while generated code cannot enumerate framework history; omission-removal mutant fails | none; bounded live G9 did not reach eviction |
+| G4 | pass offline + live inspection | namespace/helpers after initial start and timeout restart, garbage-collector enumeration, concurrency, processes, packages, source, caches, IPC/run artifacts, and outside-workspace reads are closed while generic Python, NumPy, and Pillow work; live traces exposed no unclassified route | none |
+| G5 | pass offline + live | valid return stops later model/Python work; delayed background mutation, replacement, and post-accept workspace mutation are rejected; both live arms crossed three accepted actions and successors | none |
+| G6 | pass offline + live success | retryable/fatal/uncertain injection carries exact attempt evidence and makes no host action; the bounded live success path stopped cleanly | none |
+| G7 | pass offline + live | the constructed `0002-R-minimal` compatibility fixture and NOOA fixture are value-diffed across every crossing; all 12 live provider crossings matched the frozen request profile with zero mismatches | none |
+| G8 | pass offline | eight behavioral crossing mutants are rejected independently of wording; deletion probes kill namespace closure, omission, persistence, timeout restart, validation, and both temporal barriers | none offline |
+| G9 | pass live, pinned | `g9-20260803T070026Z-1ff52c26`: both arms completed three actions, used Python on at least two action points, reused the probe file, stopped at the action budget, shut down cleanly, and emitted complete traces, with all 17 crossings pinned to `modelrun/fp4` and all 17 generations confirmed served by ModelRun | none within the interface-usability claim; competence remains outside this gate |
+
+The provider and transport/evidence seam, exhaustive negative/mutation matrices,
+complete offline compatibility catalogue, and bounded current-byte live
+usability pair are green.
+
+### Reproduction
+
+From the repository root:
+
+```bash
+uv run --python 3.14 python -m unittest discover \
+  -s experiments/agents/0002-nooa/tests -v
+```
+
+From `experiments/agents/0002-nooa/nooa-runtime/`:
+
+```bash
+.venv/bin/python -m pytest -s tests -q
+```
+
+Offline paired-runner regression from the repository root:
+
+```bash
+uv run --python 3.14 python experiments/agents/0002-nooa/run_paired_probe.py \
+  --offline --max-actions 2 --max-model-calls 4 \
+  --max-model-rounds-per-action 2 --run-root /tmp/0002-nooa-g9-offline
+```
+
+The timeout fixtures create nested workers; run them where the operating system
+process and Landlock guards are available.
+
+Current rerun (2026-08-01): 91 Python 3.12 runtime tests and 31 Python 3.14 host
+tests pass. The offline G9 runner regression is included in the host count. The
+host count includes end-to-end coordinate-action and multi-layer last-layer
+closure tests.
+
+### CN04 click-route smoke
+
+The bounded online CN04 smoke at `provider-smoke-probes/cn04/20260801T141859Z`
+advertised coordinate action `6` at all three requests. It validated and crossed
+two actions (`{x: 15, y: 27}` and `{x: 39, y: 36}`), each with a successor.
+The third request exhausted its explicit reported-token budget before a decision;
+the worker still stopped with exit code 0. Compact commitments and redaction
+results are in `artifacts/FREEZE_EVIDENCE.json`; raw evidence is local only.
+
+### CN04 long-horizon click tracer
+
+The separate online CN04 tracer at
+`provider-smoke-probes/cn04/20260801T142326Z-50a-20r-4m` completed 50 actions:
+all 50 were validated coordinate action `6` decisions and all 50 recorded a
+successor. It stopped at the action budget (`NOT_FINISHED`, 0 levels completed)
+with a clean worker exit. This is crash-resistance and route evidence, not proof
+of CN04-solving or cross-game capability. The
+subsequent removal of the optional frame helper does not alter this action route;
+the accepted pinned G9 independently qualifies the minimal interface.
+
+### Accepted pinned live G9
+
+[`g9-20260803T070026Z-1ff52c26`](./artifacts/paired-usability-probes/g9-20260803T070026Z-1ff52c26/summary.json)
+ran `0002-R-minimal` and `0002-NOOA` from clean revision `77c31aa` on LS20 seed 0,
+with paired-spec digest
+`bf8b440826c9c904edb1812ee796b1286f8c9282211369c4ed64a119c2bccf86` and
+source-state digest
+`1b44071cc63301601a5db733a3b861ed5c7e9c97ea9494b760d241ee9568d62d` over 51
+participating-source hashes. Each arm completed three actions, used Python across
+at least two action points, reused `G9_CAPABILITY_PROBE.json` after the first
+successor, stopped at the common action budget, shut down cleanly, and produced
+complete traces. The control made ten provider crossings and the candidate seven;
+all seventeen matched the frozen OpenRouter `/responses` profile with zero
+mismatches.
+
+Three things were checked rather than inferred, because each is a way the
+previous gate was wrong:
+
+- **the pin was sent** — all seventeen recorded request bodies carry the
+  `modelrun/fp4` provider block, on both arms;
+- **the pin was honoured** — all seventeen generation records return
+  `provider_name: ModelRun`, retrieved from the gateway by generation id. A 200
+  under `only` with `allow_fallbacks: false` already implies this, but implication
+  is what made the previous gate wrong;
+- **no call was left open** — zero unanswered `function_call` items in any
+  crossing on either arm, which is the defect that reopened the freeze.
+
+Total cost $0.017508. The control arm's crossings carried no unanswered call in
+the superseded run either: the consumed-call defect and its repair live on the
+candidate path, because the control's client is host-owned and its agent answers
+every call it makes. The pin is what this run adds; the fix it exercises is
+candidate-side.
+
+### Superseded current-byte live G9
+
+[`g9-20260801T152726Z-fbf2ce0d`](./artifacts/paired-usability-probes/g9-20260801T152726Z-fbf2ce0d/summary.json)
+ran `0002-R-minimal` and `0002-NOOA` from clean revision `94b31b0` on LS20
+seed 0. Each arm completed three actions, used Python across at least two action
+points, reused `G9_CAPABILITY_PROBE.json` after the first successor, stopped at
+the common action budget, shut down cleanly, and produced complete traces. The
+control made seven provider crossings and the candidate five; all twelve matched
+the frozen OpenRouter `/responses` profile with zero mismatches. The source-state
+record commits the revision, clean status, Python 3.14/3.12 runtimes, and 51
+participating-source hashes. A 67-file audit found no unredacted credential,
+Authorization bearer value, `.env` path, or unredacted data-image body.
+
+It sent no provider block, so the gateway load-balanced it: the first generation
+went to ModelRun and the later ones to CoreWeave. Three action points completed
+only because the provider that refuses an unanswered tool call did not see the
+requests that carried one. Every check above passed on a substrate that one
+provider rejected outright, which is what a gate reporting a green result on an
+unpinned route is worth.
+
+### Historical live G9 evidence
+
+The predecessor run is
+[`g9-20260731T153745Z-d253eb4b`](./artifacts/paired-usability-probes/g9-20260731T153745Z-d253eb4b/summary.json),
+with paired-spec digest
+`c6d5ebb6639d10b7f5f486ce0e380459bb9ec33db04786470c18170a5e6ae0a5`.
+It used LS20 seed 0, routing model `openai/google/gemma-4-31b-it`, wire model
+`google/gemma-4-31b-it`, and `https://openrouter.ai/api/v1`. The control made
+seven provider crossings and the candidate five; every projected static or
+tool-conditional request field matched the frozen profile. A post-run scan
+found neither the inherited credential nor unredacted data-image bodies in the
+provider evidence.
+
+Two prior nonzero runs were rejected and retained as diagnostic evidence:
+
+- [`g9-20260731T152815Z-02b334c2`](./artifacts/paired-usability-probes/g9-20260731T152815Z-02b334c2/summary.json)
+  exposed Chat-style multimodal blocks crossing directly into `/responses`;
+- [`g9-20260731T153352Z-c9265982`](./artifacts/paired-usability-probes/g9-20260731T153352Z-c9265982/summary.json)
+  reached one action and exposed an unflattened NOOA `_batch` successor-history
+  item.
+
+Prospective regressions now require exact `input_text`/`input_image` projection,
+native successor-history flattening, numeric token-field preservation, and
+tool controls that are present exactly when tools are present.
+
 ## Shared paired-run specification
 
-A comparison constructs `0002-R` and `0002-NOOA` from one immutable paired-run specification. It must declare at least:
+A usability qualification constructs `0002-R-minimal` and `0002-NOOA` from one
+immutable paired-run specification. `0002-R-minimal` is the explicitly derived
+no-helper compatibility arm defined in `CONTRACT.md`, not the frozen reference
+and not a treatment-effect control. The specification must declare at least:
 
 - model, provider endpoint, request profile, and model seed where supported;
 - environment/game identifier and environment seed, host-only where required;
@@ -32,6 +275,7 @@ These are test and experiment defaults, not identity:
 | Setting | Initial default |
 |---|---:|
 | Retained conversation turns | 6 |
+| Retained public transitions | 8 |
 | Model rounds per action | 10 |
 | Decision repairs | 2 |
 | Total model calls | 100 |
@@ -140,7 +384,7 @@ Assert each fault actually fired and produced the contracted routing and evidenc
 
 ## G7 — Model-visible parity report
 
-Construct one `0002-R` and one `0002-NOOA` fixture run from the shared paired-run specification. Normalize and diff:
+Construct one `0002-R-minimal` and one `0002-NOOA` fixture run from the shared paired-run specification. Normalize and diff:
 
 - semantic system-instruction sections and digests;
 - current observation fields and representations;
@@ -177,9 +421,38 @@ At minimum, mutants that reintroduce any of the following must fail G1, G3, G4, 
 
 Mutants that remove omission notices, Python/files persistence, timeout/restart reporting, action validation, or the post-accept temporal barrier must fail G2, G3, G5, or G6.
 
+Current deletion-probe evidence (2026-07-31):
+
+| Removed mechanism | Independent gate result |
+|---|---|
+| sandbox namespace pruning | G4 produced three failures and exposed `self`, `CodeActStrategy`, and `variables()` |
+| pointer-only omission insertion | G3 failed because the eviction notice disappeared |
+| episode-scoped sandbox retention | G2 failed on the successor because Python memory was gone |
+| timeout `restart_empty` recovery | G6 failed because the killed worker could not accept the repair cell |
+| runtime action postcondition and final validation | the illegal-action fixture admitted action `99` instead of repairing |
+| accepted-workspace commitment | G5 admitted a post-accept file mutation |
+| pending-action guard | G5 failed; the worker's duplicate action-point identity remained only as a later backstop |
+
+Each source mutant was applied alone, its named test was observed failing, and
+the production implementation was restored before the full rerun. Eight
+wording-independent behavioral crossing mutants separately expose runtime
+introspection, hidden-history query, automatic retrieval, summarization,
+semantic skill text, history selection, action batching, and host force-advance.
+Each changes an actual instruction, observation, context, or tool crossing and
+G7 rejects it. Text sentinels remain only a secondary diagnostic.
+
 ## G9 — One bounded live usability probe
 
-After G1–G8 pass, run a small same-model, same-provider, same-game, same-budget pair. Inspect raw traces from both bases for:
+After G1–G8 pass, run a small same-model, same-provider, same-game, same-budget
+`0002-R-minimal`/`0002-NOOA` pair. *Same-provider* is a requirement on the run,
+not a description of it: an unpinned pair is served by whichever endpoints the
+gateway picks, and each is free to differ about what request is legal. Only a
+pinned route qualifies this gate, and `run_paired_probe.py` refuses to claim
+otherwise — an open route still runs and still reports its result, but reports
+`route_can_qualify` and `qualifies_g9` false. Confirm the pin was honoured from
+the gateway's generation records rather than from the absence of an error.
+
+Inspect raw traces from both arms for:
 
 - interface rediscovery;
 - tool and import friction;
@@ -190,6 +463,34 @@ After G1–G8 pass, run a small same-model, same-provider, same-game, same-budge
 
 This licenses interface observations only. It does not establish gameplay superiority, causal treatment effect, or 0006 readiness.
 
+Both arms receive one neutral, spec-committed usability instruction in
+`NOTES.md`: use Python to create a probe file before action one, then read and
+update it after the first successor and before action two. A successful verdict
+requires both action boundaries, Python use at both, the persisted file, clean
+shutdown, complete traces, and no blocking stop. The instruction supplies no
+game semantics and is not part of the frozen base outside G9.
+
+The paired entry point is `run_paired_probe.py`. Its `--offline` mode is the
+runner regression and uses no provider. Live mode requires inherited
+`ARC_LLM_API_KEY`, explicit `--game`, `--model`, `--wire-model`, and
+`--api-base`, and creates a fresh same-seed game for each arm. `--model` is the
+NOOA/LiteLLM routing identifier; `--wire-model` is the exact model value both
+actual `/responses` payloads must carry. It never searches `.env` files.
+
+`--provider-route` defaults to `pinned`. The control client carries the route
+directly; the candidate, which runs in its own process against the frozen
+runtime, receives it through an overlay launcher that imports the frozen module,
+wraps `build_llm`, and hands control to the frozen entry point. The frozen
+runtime is pointed at, never edited or copied.
+
+```bash
+ARC_LLM_API_KEY=... uv run --python 3.14 python \
+  experiments/agents/0002-nooa/run_paired_probe.py \
+  --game <game-id> --model <routing-model-id> --wire-model <wire-model-id> \
+  --api-base <provider-v1-base> --provider-route pinned \
+  --max-actions 3 --max-model-calls 12
+```
+
 ## Freeze boundary
 
 Freeze `0002-NOOA` only after:
@@ -198,4 +499,6 @@ Freeze `0002-NOOA` only after:
 2. the bounded live probe exposes no unclassified model-visible crossing;
 3. a delete-centric pass removes implementation that no independent check detects;
 4. restoring the smallest removed function repairs a demonstrated failure;
-5. the contract, source manifest, and executable qualification evidence agree.
+5. the contract, source manifest, and executable qualification evidence agree;
+6. the live probe ran pinned to one provider endpoint, and the gateway's own
+   generation records confirm that endpoint served every crossing.

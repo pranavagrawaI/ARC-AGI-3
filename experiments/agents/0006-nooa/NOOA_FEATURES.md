@@ -10,7 +10,7 @@ This file records useful mechanisms present in the NVIDIA NOOA ARC example that 
 ## Source boundary
 
 - Local source: `/home/hipra/projects/nooa`
-- Repository: `git@github.com:pranavagrawaI/labs-OO-Agents.git`
+- Repository: `https://github.com/pranavagrawaI/labs-OO-Agents.git`
 - Inspected commit: `bd51d16e2594f0bc237b14fb31e9a880ec385b39`
 - Primary example: `examples/arc_agi_3/`
 - License: Apache-2.0; retain upstream SPDX and attribution when copying code.
@@ -28,6 +28,27 @@ Only when both answers are yes does it belong in `0002-NOOA`. Otherwise delete i
 base and maintain its source, exclusion reason, disposition, and re-admission evidence here.
 Entries include permanent rejections as well as possible `0006-NOOA` material; logging a
 feature does not promise to reintroduce it.
+
+### 0002-NOOA tracer-bullet disposition
+
+Exercised through 2026-07-31 against pinned commit `bd51d16e2594f0bc237b14fb31e9a880ec385b39`:
+
+- **Kept/adapted:** ordinary `Agent` composition, `CodeActStrategy`, event middleware,
+  typed method return, deterministic `FakeLLMClient` fixtures, and NOOA's guarded Python
+  worker. The worker is retained for an episode so model-created Python variables and files
+  survive one-action method boundaries; each new public action point is deterministically
+  reseeded into that same worker.
+- **Pruned:** ARC-specific observation/action methods, trajectory and grid conveniences,
+  skills, memory APIs, retrieval/reflection, summarization, helper coaching, action batching,
+  force-advance, effort ladders, viewers, fleet machinery, and cross-episode seeding.
+- **Added as model-invisible substrate:** a Python 3.14 host adapter, long-lived Python 3.12
+  worker, versioned append-only JSONL IPC, exact public transition forwarding, legal-action
+  and coordinate validation, fail-closed process supervision, filesystem confinement, and
+  network denial.
+- **Still withheld/pending:** production provider wiring, paired real-game parity, provider
+  transport classification/retries, full provider trace export, exhaustive negative and
+  mutation matrices, and any 0006 treatment mechanism. Deterministic fixtures now cover
+  timeout restart, response timeout, worker death, and process-tree cleanup on Linux/WSL.
 
 ## Re-admission rule
 

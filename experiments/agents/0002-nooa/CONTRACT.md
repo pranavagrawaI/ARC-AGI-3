@@ -1,6 +1,8 @@
-# 0002-NOOA pre-freeze contract
+# 0002-NOOA frozen minimal-substrate contract
 
-Status: build authority for the first working candidate. Not frozen. Revise this contract when executable evidence shows it is wrong or unnecessarily strong.
+Status: frozen after offline G1–G8 and bounded live G9 on qualified implementation
+revision `94b31b039b2b6da592a19f583d7dc6c69d6341ad`. Future competence mechanisms
+belong to a successor agent, not amendments to this base.
 
 ## 1. Identity and question
 
@@ -15,11 +17,16 @@ It does **not** answer whether the planned 0006 capability environment improves 
 The intended families are:
 
 ```text
-0002-R    → planned 0006
-0002-NOOA → planned 0006-NOOA
+0002-R                   → planned 0006
+0002-R-minimal ↔ 0002-NOOA  (usability qualification only)
+0002-NOOA                → planned 0006-NOOA
 ```
 
-The first comparison is base against base. A later `0006-NOOA` must be constructed as a declared treatment delta over a frozen `0002-NOOA`, not by comparing an enriched NOOA agent directly with `0002-R`.
+`0002-R-minimal` is not a replacement or re-freeze of `0002-R`, and its pair
+with `0002-NOOA` is not a causal base-against-base comparison. It exists only
+to test the minimal no-helper interface under matched live conditions. A later
+`0006-NOOA` must be constructed as a declared treatment delta over a frozen
+`0002-NOOA`, not by comparing an enriched NOOA agent directly with `0002-R`.
 
 ## 2. Authority
 
@@ -60,9 +67,22 @@ The reference behavior is the frozen `0002-R` contract at:
 - [`../0006-capability-environment/p9/CONTRACT.md`](../0006-capability-environment/p9/CONTRACT.md)
 - [`../0006-capability-environment/p9/README.md`](../0006-capability-environment/p9/README.md)
 
-`0002-NOOA` targets **capability and information parity**, not byte-identical requests or identical internal architecture. NOOA is the independent substrate under examination, so its CodeAct/runtime protocol may differ where the difference is explicit, measured, and does not add cognitive assistance.
+`0002-NOOA` targets the same semantic authority and primitive Python/files
+capability boundary, not byte-identical requests, identical convenience
+helpers, or identical internal architecture. NOOA is the independent substrate
+under examination, so its CodeAct/runtime protocol may differ where the
+difference is explicit, measured, and does not add cognitive assistance.
 
 Historical `0002-R`/P9 files are read-only references for this work. Building `0002-NOOA` must not modify or re-freeze them.
+
+Executable usability qualification uses `0002-R-minimal`, derived at run time
+from the frozen arm without modifying it. The adapter deletes `frames.py` and
+its import instructions, writes the exact committed minimal workspace contract,
+and applies the exact lowercase quoted-`"null"` normalization at the final-action
+boundary. Its manifest must record `source_arm_id: 0002-R`, identify itself as
+`0002-R-minimal`, and commit those adapter details. Evidence from this arm
+licenses minimal-interface usability only; it is not evidence about the frozen
+`0002-R` comparison.
 
 ## 4. Required model-facing capability
 
@@ -90,6 +110,8 @@ inspect current public observation
 
 Python and files are generic capability. The model may invent notes, ledgers, world models, planners, transition indexes, or hypothesis stores through them, but the host does not prescribe or maintain those structures.
 
+Declared system packages use normal imports. Model-authored workspace files remain available as relative-path data and persistent storage, but the writable workspace is not a module search path. Reusable names and functions persist directly between validated Python cells until an explicitly reported interpreter restart.
+
 The paired-run specification must declare:
 
 - the number of complete recent model turns retained;
@@ -115,11 +137,15 @@ The model-visible final answer has the same semantic shape as 0002-R:
 ```
 
 - `action` is one currently legal integer input-event ID.
-- `data` is `null` unless the public event contract requires an object such as integer `x` and `y` coordinates.
+- The model is instructed to use `null` unless the public event contract requires
+  an object. To match frozen `0002-R` exactly, the parser also accepts and preserves
+  an object for a simple action, and permits additional keys for a coordinate action;
+  required integer `x` and `y` values and bounds are still enforced.
 - `reason` is non-authoritative prose. It is not a required prediction, claim, or reconciliation record.
 - Exactly one environment action is admitted per successor observation.
 - The action is validated against the current public legal-action set and coordinate bounds.
-- Invalid final output returns a bounded, explicit repair opportunity rather than being silently coerced.
+- At each arm's shared final-action boundary, the exact lowercase string `"null"` is canonicalized to JSON null before validation. Every other string remains invalid. This repairs one observed provider serialization defect without relaxing action legality, coordinate requirements, bounds, or paired parser behavior.
+- Other invalid final output returns a bounded, explicit repair opportunity rather than being silently coerced.
 
 NOOA may use an internal return/yield mechanism to deliver this object, but it must not expose an unmatched batched `submit_actions()` interface.
 
