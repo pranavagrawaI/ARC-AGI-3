@@ -388,6 +388,69 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(controller.metrics()["turns"], 0)
         self.assertEqual(controller.state.PLAYER_BINDING, "unknown")
 
+    def test_a_refused_block_is_counted_on_the_surviving_controller(self) -> None:
+        """The copy protects state; it must not swallow the measurement.
+
+        Run supervised-probe-rules_supervised-l1-44-v3 reported `rejections: 0`
+        beside eight refused crossings and a fatal R3, because every refusal was
+        logged onto the discarded candidate. A reader of that summary would
+        conclude the controller never refused anything.
+        """
+
+        controller = CommitmentController()
+        controller.admit_working_state(block(), action=1, legal_actions=LEGAL)
+
+        class PassingCompetence:
+            def admit(self, raw: object, *, legal_actions: object) -> object:
+                return {}
+
+        # R2: after a `moved` outcome the objective may not change without a
+        # named contradiction.
+        with self.assertRaises(Rejected):
+            admit_transactionally(
+                controller,
+                PassingCompetence(),  # type: ignore[arg-type]
+                {
+                    "working_state": block(
+                        LAST_ACTION=1,
+                        LAST_OUTCOME="moved",
+                        LOCAL_OBJECTIVE="something else entirely",
+                    )
+                },
+                action=1,
+                legal_actions=LEGAL,
+            )
+
+        report = MODULE["_controller_report"](controller)
+        self.assertEqual(report["rejections"], 1)
+        self.assertEqual(report["rejected_rules"], ["R2_NO_RESCAN_ON_MOVE"])
+        # The refusal is recorded and the accepted block is left alone.
+        self.assertEqual(report["turns"], 1)
+        self.assertEqual(controller.state.LOCAL_OBJECTIVE, "reach the shape changer")
+
+    def test_a_rule_raised_before_propose_is_also_counted(self) -> None:
+        """R7 and the field parsers raise inside admit_working_state, so they
+        never reached the logging path in propose on any controller at all."""
+
+        controller = CommitmentController()
+
+        class PassingCompetence:
+            def admit(self, raw: object, *, legal_actions: object) -> object:
+                return {}
+
+        with self.assertRaises(Rejected):
+            admit_transactionally(
+                controller,
+                PassingCompetence(),  # type: ignore[arg-type]
+                {"working_state": block(NEXT_STEP=2)},
+                action=1,
+                legal_actions=LEGAL,
+            )
+
+        report = MODULE["_controller_report"](controller)
+        self.assertEqual(report["rejections"], 1)
+        self.assertEqual(report["rejected_rules"], ["R7_ONE_ACTION"])
+
 
 class RoundExhaustionTests(unittest.TestCase):
     """A model that thinks too long gets asked again, not killed."""

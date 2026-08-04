@@ -87,15 +87,30 @@ def admit_transactionally(
     The controller is copied because its successful admission mutates history
     and measurements. A later competence-contract rejection must leave the
     previously accepted block untouched.
+
+    State is what the copy protects; the rejection itself is a measurement and
+    must outlive it. ``propose`` logs a refusal onto whichever controller ran
+    the check, and that was the discarded copy -- so run
+    supervised-probe-rules_supervised-l1-44-v3 reported ``rejections: 0``
+    alongside eight refused crossings and a fatal R3, and v8 reported the same
+    beside two. Rules raised inside ``admit_working_state`` before ``propose``
+    were never logged at all. Recording on the surviving controller here covers
+    both, and is the only place that sees the rejection while still holding it.
     """
 
     candidate = deepcopy(controller)
     if candidate is not None:
-        candidate.admit_working_state(
-            raw_commitment.get("working_state"),
-            action=action,
-            legal_actions=legal_actions,
-        )
+        try:
+            candidate.admit_working_state(
+                raw_commitment.get("working_state"),
+                action=action,
+                legal_actions=legal_actions,
+            )
+        except Rejected as rejection:
+            controller.log.append(  # type: ignore[union-attr]
+                {"accepted": False, "forced": False, "rule": rejection.rule}
+            )
+            raise
     admitted = competence.admit(raw_commitment, legal_actions=legal_actions)
     return admitted, candidate
 
