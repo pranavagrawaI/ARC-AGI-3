@@ -111,9 +111,10 @@ class CompetenceRunnerTests(unittest.TestCase):
             )
 
         preserved_path = (
-            ROOT.parents[1]
-            / "artifacts/0006-nooa/provider-smoke-probes/ls20"
-            / "20260801T195450Z/worker/workspace/observations/step-00000.json"
+            ROOT.parent
+            / "0002-nooa/artifacts/paired-usability-probes"
+            / "g9-20260803T070026Z-1ff52c26/candidate/worker/workspace"
+            / "observations/step-00000.json"
         )
         preserved = json.loads(preserved_path.read_text(encoding="utf-8"))
         producer = RemoteEnvironmentWrapper.__new__(RemoteEnvironmentWrapper)

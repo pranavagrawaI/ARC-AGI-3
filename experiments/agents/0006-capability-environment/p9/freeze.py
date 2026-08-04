@@ -59,7 +59,13 @@ RUNTIME_MODULES = (
 # one digest keeps that true without duplicating 0002's list here, where it would rot.
 BASELINE_PROTOCOL_KEY = "0002-protocol"
 
-# Re-pinned 2026-08-02, for two changes taken together.
+# Re-pinned 2026-08-04 after the completed 0002-NOOA and 0006-NOOA histories were
+# merged into main. Only the folded 0002 protocol component moved; the control's
+# model-visible manifest stayed byte-identical. This establishes the baseline for a
+# new experiment. It does not rebind the completed learning-loop artifacts, whose
+# manifests retain the earlier runtime digest in their own historical bytes.
+#
+# The preceding pin was made 2026-08-02, for two changes taken together.
 #
 # The learning_loop capability was declared in the registry. That moves runtime only:
 # the control does not enable it, so nothing the model sees differs.
@@ -74,7 +80,7 @@ BASELINE_PROTOCOL_KEY = "0002-protocol"
 # Verified on this pin: registering learning_loop leaves the control manifest digest
 # at the value below and moves runtime alone. That is the pair reading its two digests
 # were meant to produce — the control moved, and not where the model can see.
-FROZEN_RUNTIME_DIGEST = "b00dbcd9e3eb13b5a3bb3c23caf87c9840574e47940eab7f9b17829d8cb4e9fe"
+FROZEN_RUNTIME_DIGEST = "6bf15b9734bc63e7628e12c672342101a57339343b826d5c980e2275ce2394b3"
 FROZEN_CONTROL_MANIFEST_DIGEST = (
     "5a6ee9f886a1f2b43374880edda85a2e2b9d88bfc8c72ef2a634a708c8b29ef3"
 )
@@ -83,7 +89,7 @@ FROZEN_CONTROL_MANIFEST_DIGEST = (
 # that says "something changed" and nothing else is what makes a freeze annoying
 # enough to be disabled.
 FROZEN_RUNTIME_COMPONENTS: dict[str, str] = {
-    "0002-protocol": "5fc34b7a9927af0905810a6aed747b286da0d958e695bd1cd5a0a0d1cb6a9616",
+    "0002-protocol": "47c88a9ac2c4ff16032da44ff25d0d510a1cb755d53fe76b09b4032876475a8b",
     "p9/agent.py": "17ed0f1833486d34d76f1b363ec972f68273789133f206b265c4bae1dcabc7a7",
     "p9/annotated_frame.py": "3c9c0627e04ad6f20541bba535bc40b27e889669c9400c7dd2fd4818141084d1",
     "p9/arms.py": "31e5bccb39b521387f7b5a11b885a72c61b7f57972aeb3307c4eaf84c683ef28",
