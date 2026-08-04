@@ -1,5 +1,13 @@
 # 0006-NOOA
 
+**Status: completed diagnostic experiment.** Exploratory qualification is closed.
+The treatment-arm spatial results are contaminated by a false model-visible image
+contract and are not valid for clean comparative inference. The historical runs
+remain behavioral evidence under that defective interface and must not be rewritten
+or silently combined with later evidence. See [FAILURE_READING.md](./FAILURE_READING.md).
+The local evidence archive and its verification digest are recorded in
+[ARTIFACT_ARCHIVE.md](./ARTIFACT_ARCHIVE.md).
+
 `0006-NOOA` is the competence treatment over frozen `0002-NOOA`. Its first
 vertical slice makes one action prospectively testable without giving the host
 semantic action authority.

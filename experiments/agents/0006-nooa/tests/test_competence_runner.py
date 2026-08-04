@@ -11,6 +11,7 @@ from pathlib import Path
 
 import numpy as np
 from arc_agi.remote_wrapper import RemoteEnvironmentWrapper
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 HOST_ROOT = ROOT / "host"
@@ -24,6 +25,7 @@ from competence_runner import (
     ModelCorrectableError,
     NooaCompetenceProcessAgent,
     NooaWorkerError,
+    annotated_image_representation,
     _require_expected_projection_dtype,
     attach_competence_context,
 )
@@ -35,6 +37,26 @@ from experiments.harness.runner import public_observation
 
 
 class CompetenceRunnerTests(unittest.TestCase):
+    def test_annotated_image_contract_describes_the_attached_image(self) -> None:
+        base = {
+            "axes": ["row", "column", "channel"],
+            "dtype": "uint8",
+            "encoding": "rgb",
+            "path": "current_frame.png",
+            "shape": [512, 512, 3],
+            "source_grid_layer": 0,
+            "source_grid_scale": 8,
+        }
+
+        described = annotated_image_representation(base, rows=64, columns=64)
+
+        self.assertEqual(described["path"], "model-frame.png")
+        self.assertEqual(described["shape"], [472, 472, 3])
+        self.assertEqual(described["source_grid_scale"], 7)
+        self.assertEqual(described["annotation"]["margin_pixels"], 24)
+        self.assertEqual(described["annotation"]["cell_pixels"], 7)
+        self.assertEqual(base["path"], "current_frame.png")
+
     def test_only_model_authored_rejections_are_marked_correctable(self) -> None:
         """Separate what the model could fix from what it could not.
 
@@ -341,6 +363,12 @@ class CompetenceRunnerTests(unittest.TestCase):
                 },
             )
             self.assertEqual(actions[0]["observation"]["competence"]["schema"], SCHEMA)
+            rendered = actions[0]["observation"]["representations"]["rendered_image"]
+            self.assertEqual(rendered["path"], "model-frame.png")
+            self.assertEqual(rendered["shape"], [38, 38, 3])
+            self.assertEqual(rendered["source_grid_scale"], 7)
+            with Image.open(run_root / rendered["path"]) as attached:
+                self.assertEqual(list(attached.size), rendered["shape"][:2])
             self.assertEqual(
                 actions[1]["observation"]["competence"]["context"]
                 ["last_prediction_result"]["outcome"],

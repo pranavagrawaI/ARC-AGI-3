@@ -1,11 +1,12 @@
 # 0006-NOOA competence contract
 
-Status: executable treatment with one completed matched comparison. It licenses
-the protocol below, not gameplay competence, a beneficial treatment effect, or
-a claim that the target model uses the protocol well. The first comparison
-found no signal, with a terminal-observation deviation that prevents calling it
-a clean evaluation of the pre-registered primary; see
-[COMPARISON.md](./COMPARISON.md).
+Status: completed diagnostic experiment; no further qualification is licensed.
+The protocol below records what was evaluated, not a continuing treatment
+candidate. The first comparison found no signal, with a terminal-observation
+deviation that prevents calling it a clean evaluation of the pre-registered
+primary. Later spatial treatment traces are additionally contaminated by the
+false image contract recorded in [FAILURE_READING.md](./FAILURE_READING.md); see
+also [COMPARISON.md](./COMPARISON.md).
 
 `0002-NOOA` at revision `eeba4c0` is frozen, matching
 `run_live_probe.py::FROZEN_CONTROL_REVISION`. The `dfb2d2b` freeze was reopened

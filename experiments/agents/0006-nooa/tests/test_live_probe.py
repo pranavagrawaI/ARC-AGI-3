@@ -363,10 +363,14 @@ def two_action_fixture(
                 "axes": ["row", "column", "channel"],
                 "dtype": "uint8",
                 "encoding": "rgb",
-                "path": "current_frame.png",
-                "shape": [len(pixels[-1]) * 8, len(pixels[-1][0]) * 8, 3],
+                "path": "model-frame.png",
+                "shape": [
+                    len(pixels[-1]) * 7 + 24,
+                    len(pixels[-1][0]) * 7 + 24,
+                    3,
+                ],
                 "source_grid_layer": len(pixels) - 1,
-                "source_grid_scale": 8,
+                "source_grid_scale": 7,
             },
         }
 

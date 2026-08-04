@@ -384,11 +384,28 @@ def _representations_valid(value: object, *, public: dict[str, Any]) -> bool:
         and rendered.get("axes") == ["row", "column", "channel"]
         and rendered.get("dtype") == "uint8"
         and rendered.get("encoding") == "rgb"
-        and rendered.get("path") == "current_frame.png"
-        and rendered.get("shape")
-        == [len(public["pixels"][-1]) * 8, len(public["pixels"][-1][0]) * 8, 3]
         and rendered.get("source_grid_layer") == len(public["pixels"]) - 1
-        and rendered.get("source_grid_scale") == 8
+        and (
+            (
+                rendered.get("path") == "model-frame.png"
+                and rendered.get("shape")
+                == [
+                    len(public["pixels"][-1]) * 7 + 24,
+                    len(public["pixels"][-1][0]) * 7 + 24,
+                    3,
+                ]
+                and rendered.get("source_grid_scale") == 7
+            )
+            # Historical treatment runs experienced this internally consistent
+            # but false contract. Accept its bytes for integrity verification;
+            # FAILURE_READING.md bars it from clean spatial inference.
+            or (
+                rendered.get("path") == "current_frame.png"
+                and rendered.get("shape")
+                == [len(public["pixels"][-1]) * 8, len(public["pixels"][-1][0]) * 8, 3]
+                and rendered.get("source_grid_scale") == 8
+            )
+        )
         and isinstance(annotation, dict)
         and set(annotation)
         == {

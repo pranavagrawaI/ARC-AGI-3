@@ -467,6 +467,25 @@ def attach_competence_context(
     return model_observation
 
 
+def annotated_image_representation(
+    base: Mapping[str, object], *, rows: int, columns: int
+) -> dict[str, object]:
+    """Describe the annotated PNG that is attached to the model request."""
+
+    from p9.annotated_frame import CELL_PIXELS, MARGIN, annotation_descriptor
+
+    rendered = deepcopy(dict(base))
+    rendered.update(
+        {
+            "path": "model-frame.png",
+            "shape": [rows * CELL_PIXELS + MARGIN, columns * CELL_PIXELS + MARGIN, 3],
+            "source_grid_scale": CELL_PIXELS,
+            "annotation": annotation_descriptor(),
+        }
+    )
+    return rendered
+
+
 def _projection_identity(projection: Any) -> dict[str, Any]:
     pixels = projection.pixels
     return {
@@ -620,7 +639,7 @@ class NooaCompetenceProcessAgent(NooaProcessAgent):
                 step=self._step,
             )
         current = self._current_projection
-        from p9.annotated_frame import annotate, annotation_descriptor
+        from p9.annotated_frame import annotate
 
         self.model_frame_path.write_bytes(annotate(current.pixels))
         height, width = observation.pixels.shape[-2:]
@@ -630,7 +649,11 @@ class NooaCompetenceProcessAgent(NooaProcessAgent):
             if GameAction.from_id(action).is_complex()
         ]
         representations = json.loads(json.dumps(current.representations))
-        representations["rendered_image"]["annotation"] = annotation_descriptor()
+        representations["rendered_image"] = annotated_image_representation(
+            representations["rendered_image"],
+            rows=height,
+            columns=width,
+        )
         frozen_observation = {
             "step": self._step,
             "current_metadata": current.metadata,
