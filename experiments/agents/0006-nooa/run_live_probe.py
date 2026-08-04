@@ -80,7 +80,7 @@ EXPECTED_API_BASE = "https://openrouter.ai/api/v1"
 MODEL_PROFILES = {
     EXPECTED_MODEL: {
         "wire_model": EXPECTED_WIRE_MODEL,
-        "provider_routes": ("open", "pinned"),
+        "provider_routes": ("open", "pinned", "preferred"),
     },
     # LiteLLM consumes the first ``openai/`` as its provider selector. The
     # remaining OpenRouter wire slug must still be ``openai/gpt-5.6-luna``.

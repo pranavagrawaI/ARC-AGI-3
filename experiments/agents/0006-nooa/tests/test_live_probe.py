@@ -2707,6 +2707,27 @@ class RateLimitRecoveryTests(unittest.TestCase):
         self.assertNotIn("only", route)
         self.assertIn(route, self.LAUNCHER["EXPECTED_PROVIDER_ROUTES"])
 
+    def test_every_declared_route_is_reachable_and_defined(self) -> None:
+        """Three tables have to agree: the route payloads, the per-model
+        allowlist that decides which are legal, and the launcher's audited
+        enumeration. Adding `preferred` to the first two left the allowlist
+        behind, and the run refused at prepare time with the route already
+        written into a driver -- caught by the runner, but only after the fact.
+        """
+
+        routes = MODULE["PROVIDER_ROUTES"]
+        allowed = {
+            route
+            for profile in MODULE["MODEL_PROFILES"].values()
+            for route in profile["provider_routes"]
+        }
+        self.assertEqual(allowed, set(routes), "route table and allowlist disagree")
+        for name, payload in routes.items():
+            with self.subTest(route=name):
+                self.assertIn(payload, self.LAUNCHER["EXPECTED_PROVIDER_ROUTES"])
+                self.assertIn(name, MODULE["PROVIDER_ROUTE_MODES"])
+                self.assertIn(name, MODULE["PROVIDER_IDENTITY_EXPECTATIONS"])
+
     def test_the_preferred_route_cannot_qualify_a_gate(self) -> None:
         """It buys availability with provider identity, so it must not be
         mistaken for the pinned evidence route."""
