@@ -1,6 +1,8 @@
 # NOOA features held out of 0002-NOOA
 
-Status: maintained deletion log and candidate inventory, not a 0006-NOOA specification or implementation checklist.
+Status: maintained deletion log and candidate inventory. The first admitted
+0006-NOOA vertical slice is specified in [`CONTRACT.md`](./CONTRACT.md); this
+file remains the record of candidates that have not earned admission.
 
 Direction comes from the shared [`NOOA implementation compass`](../NOOA_IDEOLOGY.md).
 This file records where that ideology meets the stricter experimental authority boundary.
