@@ -162,6 +162,14 @@ class ContractTests(unittest.TestCase):
   self.assertEqual(batch["execution-control"]["candidate_plans"][0]["actions"],[3])
   self.assertEqual(batch["planning-control"]["candidate_plans"][0]["actions"],[1,1,1])
   self.assertEqual(batch["game-judgment"]["candidate_plans"],[])
+ def test_widened_batch_adds_prefix_derived_action_and_frontier_coverage(self):
+  batch={case["case_id"]:case for case in json.loads((ROOT/"fixtures/widened-batch.json").read_text())["cases"]}
+  labels={row["case_id"]:row for row in json.loads((ROOT/"scorer/widened-labels.json").read_text())["labels"]}
+  self.assertEqual(set(batch),{"execution-control","planning-control","game-judgment","execution-control-left","planning-control-down"})
+  self.assertEqual(batch["execution-control-left"]["candidate_plans"][0]["actions"],[1])
+  self.assertEqual(batch["planning-control-down"]["candidate_plans"][0]["actions"],[4,4])
+  self.assertIn(["EXECUTE","route-left-control-frontier-5",1],labels["execution-control-left"]["valid_decision_signatures"])
+  self.assertIn(["EXECUTE","route-down-to-supplied-goal",4],labels["planning-control-down"]["valid_decision_signatures"])
  def test_arm_boundaries(self):
   self.assertEqual(len(visible_case(self.case,"A")["images"]),1); self.assertEqual(len(visible_case(self.case,"B")["images"]),4)
   self.assertNotIn("numeric_transitions",visible_case(self.case,"C")); self.assertIn("numeric_transitions",visible_case(self.case,"D"))

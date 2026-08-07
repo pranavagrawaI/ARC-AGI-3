@@ -80,6 +80,30 @@ CASE_SPECS = [
     },
 ]
 
+WIDENED_CASE_SPECS = [
+    *CASE_SPECS,
+    {
+        "case_id": "execution-control-left",
+        "frontier": 5,
+        "burden": "execution",
+        "goal": {"kind": "relative_position", "delta": [-5, 0]},
+        "plan_id": "route-left-control-frontier-5",
+        "max_depth": 1,
+        "max_expansions": 4,
+        "reflection": "A replay-covered one-step left route is supplied at a later frontier.",
+    },
+    {
+        "case_id": "planning-control-down",
+        "frontier": 9,
+        "burden": "planning",
+        "goal": {"kind": "absolute_position", "position": [25, 34]},
+        "plan_id": "route-down-to-supplied-goal",
+        "max_depth": 2,
+        "max_expansions": 32,
+        "reflection": "Construct a two-step route using a separately replay-covered action.",
+    },
+]
+
 
 def write(path: Path, value: Any) -> None:
     path.write_bytes(canonical_bytes(value) + b"\n")
@@ -205,7 +229,7 @@ def main() -> int:
     scorer.mkdir(parents=True, exist_ok=True)
     expected_images = {
         f"{spec['case_id']}-step-{step}.png"
-        for spec in CASE_SPECS
+        for spec in WIDENED_CASE_SPECS
         for step in range(spec["frontier"] - 3, spec["frontier"] + 1)
     }
     for existing in images.glob("*.png"):
@@ -219,34 +243,37 @@ def main() -> int:
         "path": str(PROPOSAL_SOURCE.relative_to(REPO)),
         "sha256": sha256(PROPOSAL_SOURCE.read_bytes()).hexdigest(),
     }
-    cases = []
-    labels = []
-    for spec in CASE_SPECS:
-        step = spec["frontier"]
-        source = {
-            "path": str(SOURCE.relative_to(REPO)),
-            "sha256": EXPECTED,
-            "frontier": step,
-        }
-        case = build_case(
-            rows[: step + 1], spec, source, proposal, proposal_provenance
+    for specs, batch_name, labels_name in (
+        (CASE_SPECS, "batch.json", "labels.json"),
+        (WIDENED_CASE_SPECS, "widened-batch.json", "widened-labels.json"),
+    ):
+        cases = []
+        labels = []
+        for spec in specs:
+            step = spec["frontier"]
+            source = {
+                "path": str(SOURCE.relative_to(REPO)),
+                "sha256": EXPECTED,
+                "frontier": step,
+            }
+            case = build_case(
+                rows[: step + 1], spec, source, proposal, proposal_provenance
+            )
+            cases.append(case)
+            labels.append(build_label(case, rows[step + 1]))
+        write(
+            ROOT / "fixtures" / batch_name,
+            {
+                "schema": "0003-frozen-batch-v2",
+                "source_sha256": EXPECTED,
+                "proposal_provenance": proposal_provenance,
+                "cases": cases,
+            },
         )
-        cases.append(case)
-        labels.append(build_label(case, rows[step + 1]))
-
-    write(
-        ROOT / "fixtures" / "batch.json",
-        {
-            "schema": "0003-frozen-batch-v2",
-            "source_sha256": EXPECTED,
-            "proposal_provenance": proposal_provenance,
-            "cases": cases,
-        },
-    )
-    write(
-        ROOT / "scorer" / "labels.json",
-        {"schema": "0003-scorer-labels-v2", "labels": labels},
-    )
+        write(
+            ROOT / "scorer" / labels_name,
+            {"schema": "0003-scorer-labels-v2", "labels": labels},
+        )
     print(ROOT / "fixtures" / "batch.json")
     return 0
 

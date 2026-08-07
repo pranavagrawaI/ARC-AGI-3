@@ -46,14 +46,15 @@ def main() -> int:
     args = parser.parse_args()
 
     config = json.loads(args.config.read_text())
+    batch_path = ROOT / config.get("batch_file", "fixtures/batch.json")
     if args.output.exists():
         raise FileExistsError(args.output)
     args.output.mkdir(parents=True)
     _write(args.output / "config.json", config)
-    _write(args.output / "manifest.json", {"config_sha256": digest(config), "batch_sha256": digest(json.loads((ROOT / "fixtures/batch.json").read_text())), "environment_actions": 0})
+    _write(args.output / "manifest.json", {"config_sha256": digest(config), "batch_sha256": digest(json.loads(batch_path.read_text())), "environment_actions": 0})
 
     if args.prepare_only:
-        rows = prepare_requests(ROOT / "fixtures/batch.json", ROOT, config)
+        rows = prepare_requests(batch_path, ROOT, config)
         (args.output / "requests.jsonl").write_bytes(prepared_bytes(rows))
         _write(args.output / "result.json", {"status": "PREPARED", "requests": len(rows), "provider_calls": 0, "environment_actions": 0})
         return 0

@@ -239,10 +239,12 @@ class ExperimentRunner:
         self.config = config
         self.primary = primary
         self.transfer = transfer
-        self.batch = json.loads((root / "fixtures/batch.json").read_text())
+        batch_file = config.get("batch_file", "fixtures/batch.json")
+        labels_file = config.get("labels_file", "scorer/labels.json")
+        self.batch = json.loads((root / batch_file).read_text())
         self.labels = {
             row["case_id"]: row
-            for row in json.loads((root / "scorer/labels.json").read_text())["labels"]
+            for row in json.loads((root / labels_file).read_text())["labels"]
         }
         self.results: list[dict[str, Any]] = []
         self.request_count = 0
