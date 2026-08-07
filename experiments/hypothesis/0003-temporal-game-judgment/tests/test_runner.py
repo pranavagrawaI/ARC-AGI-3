@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
+from urllib.error import HTTPError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from game_judgment.experiment import perturb_judgment_case, thinking_config  # noqa: E402
+from game_judgment.experiment import HTTPTransport, perturb_judgment_case, thinking_config  # noqa: E402
 from game_judgment.provider import assemble_provider_request  # noqa: E402
 from game_judgment.serialization import digest  # noqa: E402
 
@@ -70,6 +73,40 @@ def replay_row(
 
 
 class RunnerTests(unittest.TestCase):
+    def test_http_transport_retries_declared_transient_status_and_audits_attempts(self):
+        class Response:
+            status = 200
+            headers = {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read(self):
+                return json.dumps(provider_response()).encode()
+
+        throttled = HTTPError(
+            "https://example.invalid",
+            429,
+            "Too Many Requests",
+            {},
+            BytesIO(b'{"error":{"code":429,"message":"slow down"}}'),
+        )
+        transport = HTTPTransport(
+            "https://example.invalid", "key", 1, max_attempts=2
+        )
+        with patch(
+            "game_judgment.experiment.urlopen", side_effect=[throttled, Response()]
+        ), patch("game_judgment.experiment.sleep"):
+            payload, audit = transport.call({}, {"model": "test"})
+        self.assertIn("choices", payload)
+        self.assertEqual(audit["attempt_count"], 2)
+        self.assertEqual(
+            [row["http_status"] for row in audit["attempts"]], [429, 200]
+        )
+
     def test_provider_error_aborts_on_first_response(self):
         batch = json.loads((ROOT / "fixtures/batch.json").read_text())
         case = batch["cases"][0]

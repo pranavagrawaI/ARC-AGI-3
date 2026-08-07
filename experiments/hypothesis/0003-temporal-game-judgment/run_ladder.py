@@ -68,7 +68,16 @@ def main() -> int:
             raise RunError("no primary provider API key is configured")
         primary_audit = audit_openrouter_endpoint(config)
         _write(args.output / "provider-audit-primary.json", primary_audit)
-        primary = HTTPTransport(config["endpoint"], key, int(config["request_timeout_seconds"]))
+        transport_config = config["transport"]
+        primary = HTTPTransport(
+            config["endpoint"],
+            key,
+            int(config["request_timeout_seconds"]),
+            float(transport_config["minimum_request_interval_seconds"]),
+            int(transport_config["max_attempts"]),
+            float(transport_config["retry_backoff_seconds"]),
+            tuple(int(status) for status in transport_config["retry_http_statuses"]),
+        )
 
         if args.phase == "full" and config["transfer"]["required"]:
             endpoint = os.environ.get(config["transfer"]["endpoint_environment"])
@@ -77,7 +86,15 @@ def main() -> int:
             transfer_audit = audit_openai_compatible_endpoint(endpoint, config["transfer"]["model_audit_path"], config["transfer"]["model"])
             _write(args.output / "provider-audit-transfer.json", transfer_audit)
             transfer_key = os.environ.get(config["transfer"]["api_key_environment"], "")
-            transfer_transport = HTTPTransport(endpoint.rstrip("/") + "/v1/chat/completions", transfer_key, int(config["request_timeout_seconds"]))
+            transfer_transport = HTTPTransport(
+                endpoint.rstrip("/") + "/v1/chat/completions",
+                transfer_key,
+                int(config["request_timeout_seconds"]),
+                float(transport_config["minimum_request_interval_seconds"]),
+                int(transport_config["max_attempts"]),
+                float(transport_config["retry_backoff_seconds"]),
+                tuple(int(status) for status in transport_config["retry_http_statuses"]),
+            )
 
     runner = ExperimentRunner(ROOT, args.output, config, primary, transfer_transport)
     try:

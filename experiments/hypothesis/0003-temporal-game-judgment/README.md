@@ -67,6 +67,10 @@ budget, two repeats, model-request cap, cost cap, and stop rules. Endpoint metad
 validated before a live run. Provider/model drift, missing parameters, an unhealthy endpoint, or a
 cap violation fails closed.
 
+The transport sends at most one request every five seconds and retries only HTTP 429/502/503/504,
+at most three attempts with a frozen five-second linear backoff. Every HTTP attempt is retained in
+the transport audit and counted separately from logical model requests.
+
 The ladder stops at the first arm where every case passes twice with one stable decision signature.
 Full mode additionally requires:
 

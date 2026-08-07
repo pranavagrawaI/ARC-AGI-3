@@ -6,8 +6,9 @@ from copy import deepcopy
 from dataclasses import dataclass
 import json
 from pathlib import Path
-from time import perf_counter
+from time import monotonic, perf_counter, sleep
 from typing import Any, Protocol
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from .contract import ContractError, Decision, parse_decision
@@ -30,26 +31,68 @@ class HTTPTransport:
     endpoint: str
     api_key: str
     timeout: int
+    minimum_request_interval_seconds: float = 0.0
+    max_attempts: int = 1
+    retry_backoff_seconds: float = 0.0
+    retry_http_statuses: tuple[int, ...] = (429, 502, 503, 504)
+    _last_request_started: float | None = None
 
     def call(self, key: dict[str, Any], request: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         body = canonical_bytes(request)
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        started = perf_counter()
-        http_request = Request(self.endpoint, data=body, headers=headers)
-        with urlopen(http_request, timeout=self.timeout) as response:
-            response_body = response.read()
-            response_headers = dict(response.headers.items())
-            status = response.status
-        elapsed = perf_counter() - started
-        return json.loads(response_body), {
-            "http_status": status,
-            "headers": response_headers,
-            "latency_seconds": elapsed,
-            "request_bytes": len(body),
-            "response_bytes": len(response_body),
-        }
+        run_started = perf_counter()
+        attempts = []
+        for attempt in range(1, self.max_attempts + 1):
+            if self._last_request_started is not None:
+                wait = self.minimum_request_interval_seconds - (
+                    monotonic() - self._last_request_started
+                )
+                if wait > 0:
+                    sleep(wait)
+            self._last_request_started = monotonic()
+            attempt_started = perf_counter()
+            http_request = Request(self.endpoint, data=body, headers=headers)
+            try:
+                with urlopen(http_request, timeout=self.timeout) as response:
+                    response_body = response.read()
+                    response_headers = dict(response.headers.items())
+                    status = response.status
+            except HTTPError as exc:
+                response_body = exc.read()
+                response_headers = dict(exc.headers.items())
+                status = exc.code
+            attempts.append(
+                {
+                    "attempt": attempt,
+                    "http_status": status,
+                    "headers": response_headers,
+                    "latency_seconds": perf_counter() - attempt_started,
+                    "response_bytes": len(response_body),
+                }
+            )
+            if status not in self.retry_http_statuses or attempt == self.max_attempts:
+                try:
+                    payload = json.loads(response_body)
+                except json.JSONDecodeError:
+                    payload = {
+                        "error": {
+                            "code": status,
+                            "message": response_body.decode("utf-8", errors="replace"),
+                        }
+                    }
+                return payload, {
+                    "http_status": status,
+                    "headers": response_headers,
+                    "latency_seconds": perf_counter() - run_started,
+                    "request_bytes": len(body),
+                    "response_bytes": len(response_body),
+                    "attempt_count": len(attempts),
+                    "attempts": attempts,
+                }
+            sleep(self.retry_backoff_seconds * attempt)
+        raise AssertionError("HTTP retry loop exhausted without returning")
 
 
 @dataclass
@@ -104,6 +147,7 @@ class ReplayTransport:
             "transport": "replay",
             "latency_seconds": 0.0,
             "request_sha256": actual_request_sha256,
+            "attempt_count": 0,
         }
 
 
@@ -237,7 +281,7 @@ class ExperimentRunner:
         payload, transport_audit = (transport or self.primary).call(key, request)
         replay = transport_audit.get("transport") == "replay"
         if not replay:
-            self.provider_call_count += 1
+            self.provider_call_count += int(transport_audit.get("attempt_count", 1))
         _write(self.output / "responses" / f"{index:04d}.json", payload)
         usage = payload.get("usage", {})
         cost = usage.get("cost", 0.0)
