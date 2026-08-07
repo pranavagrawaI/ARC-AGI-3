@@ -345,10 +345,10 @@ class ExperimentRunner:
             by_case.setdefault(row["case_id"], set()).add(tuple(row.get("signature", [])))
         return all(len(signatures) == 1 for signatures in by_case.values())
 
-    def run_ladder(self) -> str:
+    def run_ladder(self, arms: tuple[str, ...] = ARMS) -> str:
         repetitions = int(self.config["repetitions"])
         summaries = []
-        for arm in ARMS:
+        for arm in arms:
             rows = [
                 self._call(case, arm, "ladder", repeat)
                 for case in self.batch["cases"]

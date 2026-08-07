@@ -24,6 +24,12 @@ GEMMA4_VISUAL_BUDGETS = {
     560: (23, 23),
 }
 GEMMA4_VISION_REFERENCE = "https://ai.google.dev/gemma/docs/capabilities/vision/image"
+PUBLIC_PREDICTION_SCHEMA = {
+    "type": "object",
+    "properties": {"public.levels_completed": {"type": "integer"}},
+    "required": ["public.levels_completed"],
+    "additionalProperties": False,
+}
 
 SYSTEM_PROMPT = """You make one bounded decision from public offline game evidence. Preserve unresolved executable alternatives. Use exactly one supplied function tool. EXECUTE only a supplied replay-working plan, PROBE only a supplied discriminator, or ABSTAIN with concrete missing evidence. Never invent an action, plan, outcome, or evidence reference."""
 
@@ -51,11 +57,17 @@ def tool_definitions() -> list[dict[str, Any]]:
     for tool, fields in TOOL_ARGUMENT_FIELDS.items():
         properties: dict[str, Any] = {}
         for field in fields:
-            schema: dict[str, Any] = {"type": _json_type(field)}
+            if field == "predicted_public_fields":
+                schema = deepcopy(PUBLIC_PREDICTION_SCHEMA)
+            elif field == "predicted_outcomes":
+                schema = {
+                    "type": "object",
+                    "additionalProperties": deepcopy(PUBLIC_PREDICTION_SCHEMA),
+                }
+            else:
+                schema = {"type": _json_type(field)}
             if field == "missing_evidence":
                 schema.update({"items": {"type": "string"}, "minItems": 1})
-            elif schema["type"] == "object":
-                schema["additionalProperties"] = True
             properties[field] = schema
         tools.append(
             {

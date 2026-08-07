@@ -47,6 +47,13 @@ uv run python experiments/hypothesis/0003-temporal-game-judgment/run_ladder.py \
   --phase ladder --authorize-provider-calls --output runs/<run-id>
 ```
 
+Recheck only the repeated execution/serialization ceiling after a protocol repair:
+
+```bash
+uv run python experiments/hypothesis/0003-temporal-game-judgment/run_ladder.py \
+  --phase ladder --only-arm H --authorize-provider-calls --output runs/<run-id>
+```
+
 Run the complete gate, including thinking layout, content perturbation, and E4B transfer:
 
 ```bash

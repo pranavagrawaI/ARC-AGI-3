@@ -38,6 +38,7 @@ def main() -> int:
     parser.add_argument("--replay-responses", type=Path)
     parser.add_argument("--authorize-provider-calls", action="store_true")
     parser.add_argument("--phase", choices=("ladder", "full"), default="full")
+    parser.add_argument("--only-arm", choices=tuple("ABCDEFGH"))
     args = parser.parse_args()
 
     config = json.loads(args.config.read_text())
@@ -98,7 +99,7 @@ def main() -> int:
 
     runner = ExperimentRunner(ROOT, args.output, config, primary, transfer_transport)
     try:
-        arm = runner.run_ladder()
+        arm = runner.run_ladder((args.only_arm,) if args.only_arm else tuple("ABCDEFGH"))
         if args.phase == "full":
             thinking = runner.run_thinking_sequence(arm)
             if not thinking["first_off_equals_last_off"] or not thinking["all_contract_pass"]:

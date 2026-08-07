@@ -80,6 +80,10 @@ class ContractTests(unittest.TestCase):
   self.assertNotIn("fixtures/images",chronological["request"]["messages"][1]["content"][-1]["text"])
   unlabelled=next(row for row in rows if row["case_id"]=="execution-control" and row["arm"]=="B")
   self.assertNotEqual(unlabelled["audit"]["images"][0]["delivered_sha256"],chronological["audit"]["images"][0]["delivered_sha256"])
+  definitions={row["function"]["name"]:row for row in current["request"]["tools"]}
+  predictions=definitions["EXECUTE"]["function"]["parameters"]["properties"]["predicted_public_fields"]
+  self.assertEqual(predictions["properties"]["public.levels_completed"]["type"],"integer")
+  self.assertFalse(predictions["additionalProperties"])
  def test_thinking_layout_uses_off_on_off_control_token(self):
   off=thinking_config(REQUEST_CONFIG,False); on=thinking_config(REQUEST_CONFIG,True)
   self.assertFalse(off["system_prompt"].startswith("<|think|>"))
