@@ -38,7 +38,9 @@ def main() -> int:
     parser.add_argument("--replay-responses", type=Path)
     parser.add_argument("--authorize-provider-calls", action="store_true")
     parser.add_argument(
-        "--phase", choices=("ladder", "perturbation", "full"), default="full"
+        "--phase",
+        choices=("ladder", "thinking", "perturbation", "full"),
+        default="full",
     )
     parser.add_argument("--only-arm", choices=tuple("ABCDEFGH"))
     args = parser.parse_args()
@@ -102,7 +104,11 @@ def main() -> int:
     runner = ExperimentRunner(ROOT, args.output, config, primary, transfer_transport)
     try:
         arm = runner.run_ladder((args.only_arm,) if args.only_arm else tuple("ABCDEFGH"))
-        if args.phase == "perturbation":
+        if args.phase == "thinking":
+            thinking = runner.run_thinking_sequence(arm)
+            if not thinking["first_off_equals_last_off"] or not thinking["all_contract_pass"]:
+                raise RunError("thinking off-on-off sequence failed its stability gate")
+        elif args.phase == "perturbation":
             perturbation = runner.run_perturbation(arm)
             if not perturbation.get("eligible") or not perturbation.get("pass"):
                 raise RunError("reconstruction-content perturbation failed or was ineligible")

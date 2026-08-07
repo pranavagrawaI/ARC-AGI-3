@@ -319,6 +319,34 @@ class RunnerTests(unittest.TestCase):
             result=json.loads((output/"results.json").read_text())
             self.assertEqual(result["model_requests"],12)
 
+    def test_thinking_phase_runs_only_g_baseline_and_off_on_off_sequence(self):
+        batch = json.loads((ROOT / "fixtures/batch.json").read_text())
+        cases = {case["case_id"]: case for case in batch["cases"]}
+        discriminator = cases["game-judgment"]["discriminators"][0]
+        decisions = {
+            "execution-control": {"tool":"EXECUTE","arguments":{"plan_id":"route-left-control","first_action":3,"predicted_public_fields":{"public.levels_completed":0}}},
+            "planning-control": {"tool":"EXECUTE","arguments":{"plan_id":"route-to-supplied-goal","first_action":1,"predicted_public_fields":{"public.levels_completed":0}}},
+            "game-judgment": {"tool":"PROBE","arguments":{"discriminator_id":discriminator["discriminator_id"],"action":discriminator["action"],"predicted_outcomes":discriminator["predicted_outcomes"]}},
+        }
+        rows=[]
+        for case_id in cases:
+            for repeat in range(2):
+                rows.append(replay_row(phase="ladder",case=cases[case_id],arm="G",repeat=repeat,response=provider_response(decisions[case_id])))
+        for sequence_index,enabled in enumerate((False,True,False)):
+            condition=thinking_config(CONFIG,enabled)
+            for case_id in cases:
+                rows.append(replay_row(phase="thinking",case=cases[case_id],arm="G",repeat=0,variant="thinking-on" if enabled else "thinking-off",sequence_index=sequence_index,request_config=condition,response=provider_response(decisions[case_id])))
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory); responses=root/"responses.jsonl"; output=root/"run"
+            responses.write_text("\n".join(json.dumps(row) for row in rows)+"\n")
+            completed=subprocess.run([sys.executable,str(RUNNER),"--replay-responses",str(responses),"--phase","thinking","--only-arm","G","--output",str(output)],capture_output=True,text=True)
+            self.assertEqual(completed.returncode,0,completed.stderr)
+            self.assertTrue(json.loads((output/"thinking-summary.json").read_text())["first_off_equals_last_off"])
+            self.assertFalse((output/"perturbation-summary.json").exists())
+            self.assertFalse((output/"transfer-summary.json").exists())
+            result=json.loads((output/"results.json").read_text())
+            self.assertEqual(result["model_requests"],15)
+
     def test_replay_response_is_bound_to_exact_request(self):
         batch = json.loads((ROOT / "fixtures/batch.json").read_text())
         case = batch["cases"][0]
