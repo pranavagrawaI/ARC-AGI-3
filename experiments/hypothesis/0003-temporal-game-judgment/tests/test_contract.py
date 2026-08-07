@@ -105,16 +105,25 @@ class ContractTests(unittest.TestCase):
   self.assertNotIn("fixtures/images",chronological["request"]["messages"][1]["content"][-1]["text"])
   unlabelled=next(row for row in rows if row["case_id"]=="execution-control" and row["arm"]=="B")
   self.assertNotEqual(unlabelled["audit"]["images"][0]["delivered_sha256"],chronological["audit"]["images"][0]["delivered_sha256"])
-  definitions={row["function"]["name"]:row for row in current["request"]["tools"]}
-  predictions=definitions["EXECUTE"]["function"]["parameters"]["properties"]["predicted_public_fields"]
+  execution_g=next(row for row in rows if row["case_id"]=="execution-control" and row["arm"]=="G")
+  judgment_g=next(row for row in rows if row["case_id"]=="game-judgment" and row["arm"]=="G")
+  execution_definitions={row["function"]["name"]:row for row in execution_g["request"]["tools"]}
+  judgment_definitions={row["function"]["name"]:row for row in judgment_g["request"]["tools"]}
+  predictions=execution_definitions["EXECUTE"]["function"]["parameters"]["properties"]["predicted_public_fields"]
   self.assertEqual(predictions["properties"]["public.levels_completed"]["type"],"integer")
   self.assertFalse(predictions["additionalProperties"])
-  outcomes=definitions["PROBE"]["function"]["parameters"]["properties"]["predicted_outcomes"]
+  outcomes=judgment_definitions["PROBE"]["function"]["parameters"]["properties"]["predicted_outcomes"]
   self.assertEqual(outcomes["type"],"array")
   self.assertEqual(outcomes["minItems"],2)
   self.assertEqual(outcomes["items"]["required"],["conjecture_id","levels_completed"])
   self.assertEqual(outcomes["items"]["properties"]["levels_completed"]["type"],"integer")
   self.assertFalse(outcomes["items"]["additionalProperties"])
+ def test_provider_exposes_only_tools_authorized_by_visible_candidates(self):
+  rows=prepare_requests(ROOT/"fixtures/batch.json",ROOT,REQUEST_CONFIG)
+  tools={(row["case_id"],row["arm"]):{tool["function"]["name"] for tool in row["request"]["tools"]} for row in rows}
+  self.assertEqual(tools[("execution-control","G")],{"EXECUTE","ABSTAIN"})
+  self.assertEqual(tools[("game-judgment","G")],{"PROBE","ABSTAIN"})
+  self.assertEqual(tools[("game-judgment","D")],{"ABSTAIN"})
  def test_thinking_layout_uses_off_on_off_control_token(self):
   off=thinking_config(REQUEST_CONFIG,False); on=thinking_config(REQUEST_CONFIG,True)
   self.assertFalse(off["system_prompt"].startswith("<|think|>"))

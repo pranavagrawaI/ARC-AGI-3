@@ -60,7 +60,7 @@ def _json_type(field: str) -> str:
     }[field]
 
 
-def tool_definitions() -> list[dict[str, Any]]:
+def tool_definitions(allowed_tools: set[str] | None = None) -> list[dict[str, Any]]:
     descriptions = {
         "EXECUTE": "Select a supplied replay-working plan and its legal first action.",
         "PROBE": "Select a supplied discriminator with distinct outcomes and state all predictions.",
@@ -68,6 +68,8 @@ def tool_definitions() -> list[dict[str, Any]]:
     }
     tools = []
     for tool, fields in TOOL_ARGUMENT_FIELDS.items():
+        if allowed_tools is not None and tool not in allowed_tools:
+            continue
         properties: dict[str, Any] = {}
         for field in fields:
             if field == "predicted_public_fields":
@@ -120,6 +122,17 @@ def assemble_provider_request(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     context_layout = config.get("context_layout", "separated")
     logical = visible_case(case, arm, context_layout)
+    allowed_tools = {"ABSTAIN"}
+    if logical.get("candidate_plans"):
+        allowed_tools.add("EXECUTE")
+    if logical.get("discriminators"):
+        allowed_tools.add("PROBE")
+    logical["contract"]["tools"] = {
+        tool: fields
+        for tool, fields in logical["contract"]["tools"].items()
+        if tool in allowed_tools
+    }
+    logical_request_sha256 = digest(logical)
     visual_budget = int(config["visual_token_budget"])
     if visual_budget not in GEMMA4_VISUAL_BUDGETS:
         raise ValueError(f"unsupported Gemma 4 visual token budget {visual_budget}")
@@ -170,7 +183,7 @@ def assemble_provider_request(
             {"role": "system", "content": config.get("system_prompt", SYSTEM_PROMPT)},
             {"role": "user", "content": content},
         ],
-        "tools": tool_definitions(),
+        "tools": tool_definitions(allowed_tools),
         "tool_choice": "required",
         "temperature": config["temperature"],
         "top_p": config["top_p"],
@@ -186,7 +199,8 @@ def assemble_provider_request(
         "case_id": case["case_id"],
         "arm": arm,
         "context_layout": context_layout,
-        "logical_request_sha256": digest(visible_case(case, arm, context_layout)),
+        "allowed_tools": sorted(allowed_tools),
+        "logical_request_sha256": logical_request_sha256,
         "provider_request_sha256": digest(request),
         "images": provenance,
     }
