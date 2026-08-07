@@ -52,6 +52,10 @@ _Avoid_: Known rule, ground truth, final model
 The requirement to balance progress, information, risk, and irreversible cost because every environment action consumes a scarce interaction budget. Information has value only when it can improve a consequential decision.
 _Avoid_: Exploration rate, information gain alone
 
+**Machinery**:
+Reproducible computation once the representation, hypotheses, objective, and risk contract have been specified. Machinery may measure, enumerate, compile, replay, search, simulate, verify, execute, and replan; it does not choose which entities, latent state, causal explanation, objective, abstraction, or uncertainty trade-off should govern the current decision.
+_Avoid_: Non-semantic computation, host intelligence, fixed game theory
+
 **Game Judgment**:
 The situated ability to choose the highest-leverage hypothesis, experiment, computation, reconstruction, plan, or action for improving the next real decision. It routes among game-building intuition, evidential correction, and action-economical play rather than following a fixed discovery procedure.
 _Avoid_: Fixed exploration policy, verification checklist, information gain alone
@@ -59,6 +63,30 @@ _Avoid_: Fixed exploration policy, verification checklist, information gain alon
 **Executable Conjecture**:
 The smallest runnable externalization of an emerging causal explanation that can sharpen a prediction, expose missing state, compare alternatives, or improve a real decision. It is expected to be early, partial, provisional, and disposable; it earns elaboration or survival only through prospective usefulness and contact with public evidence.
 _Avoid_: Complete simulator requirement, retrospective code, polished reconstruction
+
+**Representation Specification**:
+A provenance-bearing semantic commitment that states how machinery should derive neutral candidate structure from a named admissible evidence frontier. It constrains measurement without asserting which candidates are entities or what roles they play.
+_Avoid_: Perception ground truth, hidden host policy, object ontology
+
+**Candidate Scene**:
+The reproducible neutral structure measured under one Representation Specification at one evidence frontier. Its regions, tracks, relations, and correspondences are candidates rather than asserted entities, roles, or universal identities.
+_Avoid_: World state, object map, scene truth
+
+**Grounding Conjecture**:
+An Executable Conjecture that binds a symbol or semantic identity to recoverable public evidence under a Representation Specification.
+_Avoid_: Detected object, entity fact, semantic label
+
+**Transition Conjecture**:
+An Executable Conjecture that predicts a state change and the conditions under which it occurs.
+_Avoid_: Known mechanic, transition fact, prose rule
+
+**Objective Conjecture**:
+An Executable Conjecture that relates a state condition to public progress, a terminal event, or another outcome worth pursuing.
+_Avoid_: Known objective, supplied goal, terminal correlation alone
+
+**Plan Certificate**:
+A machinery-produced record of a candidate action sequence, its predicted states, relied-upon conjectures, unverified assumptions, and risk disposition under one Working Theory. It exposes what a plan depends on without certifying correctness or authorizing execution.
+_Avoid_: Approved route, proof of correctness, action authorization
 
 **Executable Reconstruction**:
 An evolving collection of executable conjectures about a game's decision-relevant hidden implementation. It may remain local or grow into a broader runnable theory for counterfactual prediction and planning; it need not reproduce the original source or model details irrelevant to current decisions.
