@@ -39,7 +39,7 @@ def main() -> int:
     parser.add_argument("--authorize-provider-calls", action="store_true")
     parser.add_argument(
         "--phase",
-        choices=("ladder", "thinking", "layout", "perturbation", "transfer", "full"),
+        choices=("ladder", "thinking", "layout", "perturbation", "transfer", "reconstruction-control", "full"),
         default="full",
     )
     parser.add_argument("--only-arm", choices=tuple("ABCDEFGH"))
@@ -69,23 +69,25 @@ def main() -> int:
         transport_mode = "provider"
         if not args.authorize_provider_calls:
             raise RunError("live execution requires --authorize-provider-calls")
-        key = _api_key(config["api_key_environment"])
-        if not key:
-            raise RunError("no primary provider API key is configured")
-        primary_audit = audit_openrouter_endpoint(config)
-        _write(args.output / "provider-audit-primary.json", primary_audit)
         transport_config = config["transport"]
-        primary = HTTPTransport(
-            config["endpoint"],
-            key,
-            int(config["request_timeout_seconds"]),
-            float(transport_config["minimum_request_interval_seconds"]),
-            int(transport_config["max_attempts"]),
-            float(transport_config["retry_backoff_seconds"]),
-            tuple(int(status) for status in transport_config["retry_http_statuses"]),
-        )
+        primary = None
+        if args.phase != "reconstruction-control":
+            key = _api_key(config["api_key_environment"])
+            if not key:
+                raise RunError("no primary provider API key is configured")
+            primary_audit = audit_openrouter_endpoint(config)
+            _write(args.output / "provider-audit-primary.json", primary_audit)
+            primary = HTTPTransport(
+                config["endpoint"],
+                key,
+                int(config["request_timeout_seconds"]),
+                float(transport_config["minimum_request_interval_seconds"]),
+                int(transport_config["max_attempts"]),
+                float(transport_config["retry_backoff_seconds"]),
+                tuple(int(status) for status in transport_config["retry_http_statuses"]),
+            )
 
-        if args.phase in {"transfer", "full"} and config["transfer"]["required"]:
+        if args.phase in {"transfer", "reconstruction-control", "full"} and config["transfer"]["required"]:
             endpoint = os.environ.get(config["transfer"]["endpoint_environment"])
             if not endpoint:
                 raise RunError(f"required E4B endpoint environment {config['transfer']['endpoint_environment']} is missing")
@@ -101,9 +103,25 @@ def main() -> int:
                 float(transport_config["retry_backoff_seconds"]),
                 tuple(int(status) for status in transport_config["retry_http_statuses"]),
             )
+        if primary is None:
+            if transfer_transport is None:
+                raise RunError("reconstruction control requires E4B transport")
+            primary = transfer_transport
 
     runner = ExperimentRunner(ROOT, args.output, config, primary, transfer_transport)
     try:
+        if args.phase == "reconstruction-control":
+            transfer_config = deepcopy(config)
+            transfer_config["model"] = config["transfer"]["model"]
+            transfer_config.pop("provider", None)
+            control = runner.run_reconstruction_control(transfer_config)
+            if not control["pass"]:
+                raise RunError("E4B reconstruction-disabled control failed")
+            runner.finish(
+                "PASS_REPLAY" if transport_mode == "replay" else "PASS",
+                transport_mode=transport_mode,
+            )
+            return 0
         arm = runner.run_ladder((args.only_arm,) if args.only_arm else tuple("ABCDEFGH"))
         if args.phase == "thinking":
             thinking = runner.run_thinking_sequence(arm)

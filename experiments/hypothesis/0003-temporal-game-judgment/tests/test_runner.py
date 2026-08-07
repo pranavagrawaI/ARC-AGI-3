@@ -396,6 +396,32 @@ class RunnerTests(unittest.TestCase):
             self.assertTrue(json.loads((output/"transfer-summary.json").read_text())["stable_success"])
             self.assertEqual(json.loads((output/"results.json").read_text())["model_requests"],12)
 
+    def test_reconstruction_control_compares_e4b_g_with_disabled_d(self):
+        batch = json.loads((ROOT / "fixtures/batch.json").read_text())
+        cases = {case["case_id"]: case for case in batch["cases"]}
+        discriminator = cases["game-judgment"]["discriminators"][0]
+        decisions = {
+            "execution-control": {"tool":"EXECUTE","arguments":{"plan_id":"route-left-control","first_action":3,"predicted_public_fields":{"public.levels_completed":0}}},
+            "planning-control": {"tool":"EXECUTE","arguments":{"plan_id":"route-to-supplied-goal","first_action":1,"predicted_public_fields":{"public.levels_completed":0}}},
+            "game-judgment": {"tool":"PROBE","arguments":{"discriminator_id":discriminator["discriminator_id"],"action":discriminator["action"],"predicted_outcomes":discriminator["predicted_outcomes"]}},
+        }
+        abstain={"tool":"ABSTAIN","arguments":{"reason_code":"no_executable_options","missing_evidence":["candidate_plans","discriminators"]}}
+        transfer_config=dict(CONFIG); transfer_config["model"]="google/gemma-4-E4B-it"; transfer_config.pop("provider",None)
+        rows=[]
+        for case_id in cases:
+            for repeat in range(2):
+                rows.append(replay_row(phase="reconstruction-control",case=cases[case_id],arm="G",repeat=repeat,variant="enabled",request_config=transfer_config,response=provider_response(decisions[case_id],model="google/gemma-4-E4B-it",provider="Local")))
+        for case_id in cases:
+            for repeat in range(2):
+                rows.append(replay_row(phase="reconstruction-control",case=cases[case_id],arm="D",repeat=repeat,variant="disabled",request_config=transfer_config,response=provider_response(abstain,model="google/gemma-4-E4B-it",provider="Local")))
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory); responses=root/"responses.jsonl"; output=root/"run"
+            responses.write_text("\n".join(json.dumps(row) for row in rows)+"\n")
+            completed=subprocess.run([sys.executable,str(RUNNER),"--replay-responses",str(responses),"--phase","reconstruction-control","--output",str(output)],capture_output=True,text=True)
+            self.assertEqual(completed.returncode,0,completed.stderr)
+            self.assertTrue(json.loads((output/"reconstruction-control-summary.json").read_text())["pass"])
+            self.assertEqual(json.loads((output/"results.json").read_text())["model_requests"],12)
+
     def test_replay_response_is_bound_to_exact_request(self):
         batch = json.loads((ROOT / "fixtures/batch.json").read_text())
         case = batch["cases"][0]

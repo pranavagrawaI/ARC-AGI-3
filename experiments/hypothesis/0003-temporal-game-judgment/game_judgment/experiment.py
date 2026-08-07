@@ -322,7 +322,7 @@ class ExperimentRunner:
             row["reasoning_returned"] = normalized["reasoning"] is not None
             row["transport_decision"] = normalized["transport_decision"]
             expected_provider = self.config.get("provider_audit", {}).get("provider_name")
-            if phase != "transfer" and normalized["provider"] is not None and expected_provider and normalized["provider"] != expected_provider:
+            if phase not in {"transfer", "reconstruction-control"} and normalized["provider"] is not None and expected_provider and normalized["provider"] != expected_provider:
                 raise RunError(
                     f"provider drift: expected {expected_provider}, got {normalized['provider']}"
                 )
@@ -466,6 +466,57 @@ class ExperimentRunner:
         ]
         summary = {"model": transfer_config["model"], "stable_success": self._stable_success(rows)}
         _write(self.output / "transfer-summary.json", summary)
+        return summary
+
+    def run_reconstruction_control(self, transfer_config: dict[str, Any]) -> dict[str, Any]:
+        if self.transfer is None:
+            raise RunError("required E4B transfer transport is unavailable")
+        repetitions = int(self.config["repetitions"])
+        enabled = [
+            self._call(
+                case, "G", "reconstruction-control", repeat,
+                variant="enabled",
+                request_config=transfer_config,
+                transport=self.transfer,
+            )
+            for case in self.batch["cases"]
+            for repeat in range(repetitions)
+        ]
+        disabled = [
+            self._call(
+                case, "D", "reconstruction-control", repeat,
+                variant="disabled",
+                request_config=transfer_config,
+                transport=self.transfer,
+                score_response=False,
+            )
+            for case in self.batch["cases"]
+            for repeat in range(repetitions)
+        ]
+        disabled_by_case: dict[str, set[tuple[Any, ...]]] = {}
+        for row in disabled:
+            disabled_by_case.setdefault(row["case_id"], set()).add(
+                tuple(row.get("signature", []))
+            )
+        summary = {
+            "model": transfer_config["model"],
+            "enabled_stable_success": self._stable_success(enabled),
+            "disabled_all_abstain": all(
+                row.get("decision", {}).get("tool") == "ABSTAIN" for row in disabled
+            ),
+            "disabled_stable_by_case": all(
+                len(signatures) == 1 for signatures in disabled_by_case.values()
+            ),
+        }
+        summary["pass"] = all(
+            summary[field]
+            for field in (
+                "enabled_stable_success",
+                "disabled_all_abstain",
+                "disabled_stable_by_case",
+            )
+        )
+        _write(self.output / "reconstruction-control-summary.json", summary)
         return summary
 
     def finish(
