@@ -62,7 +62,7 @@ the first paid 31B request.
 
 ## Frozen runtime and gates
 
-`runtime-config.json` pins the 31B model revision, OpenInference BF16 endpoint, decoding, visual-token
+`runtime-config.json` pins the 31B model revision, Novita BF16 endpoint, decoding, visual-token
 budget, two repeats, model-request cap, cost cap, and stop rules. Endpoint metadata is fetched and
 validated before a live run. Provider/model drift, missing parameters, an unhealthy endpoint, or a
 cap violation fails closed.

@@ -18,7 +18,7 @@ RUNNER = ROOT / "run_ladder.py"
 CONFIG = json.loads((ROOT / "runtime-config.json").read_text())
 
 
-def provider_response(decision=None, model="google/gemma-4-31b-it", provider="OpenInference"):
+def provider_response(decision=None, model="google/gemma-4-31b-it", provider="Novita"):
     if decision is None:
         message = {"content": "{}"}
         finish = "stop"
