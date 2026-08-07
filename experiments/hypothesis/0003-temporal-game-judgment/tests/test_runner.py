@@ -289,6 +289,36 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(result["transport_mode"],"replay")
             self.assertEqual(result["provider_calls"],0)
 
+    def test_perturbation_phase_runs_only_g_baseline_and_sequence(self):
+        batch = json.loads((ROOT / "fixtures/batch.json").read_text())
+        cases = {case["case_id"]: case for case in batch["cases"]}
+        discriminator = cases["game-judgment"]["discriminators"][0]
+        decisions = {
+            "execution-control": {"tool":"EXECUTE","arguments":{"plan_id":"route-left-control","first_action":3,"predicted_public_fields":{"public.levels_completed":0}}},
+            "planning-control": {"tool":"EXECUTE","arguments":{"plan_id":"route-to-supplied-goal","first_action":1,"predicted_public_fields":{"public.levels_completed":0}}},
+            "game-judgment": {"tool":"PROBE","arguments":{"discriminator_id":discriminator["discriminator_id"],"action":discriminator["action"],"predicted_outcomes":discriminator["predicted_outcomes"]}},
+        }
+        abstain={"tool":"ABSTAIN","arguments":{"reason_code":"insufficient_evidence","missing_evidence":["cycle_delta"]}}
+        rows=[]
+        for case_id in cases:
+            for repeat in range(2):
+                rows.append(replay_row(phase="ladder",case=cases[case_id],arm="G",repeat=repeat,response=provider_response(decisions[case_id])))
+        perturbed,_=perturb_judgment_case(cases["game-judgment"])
+        for sequence_index,variant in enumerate(("intact","perturbed","intact")):
+            for repeat in range(2):
+                request_case=perturbed if variant=="perturbed" else cases["game-judgment"]
+                rows.append(replay_row(phase="perturbation",case=request_case,arm="G",repeat=repeat,variant=variant,sequence_index=sequence_index,response=provider_response(abstain if variant=="perturbed" else decisions["game-judgment"])))
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory); responses=root/"responses.jsonl"; output=root/"run"
+            responses.write_text("\n".join(json.dumps(row) for row in rows)+"\n")
+            completed=subprocess.run([sys.executable,str(RUNNER),"--replay-responses",str(responses),"--phase","perturbation","--only-arm","G","--output",str(output)],capture_output=True,text=True)
+            self.assertEqual(completed.returncode,0,completed.stderr)
+            self.assertTrue(json.loads((output/"perturbation-summary.json").read_text())["pass"])
+            self.assertFalse((output/"thinking-summary.json").exists())
+            self.assertFalse((output/"transfer-summary.json").exists())
+            result=json.loads((output/"results.json").read_text())
+            self.assertEqual(result["model_requests"],12)
+
     def test_replay_response_is_bound_to_exact_request(self):
         batch = json.loads((ROOT / "fixtures/batch.json").read_text())
         case = batch["cases"][0]
