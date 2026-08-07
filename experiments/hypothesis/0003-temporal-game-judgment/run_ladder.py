@@ -1,21 +1,112 @@
 from __future__ import annotations
-import argparse, json
+
+import argparse
+from copy import deepcopy
+import json
+import os
 from pathlib import Path
 import sys
-ROOT=Path(__file__).resolve().parent; sys.path.insert(0,str(ROOT))
-from game_judgment import ARMS, ContractError, canonical_bytes, digest, parse_decision, score, visible_case  # noqa:E402
 
-def main():
- p=argparse.ArgumentParser(); p.add_argument("--responses",type=Path,required=True); p.add_argument("--output",type=Path,required=True); a=p.parse_args()
- batch=json.loads((ROOT/"fixtures/batch.json").read_text()); labels={x["case_id"]:x for x in json.loads((ROOT/"scorer/labels.json").read_text())["labels"]}
- supplied={(x["case_id"],x["arm"],x.get("repeat",0)):x for x in map(json.loads,a.responses.read_text().splitlines())}; a.output.mkdir(parents=True,exist_ok=False); results=[]
- for case in batch["cases"]:
-  for arm in ARMS:
-   request=visible_case(case,arm); key=(case["case_id"],arm,0); row={"case_id":key[0],"arm":arm,"request_sha256":digest(request)}
-   try:
-    raw=supplied[key]["raw_response"]; decision=parse_decision(raw); row.update({"raw_response":raw,"parser":{"tool":decision.tool,"arguments":decision.arguments},"score":score(case,labels[key[0]],decision)})
-   except (KeyError,ContractError) as e: row.update({"parser_error":str(e),"score":{"contract":False,"pass":False}})
-   results.append(row)
- (a.output/"requests.jsonl").write_bytes(b"".join(canonical_bytes({"case_id":c["case_id"],"arm":arm,"request":visible_case(c,arm)})+b"\n" for c in batch["cases"] for arm in ARMS))
- (a.output/"results.json").write_bytes(canonical_bytes({"schema":"0003-ladder-result-v1","environment_actions":0,"results":results})+b"\n")
-if __name__=="__main__": main()
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+
+from game_judgment import prepare_requests, prepared_bytes  # noqa: E402
+from game_judgment.experiment import (  # noqa: E402
+    ExperimentRunner,
+    HTTPTransport,
+    ReplayTransport,
+    RunError,
+    audit_openai_compatible_endpoint,
+    audit_openrouter_endpoint,
+)
+from game_judgment.serialization import digest  # noqa: E402
+
+
+def _write(path: Path, value) -> None:
+    path.write_text(json.dumps(value, sort_keys=True, indent=2) + "\n")
+
+
+def _api_key(names: list[str]) -> str:
+    return next((os.environ[name] for name in names if os.environ.get(name)), "")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=Path, default=ROOT / "runtime-config.json")
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument("--replay-responses", type=Path)
+    parser.add_argument("--authorize-provider-calls", action="store_true")
+    parser.add_argument("--phase", choices=("ladder", "full"), default="full")
+    args = parser.parse_args()
+
+    config = json.loads(args.config.read_text())
+    if args.output.exists():
+        raise FileExistsError(args.output)
+    args.output.mkdir(parents=True)
+    _write(args.output / "config.json", config)
+    _write(args.output / "manifest.json", {"config_sha256": digest(config), "batch_sha256": digest(json.loads((ROOT / "fixtures/batch.json").read_text())), "environment_actions": 0})
+
+    if args.prepare_only:
+        rows = prepare_requests(ROOT / "fixtures/batch.json", ROOT, config)
+        (args.output / "requests.jsonl").write_bytes(prepared_bytes(rows))
+        _write(args.output / "result.json", {"status": "PREPARED", "requests": len(rows), "provider_calls": 0, "environment_actions": 0})
+        return 0
+
+    transfer_transport = None
+    transfer_config = None
+    if args.replay_responses:
+        primary = ReplayTransport.load(args.replay_responses)
+        transfer_transport = primary
+        transport_mode = "replay"
+    else:
+        transport_mode = "provider"
+        if not args.authorize_provider_calls:
+            raise RunError("live execution requires --authorize-provider-calls")
+        key = _api_key(config["api_key_environment"])
+        if not key:
+            raise RunError("no primary provider API key is configured")
+        primary_audit = audit_openrouter_endpoint(config)
+        _write(args.output / "provider-audit-primary.json", primary_audit)
+        primary = HTTPTransport(config["endpoint"], key, int(config["request_timeout_seconds"]))
+
+        if args.phase == "full" and config["transfer"]["required"]:
+            endpoint = os.environ.get(config["transfer"]["endpoint_environment"])
+            if not endpoint:
+                raise RunError(f"required E4B endpoint environment {config['transfer']['endpoint_environment']} is missing")
+            transfer_audit = audit_openai_compatible_endpoint(endpoint, config["transfer"]["model_audit_path"], config["transfer"]["model"])
+            _write(args.output / "provider-audit-transfer.json", transfer_audit)
+            transfer_key = os.environ.get(config["transfer"]["api_key_environment"], "")
+            transfer_transport = HTTPTransport(endpoint.rstrip("/") + "/v1/chat/completions", transfer_key, int(config["request_timeout_seconds"]))
+
+    runner = ExperimentRunner(ROOT, args.output, config, primary, transfer_transport)
+    try:
+        arm = runner.run_ladder()
+        if args.phase == "full":
+            thinking = runner.run_thinking_sequence(arm)
+            if not thinking["first_off_equals_last_off"] or not thinking["all_contract_pass"]:
+                raise RunError("thinking off-on-off sequence failed its stability gate")
+            perturbation = runner.run_perturbation(arm)
+            if not perturbation.get("eligible") or not perturbation.get("pass"):
+                raise RunError("reconstruction-content perturbation failed or was ineligible")
+            transfer_config = deepcopy(config)
+            transfer_config["model"] = config["transfer"]["model"]
+            transfer_config.pop("provider", None)
+            transfer = runner.run_transfer(arm, transfer_config)
+            if not transfer["stable_success"]:
+                raise RunError("E4B transfer failed repeated signature stability")
+        runner.finish(
+            "PASS_REPLAY" if transport_mode == "replay" else "PASS",
+            transport_mode=transport_mode,
+        )
+        return 0
+    except Exception as exc:
+        runner.finish("FAIL", str(exc), transport_mode=transport_mode)
+        if isinstance(exc, (RunError, ValueError)):
+            print(str(exc), file=sys.stderr)
+            return 1
+        raise
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
