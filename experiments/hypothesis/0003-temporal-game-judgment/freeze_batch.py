@@ -208,6 +208,85 @@ def build_live_initial_case(
     return case, label
 
 
+def build_route_ceiling_case(
+    rows: list[dict[str, Any]], step: int, source: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    current, successor = rows[step], rows[step + 1]
+    action = action_id(successor)
+    plan_id = f"route-ceiling-step-{step}"
+    conjecture_id = f"C-historical-replay-step-{step}"
+    image_path = ROOT / f"fixtures/images/route-ceiling-step-{step}.png"
+    image_size = render_grid(current["frame"][-1], image_path)
+    case = {
+        "schema": "0003-decision-case-v2",
+        "case_id": f"route-ceiling-{step}",
+        "burden": "execution",
+        "source": source,
+        "proposal_provenance": {
+            "authority_label": "historical_replay_certificate",
+            "frontier": step,
+        },
+        "legal_actions": current["available_actions"],
+        "current_public": {
+            field: current[field]
+            for field in ("state", "levels_completed", "win_levels", "available_actions")
+        },
+        "images": [{
+            "step": step,
+            "path": str(image_path.relative_to(ROOT)),
+            "sha256": sha256(image_path.read_bytes()).hexdigest(),
+            "size": list(image_size),
+        }],
+        "step_labels": [step],
+        "numeric_transitions": [],
+        "reflection": "Select the sole head of the separately replay-verified route ceiling.",
+        "reconstruction_authority": "historical_replay_certificate",
+        "candidate_scene": {
+            "schema": "0003-candidate-scene-v1",
+            "evidence_frontier": step,
+            "neutral_tracks": [],
+            "regions": [],
+        },
+        "executable_conjectures": [{
+            "id": conjecture_id,
+            "class": "transition",
+            "program": {"kind": "historical_state_action_replay", "action": action},
+            "replay": {
+                "status": "working",
+                "supports": [step + 1],
+                "contradictions": [],
+                "uncovered": [],
+                "covered_actions": [action],
+            },
+        }],
+        "replay_status": {conjecture_id: "working"},
+        "candidate_plans": [{
+            "plan_id": plan_id,
+            "actions": [action],
+            "predicted_positions": [],
+            "predicted_public_fields": {
+                "public.levels_completed": successor["levels_completed"]
+            },
+            "conjecture_ids": [conjecture_id],
+            "dependency_statuses": {conjecture_id: "working"},
+        }],
+        "verified_route": None,
+        "discriminators": [],
+        "contract": CONTRACT,
+    }
+    label = {
+        "case_id": case["case_id"],
+        "protected_successor": {
+            "public.levels_completed": successor["levels_completed"]
+        },
+        "valid_decision_signatures": [["EXECUTE", plan_id, action]],
+        "valid_abstentions": [],
+        "expected_current_frame_sha256": frame_digest(current["frame"]),
+        "expected_successor_frame_sha256": frame_digest(successor["frame"]),
+    }
+    return case, label
+
+
 def build_case(
     prefix: list[dict[str, Any]],
     spec: dict[str, Any],
@@ -359,6 +438,25 @@ def main() -> int:
     )
     write(ROOT / "fixtures/live-initial-case.json", live_case)
     write(ROOT / "scorer/live-initial-label.json", live_label)
+    route_cases = []
+    route_labels = []
+    for step in range(1, 14):
+        route_case, route_label = build_route_ceiling_case(
+            rows,
+            step,
+            {"path": str(SOURCE.relative_to(REPO)), "sha256": EXPECTED, "frontier": step},
+        )
+        route_cases.append(route_case)
+        route_labels.append(route_label)
+    write(ROOT / "fixtures/live-route-ceiling.json", {
+        "schema": "0003-live-route-ceiling-v1",
+        "authority": "historical_replay_ceiling_not_autonomous_reconstruction",
+        "cases": route_cases,
+    })
+    write(ROOT / "scorer/live-route-ceiling-labels.json", {
+        "schema": "0003-live-route-ceiling-labels-v1",
+        "labels": route_labels,
+    })
     print(ROOT / "fixtures" / "batch.json")
     return 0
 

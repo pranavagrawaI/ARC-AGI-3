@@ -196,6 +196,23 @@ class ContractTests(unittest.TestCase):
   self.assertTrue(validate_current(current,case,label)["pass"])
   successor=environment.step(GameAction.ACTION3)
   self.assertTrue(validate_successor(successor,case["candidate_plans"][0]["predicted_public_fields"],label)["pass"])
+ def test_route_ceiling_replays_one_level_offline_with_exact_successors(self):
+  import arc_agi
+  from arc_agi.base import OperationMode
+  from arcengine import GameAction
+
+  cases=json.loads((ROOT/"fixtures/live-route-ceiling.json").read_text())["cases"]
+  labels=json.loads((ROOT/"scorer/live-route-ceiling-labels.json").read_text())["labels"]
+  self.assertEqual(len(cases),13)
+  self.assertTrue(all("protected_successor" not in case for case in cases))
+  environment=arc_agi.Arcade(operation_mode=OperationMode.OFFLINE).make("ls20",seed=0)
+  current=environment.reset()
+  for case,label in zip(cases,labels):
+   self.assertTrue(validate_current(current,case,label)["pass"])
+   plan=case["candidate_plans"][0]
+   current=environment.step(GameAction.from_id(plan["actions"][0]))
+   self.assertTrue(validate_successor(current,plan["predicted_public_fields"],label)["pass"])
+  self.assertEqual(current.levels_completed,1)
  def test_arm_boundaries(self):
   self.assertEqual(len(visible_case(self.case,"A")["images"]),1); self.assertEqual(len(visible_case(self.case,"B")["images"]),4)
   self.assertNotIn("numeric_transitions",visible_case(self.case,"C")); self.assertIn("numeric_transitions",visible_case(self.case,"D"))
