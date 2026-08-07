@@ -254,6 +254,14 @@ class ExperimentRunner:
             "raw_response_sha256": digest(payload),
             "usage": usage,
         }
+        provider_error = payload.get("error")
+        if isinstance(provider_error, dict):
+            row["provider_error"] = provider_error
+            self.results.append(row)
+            raise RunError(
+                "provider error: "
+                f"{provider_error.get('code')} {provider_error.get('message', 'unknown error')}"
+            )
         try:
             normalized = normalize_response(payload)
             decision = parse_decision(normalized["decision"])

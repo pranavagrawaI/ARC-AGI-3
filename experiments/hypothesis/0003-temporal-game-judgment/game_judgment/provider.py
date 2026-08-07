@@ -53,7 +53,7 @@ def tool_definitions() -> list[dict[str, Any]]:
         for field in fields:
             schema: dict[str, Any] = {"type": _json_type(field)}
             if field == "missing_evidence":
-                schema.update({"items": {"type": "string"}, "minItems": 1, "uniqueItems": True})
+                schema.update({"items": {"type": "string"}, "minItems": 1})
             elif schema["type"] == "object":
                 schema["additionalProperties"] = True
             properties[field] = schema

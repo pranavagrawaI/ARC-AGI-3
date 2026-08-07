@@ -70,6 +70,41 @@ def replay_row(
 
 
 class RunnerTests(unittest.TestCase):
+    def test_provider_error_aborts_on_first_response(self):
+        batch = json.loads((ROOT / "fixtures/batch.json").read_text())
+        case = batch["cases"][0]
+        row = replay_row(
+            phase="ladder",
+            case=case,
+            arm="A",
+            repeat=0,
+            response={"error": {"code": 502, "message": "unsupported grammar"}},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            responses = root / "responses.jsonl"
+            responses.write_text(json.dumps(row) + "\n")
+            output = root / "run"
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(RUNNER),
+                    "--replay-responses",
+                    str(responses),
+                    "--phase",
+                    "ladder",
+                    "--output",
+                    str(output),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            result = json.loads((output / "results.json").read_text())
+            self.assertEqual(result["model_requests"], 1)
+            self.assertEqual(len(result["results"]), 1)
+            self.assertIn("provider error: 502", result["error"])
+
     def test_empty_replay_fails_nonzero_with_no_passes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
