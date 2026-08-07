@@ -7,6 +7,7 @@ ROOT=Path(__file__).resolve().parents[1]; sys.path.insert(0,str(ROOT))
 from game_judgment import ContractError, parse_decision, prepare_requests, prepared_bytes, score, visible_case
 from game_judgment.provider import normalize_response
 from game_judgment.experiment import perturb_judgment_case, thinking_config
+from game_judgment.live import validate_current, validate_successor
 
 REQUEST_CONFIG={"model":"google/gemma-4-31b-it","visual_token_budget":280,"temperature":1.0,"top_p":0.95,"top_k":64,"max_completion_tokens":2048,"reasoning":{"enabled":False},"provider":{"only":["coreweave/bf16"],"order":["coreweave/bf16"],"allow_fallbacks":False,"require_parameters":True},"seed":0}
 
@@ -179,6 +180,22 @@ class ContractTests(unittest.TestCase):
   self.assertEqual(batch["planning-control-down"]["candidate_plans"][0]["actions"],[4,4])
   self.assertIn(["EXECUTE","route-left-control-frontier-5",1],labels["execution-control-left"]["valid_decision_signatures"])
   self.assertIn(["EXECUTE","route-down-to-supplied-goal",4],labels["planning-control-down"]["valid_decision_signatures"])
+ def test_live_initial_certificate_matches_offline_engine_without_scorer_leakage(self):
+  import arc_agi
+  from arc_agi.base import OperationMode
+  from arcengine import GameAction
+
+  case=json.loads((ROOT/"fixtures/live-initial-case.json").read_text())
+  label=json.loads((ROOT/"scorer/live-initial-label.json").read_text())
+  self.assertNotIn("protected_successor",case)
+  self.assertFalse(any("expected_" in key for key in case))
+  self.assertEqual(case["candidate_plans"][0]["actions"],[3])
+  arcade=arc_agi.Arcade(operation_mode=OperationMode.OFFLINE)
+  environment=arcade.make("ls20",seed=0)
+  current=environment.reset()
+  self.assertTrue(validate_current(current,case,label)["pass"])
+  successor=environment.step(GameAction.ACTION3)
+  self.assertTrue(validate_successor(successor,case["candidate_plans"][0]["predicted_public_fields"],label)["pass"])
  def test_arm_boundaries(self):
   self.assertEqual(len(visible_case(self.case,"A")["images"]),1); self.assertEqual(len(visible_case(self.case,"B")["images"]),4)
   self.assertNotIn("numeric_transitions",visible_case(self.case,"C")); self.assertIn("numeric_transitions",visible_case(self.case,"D"))

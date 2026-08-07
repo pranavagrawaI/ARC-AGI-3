@@ -130,6 +130,84 @@ def changed_cells(before: list[list[int]], after: list[list[int]]) -> int:
     )
 
 
+def frame_digest(frame: list[list[list[int]]]) -> str:
+    return sha256(canonical_bytes(frame)).hexdigest()
+
+
+def build_live_initial_case(
+    rows: list[dict[str, Any]], proposal: dict[str, Any], source: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    current, successor = rows[1], rows[2]
+    grounding = next(
+        row for row in proposal["groundings"] if row["kind"] == "tracked_candidate"
+    )
+    current_bbox = grounding["occurrences"]["1"]
+    successor_bbox = grounding["occurrences"]["2"]
+    current_position = [current_bbox[0], current_bbox[2]]
+    successor_position = [successor_bbox[0], successor_bbox[2]]
+    if action_id(successor) != 3 or successor_position != [45, 29]:
+        raise RuntimeError("frozen live successor no longer matches ACTION3 certificate")
+    image_path = ROOT / "fixtures/images/live-initial-step-1.png"
+    image_size = render_grid(current["frame"][-1], image_path)
+    dependencies = ["C-live-translation", "C-live-public-persistence"]
+    case = {
+        "schema": "0003-decision-case-v2",
+        "case_id": "live-initial-control",
+        "burden": "execution",
+        "source": source,
+        "proposal_provenance": {
+            "authority_label": "historical_replay_certificate",
+            "frontier": 1,
+        },
+        "legal_actions": current["available_actions"],
+        "current_public": {
+            field: current[field]
+            for field in ("state", "levels_completed", "win_levels", "available_actions")
+        },
+        "images": [{
+            "step": 1,
+            "path": str(image_path.relative_to(ROOT)),
+            "sha256": sha256(image_path.read_bytes()).hexdigest(),
+            "size": list(image_size),
+        }],
+        "step_labels": [1],
+        "numeric_transitions": [],
+        "reflection": "Select the head of a separately replay-verified initial-state route.",
+        "reconstruction_authority": "historical_replay_certificate",
+        "candidate_scene": {
+            "schema": "0003-candidate-scene-v1",
+            "evidence_frontier": 1,
+            "neutral_tracks": [{"track_id": "track-0", "occurrences": [{"step": 1, "position": current_position}], "observed_patch_signatures": 1}],
+            "regions": [],
+        },
+        "executable_conjectures": [
+            {"id": dependencies[0], "class": "transition", "program": {"kind": "action_translation", "action_deltas": {"3": [0, -5]}}, "replay": {"status": "working", "supports": [2], "contradictions": [], "uncovered": [], "covered_actions": [3]}},
+            {"id": dependencies[1], "class": "transition", "program": {"kind": "public_field_persistence", "field": "levels_completed"}, "replay": {"status": "working", "supports": [2], "contradictions": [], "uncovered": []}},
+        ],
+        "replay_status": {dependency: "working" for dependency in dependencies},
+        "candidate_plans": [{
+            "plan_id": "live-initial-action3",
+            "actions": [3],
+            "predicted_positions": [current_position, successor_position],
+            "predicted_public_fields": {"public.levels_completed": successor["levels_completed"]},
+            "conjecture_ids": dependencies,
+            "dependency_statuses": {dependency: "working" for dependency in dependencies},
+        }],
+        "verified_route": None,
+        "discriminators": [],
+        "contract": CONTRACT,
+    }
+    label = {
+        "case_id": case["case_id"],
+        "protected_successor": {"public.levels_completed": successor["levels_completed"]},
+        "valid_decision_signatures": [["EXECUTE", "live-initial-action3", 3]],
+        "valid_abstentions": [],
+        "expected_current_frame_sha256": frame_digest(current["frame"]),
+        "expected_successor_frame_sha256": frame_digest(successor["frame"]),
+    }
+    return case, label
+
+
 def build_case(
     prefix: list[dict[str, Any]],
     spec: dict[str, Any],
@@ -274,6 +352,13 @@ def main() -> int:
             ROOT / "scorer" / labels_name,
             {"schema": "0003-scorer-labels-v2", "labels": labels},
         )
+    live_case, live_label = build_live_initial_case(
+        rows,
+        proposal,
+        {"path": str(SOURCE.relative_to(REPO)), "sha256": EXPECTED, "frontier": 1},
+    )
+    write(ROOT / "fixtures/live-initial-case.json", live_case)
+    write(ROOT / "scorer/live-initial-label.json", live_label)
     print(ROOT / "fixtures" / "batch.json")
     return 0
 
