@@ -39,7 +39,7 @@ def main() -> int:
     parser.add_argument("--authorize-provider-calls", action="store_true")
     parser.add_argument(
         "--phase",
-        choices=("ladder", "thinking", "layout", "perturbation", "full"),
+        choices=("ladder", "thinking", "layout", "perturbation", "transfer", "full"),
         default="full",
     )
     parser.add_argument("--only-arm", choices=tuple("ABCDEFGH"))
@@ -85,7 +85,7 @@ def main() -> int:
             tuple(int(status) for status in transport_config["retry_http_statuses"]),
         )
 
-        if args.phase == "full" and config["transfer"]["required"]:
+        if args.phase in {"transfer", "full"} and config["transfer"]["required"]:
             endpoint = os.environ.get(config["transfer"]["endpoint_environment"])
             if not endpoint:
                 raise RunError(f"required E4B endpoint environment {config['transfer']['endpoint_environment']} is missing")
@@ -117,6 +117,13 @@ def main() -> int:
             perturbation = runner.run_perturbation(arm)
             if not perturbation.get("eligible") or not perturbation.get("pass"):
                 raise RunError("reconstruction-content perturbation failed or was ineligible")
+        elif args.phase == "transfer":
+            transfer_config = deepcopy(config)
+            transfer_config["model"] = config["transfer"]["model"]
+            transfer_config.pop("provider", None)
+            transfer = runner.run_transfer(arm, transfer_config)
+            if not transfer["stable_success"]:
+                raise RunError("E4B transfer failed repeated signature stability")
         elif args.phase == "full":
             thinking = runner.run_thinking_sequence(arm)
             if not thinking["first_off_equals_last_off"] or not thinking["all_contract_pass"]:
