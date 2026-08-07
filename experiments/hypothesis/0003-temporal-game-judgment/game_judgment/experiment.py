@@ -317,6 +317,7 @@ class ExperimentRunner:
                 )
             row["finish_reason"] = normalized["finish_reason"]
             row["reasoning_returned"] = normalized["reasoning"] is not None
+            row["transport_decision"] = normalized["transport_decision"]
             expected_provider = self.config.get("provider_audit", {}).get("provider_name")
             if phase != "transfer" and normalized["provider"] is not None and expected_provider and normalized["provider"] != expected_provider:
                 raise RunError(

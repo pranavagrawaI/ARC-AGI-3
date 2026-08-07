@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from io import BytesIO
 from pathlib import Path
 import subprocess
@@ -26,13 +27,22 @@ def provider_response(decision=None, model="google/gemma-4-31b-it", provider="No
         message = {"content": "{}"}
         finish = "stop"
     else:
+        transport_decision = deepcopy(decision)
+        if transport_decision["tool"] == "PROBE":
+            transport_decision["arguments"]["predicted_outcomes"] = [
+                {
+                    "conjecture_id": conjecture_id,
+                    "levels_completed": prediction["public.levels_completed"],
+                }
+                for conjecture_id, prediction in transport_decision["arguments"]["predicted_outcomes"].items()
+            ]
         message = {
             "tool_calls": [
                 {
                     "type": "function",
                     "function": {
-                        "name": decision["tool"],
-                        "arguments": json.dumps(decision["arguments"]),
+                        "name": transport_decision["tool"],
+                        "arguments": json.dumps(transport_decision["arguments"]),
                     },
                 }
             ]

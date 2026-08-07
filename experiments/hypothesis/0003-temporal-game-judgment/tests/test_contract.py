@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 ROOT=Path(__file__).resolve().parents[1]; sys.path.insert(0,str(ROOT))
 from game_judgment import ContractError, parse_decision, prepare_requests, prepared_bytes, score, visible_case
+from game_judgment.provider import normalize_response
 from game_judgment.experiment import thinking_config
 
 REQUEST_CONFIG={"model":"google/gemma-4-31b-it","visual_token_budget":280,"temperature":1.0,"top_p":0.95,"top_k":64,"max_completion_tokens":2048,"reasoning":{"enabled":False},"provider":{"only":["coreweave/bf16"],"order":["coreweave/bf16"],"allow_fallbacks":False,"require_parameters":True},"seed":0}
@@ -28,14 +29,28 @@ class ContractTests(unittest.TestCase):
   d=parse_decision({"tool":"EXECUTE","arguments":{"plan_id":"route-left-control","first_action":3,"predicted_public_fields":{"public.levels_completed":1}}})
   self.assertFalse(score(self.case,self.label,d)["pass"])
  def test_probe_and_abstention(self):
-  self.assertEqual(parse_decision({"tool":"PROBE","arguments":{"discriminator_id":"cycle-entry","action":1,"predicted_outcomes":{"a":0,"b":1}}}).tool,"PROBE")
+  self.assertEqual(parse_decision({"tool":"PROBE","arguments":{"discriminator_id":"cycle-entry","action":1,"predicted_outcomes":{"a":{"public.levels_completed":0},"b":{"public.levels_completed":1}}}}).tool,"PROBE")
   self.assertEqual(parse_decision({"tool":"ABSTAIN","arguments":{"reason_code":"insufficient_evidence","missing_evidence":["objective"]}}).tool,"ABSTAIN")
   with self.assertRaises(ContractError):
    parse_decision({"tool":"ABSTAIN","arguments":{"reason_code":"insufficient_evidence","missing_evidence":[]}})
+ def test_probe_transport_records_are_closed_typed_and_decode_to_canonical_outcomes(self):
+  payload={"model":"google/gemma-4-31b-it","provider":"Novita","choices":[{"finish_reason":"tool_calls","message":{"tool_calls":[{"function":{"name":"PROBE","arguments":json.dumps({"discriminator_id":"D","action":1,"predicted_outcomes":[{"conjecture_id":"C-a","levels_completed":1},{"conjecture_id":"C-b","levels_completed":0}]})}}]}}]}
+  normalized=normalize_response(payload)
+  self.assertEqual(normalized["transport_decision"]["arguments"]["predicted_outcomes"][0]["conjecture_id"],"C-a")
+  self.assertEqual(normalized["decision"]["arguments"]["predicted_outcomes"],{"C-a":{"public.levels_completed":1},"C-b":{"public.levels_completed":0}})
+  for outcomes in (
+   [{"conjecture_id":"C-a","levels_completed":"1"},{"conjecture_id":"C-b","levels_completed":0}],
+   [{"conjecture_id":"C-a","levels_completed":1,"extra":0},{"conjecture_id":"C-b","levels_completed":0}],
+   [{"conjecture_id":"C-a","levels_completed":1},{"conjecture_id":"C-a","levels_completed":0}],
+  ):
+   bad=deepcopy(payload)
+   bad["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]=json.dumps({"discriminator_id":"D","action":1,"predicted_outcomes":outcomes})
+   with self.subTest(outcomes=outcomes),self.assertRaises(ValueError):
+    normalize_response(bad)
  def test_boolean_actions_fail_closed(self):
   for tool,arguments in (
    ("EXECUTE",{"plan_id":"route-left-control","first_action":True,"predicted_public_fields":{"public.levels_completed":0}}),
-   ("PROBE",{"discriminator_id":"D","action":True,"predicted_outcomes":{"a":0,"b":1}}),
+   ("PROBE",{"discriminator_id":"D","action":True,"predicted_outcomes":{"a":{"public.levels_completed":0},"b":{"public.levels_completed":1}}}),
   ):
    with self.subTest(tool=tool),self.assertRaises(ContractError):
     parse_decision({"tool":tool,"arguments":arguments})
@@ -47,7 +62,7 @@ class ContractTests(unittest.TestCase):
   discriminator=judgment["discriminators"][0]
   probe=parse_decision({"tool":"PROBE","arguments":{"discriminator_id":discriminator["discriminator_id"],"action":discriminator["action"],"predicted_outcomes":discriminator["predicted_outcomes"]}})
   self.assertTrue(score(judgment,label,probe)["pass"])
-  wrong=parse_decision({"tool":"PROBE","arguments":{"discriminator_id":discriminator["discriminator_id"],"action":discriminator["action"],"predicted_outcomes":{"a":0,"b":1}}})
+  wrong=parse_decision({"tool":"PROBE","arguments":{"discriminator_id":discriminator["discriminator_id"],"action":discriminator["action"],"predicted_outcomes":{"a":{"public.levels_completed":0},"b":{"public.levels_completed":1}}}})
   self.assertFalse(score(judgment,label,wrong)["pass"])
   abstain=parse_decision({"tool":"ABSTAIN","arguments":{"reason_code":"insufficient_evidence","missing_evidence":["cycle_delta"]}})
   self.assertTrue(score(judgment,label,abstain)["pass"])
@@ -84,6 +99,12 @@ class ContractTests(unittest.TestCase):
   predictions=definitions["EXECUTE"]["function"]["parameters"]["properties"]["predicted_public_fields"]
   self.assertEqual(predictions["properties"]["public.levels_completed"]["type"],"integer")
   self.assertFalse(predictions["additionalProperties"])
+  outcomes=definitions["PROBE"]["function"]["parameters"]["properties"]["predicted_outcomes"]
+  self.assertEqual(outcomes["type"],"array")
+  self.assertEqual(outcomes["minItems"],2)
+  self.assertEqual(outcomes["items"]["required"],["conjecture_id","levels_completed"])
+  self.assertEqual(outcomes["items"]["properties"]["levels_completed"]["type"],"integer")
+  self.assertFalse(outcomes["items"]["additionalProperties"])
  def test_thinking_layout_uses_off_on_off_control_token(self):
   off=thinking_config(REQUEST_CONFIG,False); on=thinking_config(REQUEST_CONFIG,True)
   self.assertFalse(off["system_prompt"].startswith("<|think|>"))

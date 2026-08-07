@@ -30,6 +30,19 @@ PUBLIC_PREDICTION_SCHEMA = {
     "required": ["public.levels_completed"],
     "additionalProperties": False,
 }
+PROBE_OUTCOMES_SCHEMA = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "conjecture_id": {"type": "string"},
+            "levels_completed": {"type": "integer"},
+        },
+        "required": ["conjecture_id", "levels_completed"],
+        "additionalProperties": False,
+    },
+    "minItems": 2,
+}
 
 SYSTEM_PROMPT = """You make one bounded decision from public offline game evidence. Preserve unresolved executable alternatives. Use exactly one supplied function tool. EXECUTE only a supplied replay-working plan, PROBE only a supplied discriminator, or ABSTAIN with concrete missing evidence. Never invent an action, plan, outcome, or evidence reference."""
 
@@ -60,10 +73,7 @@ def tool_definitions() -> list[dict[str, Any]]:
             if field == "predicted_public_fields":
                 schema = deepcopy(PUBLIC_PREDICTION_SCHEMA)
             elif field == "predicted_outcomes":
-                schema = {
-                    "type": "object",
-                    "additionalProperties": deepcopy(PUBLIC_PREDICTION_SCHEMA),
-                }
+                schema = deepcopy(PROBE_OUTCOMES_SCHEMA)
             else:
                 schema = {"type": _json_type(field)}
             if field == "missing_evidence":
@@ -217,16 +227,47 @@ def normalize_response(payload: dict[str, Any]) -> dict[str, Any]:
         arguments = function.get("arguments")
         if isinstance(arguments, str):
             arguments = json.loads(arguments)
-        normalized = {"tool": function.get("name"), "arguments": arguments}
+        transport_decision = {"tool": function.get("name"), "arguments": arguments}
     elif not calls and isinstance(message.get("content"), str):
-        normalized = json.loads(message["content"])
+        transport_decision = json.loads(message["content"])
     else:
         raise ValueError("provider response must contain exactly one tool call")
+    normalized = _decode_transport_decision(transport_decision)
     return {
         "decision": normalized,
+        "transport_decision": transport_decision,
         "model": payload.get("model"),
         "provider": payload.get("provider"),
         "usage": payload.get("usage", {}),
         "finish_reason": choices[0].get("finish_reason"),
         "reasoning": message.get("reasoning") or message.get("reasoning_content"),
     }
+
+
+def _decode_transport_decision(value: Any) -> Any:
+    """Translate the closed provider representation into the canonical scoring form."""
+
+    if not isinstance(value, dict) or value.get("tool") != "PROBE":
+        return value
+    arguments = value.get("arguments")
+    if not isinstance(arguments, dict):
+        raise ValueError("PROBE transport arguments must be an object")
+    outcomes = arguments.get("predicted_outcomes")
+    if not isinstance(outcomes, list) or len(outcomes) < 2:
+        raise ValueError("PROBE transport outcomes must contain at least two records")
+    canonical: dict[str, dict[str, int]] = {}
+    for record in outcomes:
+        if not isinstance(record, dict) or set(record) != {"conjecture_id", "levels_completed"}:
+            raise ValueError("PROBE transport outcome fields must be exactly conjecture_id and levels_completed")
+        conjecture_id = record["conjecture_id"]
+        levels_completed = record["levels_completed"]
+        if not isinstance(conjecture_id, str) or not conjecture_id:
+            raise ValueError("PROBE transport conjecture_id must be a non-empty string")
+        if type(levels_completed) is not int:
+            raise ValueError("PROBE transport levels_completed must be an integer")
+        if conjecture_id in canonical:
+            raise ValueError("PROBE transport conjecture_id values must be unique")
+        canonical[conjecture_id] = {"public.levels_completed": levels_completed}
+    decoded = deepcopy(value)
+    decoded["arguments"]["predicted_outcomes"] = canonical
+    return decoded

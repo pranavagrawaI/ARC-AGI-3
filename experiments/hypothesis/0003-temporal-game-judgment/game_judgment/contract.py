@@ -45,6 +45,14 @@ def _integer(value: Any) -> bool:
     return type(value) is int
 
 
+def _public_prediction(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == {"public.levels_completed"}
+        and _integer(value["public.levels_completed"])
+    )
+
+
 def parse_decision(raw: str | bytes | dict[str, Any]) -> Decision:
     try:
         value = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
@@ -62,11 +70,7 @@ def parse_decision(raw: str | bytes | dict[str, Any]) -> Decision:
         if not isinstance(arguments["plan_id"], str) or not _integer(arguments["first_action"]):
             raise ContractError("invalid EXECUTE identifiers")
         predictions = arguments["predicted_public_fields"]
-        if (
-            not isinstance(predictions, dict)
-            or not predictions
-            or any(value == "UNKNOWN" for value in predictions.values())
-        ):
+        if not _public_prediction(predictions):
             raise ContractError("EXECUTE requires concrete public predictions")
     elif tool == "PROBE":
         if not isinstance(arguments["discriminator_id"], str) or not _integer(arguments["action"]):
@@ -75,7 +79,8 @@ def parse_decision(raw: str | bytes | dict[str, Any]) -> Decision:
         if (
             not isinstance(outcomes, dict)
             or len(outcomes) < 2
-            or any(value == "UNKNOWN" for value in outcomes.values())
+            or any(not isinstance(key, str) or not key for key in outcomes)
+            or any(not _public_prediction(prediction) for prediction in outcomes.values())
         ):
             raise ContractError("PROBE requires at least two concrete outcomes")
     else:

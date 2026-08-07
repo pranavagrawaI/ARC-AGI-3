@@ -78,6 +78,10 @@ The transport sends at most one request every five seconds and retries only HTTP
 at most three attempts with a frozen five-second linear backoff. Every HTTP attempt is retained in
 the transport audit and counted separately from logical model requests.
 
+At the provider boundary, `PROBE.predicted_outcomes` is a closed array of
+`{conjecture_id, levels_completed}` records. Valid records are decoded back into the canonical
+conjecture-keyed public-outcome map before contract validation and scoring.
+
 The ladder stops at the first arm where every case passes twice with one stable decision signature.
 Full mode additionally requires:
 
