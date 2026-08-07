@@ -3,6 +3,8 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from .machinery import discriminator_is_decision_relevant
+
 
 ARM_CONFIGS = {
     "A": {"images": "current"},
@@ -44,4 +46,10 @@ def visible_case(case: dict[str, Any], arm: str) -> dict[str, Any]:
     ):
         if config.get(field):
             request[field] = deepcopy(case[field])
+    if "discriminators" in request:
+        request["discriminators"] = [
+            discriminator
+            for discriminator in request["discriminators"]
+            if discriminator_is_decision_relevant(discriminator)
+        ]
     return request

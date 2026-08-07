@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .contract import Decision
+from .machinery import discriminator_is_decision_relevant
 
 
 def _find(rows: list[dict[str, Any]], field: str, value: Any) -> dict[str, Any] | None:
@@ -36,6 +37,7 @@ def score(case: dict[str, Any], labels: dict[str, Any], decision: Decision) -> d
         )
         semantics = bool(
             discriminator
+            and discriminator_is_decision_relevant(discriminator)
             and discriminator["action"] == decision.arguments["action"]
             and discriminator["predicted_outcomes"] == decision.arguments["predicted_outcomes"]
         )

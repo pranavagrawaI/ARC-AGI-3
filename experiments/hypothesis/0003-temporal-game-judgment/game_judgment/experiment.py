@@ -218,7 +218,8 @@ def perturb_judgment_case(case: dict[str, Any]) -> tuple[dict[str, Any], dict[st
         "target": f"discriminators/{discriminator['discriminator_id']}/predicted_outcomes/{theories[1]}",
         "before": before,
         "after": first,
-        "unchanged": ["ids", "ordering", "prose", "legal_actions", "protected_successor"],
+        "unchanged_source_fields": ["ids", "ordering", "prose", "legal_actions", "protected_successor"],
+        "expected_compiled_effect": "non-discriminating candidate omitted from model-visible discriminators",
         "expected_intact_signature": ["PROBE", discriminator["discriminator_id"], discriminator["action"]],
         "expected_perturbed_signature": ["ABSTAIN", "insufficient_evidence"],
     }

@@ -44,7 +44,7 @@ PROBE_OUTCOMES_SCHEMA = {
     "minItems": 2,
 }
 
-SYSTEM_PROMPT = """You make one bounded decision from public offline game evidence. Preserve unresolved executable alternatives. Use exactly one supplied function tool. EXECUTE only a supplied replay-working plan, PROBE only a supplied discriminator, or ABSTAIN with concrete missing evidence. Never invent an action, plan, outcome, or evidence reference."""
+SYSTEM_PROMPT = """You make one bounded decision from public offline game evidence. Preserve unresolved executable alternatives. Use exactly one supplied function tool. EXECUTE only a supplied replay-working plan, PROBE only a supplied discriminator with distinct predicted outcomes, or ABSTAIN with concrete missing evidence. Never invent an action, plan, outcome, or evidence reference."""
 
 
 def _json_type(field: str) -> str:
@@ -63,7 +63,7 @@ def _json_type(field: str) -> str:
 def tool_definitions() -> list[dict[str, Any]]:
     descriptions = {
         "EXECUTE": "Select a supplied replay-working plan and its legal first action.",
-        "PROBE": "Select a supplied discriminator and state all of its predicted outcomes.",
+        "PROBE": "Select a supplied discriminator with distinct outcomes and state all predictions.",
         "ABSTAIN": "Decline when named evidence required for a safe decision is missing.",
     }
     tools = []

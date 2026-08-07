@@ -11,6 +11,16 @@ class MachineryError(ValueError):
     pass
 
 
+def discriminator_is_decision_relevant(discriminator: dict[str, Any]) -> bool:
+    """Return whether the candidate predicts at least two distinct outcomes."""
+
+    outcomes = discriminator.get("predicted_outcomes")
+    if not isinstance(outcomes, dict) or len(outcomes) < 2:
+        return False
+    predictions = list(outcomes.values())
+    return any(prediction != predictions[0] for prediction in predictions[1:])
+
+
 def action_id(row: dict[str, Any]) -> int:
     raw = str(row["action_input"]["id"])
     if not raw.startswith("ACTION") or not raw[6:].isdigit():
@@ -276,20 +286,19 @@ def compile_prefix(
             }
             for conjecture_id, value in values.items()
         }
-        if len({tuple(outcome.items()) for outcome in outcomes.values()}) < 2:
+        candidate_discriminator = {
+            "discriminator_id": case_spec["discriminator"],
+            "distinguishes": [cycle["id"], competitor["id"]],
+            "predicted_outcomes": outcomes,
+        }
+        if not discriminator_is_decision_relevant(candidate_discriminator):
             raise MachineryError("declared discriminator does not distinguish outcomes")
         target = _position(_bbox(next(row for row in proposal["groundings"] if row["symbol"] == objective["region"])["bbox"]))
         actions, _, _ = _route(
             positions[len(prefix) - 1], target, current["available_actions"], translation["action_deltas"], 1, 4
         )
-        discriminators.append(
-            {
-                "discriminator_id": case_spec["discriminator"],
-                "action": actions[0],
-                "distinguishes": [cycle["id"], competitor["id"]],
-                "predicted_outcomes": outcomes,
-            }
-        )
+        candidate_discriminator["action"] = actions[0]
+        discriminators.append(candidate_discriminator)
 
     return {
         "reconstruction_authority": "oracle_coach_prefix_proposal",

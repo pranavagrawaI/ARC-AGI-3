@@ -6,7 +6,7 @@ from unittest.mock import patch
 ROOT=Path(__file__).resolve().parents[1]; sys.path.insert(0,str(ROOT))
 from game_judgment import ContractError, parse_decision, prepare_requests, prepared_bytes, score, visible_case
 from game_judgment.provider import normalize_response
-from game_judgment.experiment import thinking_config
+from game_judgment.experiment import perturb_judgment_case, thinking_config
 
 REQUEST_CONFIG={"model":"google/gemma-4-31b-it","visual_token_budget":280,"temperature":1.0,"top_p":0.95,"top_k":64,"max_completion_tokens":2048,"reasoning":{"enabled":False},"provider":{"only":["coreweave/bf16"],"order":["coreweave/bf16"],"allow_fallbacks":False,"require_parameters":True},"seed":0}
 
@@ -67,6 +67,16 @@ class ContractTests(unittest.TestCase):
   abstain=parse_decision({"tool":"ABSTAIN","arguments":{"reason_code":"insufficient_evidence","missing_evidence":["cycle_delta"]}})
   self.assertTrue(score(judgment,label,abstain)["pass"])
   self.assertFalse(score(self.case,self.label,abstain)["pass"])
+ def test_non_discriminating_probe_is_not_exposed_or_accepted(self):
+  batch=json.loads((ROOT/"fixtures/batch.json").read_text())
+  labels=json.loads((ROOT/"scorer/labels.json").read_text())["labels"]
+  judgment=next(case for case in batch["cases"] if case["case_id"]=="game-judgment")
+  label=next(row for row in labels if row["case_id"]=="game-judgment")
+  perturbed,_=perturb_judgment_case(judgment)
+  discriminator=perturbed["discriminators"][0]
+  self.assertEqual(visible_case(perturbed,"G")["discriminators"],[])
+  probe=parse_decision({"tool":"PROBE","arguments":{"discriminator_id":discriminator["discriminator_id"],"action":discriminator["action"],"predicted_outcomes":discriminator["predicted_outcomes"]}})
+  self.assertFalse(score(perturbed,label,probe)["semantics"])
  def test_unresolved_dependency_cannot_pass_execute_scoring(self):
   case=deepcopy(self.case); label=deepcopy(self.label)
   case["candidate_plans"][0]["conjecture_ids"].append("O-progress")
