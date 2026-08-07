@@ -166,4 +166,12 @@ class ContractTests(unittest.TestCase):
   self.assertEqual(len(visible_case(self.case,"A")["images"]),1); self.assertEqual(len(visible_case(self.case,"B")["images"]),4)
   self.assertNotIn("numeric_transitions",visible_case(self.case,"C")); self.assertIn("numeric_transitions",visible_case(self.case,"D"))
   self.assertIn("reflection",visible_case(self.case,"E")); self.assertIn("executable_conjectures",visible_case(self.case,"F")); self.assertIn("candidate_plans",visible_case(self.case,"G")); self.assertIn("verified_route",visible_case(self.case,"H"))
+ def test_candidate_local_layout_moves_relevant_conjectures_beside_candidates(self):
+  batch={case["case_id"]:case for case in json.loads((ROOT/"fixtures/batch.json").read_text())["cases"]}
+  planning=visible_case(batch["planning-control"],"G","candidate-local")
+  judgment=visible_case(batch["game-judgment"],"G","candidate-local")
+  self.assertNotIn("executable_conjectures",planning)
+  self.assertEqual([row["id"] for row in planning["candidate_plans"][0]["supporting_conjectures"]],["C-translation","C-public-persistence"])
+  self.assertEqual({row["id"] for row in judgment["discriminators"][0]["supporting_conjectures"]},{"C-cycle","C-cycle-competitor","O-progress"})
+  self.assertEqual(judgment["context_layout"],"candidate-local")
 if __name__=="__main__": unittest.main()

@@ -19,7 +19,34 @@ ARM_CONFIGS = {
 ARMS = tuple(ARM_CONFIGS)
 
 
-def visible_case(case: dict[str, Any], arm: str) -> dict[str, Any]:
+def _candidate_local_layout(request: dict[str, Any]) -> None:
+    conjectures = {
+        conjecture["id"]: conjecture
+        for conjecture in request.pop("executable_conjectures", [])
+    }
+    for plan in request.get("candidate_plans", []):
+        plan["supporting_conjectures"] = [
+            deepcopy(conjectures[conjecture_id])
+            for conjecture_id in plan["conjecture_ids"]
+        ]
+    for discriminator in request.get("discriminators", []):
+        relevant_ids = set(discriminator["distinguishes"])
+        relevant_ids.update(
+            conjecture_id
+            for conjecture_id, conjecture in conjectures.items()
+            if conjecture["class"] == "objective"
+        )
+        discriminator["supporting_conjectures"] = [
+            deepcopy(conjectures[conjecture_id])
+            for conjecture_id in conjectures
+            if conjecture_id in relevant_ids
+        ]
+    request["context_layout"] = "candidate-local"
+
+
+def visible_case(
+    case: dict[str, Any], arm: str, context_layout: str = "separated"
+) -> dict[str, Any]:
     try:
         config = ARM_CONFIGS[arm]
     except KeyError as exc:
@@ -52,4 +79,8 @@ def visible_case(case: dict[str, Any], arm: str) -> dict[str, Any]:
             for discriminator in request["discriminators"]
             if discriminator_is_decision_relevant(discriminator)
         ]
+    if context_layout == "candidate-local":
+        _candidate_local_layout(request)
+    elif context_layout != "separated":
+        raise ValueError(f"unknown context layout {context_layout!r}")
     return request

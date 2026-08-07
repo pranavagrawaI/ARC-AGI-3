@@ -383,6 +383,36 @@ class ExperimentRunner:
         _write(self.output / "thinking-summary.json", summary)
         return summary
 
+    def run_layout_sequence(self, arm: str) -> dict[str, Any]:
+        rows = []
+        sequence = self.config["layout_sequence"]
+        for sequence_index, layout in enumerate(sequence):
+            condition = deepcopy(self.config)
+            condition["context_layout"] = layout
+            for case in self.batch["cases"]:
+                rows.append(
+                    self._call(
+                        case, arm, "layout", 0,
+                        sequence_index=sequence_index,
+                        variant=layout,
+                        request_config=condition,
+                    )
+                )
+        first = {
+            row["case_id"]: row.get("signature")
+            for row in rows if row["sequence_index"] == 0
+        }
+        last = {
+            row["case_id"]: row.get("signature")
+            for row in rows if row["sequence_index"] == len(sequence) - 1
+        }
+        summary = {
+            "first_separated_equals_last_separated": first == last,
+            "all_contract_pass": all(row.get("score", {}).get("pass") for row in rows),
+        }
+        _write(self.output / "layout-summary.json", summary)
+        return summary
+
     def run_perturbation(self, arm: str) -> dict[str, Any]:
         if arm not in {"F", "G"}:
             summary = {"eligible": False, "reason": "minimal successful arm is not F or G"}

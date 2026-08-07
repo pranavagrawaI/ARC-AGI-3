@@ -118,7 +118,8 @@ def _delivered_png(path: Path, step: int, labelled: bool) -> tuple[bytes, tuple[
 def assemble_provider_request(
     case: dict[str, Any], arm: str, experiment_root: Path, config: dict[str, Any]
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    logical = visible_case(case, arm)
+    context_layout = config.get("context_layout", "separated")
+    logical = visible_case(case, arm, context_layout)
     visual_budget = int(config["visual_token_budget"])
     if visual_budget not in GEMMA4_VISUAL_BUDGETS:
         raise ValueError(f"unsupported Gemma 4 visual token budget {visual_budget}")
@@ -184,7 +185,8 @@ def assemble_provider_request(
         "schema": "0003-request-audit-v1",
         "case_id": case["case_id"],
         "arm": arm,
-        "logical_request_sha256": digest(visible_case(case, arm)),
+        "context_layout": context_layout,
+        "logical_request_sha256": digest(visible_case(case, arm, context_layout)),
         "provider_request_sha256": digest(request),
         "images": provenance,
     }

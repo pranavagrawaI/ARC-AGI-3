@@ -39,7 +39,7 @@ def main() -> int:
     parser.add_argument("--authorize-provider-calls", action="store_true")
     parser.add_argument(
         "--phase",
-        choices=("ladder", "thinking", "perturbation", "full"),
+        choices=("ladder", "thinking", "layout", "perturbation", "full"),
         default="full",
     )
     parser.add_argument("--only-arm", choices=tuple("ABCDEFGH"))
@@ -108,6 +108,10 @@ def main() -> int:
             thinking = runner.run_thinking_sequence(arm)
             if not thinking["first_off_equals_last_off"] or not thinking["all_contract_pass"]:
                 raise RunError("thinking off-on-off sequence failed its stability gate")
+        elif args.phase == "layout":
+            layout = runner.run_layout_sequence(arm)
+            if not layout["first_separated_equals_last_separated"] or not layout["all_contract_pass"]:
+                raise RunError("context-layout sequence failed its stability gate")
         elif args.phase == "perturbation":
             perturbation = runner.run_perturbation(arm)
             if not perturbation.get("eligible") or not perturbation.get("pass"):
