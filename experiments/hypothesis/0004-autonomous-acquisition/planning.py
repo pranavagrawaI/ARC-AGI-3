@@ -40,13 +40,12 @@ def tool_definitions() -> list[dict[str, Any]]:
                             "type": "array", "items": {"type": "integer", "enum": [1, 2, 3, 4]},
                             "minItems": 1, "maxItems": 64,
                         },
-                        "predicted_level_gain": {"type": "integer", "enum": [1]},
                         "evidence_refs": {
                             "type": "array", "items": {"type": "string", "enum": list(EVIDENCE_REFS)},
                             "minItems": 1,
                         },
                     },
-                    "required": ["actions", "predicted_level_gain", "evidence_refs"],
+                    "required": ["actions", "evidence_refs"],
                     "additionalProperties": False,
                 },
             },
@@ -83,15 +82,13 @@ def parse_response(payload: dict[str, Any]) -> PlanningDecision:
     if isinstance(arguments, str):
         arguments = json.loads(arguments)
     if tool == "SUBMIT_PLAN":
-        required = {"actions", "predicted_level_gain", "evidence_refs"}
+        required = {"actions", "evidence_refs"}
         if not isinstance(arguments, dict) or set(arguments) != required:
             raise ValueError("invalid SUBMIT_PLAN fields")
         actions = arguments["actions"]
         refs = arguments["evidence_refs"]
         if not isinstance(actions, list) or not 1 <= len(actions) <= 64 or any(type(a) is not int or a not in {1, 2, 3, 4} for a in actions):
             raise ValueError("actions must contain 1..64 legal integer actions")
-        if arguments["predicted_level_gain"] != 1:
-            raise ValueError("predicted_level_gain must be 1")
         if not isinstance(refs, list) or not refs or any(ref not in EVIDENCE_REFS for ref in refs):
             raise ValueError("unknown or empty evidence_refs")
     elif tool == "ABSTAIN":

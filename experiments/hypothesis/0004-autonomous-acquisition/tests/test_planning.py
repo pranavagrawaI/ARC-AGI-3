@@ -24,13 +24,13 @@ class PlanningTests(unittest.TestCase):
  def test_case_has_no_route_or_successor(self):
   self.assertTrue({"candidate_plans","verified_route","protected_successor","checkpoint_prefix_actions"}.isdisjoint(self.case))
  def test_closed_plan_parses(self):
-  decision=parse_response(response("SUBMIT_PLAN",{"actions":[1,4,2],"predicted_level_gain":1,"evidence_refs":["chronological_frames"]}))
+  decision=parse_response(response("SUBMIT_PLAN",{"actions":[1,4,2],"evidence_refs":["chronological_frames"]}))
   self.assertEqual(decision.signature,("SUBMIT_PLAN",(1,4,2)))
-  compact=parse_response(response("SUBMIT_PLAN",{"actions":[1,4,3],"predicted_level_gain":1,"evidence_refs":["action_model","causal_affordances","current_state","objective"]}))
+  compact=parse_response(response("SUBMIT_PLAN",{"actions":[1,4,3],"evidence_refs":["action_model","causal_affordances","current_state","objective"]}))
   self.assertEqual(compact.arguments["actions"],[1,4,3])
  def test_malformed_plans_fail_closed(self):
   for actions in [[],[5],[True],[1]*65]:
-   with self.assertRaises(ValueError):parse_response(response("SUBMIT_PLAN",{"actions":actions,"predicted_level_gain":1,"evidence_refs":["chronological_frames"]}))
+   with self.assertRaises(ValueError):parse_response(response("SUBMIT_PLAN",{"actions":actions,"evidence_refs":["chronological_frames"]}))
  def test_evidence_schema_is_closed(self):
   schema=tool_definitions()[0]["function"]["parameters"]["properties"]["evidence_refs"]
   self.assertEqual(tuple(schema["items"]["enum"]),EVIDENCE_REFS)
