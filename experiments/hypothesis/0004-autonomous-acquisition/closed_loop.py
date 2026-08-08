@@ -11,6 +11,8 @@ SYSTEM_PROMPT = """Choose one next legal action in an unfamiliar grid game. You 
 
 DELIBERATIVE_SYSTEM_PROMPT = """Choose one next legal action in an unfamiliar grid game. You receive the public successor frame after every action. Think through the path-dependent plan as fully as useful. Use the supplied action model, objective, replay-supported causal affordance, prior replies, and observed outcomes; explicitly adapt after blocked moves or unexpected transitions. In your visible reply, explain your current subgoal, route logic, and predicted successor. End with exactly one separate final line `ACTION: N`, where N is 1, 2, 3, or 4."""
 
+GROUNDED_DELIBERATIVE_SYSTEM_PROMPT = """Choose one next legal action in an unfamiliar grid game. You receive public frames plus a neutral overlay and public-derived machinery grounding after every action. Think through the path-dependent plan as fully as useful. Treat the current grounding as measured state, not as a prediction: when it conflicts with a prior reply, explicitly discard the predicted position and replan from the measured controlled cell and transition class. Use the action model, objective, replay-supported causal affordance, prior replies, observed outcomes, and resource change. In your visible reply, explain your current subgoal, route logic, and predicted successor. End with exactly one separate final line `ACTION: N`, where N is 1, 2, 3, or 4."""
+
 
 @dataclass(frozen=True)
 class ActionDecision:

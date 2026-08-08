@@ -25,11 +25,13 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(REPO / "experiments/hypothesis/0003-temporal-game-judgment"))
 from closed_loop import (  # noqa: E402
     DELIBERATIVE_SYSTEM_PROMPT,
+    GROUNDED_DELIBERATIVE_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
     parse_deliberative_response,
     parse_response,
 )
 from freeze_planning import PALETTE  # noqa: E402
+from grounding import PublicGrounder, grounding_digest  # noqa: E402
 from game_judgment.experiment import (  # noqa: E402
     HTTPTransport,
     RunError,
@@ -44,6 +46,7 @@ ACTION_CAP = 20
 PAID_COST_CAP_USD = 0.15
 DELIBERATIVE_COST_CAP_USD = 0.50
 DELIBERATIVE_MAX_TOKENS = 8192
+GROUNDED_MAX_TOKENS = 16384
 PRIMARY_PROVIDER_PROFILES = {
     "novita/bf16": {"provider_name": "Novita", "quantization": "bf16"},
     "coreweave/bf16": {"provider_name": "CoreWeave", "quantization": "bf16"},
@@ -101,6 +104,8 @@ def assemble_request(
     case: dict[str, Any], config: dict[str, Any], *, step: int,
     before_grid: Any | None, current_grid: Any, history: list[dict[str, Any]],
     include_provider: bool = False,
+    grounder: PublicGrounder | None = None,
+    grounding: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[tuple[str, str, bytes]]]:
     content: list[dict[str, Any]] = []
     frame_rows: list[tuple[str, str, bytes]] = []
@@ -113,14 +118,30 @@ def assemble_request(
     content.append({"type": "text", "text": f"current public frame; sha256={grid_hash}"})
     content.append(image)
     frame_rows.append(("current", grid_hash, data))
-    visible = {
-        "case": public_case(case),
-        "closed_loop": {
-            "step": step,
-            "actions_remaining": ACTION_CAP - step,
-            "history": history,
-        },
+    if grounder is not None and grounding is not None:
+        overlay_data = grounder.overlay(current_grid, grounding)
+        overlay_hash = sha256(overlay_data).hexdigest()
+        content.append({
+            "type": "text",
+            "text": (
+                "current public-derived grounding overlay; magenta=controlled track, "
+                "yellow=known trigger, cyan=target cell, blue=resource track; "
+                f"sha256={overlay_hash}"
+            ),
+        })
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64," + b64encode(overlay_data).decode()},
+        })
+        frame_rows.append(("grounding", overlay_hash, overlay_data))
+    loop = {
+        "step": step,
+        "actions_remaining": ACTION_CAP - step,
+        "history": history,
     }
+    if grounding is not None:
+        loop["current_public_grounding"] = grounding
+    visible = {"case": public_case(case), "closed_loop": loop}
     content.append({"type": "text", "text": json.dumps(visible, sort_keys=True, indent=2)})
     request = {
         "model": config["model"],
@@ -180,6 +201,7 @@ def main() -> int:
     parser.add_argument(
         "--primary-provider", choices=tuple(PRIMARY_PROVIDER_PROFILES), default="novita/bf16"
     )
+    parser.add_argument("--grounded", action="store_true")
     args = parser.parse_args()
     if args.route == "transfer" and not args.authorize_local_model_calls:
         raise RunError("execution requires --authorize-local-model-calls")
@@ -187,6 +209,8 @@ def main() -> int:
         raise RunError("execution requires --authorize-paid-model-calls")
     if args.deliberative and args.route != "primary":
         raise RunError("deliberative condition is defined only for the primary route")
+    if args.grounded and not args.deliberative:
+        raise RunError("grounded condition requires deliberative replies")
     if args.output.exists():
         raise FileExistsError(args.output)
     card = args.experiment_card.read_bytes()
@@ -204,8 +228,13 @@ def main() -> int:
     config = deepcopy(runtime)
     if args.deliberative:
         config["reasoning"] = {"enabled": True, "exclude": False}
-        config["decision_system_prompt"] = DELIBERATIVE_SYSTEM_PROMPT
-        config["decision_max_tokens"] = DELIBERATIVE_MAX_TOKENS
+        config["decision_system_prompt"] = (
+            GROUNDED_DELIBERATIVE_SYSTEM_PROMPT if args.grounded
+            else DELIBERATIVE_SYSTEM_PROMPT
+        )
+        config["decision_max_tokens"] = (
+            GROUNDED_MAX_TOKENS if args.grounded else DELIBERATIVE_MAX_TOKENS
+        )
     cost_cap = DELIBERATIVE_COST_CAP_USD if args.deliberative else PAID_COST_CAP_USD
     include_provider = args.route == "primary"
     if args.route == "transfer":
@@ -255,6 +284,7 @@ def main() -> int:
         "primary_provider": args.primary_provider if args.route == "primary" else None,
         "paid_cost_cap_usd": cost_cap if args.route == "primary" else 0.0,
         "deliberative": args.deliberative,
+        "grounded": args.grounded,
         "offline_actions_cap": EPISODES * (len(label["checkpoint_prefix_actions"]) + ACTION_CAP),
         "environment_actions": 0,
         "claim_boundary": "one-action feedback planning from a historical checkpoint with a machinery-supplied objective, action model, and causal affordance",
@@ -269,6 +299,7 @@ def main() -> int:
     results: list[dict[str, Any]] = []
     calls = 0
     paid_cost = 0.0
+    grounder = PublicGrounder.from_frozen_prefix() if args.grounded else None
     try:
         for repeat in range(EPISODES):
             arcade, environment, frame = checkpoint(label)
@@ -276,6 +307,7 @@ def main() -> int:
             before_grid = None
             current_grid = np.asarray(frame.frame[-1]).copy()
             history: list[dict[str, Any]] = []
+            current_grounding = grounder.observe(current_grid) if grounder else None
             completed = False
             try:
                 for step in range(ACTION_CAP):
@@ -283,6 +315,7 @@ def main() -> int:
                         case, config, step=step, before_grid=before_grid,
                         current_grid=current_grid, history=history,
                         include_provider=include_provider,
+                        grounder=grounder, grounding=current_grounding,
                     )
                     for frame_label, grid_hash, data in frame_rows:
                         path = args.output / "frames" / f"repeat-{repeat}-step-{step:02d}-{frame_label}-{grid_hash[:12]}.png"
@@ -321,10 +354,18 @@ def main() -> int:
                     }
                     if args.deliberative:
                         outcome["model_reply"] = payload["choices"][0]["message"]["content"]
+                    successor_grounding = None
+                    if grounder is not None:
+                        successor_grounding = grounder.observe(
+                            successor_grid, previous=current_grounding, action=decision.action
+                        )
+                        outcome["public_grounding"] = successor_grounding
+                        outcome["public_grounding_sha256"] = grounding_digest(successor_grounding)
                     history.append(outcome)
                     append(args.output / "trace.jsonl", {"repeat": repeat, **outcome})
                     completed = successor.levels_completed > start_levels or successor.state.value == "WIN"
                     before_grid, current_grid, frame = current_grid, successor_grid, successor
+                    current_grounding = successor_grounding
                     if completed or successor.state.value == "GAME_OVER":
                         break
                     if args.route == "primary" and paid_cost >= cost_cap:

@@ -4,10 +4,12 @@ import sys
 import unittest
 
 import numpy as np
+from arcengine import GameAction
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from closed_loop import DELIBERATIVE_SYSTEM_PROMPT, parse_deliberative_response, parse_response
+from grounding import PublicGrounder
 from run_closed_loop import ACTION_CAP, DELIBERATIVE_MAX_TOKENS, assemble_request, checkpoint, public_case, response_cost_usd
 
 
@@ -105,6 +107,48 @@ class ClosedLoopTests(unittest.TestCase):
         self.assertEqual(request["max_tokens"], 8192)
         self.assertTrue(request["reasoning"]["enabled"])
         self.assertIn('"model_reply": "plan\\nACTION: 1"', request["messages"][1]["content"][-1]["text"])
+
+    def test_public_grounder_stays_exact_through_blocks_and_reset(self):
+        actions = [1, 1, 1, 1, 4, 4, 4, 4, 4, 2, 1, 2, 4]
+        arcade, environment, frame = checkpoint(self.label)
+        grounder = PublicGrounder.from_frozen_prefix()
+        observation = grounder.observe(frame.frame[-1])
+        try:
+            self.assertEqual(observation["controlled_cell"], [30, 24])
+            self.assertEqual(observation["controlled_candidate_count"], 1)
+            classes = []
+            for action in actions:
+                frame = environment.step(GameAction.from_id(action))
+                observation = grounder.observe(
+                    frame.frame[-1], previous=observation, action=action
+                )
+                classes.append(observation["transition_class"])
+                self.assertEqual(
+                    observation["controlled_cell"],
+                    [environment._game.gudziatsk.y, environment._game.gudziatsk.x],
+                )
+                self.assertEqual(observation["controlled_candidate_count"], 1)
+            self.assertIn("blocked_or_no_translation", classes)
+            self.assertIn("unexpected_transition", classes)
+        finally:
+            arcade.close_scorecard()
+
+    def test_grounded_request_contains_overlay_and_measured_state(self):
+        arcade, _, frame = checkpoint(self.label)
+        grounder = PublicGrounder.from_frozen_prefix()
+        grid = np.asarray(frame.frame[-1])
+        grounding = grounder.observe(grid)
+        try:
+            request, rows = assemble_request(
+                self.case, self.config, step=0, before_grid=None, current_grid=grid,
+                history=[], include_provider=True, grounder=grounder, grounding=grounding,
+            )
+            self.assertEqual([row[0] for row in rows], ["current", "grounding"])
+            text = request["messages"][1]["content"][-1]["text"]
+            self.assertIn('"controlled_cell": [', text)
+            self.assertIn('"controlled_track_status": "unique"', text)
+        finally:
+            arcade.close_scorecard()
 
     def test_paid_cost_uses_reported_or_audited_usage(self):
         audit = {"endpoint": {"pricing": {"prompt": "0.1", "completion": "0.2"}}}
