@@ -23,3 +23,9 @@ causal package, but removes full-route commitment: E4B chooses one action, recei
 public successor, and chooses again. This condition also failed 0/3. It is still prefix-conditioned,
 not autonomous play from reset, and the intact causal package already fails; lower-information
 ablations are therefore not licensed by this result.
+
+A later human-annotation audit exposed that the compact package was not a complete causal state.
+Machinery had segmented the color key, refill, blue mechanisms, and action bar, but had not grouped
+or assigned effects to them. See `ANNOTATION-COMPARISON.md`. The feedback result remains evidence
+that E4B did not use the supplied rotation affordance effectively, not that feedback planning failed
+despite every relevant mechanic being represented.
