@@ -22,6 +22,11 @@ The machinery therefore returns a scene with many of the same visual regions, bu
 semantic game description. It assigns decision-relevant meaning to the player, workspace, target,
 and rotation trigger. The compact model request omitted the other annotated mechanics entirely.
 
+Scorer-only replay after this audit identified the large v11 transition at action 11: attempts fell
+from 3 to 2, the action-bar budget refilled from 0 to 42, and the player returned to spawn. It was an
+empty-bar reset, not contact with a changer as the original run log reported. The same correction
+applies to the action-11 transition in v7.
+
 This changes the interpretation of feedback-planning v11. The run still shows that E4B did not route
 to the explicitly supplied rotation trigger. It does **not** show failure despite a complete or
 sufficient causal state: the causal state was partial. A fair next planning ceiling should first
