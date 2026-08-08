@@ -8,7 +8,10 @@ from typing import Any
 
 
 SYSTEM_PROMPT = """Plan in an unfamiliar grid game from chronological public frames and a machinery-acquired objective. Actions move the controlled object according to the supplied action model. Any causal affordance is replay-supported prior evidence, not a route. Produce your own route: no candidate plan, historical suffix, or protected successor is supplied. Submit a plan only if you expect it to complete one level; otherwise abstain. Use exactly one tool and never invent an action or evidence reference."""
-EVIDENCE_REFS = ("chronological_frames", "action_model", "acquired_objective", "tracked_positions", "causal_affordances")
+EVIDENCE_REFS = (
+    "chronological_frames", "coordinate_system", "action_model", "current_state",
+    "objective", "acquired_objective", "tracked_positions", "causal_affordances",
+)
 
 
 @dataclass(frozen=True)

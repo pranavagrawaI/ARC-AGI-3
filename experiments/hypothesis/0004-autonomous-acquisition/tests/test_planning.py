@@ -26,6 +26,8 @@ class PlanningTests(unittest.TestCase):
  def test_closed_plan_parses(self):
   decision=parse_response(response("SUBMIT_PLAN",{"actions":[1,4,2],"predicted_level_gain":1,"evidence_refs":["chronological_frames"]}))
   self.assertEqual(decision.signature,("SUBMIT_PLAN",(1,4,2)))
+  compact=parse_response(response("SUBMIT_PLAN",{"actions":[1,4,3],"predicted_level_gain":1,"evidence_refs":["action_model","causal_affordances","current_state","objective"]}))
+  self.assertEqual(compact.arguments["actions"],[1,4,3])
  def test_malformed_plans_fail_closed(self):
   for actions in [[],[5],[True],[1]*65]:
    with self.assertRaises(ValueError):parse_response(response("SUBMIT_PLAN",{"actions":actions,"predicted_level_gain":1,"evidence_refs":["chronological_frames"]}))
