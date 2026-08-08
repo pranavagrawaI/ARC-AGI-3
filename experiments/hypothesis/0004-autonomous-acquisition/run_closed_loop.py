@@ -25,12 +25,18 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(REPO / "experiments/hypothesis/0003-temporal-game-judgment"))
 from closed_loop import SYSTEM_PROMPT, parse_response  # noqa: E402
 from freeze_planning import PALETTE  # noqa: E402
-from game_judgment.experiment import HTTPTransport, RunError, audit_openai_compatible_endpoint  # noqa: E402
+from game_judgment.experiment import (  # noqa: E402
+    HTTPTransport,
+    RunError,
+    audit_openai_compatible_endpoint,
+    audit_openrouter_endpoint,
+)
 from game_judgment.serialization import canonical_bytes, digest  # noqa: E402
 
 
 EPISODES = 3
 ACTION_CAP = 20
+PAID_COST_CAP_USD = 0.15
 
 
 def write(path: Path, value: Any) -> None:
@@ -81,6 +87,7 @@ def frame_content(label: str, grid: Any) -> tuple[dict[str, Any], str, bytes]:
 def assemble_request(
     case: dict[str, Any], config: dict[str, Any], *, step: int,
     before_grid: Any | None, current_grid: Any, history: list[dict[str, Any]],
+    include_provider: bool = False,
 ) -> tuple[dict[str, Any], list[tuple[str, str, bytes]]]:
     content: list[dict[str, Any]] = []
     frame_rows: list[tuple[str, str, bytes]] = []
@@ -115,7 +122,22 @@ def assemble_request(
         "reasoning": deepcopy(config["reasoning"]),
         "seed": config["seed"],
     }
+    if include_provider:
+        request["provider"] = deepcopy(config["provider"])
     return request, frame_rows
+
+
+def response_cost_usd(payload: dict[str, Any], provider_audit: dict[str, Any]) -> float:
+    usage = payload.get("usage") or {}
+    reported = usage.get("cost")
+    if isinstance(reported, (int, float)) and reported >= 0:
+        return float(reported)
+    pricing = provider_audit["endpoint"]["pricing"]
+    prompt = int(usage.get("prompt_tokens", 0))
+    completion = int(usage.get("completion_tokens", 0))
+    if prompt == 0 and completion == 0:
+        raise RunError("paid response omitted both cost and token usage")
+    return prompt * float(pricing["prompt"]) + completion * float(pricing["completion"])
 
 
 def checkpoint(label: dict[str, Any]):
@@ -138,18 +160,19 @@ def main() -> int:
     parser.add_argument("--experiment-card", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--case-file", type=Path, default=ROOT / "fixtures/planning-affordance-compact-case.json")
+    parser.add_argument("--route", choices=("transfer", "primary"), default="transfer")
     parser.add_argument("--authorize-local-model-calls", action="store_true")
+    parser.add_argument("--authorize-paid-model-calls", action="store_true")
     args = parser.parse_args()
-    if not args.authorize_local_model_calls:
+    if args.route == "transfer" and not args.authorize_local_model_calls:
         raise RunError("execution requires --authorize-local-model-calls")
+    if args.route == "primary" and not args.authorize_paid_model_calls:
+        raise RunError("execution requires --authorize-paid-model-calls")
     if args.output.exists():
         raise FileExistsError(args.output)
     card = args.experiment_card.read_bytes()
     if len(card) > 1024:
         raise RunError("experiment card exceeds 1 KiB")
-    endpoint = os.environ.get("GEMMA_E4B_ENDPOINT")
-    if not endpoint:
-        raise RunError("GEMMA_E4B_ENDPOINT is required")
     args.output.mkdir(parents=True)
     case = json.loads(args.case_file.read_text())
     forbidden = {"candidate_plans", "verified_route", "protected_successor", "checkpoint_prefix_actions"}
@@ -160,7 +183,25 @@ def main() -> int:
     runtime_path = REPO / "experiments/hypothesis/0003-temporal-game-judgment/runtime-config.json"
     runtime = json.loads(runtime_path.read_text())
     config = deepcopy(runtime)
-    config["model"] = runtime["transfer"]["model"]
+    include_provider = args.route == "primary"
+    if args.route == "transfer":
+        config["model"] = runtime["transfer"]["model"]
+        endpoint = os.environ.get("GEMMA_E4B_ENDPOINT")
+        if not endpoint:
+            raise RunError("GEMMA_E4B_ENDPOINT is required")
+        provider_audit = audit_openai_compatible_endpoint(
+            endpoint, runtime["transfer"]["model_audit_path"], config["model"]
+        )
+        api_key = os.environ.get(runtime["transfer"]["api_key_environment"], "")
+    else:
+        endpoint = runtime["endpoint"]
+        provider_audit = audit_openrouter_endpoint(runtime)
+        api_key = next(
+            (os.environ[name] for name in runtime["api_key_environment"] if os.environ.get(name)),
+            "",
+        )
+        if not api_key:
+            raise RunError("OpenRouter API key is required")
     write(args.output / "manifest.json", {
         "card_sha256": sha256(card).hexdigest(),
         "case_sha256": digest(case),
@@ -168,21 +209,23 @@ def main() -> int:
         "label_sha256": sha256(label_path.read_bytes()).hexdigest(),
         "runtime_sha256": sha256(runtime_path.read_bytes()).hexdigest(),
         "model_calls_cap": EPISODES * ACTION_CAP,
+        "route": args.route,
+        "model": config["model"],
+        "paid_cost_cap_usd": PAID_COST_CAP_USD if args.route == "primary" else 0.0,
         "offline_actions_cap": EPISODES * (len(label["checkpoint_prefix_actions"]) + ACTION_CAP),
         "environment_actions": 0,
         "claim_boundary": "one-action feedback planning from a historical checkpoint with a machinery-supplied objective, action model, and causal affordance",
         "protected_label_use": "offline checkpoint reconstruction and external scoring only",
     })
-    write(args.output / "provider-audit.json", audit_openai_compatible_endpoint(
-        endpoint, runtime["transfer"]["model_audit_path"], config["model"]
-    ))
+    write(args.output / "provider-audit.json", provider_audit)
     transport = HTTPTransport(
-        endpoint.rstrip("/") + "/v1/chat/completions", "",
+        endpoint.rstrip("/") + ("/v1/chat/completions" if args.route == "transfer" else ""), api_key,
         int(runtime["request_timeout_seconds"]), 0.0, 1, 0.0,
         tuple(runtime["transport"]["retry_http_statuses"]),
     )
     results: list[dict[str, Any]] = []
     calls = 0
+    paid_cost = 0.0
     try:
         for repeat in range(EPISODES):
             arcade, environment, frame = checkpoint(label)
@@ -196,6 +239,7 @@ def main() -> int:
                     request, frame_rows = assemble_request(
                         case, config, step=step, before_grid=before_grid,
                         current_grid=current_grid, history=history,
+                        include_provider=include_provider,
                     )
                     for frame_label, grid_hash, data in frame_rows:
                         path = args.output / "frames" / f"repeat-{repeat}-step-{step:02d}-{frame_label}-{grid_hash[:12]}.png"
@@ -210,6 +254,8 @@ def main() -> int:
                     })
                     payload, audit = transport.call({"phase": "closed_loop", "repeat": repeat, "step": step}, request)
                     calls += 1
+                    if args.route == "primary":
+                        paid_cost += response_cost_usd(payload, provider_audit)
                     append(args.output / "raw-responses.jsonl", {
                         "repeat": repeat, "step": step, "request_sha256": request_hash,
                         "response": payload, "transport_audit": audit,
@@ -231,6 +277,8 @@ def main() -> int:
                     before_grid, current_grid, frame = current_grid, successor_grid, successor
                     if completed or successor.state.value == "GAME_OVER":
                         break
+                    if args.route == "primary" and paid_cost >= PAID_COST_CAP_USD:
+                        raise RunError("paid cost cap reached")
                 results.append({
                     "repeat": repeat,
                     "completed_level": completed,
@@ -251,7 +299,7 @@ def main() -> int:
             "model_calls": calls,
             "offline_actions": EPISODES * len(label["checkpoint_prefix_actions"]) + sum(row["actions_executed"] for row in results),
             "environment_actions": 0,
-            "paid_cost_usd": 0.0,
+            "paid_cost_usd": paid_cost,
         }
     except Exception as exc:
         result = {
@@ -261,7 +309,7 @@ def main() -> int:
             "model_calls": calls,
             "episodes_completed": len(results),
             "environment_actions": 0,
-            "paid_cost_usd": 0.0,
+            "paid_cost_usd": paid_cost,
         }
     write(args.output / "result.json", result)
     return 0 if result["status"] == "PASS" else 1

@@ -8,7 +8,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from closed_loop import parse_response
-from run_closed_loop import ACTION_CAP, assemble_request, checkpoint, public_case
+from run_closed_loop import ACTION_CAP, assemble_request, checkpoint, public_case, response_cost_usd
 
 
 def response(content, finish_reason="stop"):
@@ -73,6 +73,22 @@ class ClosedLoopTests(unittest.TestCase):
         self.assertIn('"changed_cells": 1', text)
         self.assertNotIn("verified_route", text)
         self.assertEqual(ACTION_CAP, 20)
+
+    def test_primary_request_keeps_provider_pin(self):
+        grid = np.zeros((2, 2), dtype=int)
+        request, _ = assemble_request(
+            self.case, self.config, step=0, before_grid=None, current_grid=grid,
+            history=[], include_provider=True,
+        )
+        self.assertEqual(request["provider"], self.config["provider"])
+
+    def test_paid_cost_uses_reported_or_audited_usage(self):
+        audit = {"endpoint": {"pricing": {"prompt": "0.1", "completion": "0.2"}}}
+        self.assertEqual(response_cost_usd({"usage": {"cost": 0.25}}, audit), 0.25)
+        self.assertAlmostEqual(
+            response_cost_usd({"usage": {"prompt_tokens": 2, "completion_tokens": 3}}, audit),
+            0.8,
+        )
 
 
 if __name__ == "__main__":
