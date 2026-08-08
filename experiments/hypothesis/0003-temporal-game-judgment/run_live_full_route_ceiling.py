@@ -24,7 +24,14 @@ from game_judgment import (  # noqa: E402
     parse_decision, score,
 )
 from game_judgment.experiment import HTTPTransport, RunError, audit_openai_compatible_endpoint  # noqa: E402
-from game_judgment.live import frame_sha256, public_state, validate_current, validate_successor  # noqa: E402
+from game_judgment.live import (  # noqa: E402
+    configure_remote_step_timeout, frame_sha256, public_state, validate_current,
+    validate_successor,
+)
+
+
+class InvalidRun(RunError):
+    pass
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -69,6 +76,7 @@ def main() -> int:
         "schema": "0003-live-full-route-ceiling-result-v1",
         "status": "RUNNING", "environment_actions": 0, "probe_actions": 0,
         "provider_calls": 0, "paid_cost_usd": 0.0, "levels_completed": 0,
+        "submitted_actions": 0,
         "completion_action_counts": [], "experiment_card_sha256": sha256(card).hexdigest(),
         "natural_stop": "WIN",
     }
@@ -76,6 +84,7 @@ def main() -> int:
         "fixture_sha256": digest(fixture), "labels_sha256": sha256(labels_path.read_bytes()).hexdigest(),
         "config_sha256": digest(transfer), "card_sha256": result["experiment_card_sha256"],
         "certificate_actions": len(cases), "action_cap": None,
+        "arc_read_timeout_seconds": 60,
         "claim_boundary": "verified-route ceiling; not autonomous reconstruction",
     })
     write_json(args.output / "provider-audit.json", audit_openai_compatible_endpoint(
@@ -99,6 +108,7 @@ def main() -> int:
         if environment is None:
             raise RunError("online environment was unavailable")
         current = environment.reset()
+        configure_remote_step_timeout(environment, 60.0)
         for index, (case, label) in enumerate(zip(cases, labels), 1):
             if current.state.value == "WIN":
                 break
@@ -117,7 +127,10 @@ def main() -> int:
             if not decision_score["pass"]:
                 raise RunError(f"action {index} decision failed the frozen contract")
             previous_levels = current.levels_completed
+            result["submitted_actions"] += 1
             successor = environment.step(GameAction.from_id(decision.arguments["first_action"]))
+            if successor is None:
+                raise InvalidRun(f"action {index} returned no successor")
             result["environment_actions"] += 1
             successor_check = validate_successor(
                 successor, decision.arguments["predicted_public_fields"], label
@@ -149,7 +162,7 @@ def main() -> int:
     except Exception as exc:
         if current is not None:
             result["levels_completed"] = current.levels_completed
-        result["status"] = "FAIL"
+        result["status"] = "INVALID" if isinstance(exc, InvalidRun) else "FAIL"
         result["error"] = f"{type(exc).__name__}: {exc}"
         write_json(args.output / "result.json", result)
         return 1

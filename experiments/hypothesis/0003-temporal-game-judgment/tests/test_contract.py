@@ -7,7 +7,7 @@ ROOT=Path(__file__).resolve().parents[1]; sys.path.insert(0,str(ROOT))
 from game_judgment import ContractError, parse_decision, prepare_requests, prepared_bytes, score, visible_case
 from game_judgment.provider import normalize_response
 from game_judgment.experiment import perturb_judgment_case, thinking_config
-from game_judgment.live import validate_current, validate_successor
+from game_judgment.live import configure_remote_step_timeout, validate_current, validate_successor
 
 REQUEST_CONFIG={"model":"google/gemma-4-31b-it","visual_token_budget":280,"temperature":1.0,"top_p":0.95,"top_k":64,"max_completion_tokens":2048,"reasoning":{"enabled":False},"provider":{"only":["coreweave/bf16"],"order":["coreweave/bf16"],"allow_fallbacks":False,"require_parameters":True},"seed":0}
 
@@ -55,6 +55,15 @@ class ContractTests(unittest.TestCase):
   ):
    with self.subTest(tool=tool),self.assertRaises(ContractError):
     parse_decision({"tool":tool,"arguments":arguments})
+ def test_remote_step_timeout_is_extended_without_retrying(self):
+  class Session:
+   def __init__(self): self.calls=[]
+   def post(self,*args,**kwargs): self.calls.append((args,kwargs)); return "response"
+  class Environment: pass
+  environment=Environment(); environment._session=Session()
+  configure_remote_step_timeout(environment,60.0)
+  self.assertEqual(environment._session.post("url",timeout=10),"response")
+  self.assertEqual(environment._session.calls,[(("url",),{"timeout":60.0})])
  def test_probe_predictions_and_abstention_are_scored_semantically(self):
   batch=json.loads((ROOT/"fixtures/batch.json").read_text())
   labels=json.loads((ROOT/"scorer/labels.json").read_text())["labels"]

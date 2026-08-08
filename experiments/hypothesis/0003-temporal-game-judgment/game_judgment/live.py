@@ -11,6 +11,21 @@ from .serialization import canonical_bytes
 PUBLIC_FIELDS = ("state", "levels_completed", "win_levels", "available_actions")
 
 
+def configure_remote_step_timeout(environment: Any, seconds: float) -> None:
+    """Increase the SDK's fixed POST timeout without adding unsafe action retries."""
+
+    session = getattr(environment, "_session", None)
+    if session is None or not callable(getattr(session, "post", None)):
+        raise TypeError("online environment has no configurable HTTP session")
+    original_post = session.post
+
+    def post(*args: Any, **kwargs: Any) -> Any:
+        kwargs["timeout"] = seconds
+        return original_post(*args, **kwargs)
+
+    session.post = post
+
+
 def frame_as_records(frame_data: Any) -> list[list[list[int]]]:
     return [plane.tolist() if hasattr(plane, "tolist") else plane for plane in frame_data.frame]
 
