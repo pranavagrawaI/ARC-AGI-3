@@ -19,12 +19,17 @@ class AcquisitionTests(unittest.TestCase):
  def setUpClass(cls):
   import freeze_acquisition;freeze_acquisition.main()
   cls.case=json.loads((ROOT/"fixtures/case.json").read_text())
+  cls.pruned=json.loads((ROOT/"fixtures/case-pruned.json").read_text())
   cls.label=json.loads((ROOT/"scorer/label.json").read_text())
  def test_frozen_boundary_and_transfer_audit(self):
   self.assertEqual([row["pair_id"] for row in self.case["candidate_hypotheses"]],[7,9,13,17,25,32,35])
   self.assertNotIn("valid_pair_id",json.dumps(self.case))
   transfer=json.loads((ROOT/"fixtures/machinery-transfer.json").read_text())["levels"]
   self.assertEqual([row["unique_scale_first_observation"] for row in transfer],[18,None,14,10])
+  self.assertEqual([row["deduplicated_scale_first_observation"] for row in transfer],[18,20,14,10])
+  self.assertTrue(all(row["acquired_after_deduplication"] for row in transfer))
+  self.assertEqual([row["pair_id"] for row in self.pruned["candidate_hypotheses"]],[32])
+  self.assertEqual(self.pruned["representation_deduplication"]["removed_mutable_tracks"],[23])
  def test_select_compiles_and_heldout_scores(self):
   decision=parse_response(response("SELECT_RELATION",{"pair_id":32,"program_kind":"integer_scale_objective","factor":2,"evidence_refs":["invariant.patch","mutable.contact_change_rows"]}))
   self.assertTrue(score(self.case,self.label,decision)["acquired"])

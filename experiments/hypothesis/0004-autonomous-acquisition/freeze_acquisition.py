@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from hashlib import sha256
+from copy import deepcopy
 import json
 from pathlib import Path
 import sys
@@ -57,6 +58,44 @@ def scale_candidates(candidates: list[tuple[Any, Any]]) -> list[tuple[int, Any, 
     return rows
 
 
+def change_events(track: Any) -> set[int]:
+    return {
+        frame for frame in track.sigs
+        if frame - 1 in track.sigs and track.sigs[frame] != track.sigs[frame - 1]
+    }
+
+
+def strict_synchronized_subtrack(child: Any, parent: Any) -> bool:
+    if set(child.sprites) != set(parent.sprites) or change_events(child) != change_events(parent):
+        return False
+    strict = False
+    for frame in child.sprites:
+        child_box = child.sprites[frame].bbox
+        parent_box = parent.sprites[frame].bbox
+        if not (
+            parent_box[0] <= child_box[0] <= child_box[1] <= parent_box[1]
+            and parent_box[2] <= child_box[2] <= child_box[3] <= parent_box[3]
+        ):
+            return False
+        strict = strict or child_box != parent_box
+    return strict
+
+
+def prune_derived_mutable_tracks(
+    rows: list[tuple[int, Any, Any, int]],
+) -> tuple[list[tuple[int, Any, Any, int]], set[int]]:
+    mutable_tracks = {mutable.tid: mutable for _, _, mutable, _ in rows}
+    derived = {
+        track_id
+        for track_id, child in mutable_tracks.items()
+        if any(
+            track_id != parent_id and strict_synchronized_subtrack(child, parent)
+            for parent_id, parent in mutable_tracks.items()
+        )
+    }
+    return [row for row in rows if row[2].tid not in derived], derived
+
+
 def main() -> int:
     verify_sources()
     sys.path.insert(0, str(SUBSTRATE))
@@ -70,19 +109,29 @@ def main() -> int:
         full = digest(observations, "colour", horizon=len(observations))
         truth = selector.oracle_pair(full)
         earliest = None
+        deduplicated_earliest = None
         for horizon in range(4, len(observations) + 1):
             prefix = digest(observations, "colour", horizon=horizon)
             candidates = selector.pairs_of(prefix)
             index = {(left.tid, right.tid): pair_id for pair_id, (left, right) in enumerate(candidates)}
             selected = selector.scale_rule(candidates)
             if truth in index and selected == index[truth]:
-                earliest = horizon
-                break
+                earliest = earliest or horizon
+            scale_rows = scale_candidates(candidates)
+            retained, _ = prune_derived_mutable_tracks(scale_rows)
+            if (
+                deduplicated_earliest is None
+                and len(retained) == 1
+                and (retained[0][1].tid, retained[0][2].tid) == truth
+            ):
+                deduplicated_earliest = horizon
         transfer.append({
             "level": level,
             "observations_total": len(observations),
             "unique_scale_first_observation": earliest,
             "acquired_without_model": earliest is not None,
+            "deduplicated_scale_first_observation": deduplicated_earliest,
+            "acquired_after_deduplication": deduplicated_earliest is not None,
         })
 
     level = 2
@@ -95,7 +144,9 @@ def main() -> int:
     frames = prefix["_tracks"]["frames"]
     attribution = {row["tid"]: row for row in prefix.get("attribution", [])}
     visible_candidates = []
-    for pair_id, invariant, mutable, factor in scale_candidates(all_candidates):
+    scale_rows = scale_candidates(all_candidates)
+    retained_rows, derived_tracks = prune_derived_mutable_tracks(scale_rows)
+    for pair_id, invariant, mutable, factor in scale_rows:
         invariant_frame = min(invariant.sprites)
         mutable_first = min(mutable.sprites)
         mutable_current = max(frame for frame in mutable.sprites if frame < horizon)
@@ -167,6 +218,28 @@ def main() -> int:
             "exactly_one_call": True,
         },
     }
+    pruned_case = deepcopy(case)
+    retained_pair_ids = [row[0] for row in retained_rows]
+    pruned_case["case_id"] = "ls20-level-2-deduplicated-scale-objective"
+    pruned_case["authority"] = "prefix_only_measurements_with_generic_representation_deduplication"
+    pruned_case["candidate_hypotheses"] = [
+        row for row in visible_candidates if row["pair_id"] in retained_pair_ids
+    ]
+    pruned_case["representation_deduplication"] = {
+        "rule": "remove_strict_spatial_subtracks_with_identical_observation_and_change_events",
+        "removed_mutable_tracks": sorted(derived_tracks),
+        "retained_pair_ids": retained_pair_ids,
+        "evidence": [{
+            "child_track": child_id,
+            "parent_track": parent_id,
+            "shared_observations": len(next(row[2] for row in scale_rows if row[2].tid == child_id).sprites),
+            "change_events": sorted(change_events(next(row[2] for row in scale_rows if row[2].tid == child_id))),
+        } for child_id in sorted(derived_tracks) for parent_id, parent in {
+            row[2].tid: row[2] for row in scale_rows
+        }.items() if child_id != parent_id and strict_synchronized_subtrack(
+            next(row[2] for row in scale_rows if row[2].tid == child_id), parent
+        )],
+    }
     labels = {
         "schema": "0004-acquisition-label-v1",
         "case_id": case["case_id"],
@@ -176,6 +249,7 @@ def main() -> int:
         "terminal_observation": len(observations),
     }
     write(ROOT / "fixtures/case.json", case)
+    write(ROOT / "fixtures/case-pruned.json", pruned_case)
     write(ROOT / "fixtures/machinery-transfer.json", {
         "schema": "0004-machinery-transfer-v1",
         "source_sha256": EXPECTED[RECORDING],
