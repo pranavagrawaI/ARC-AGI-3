@@ -45,6 +45,7 @@ class PlanningTests(unittest.TestCase):
   self.assertEqual(self.compact_case["current_state"],{"controlled_cell":[30,24],"target_cell":[50,54]})
   self.assertEqual(self.compact_case["causal_affordances"][0]["trigger_cell"],[10,49])
   self.assertEqual(self.compact_case["causal_affordances"][0]["contacts_required"],2)
+  self.assertIn("divide coordinate difference by 5",self.compact_case["planning_rule"])
   self.assertEqual(len(self.compact_case["images"]),1)
   self.assertTrue({"candidate_plans","verified_route","protected_successor"}.isdisjoint(self.compact_case))
  def test_offline_checkpoint_matches_frozen_prefix(self):

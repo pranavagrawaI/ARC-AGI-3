@@ -109,6 +109,7 @@ def main() -> int:
             "target_cell": target_cell,
             "required_affordance_id": "affordance-0",
         },
+        "planning_rule": "one action applies its full 5-unit delta; divide coordinate difference by 5 to count actions",
         "causal_affordances": [{
             "affordance_id": "affordance-0",
             "trigger_cell": positions[0],
