@@ -7,8 +7,8 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from closed_loop import parse_response
-from run_closed_loop import ACTION_CAP, assemble_request, checkpoint, public_case, response_cost_usd
+from closed_loop import DELIBERATIVE_SYSTEM_PROMPT, parse_deliberative_response, parse_response
+from run_closed_loop import ACTION_CAP, DELIBERATIVE_MAX_TOKENS, assemble_request, checkpoint, public_case, response_cost_usd
 
 
 def response(content, finish_reason="stop"):
@@ -41,6 +41,13 @@ class ClosedLoopTests(unittest.TestCase):
                 parse_response(response(content))
         with self.assertRaises(ValueError):
             parse_response(response("1", finish_reason="length"))
+
+    def test_deliberative_contract_allows_reply_but_closes_action(self):
+        value = response("I will route upward first.\nACTION: 1")
+        self.assertEqual(parse_deliberative_response(value).action, 1)
+        for content in ("ACTION: 1\nextra", "I choose 1", "ACTION: 1\nACTION: 2"):
+            with self.assertRaises(ValueError):
+                parse_deliberative_response(response(content))
 
     def test_visible_case_has_no_route_or_protected_successor(self):
         visible = public_case(self.case)
@@ -81,6 +88,23 @@ class ClosedLoopTests(unittest.TestCase):
             history=[], include_provider=True,
         )
         self.assertEqual(request["provider"], self.config["provider"])
+
+    def test_deliberative_request_has_room_and_prior_reply_memory(self):
+        grid = np.zeros((2, 2), dtype=int)
+        config = dict(self.config)
+        config.update({
+            "reasoning": {"enabled": True, "exclude": False},
+            "decision_system_prompt": DELIBERATIVE_SYSTEM_PROMPT,
+            "decision_max_tokens": DELIBERATIVE_MAX_TOKENS,
+        })
+        history = [{"step": 0, "action": 1, "model_reply": "plan\nACTION: 1"}]
+        request, _ = assemble_request(
+            self.case, config, step=1, before_grid=grid, current_grid=grid,
+            history=history, include_provider=True,
+        )
+        self.assertEqual(request["max_tokens"], 8192)
+        self.assertTrue(request["reasoning"]["enabled"])
+        self.assertIn('"model_reply": "plan\\nACTION: 1"', request["messages"][1]["content"][-1]["text"])
 
     def test_paid_cost_uses_reported_or_audited_usage(self):
         audit = {"endpoint": {"pricing": {"prompt": "0.1", "completion": "0.2"}}}

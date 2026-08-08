@@ -23,7 +23,12 @@ ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(REPO / "experiments/hypothesis/0003-temporal-game-judgment"))
-from closed_loop import SYSTEM_PROMPT, parse_response  # noqa: E402
+from closed_loop import (  # noqa: E402
+    DELIBERATIVE_SYSTEM_PROMPT,
+    SYSTEM_PROMPT,
+    parse_deliberative_response,
+    parse_response,
+)
 from freeze_planning import PALETTE  # noqa: E402
 from game_judgment.experiment import (  # noqa: E402
     HTTPTransport,
@@ -37,6 +42,14 @@ from game_judgment.serialization import canonical_bytes, digest  # noqa: E402
 EPISODES = 3
 ACTION_CAP = 20
 PAID_COST_CAP_USD = 0.15
+DELIBERATIVE_COST_CAP_USD = 0.50
+DELIBERATIVE_MAX_TOKENS = 8192
+PRIMARY_PROVIDER_PROFILES = {
+    "novita/bf16": {"provider_name": "Novita", "quantization": "bf16"},
+    "coreweave/bf16": {"provider_name": "CoreWeave", "quantization": "bf16"},
+    "deepinfra/turbo": {"provider_name": "DeepInfra", "quantization": "fp4"},
+    "chutes/fp4": {"provider_name": "Chutes", "quantization": "fp4"},
+}
 
 
 def write(path: Path, value: Any) -> None:
@@ -112,13 +125,13 @@ def assemble_request(
     request = {
         "model": config["model"],
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": config.get("decision_system_prompt", SYSTEM_PROMPT)},
             {"role": "user", "content": content},
         ],
         "temperature": config["temperature"],
         "top_p": config["top_p"],
         "top_k": config["top_k"],
-        "max_tokens": 8,
+        "max_tokens": config.get("decision_max_tokens", 8),
         "reasoning": deepcopy(config["reasoning"]),
         "seed": config["seed"],
     }
@@ -163,11 +176,17 @@ def main() -> int:
     parser.add_argument("--route", choices=("transfer", "primary"), default="transfer")
     parser.add_argument("--authorize-local-model-calls", action="store_true")
     parser.add_argument("--authorize-paid-model-calls", action="store_true")
+    parser.add_argument("--deliberative", action="store_true")
+    parser.add_argument(
+        "--primary-provider", choices=tuple(PRIMARY_PROVIDER_PROFILES), default="novita/bf16"
+    )
     args = parser.parse_args()
     if args.route == "transfer" and not args.authorize_local_model_calls:
         raise RunError("execution requires --authorize-local-model-calls")
     if args.route == "primary" and not args.authorize_paid_model_calls:
         raise RunError("execution requires --authorize-paid-model-calls")
+    if args.deliberative and args.route != "primary":
+        raise RunError("deliberative condition is defined only for the primary route")
     if args.output.exists():
         raise FileExistsError(args.output)
     card = args.experiment_card.read_bytes()
@@ -183,6 +202,11 @@ def main() -> int:
     runtime_path = REPO / "experiments/hypothesis/0003-temporal-game-judgment/runtime-config.json"
     runtime = json.loads(runtime_path.read_text())
     config = deepcopy(runtime)
+    if args.deliberative:
+        config["reasoning"] = {"enabled": True, "exclude": False}
+        config["decision_system_prompt"] = DELIBERATIVE_SYSTEM_PROMPT
+        config["decision_max_tokens"] = DELIBERATIVE_MAX_TOKENS
+    cost_cap = DELIBERATIVE_COST_CAP_USD if args.deliberative else PAID_COST_CAP_USD
     include_provider = args.route == "primary"
     if args.route == "transfer":
         config["model"] = runtime["transfer"]["model"]
@@ -195,7 +219,24 @@ def main() -> int:
         api_key = os.environ.get(runtime["transfer"]["api_key_environment"], "")
     else:
         endpoint = runtime["endpoint"]
-        provider_audit = audit_openrouter_endpoint(runtime)
+        profile = PRIMARY_PROVIDER_PROFILES[args.primary_provider]
+        config["provider"] = {
+            "only": [args.primary_provider],
+            "order": [args.primary_provider],
+            "allow_fallbacks": False,
+            "require_parameters": True,
+        }
+        audit_config = deepcopy(runtime)
+        audit_config["provider_audit"] = {
+            **runtime["provider_audit"],
+            "provider_name": profile["provider_name"],
+            "tag": args.primary_provider,
+            "quantization": profile["quantization"],
+            "required_parameters": [
+                "reasoning", "max_tokens", "temperature", "top_p", "top_k", "seed"
+            ],
+        }
+        provider_audit = audit_openrouter_endpoint(audit_config)
         api_key = next(
             (os.environ[name] for name in runtime["api_key_environment"] if os.environ.get(name)),
             "",
@@ -211,7 +252,9 @@ def main() -> int:
         "model_calls_cap": EPISODES * ACTION_CAP,
         "route": args.route,
         "model": config["model"],
-        "paid_cost_cap_usd": PAID_COST_CAP_USD if args.route == "primary" else 0.0,
+        "primary_provider": args.primary_provider if args.route == "primary" else None,
+        "paid_cost_cap_usd": cost_cap if args.route == "primary" else 0.0,
+        "deliberative": args.deliberative,
         "offline_actions_cap": EPISODES * (len(label["checkpoint_prefix_actions"]) + ACTION_CAP),
         "environment_actions": 0,
         "claim_boundary": "one-action feedback planning from a historical checkpoint with a machinery-supplied objective, action model, and causal affordance",
@@ -254,13 +297,18 @@ def main() -> int:
                     })
                     payload, audit = transport.call({"phase": "closed_loop", "repeat": repeat, "step": step}, request)
                     calls += 1
-                    if args.route == "primary":
-                        paid_cost += response_cost_usd(payload, provider_audit)
                     append(args.output / "raw-responses.jsonl", {
                         "repeat": repeat, "step": step, "request_sha256": request_hash,
                         "response": payload, "transport_audit": audit,
                     })
-                    decision = parse_response(payload)
+                    if payload.get("error") and not payload.get("choices"):
+                        raise RunError(f"provider error: {payload['error']}")
+                    if args.route == "primary":
+                        paid_cost += response_cost_usd(payload, provider_audit)
+                    decision = (
+                        parse_deliberative_response(payload) if args.deliberative
+                        else parse_response(payload)
+                    )
                     successor = environment.step(GameAction.from_id(decision.action))
                     successor_grid = np.asarray(successor.frame[-1]).copy()
                     outcome = {
@@ -271,13 +319,15 @@ def main() -> int:
                         "state": successor.state.value,
                         "grid_sha256": sha256(canonical_bytes(successor_grid.tolist())).hexdigest(),
                     }
+                    if args.deliberative:
+                        outcome["model_reply"] = payload["choices"][0]["message"]["content"]
                     history.append(outcome)
                     append(args.output / "trace.jsonl", {"repeat": repeat, **outcome})
                     completed = successor.levels_completed > start_levels or successor.state.value == "WIN"
                     before_grid, current_grid, frame = current_grid, successor_grid, successor
                     if completed or successor.state.value == "GAME_OVER":
                         break
-                    if args.route == "primary" and paid_cost >= PAID_COST_CAP_USD:
+                    if args.route == "primary" and paid_cost >= cost_cap:
                         raise RunError("paid cost cap reached")
                 results.append({
                     "repeat": repeat,
