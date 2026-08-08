@@ -11,3 +11,9 @@ without consulting the terminal label.
 
 This is an offline acquisition gate. It does not yet produce a route or authorize an environment
 action.
+
+The next planning gate reconstructs the acquisition checkpoint by replaying only its already-seen
+prefix in the real local LS20 engine. E4B receives four chronological frames, the inferred action
+model, tracked positions, and the acquired objective. It receives no candidate plan, route suffix,
+or protected successor. Each submitted plan is executed from a fresh checkpoint; only actual level
+completion passes.
