@@ -217,7 +217,11 @@ def build_route_ceiling_case(
     current, successor = rows[step], rows[step + 1]
     action = action_id(successor)
     plan_id = f"{namespace}-step-{step}"
-    conjecture_id = f"C-{namespace}-historical-replay-step-{step}"
+    conjecture_id = (
+        f"C-historical-replay-step-{step}"
+        if namespace == "route-ceiling"
+        else f"C-{namespace}-historical-replay-step-{step}"
+    )
     image_path = ROOT / f"fixtures/images/{namespace}-step-{step}.png"
     image_size = render_grid(current["frame"][-1], image_path)
     case = {
