@@ -80,6 +80,48 @@ def main() -> int:
     }]
     path = ROOT / "fixtures/planning-affordance-case.json"
     path.write_text(json.dumps(enriched, sort_keys=True, separators=(",", ":")) + "\n")
+    controlled_bbox = case["tracked_positions"]["controlled"]["bbox"]
+    target_bbox = case["tracked_positions"]["target"]["bbox"]
+    row_origin, column_origin = controlled_bbox[0] % 5, controlled_bbox[2] % 5
+    target_cell = [
+        row_origin + ((target_bbox[0] - row_origin) // 5) * 5,
+        column_origin + ((target_bbox[2] - column_origin) // 5) * 5,
+    ]
+    compact = {
+        "schema": "0004-compact-affordance-planning-case-v1",
+        "case_id": case["case_id"],
+        "authority": enriched["authority"],
+        "images": case["images"][-1:],
+        "coordinate_system": "cells are [row,column]; row increases down; column increases right",
+        "legal_actions": [1, 2, 3, 4],
+        "action_model": [
+            {"action": 1, "direction": "up", "delta_row": -5, "delta_column": 0},
+            {"action": 2, "direction": "down", "delta_row": 5, "delta_column": 0},
+            {"action": 3, "direction": "left", "delta_row": 0, "delta_column": -5},
+            {"action": 4, "direction": "right", "delta_row": 0, "delta_column": 5},
+        ],
+        "current_state": {
+            "controlled_cell": [controlled_bbox[0], controlled_bbox[2]],
+            "target_cell": target_cell,
+        },
+        "objective": {
+            "kind": "match_workspace_then_contact_target",
+            "target_cell": target_cell,
+            "required_affordance_id": "affordance-0",
+        },
+        "causal_affordances": [{
+            "affordance_id": "affordance-0",
+            "trigger_cell": positions[0],
+            "effect": "rotate workspace clockwise one quarter-turn per contact",
+            "contacts_required": applications[0],
+            "contact_protocol": "entering fires once; leave the trigger cell before entering again",
+            "prior_replay_supports": len(supports),
+            "prior_replay_contradictions": 0,
+        }],
+        "instruction": "Generate at most 64 actions that fire the required affordance and then contact the target.",
+    }
+    compact_path = ROOT / "fixtures/planning-affordance-compact-case.json"
+    compact_path.write_text(json.dumps(compact, sort_keys=True, separators=(",", ":")) + "\n")
     print(f"affordance supports={len(supports)} position={positions[0]} applications={applications[0]}")
     return 0
 
