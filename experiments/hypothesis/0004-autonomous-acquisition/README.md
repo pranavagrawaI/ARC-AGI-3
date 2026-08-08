@@ -17,3 +17,9 @@ prefix in the real local LS20 engine. E4B receives four chronological frames, th
 model, tracked positions, and the acquired objective. It receives no candidate plan, route suffix,
 or protected successor. Each submitted plan is executed from a fresh checkpoint; only actual level
 completion passes.
+
+The subsequent feedback gate keeps that historical checkpoint and the compact replay-supported
+causal package, but removes full-route commitment: E4B chooses one action, receives the actual
+public successor, and chooses again. This condition also failed 0/3. It is still prefix-conditioned,
+not autonomous play from reset, and the intact causal package already fails; lower-information
+ablations are therefore not licensed by this result.
