@@ -16,7 +16,9 @@ class PlanningTests(unittest.TestCase):
  @classmethod
  def setUpClass(cls):
   import freeze_planning;freeze_planning.main()
+  import freeze_affordances;freeze_affordances.main()
   cls.case=json.loads((ROOT/"fixtures/planning-case.json").read_text())
+  cls.affordance_case=json.loads((ROOT/"fixtures/planning-affordance-case.json").read_text())
   cls.label=json.loads((ROOT/"scorer/planning-label.json").read_text())
  def test_case_has_no_route_or_successor(self):
   self.assertTrue({"candidate_plans","verified_route","protected_successor","checkpoint_prefix_actions"}.isdisjoint(self.case))
@@ -29,6 +31,13 @@ class PlanningTests(unittest.TestCase):
  def test_evidence_schema_is_closed(self):
   schema=tool_definitions()[0]["function"]["parameters"]["properties"]["evidence_refs"]
   self.assertEqual(tuple(schema["items"]["enum"]),EVIDENCE_REFS)
+ def test_affordance_is_prior_supported_and_route_free(self):
+  affordance=self.affordance_case["causal_affordances"][0]
+  self.assertEqual(affordance["current_trigger_top_left"],[10,49])
+  self.assertEqual(affordance["objective_applications_required"],2)
+  self.assertEqual(len(affordance["replay"]["supports"]),3)
+  self.assertTrue(all(row["prior_level"]==1 for row in affordance["replay"]["supports"]))
+  self.assertTrue({"candidate_plans","verified_route","protected_successor"}.isdisjoint(self.affordance_case))
  def test_offline_checkpoint_matches_frozen_prefix(self):
   arcade,_,frame=checkpoint(self.label)
   try:self.assertEqual(frame.state.value,"NOT_FINISHED")

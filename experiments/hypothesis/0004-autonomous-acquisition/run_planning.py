@@ -88,6 +88,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--experiment-card", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--case-file", type=Path, default=ROOT / "fixtures/planning-case.json")
     parser.add_argument("--authorize-local-model-calls", action="store_true")
     args = parser.parse_args()
     if not args.authorize_local_model_calls:
@@ -101,7 +102,7 @@ def main() -> int:
     if not endpoint:
         raise RunError("GEMMA_E4B_ENDPOINT is required")
     args.output.mkdir(parents=True)
-    case = json.loads((ROOT / "fixtures/planning-case.json").read_text())
+    case = json.loads(args.case_file.read_text())
     label_path = ROOT / "scorer/planning-label.json"
     label = json.loads(label_path.read_text())
     runtime = json.loads((REPO / "experiments/hypothesis/0003-temporal-game-judgment/runtime-config.json").read_text())
@@ -109,6 +110,7 @@ def main() -> int:
     request = assemble_request(case, config)
     write(args.output / "manifest.json", {
         "card_sha256": sha256(card).hexdigest(), "case_sha256": digest(case),
+        "case_path": str(args.case_file),
         "label_sha256": sha256(label_path.read_bytes()).hexdigest(), "request_sha256": digest(request),
         "model_calls_cap": 3, "offline_actions_cap": 261, "environment_actions": 0,
         "claim_boundary": "one-shot planning from a supplied observation prefix and acquired objective",
