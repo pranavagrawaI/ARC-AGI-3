@@ -10,6 +10,15 @@ from typing import Any
 
 SYSTEM_PROMPT = """You acquire one objective relation from prefix-only neutral measurements. Every candidate is mechanically executable and fits the stated scale checks; several may be incidental markers. Select a relation only when the supplied structural, temporal, and causal evidence supports adopting it as the game objective. Otherwise abstain and name the missing evidence. Use exactly one tool. Never invent a pair, program, factor, observation, or outcome."""
 
+EVIDENCE_REFS = (
+    "invariant.area", "invariant.extent", "invariant.colors", "invariant.patch",
+    "invariant.observed_frames", "mutable.initial_area", "mutable.initial_extent",
+    "mutable.initial_colors", "mutable.initial_patch", "mutable.current_patch",
+    "mutable.observed_frames", "mutable.appearance_changes",
+    "mutable.contact_change_rows", "mutable.background_change_rate",
+    "prefix_replay.checks", "representation_deduplication.evidence",
+)
+
 
 @dataclass(frozen=True)
 class AcquisitionDecision:
@@ -36,7 +45,11 @@ def tool_definitions() -> list[dict[str, Any]]:
                         "pair_id": {"type": "integer"},
                         "program_kind": {"type": "string", "enum": ["integer_scale_objective"]},
                         "factor": {"type": "integer", "enum": [2, 3, 4, 5]},
-                        "evidence_refs": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                        "evidence_refs": {
+                            "type": "array",
+                            "items": {"type": "string", "enum": list(EVIDENCE_REFS)},
+                            "minItems": 1,
+                        },
                     },
                     "required": ["pair_id", "program_kind", "factor", "evidence_refs"],
                     "additionalProperties": False,
@@ -124,14 +137,7 @@ def score(case: dict[str, Any], label: dict[str, Any], decision: AcquisitionDeci
         (row for row in case["candidate_hypotheses"] if row["pair_id"] == decision.arguments["pair_id"]),
         None,
     )
-    allowed_evidence_refs = {
-        "invariant.area", "invariant.extent", "invariant.colors", "invariant.patch",
-        "invariant.observed_frames", "mutable.initial_area", "mutable.initial_extent",
-        "mutable.initial_colors", "mutable.initial_patch", "mutable.current_patch",
-        "mutable.observed_frames", "mutable.appearance_changes",
-        "mutable.contact_change_rows", "mutable.background_change_rate",
-        "prefix_replay.checks",
-    }
+    allowed_evidence_refs = set(EVIDENCE_REFS)
     prefix_semantics = bool(
         candidate
         and candidate["program"]["kind"] == decision.arguments["program_kind"]

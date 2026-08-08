@@ -5,7 +5,7 @@ import sys
 import unittest
 
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
-from acquisition import assemble_request,parse_response,score
+from acquisition import EVIDENCE_REFS,assemble_request,parse_response,score,tool_definitions
 
 CONFIG={"model":"google/gemma-4-E4B-it","temperature":1.0,"top_p":0.95,"top_k":64,"max_completion_tokens":2048,"reasoning":{"enabled":False},"seed":0}
 
@@ -46,6 +46,9 @@ class AcquisitionTests(unittest.TestCase):
  def test_malformed_or_invented_output_fails_closed(self):
   for payload in [response("SELECT_RELATION",{"pair_id":32}),response("INVENT",{}),response("ABSTAIN",{"reason_code":"x","missing_evidence":[]})]:
    with self.assertRaises(ValueError):parse_response(payload)
+ def test_evidence_references_are_closed_enum(self):
+  select=tool_definitions()[0]["function"]["parameters"]["properties"]["evidence_refs"]
+  self.assertEqual(tuple(select["items"]["enum"]),EVIDENCE_REFS)
 
 
 if __name__=="__main__":unittest.main()

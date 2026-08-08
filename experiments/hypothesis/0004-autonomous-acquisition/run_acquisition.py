@@ -68,11 +68,14 @@ def main() -> int:
         tuple(int(value) for value in config["transport"]["retry_http_statuses"]),
     )
     rows = []
+    raw_rows = []
     try:
         for repeat in range(3):
             payload, audit = transport.call(
                 {"phase": "acquisition", "case_id": case["case_id"], "repeat": repeat}, request
             )
+            raw_rows.append({"repeat": repeat, "response": payload, "transport_audit": audit})
+            write(args.output / "raw-responses.json", raw_rows)
             decision = parse_response(payload)
             # The scorer-only terminal label is consulted only after the response is immutable.
             label = json.loads(label_path.read_text())
@@ -93,7 +96,7 @@ def main() -> int:
     except Exception as exc:
         result = {
             "schema": "0004-acquisition-result-v1", "status": "FAIL",
-            "error": f"{type(exc).__name__}: {exc}", "model_calls": len(rows),
+            "error": f"{type(exc).__name__}: {exc}", "model_calls": len(raw_rows),
             "environment_actions": 0, "paid_cost_usd": 0.0,
         }
     write(args.output / "result.json", result)
