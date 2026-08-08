@@ -213,6 +213,27 @@ class ContractTests(unittest.TestCase):
    current=environment.step(GameAction.from_id(plan["actions"][0]))
    self.assertTrue(validate_successor(current,plan["predicted_public_fields"],label)["pass"])
   self.assertEqual(current.levels_completed,1)
+ def test_full_route_ceiling_replays_to_win_offline(self):
+  import arc_agi
+  from arc_agi.base import OperationMode
+  from arcengine import GameAction
+
+  cases=json.loads((ROOT/"fixtures/live-full-route-ceiling.json").read_text())["cases"]
+  labels=json.loads((ROOT/"scorer/live-full-route-ceiling-labels.json").read_text())["labels"]
+  self.assertEqual(len(cases),404)
+  environment=arc_agi.Arcade(operation_mode=OperationMode.OFFLINE).make("ls20",seed=0)
+  current=environment.reset()
+  completion_actions=[]
+  for action_count,(case,label) in enumerate(zip(cases,labels),1):
+   self.assertTrue(validate_current(current,case,label)["pass"])
+   plan=case["candidate_plans"][0]
+   previous=current.levels_completed
+   current=environment.step(GameAction.from_id(plan["actions"][0]))
+   self.assertTrue(validate_successor(current,plan["predicted_public_fields"],label)["pass"])
+   if current.levels_completed>previous: completion_actions.append(action_count)
+  self.assertEqual(completion_actions,[13,58,99,147,195,301,404])
+  self.assertEqual(current.levels_completed,7)
+  self.assertEqual(current.state.value,"WIN")
  def test_arm_boundaries(self):
   self.assertEqual(len(visible_case(self.case,"A")["images"]),1); self.assertEqual(len(visible_case(self.case,"B")["images"]),4)
   self.assertNotIn("numeric_transitions",visible_case(self.case,"C")); self.assertIn("numeric_transitions",visible_case(self.case,"D"))

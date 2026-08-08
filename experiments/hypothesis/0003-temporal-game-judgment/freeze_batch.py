@@ -209,17 +209,20 @@ def build_live_initial_case(
 
 
 def build_route_ceiling_case(
-    rows: list[dict[str, Any]], step: int, source: dict[str, Any]
+    rows: list[dict[str, Any]],
+    step: int,
+    source: dict[str, Any],
+    namespace: str = "route-ceiling",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     current, successor = rows[step], rows[step + 1]
     action = action_id(successor)
-    plan_id = f"route-ceiling-step-{step}"
-    conjecture_id = f"C-historical-replay-step-{step}"
-    image_path = ROOT / f"fixtures/images/route-ceiling-step-{step}.png"
+    plan_id = f"{namespace}-step-{step}"
+    conjecture_id = f"C-{namespace}-historical-replay-step-{step}"
+    image_path = ROOT / f"fixtures/images/{namespace}-step-{step}.png"
     image_size = render_grid(current["frame"][-1], image_path)
     case = {
         "schema": "0003-decision-case-v2",
-        "case_id": f"route-ceiling-{step}",
+        "case_id": f"{namespace}-{step}",
         "burden": "execution",
         "source": source,
         "proposal_provenance": {
@@ -456,6 +459,27 @@ def main() -> int:
     write(ROOT / "scorer/live-route-ceiling-labels.json", {
         "schema": "0003-live-route-ceiling-labels-v1",
         "labels": route_labels,
+    })
+    full_route_cases = []
+    full_route_labels = []
+    for step in range(1, len(rows) - 1):
+        route_case, route_label = build_route_ceiling_case(
+            rows,
+            step,
+            {"path": str(SOURCE.relative_to(REPO)), "sha256": EXPECTED, "frontier": step},
+            namespace="full-route-ceiling",
+        )
+        full_route_cases.append(route_case)
+        full_route_labels.append(route_label)
+    write(ROOT / "fixtures/live-full-route-ceiling.json", {
+        "schema": "0003-live-full-route-ceiling-v1",
+        "authority": "historical_replay_ceiling_not_autonomous_reconstruction",
+        "natural_stop": "WIN",
+        "cases": full_route_cases,
+    })
+    write(ROOT / "scorer/live-full-route-ceiling-labels.json", {
+        "schema": "0003-live-full-route-ceiling-labels-v1",
+        "labels": full_route_labels,
     })
     print(ROOT / "fixtures" / "batch.json")
     return 0
