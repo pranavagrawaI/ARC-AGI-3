@@ -1,0 +1,11 @@
+# 0158 Qwen3.7 Flash matched 44-action v28
+Question: How does Qwen3.7 Flash act under frozen v26, and can it complete L1?
+Posture: matched candidate diagnosis
+Contrast: DeepSeek v27; host, prompt, seed, caps, default reasoning matched; model/route differ. V26 is descriptive.
+Prediction: Qwen3.7 uses at least one Translate commitment and tests at least 3 action IDs; L1 remains uncertain.
+Measure: levels; actions; commitments/verdicts; closures; register; calls/tokens/cost; traces.
+Cap: 44 actions; 1200 calls; 12 iterations/artifact; 4 errors; 16384 output/call; 15M tokens; 4h; spend unknown.
+Stop: L1; cap; G2; reset; malformed artifact; provider/environment/budget failure.
+Invalid if: fallback, wrong model/provider, resumption, input/host drift, or missing usage.
+Result map: L1 -> retain; stronger model/no L1 -> add objectives/constraints; no action map -> reject; invalid -> no comparison.
+Outputs: artifacts/live-ls20/<run-id>.

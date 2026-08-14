@@ -1,0 +1,605 @@
+--- third_party/source-snapshots/nooa/launcher.py	2026-08-11 16:24:37.644108313 +0000
++++ nooa-runtime/launcher.py	2026-08-12 13:03:18.938133399 +0000
+@@ -1,357 +1,277 @@
+-# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+-# SPDX-License-Identifier: Apache-2.0
+-"""Launch the ARC-AGI-3 solver agent in headless mode (no TUI / tmux required).
+-
+-Runs the agent directly via the ``InteractiveAgent`` dispatcher loop — no
+-``nooa_tui`` package needed. All agent behaviours (memory, reflection,
+-summarization, effort ladder, IPC tail, context blocks) are preserved; the only
+-thing removed is the terminal-drawing layer.
+-
+-Usage (normally started by run_solver.py):
+-
+-    .venv/bin/python examples/arc_agi_3/launcher.py \
+-        --run-dir results/arc_agi_3/nemo_solver/<run> --game ls20 --variant memory
+-"""
++"""One-request append-only JSONL bridge for the ephemeral Python 3.12 runtime."""
+ 
+ from __future__ import annotations
+ 
+ import argparse
+ import asyncio
+-import sys
++import json
++import os
++from hashlib import sha256
+ from pathlib import Path
++from typing import Any
+ 
+-EXAMPLE_DIR = Path(__file__).resolve().parent
+-sys.path.insert(0, str(EXAMPLE_DIR))
++os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
++os.environ["LITELLM_MODE"] = "PRODUCTION"
+ 
+-from arc_llm import build_embedding_config, build_llm  # noqa: E402
+-from solver_agent import MdArcSolverAgent, MemArcSolverAgent  # noqa: E402
++from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
+ 
+-DEFAULT_SKILL = "grid-game-solver"
++from agent import GroundingAgent
++from provider import AuditedProviderClient, build_llm
+ 
++PROTOCOL = "0158-grounding-ipc-v1"
++LIVE_PROVIDER_ROUTE = {
++    "order": ["coreweave/fp8"],
++    "only": ["coreweave/fp8"],
++    "allow_fallbacks": False,
++    "require_parameters": False,
++    "quantizations": ["fp8"],
++}
+ 
+-def _skill_path(name: str) -> Path | None:
+-    """Resolve a skill by directory name under ``skills/`` (e.g. ``grid-game-solver``).
+-    Falls back to the default skill, then to None if neither SKILL.md exists."""
+-    skills_dir = EXAMPLE_DIR / "skills"
+-    requested = name or DEFAULT_SKILL
+-    for candidate in (requested, DEFAULT_SKILL):
+-        path = skills_dir / candidate / "SKILL.md"
+-        if path.exists():
+-            if candidate != requested:
+-                print(
+-                    f"[launcher] WARNING: skill '{requested}' not found at {skills_dir / requested};"
+-                    f" falling back to '{candidate}'",
+-                    file=sys.stderr,
+-                )
+-            return path
+-    return None
+-
+-
+-def build_memory_config(store_path: str | Path):
+-    """The memory variant's MemoryConfig (extracted for testable wiring).
+-
+-    ``reflection.background=True`` keeps manual ``self.memory.reflect()``
+-    consolidation OFF the turn's critical path — inline it cost 600-1,500s/game
+-    on the 20260716 fleet and triggered sandbox cell-deadline kills.
+-    """
+-    from nooa_memory import MemoryConfig
+-    from nooa_memory.config import ReflectionPolicy, RetrievalConfig, SpontaneousConfig
+-
+-    return MemoryConfig(
+-        enabled=True,
+-        path=str(store_path),
+-        owner="ArcSolver",
+-        embedding=build_embedding_config(),
+-        retrieval=RetrievalConfig(top_k=8, hops=1),
+-        spontaneous=SpontaneousConfig(enabled=True, top_k=6),
+-        reflection=ReflectionPolicy(trigger="manual", background=True),
+-    )
+ 
++def _canonical(value: Any) -> str:
++    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+ 
+-def parse_effort_ladder(
+-    spec: str | None, primary_effort: str | None
+-) -> list[tuple[float, str]] | None:
+-    """Parse ``"600:medium,900:low"`` into an ascending effort ladder.
+-
+-    Rung 0 is the client's primary effort (``primary_effort``; may be None =
+-    model default); each ``after_seconds:effort`` pair is a downshift rung the
+-    agent applies once a turn has run that long. Returns None when there is no
+-    downshift rung to apply (so the agent keeps a single fixed effort).
+-    """
+-    rungs: list[tuple[float, str]] = [(0.0, primary_effort or "")]
+-    for part in (spec or "").split(","):
+-        part = part.strip()
+-        if not part:
+-            continue
+-        after, _, effort = part.partition(":")
+-        rungs.append((float(after), effort.strip()))
+-    return sorted(rungs) if len(rungs) > 1 else None
+ 
++async def _tail_from_start(path: str, poll_interval: float = 0.5):
++    """Like runtime.producers.tail() but starts at position 0, not EOF.
+ 
+-def parse_args() -> argparse.Namespace:
+-    p = argparse.ArgumentParser(description=__doc__)
+-    p.add_argument("--run-dir", required=True)
+-    p.add_argument("--game", required=True)
+-    p.add_argument("--variant", choices=["memory", "mdfiles"], required=True)
+-    p.add_argument("--reflect-every", type=int, default=8)
+-    p.add_argument(
+-        "--alias", default="", help="opaque handle the agent sees instead of the game id"
+-    )
+-    p.add_argument(
+-        "--model",
+-        default=None,
+-        help="gateway model id override, e.g. openai/openai/gpt-5.5 "
+-        "(default: ARC_LLM_MODEL from .env)",
+-    )
+-    p.add_argument(
+-        "--reasoning-effort", default=None, help="primary reasoning effort (ladder rung 0)"
+-    )
+-    p.add_argument(
+-        "--effort-ladder",
+-        default=None,
+-        help="downshift rungs 'after_s:effort[,after_s:effort…]', e.g. "
+-        "'600:medium' — reasoning_effort drops to that level once a "
+-        "turn has run that long (single model, no second client)",
+-    )
+-    p.add_argument(
+-        "--visual",
+-        choices=["off", "only", "additive"],
+-        default="off",
+-        help="grid-as-image mode: off | only (image replaces the hex grid) "
+-        "| additive (image + hex grid)",
+-    )
+-    p.add_argument(
+-        "--png-scale",
+-        dest="png_scale",
+-        type=int,
+-        default=8,
+-        help="pixels per grid cell for the visual PNG (grid is "
+-        "(scale*64)x(scale*64); typically 8-16)",
+-    )
+-    p.add_argument(
+-        "--seed-knowledge",
+-        default=None,
+-        help="Prior run's workspace to seed knowledge from "
+-        "(memory.sqlite / knowledge/*.md are copied in)",
+-    )
+-    p.add_argument(
+-        "--skill",
+-        default=DEFAULT_SKILL,
+-        help="skill directory under skills/ to load as the agent's "
+-        "<arc_skill> block (e.g. grid-game-solver, interactive-game-solver)",
+-    )
+-    p.add_argument(
+-        "--max-actions-per-turn",
+-        type=int,
+-        default=20,
+-        help="submit_actions per-turn batch cap; <=0 = unlimited "
+-        "(run_solver forwards the same value to the harness)",
+-    )
+-    return p.parse_args()
+-
+-
+-def seed_knowledge(src: Path, workspace: Path, variant: str) -> None:
+-    """Copy accumulated knowledge from a prior run's workspace into this one."""
+-    import shutil
+-
+-    if variant == "memory":
+-        db = src / "memory.sqlite"
+-        if db.exists():
+-            shutil.copy2(db, workspace / "memory.sqlite")
+-    else:
+-        src_knowledge = src / "knowledge"
+-        if src_knowledge.is_dir():
+-            (workspace / "knowledge").mkdir(parents=True, exist_ok=True)
+-            for f in src_knowledge.glob("*.md"):
+-                shutil.copy2(f, workspace / "knowledge" / f.name)
+-    src_helpers = src / "helpers"
+-    if src_helpers.is_dir():
+-        (workspace / "helpers").mkdir(parents=True, exist_ok=True)
+-        for f in src_helpers.glob("*.py"):
+-            shutil.copy2(f, workspace / "helpers" / f.name)
+-
+-
+-async def _headless_dispatch(agent) -> None:
+-    """Drive the agent via its queue dispatcher — no TUI session required.
+-
+-    Races all registered queues (game_states, user_messages, system_messages)
+-    each turn and calls ``agent.handle(notification)`` — the dispatcher contract
+-    described on ``RespondResult``: every stop reason (including DONE) re-enters
+-    the race. The loop runs until run_solver terminates this process when the
+-    harness finishes; DONE must NOT exit here, or a premature DONE from the
+-    agent would tear down a still-running game (run_solver kills the harness
+-    when the launcher dies). Errors are logged and retried with backoff — the
+-    harness's nudge/force-advance ladder and the fleet wall-clock cap already
+-    bound a wedged agent, and a transient LLM outage must not kill the game.
++    The host may write request 0 between process creation and the tail task's
++    first run. Reading from the start makes attach timing irrelevant and never
++    treats a partial final line as a record.
+     """
+-    from nooa.interactive import RespondReason
++    fh = open(path)  # noqa: ASYNC230, SIM115 - exact NOOA tail pattern; closed in finally
++    try:
++        while True:
++            pos = fh.tell()
++            line = fh.readline()
++            if line.endswith("\n"):
++                if line.strip():
++                    yield line.rstrip("\n")
++            else:
++                fh.seek(pos)
++                await asyncio.sleep(poll_interval)
++    finally:
++        fh.close()
+ 
+-    consecutive_errors = 0
+ 
+-    while True:
+-        try:
+-            wins = await agent.queue_manager.race()
+-        except (asyncio.CancelledError, ValueError):
+-            break
+-        notification: dict[str, list] = {}
+-        for name, item in wins:
+-            notification.setdefault(name, []).append(item)
+-        try:
+-            result = await agent.handle(notification)
+-            consecutive_errors = 0
+-        except asyncio.CancelledError:
+-            break
+-        except Exception as exc:
+-            consecutive_errors += 1
+-            backoff = min(2 ** min(consecutive_errors, 6), 60)
+-            print(
+-                f"[launcher] handle() raised {exc!r} "
+-                f"(consecutive={consecutive_errors}) — retrying in {backoff}s",
+-                file=sys.stderr,
+-            )
+-            await asyncio.sleep(backoff)
++def _validate_request_lines(lines: list[str], path: Path) -> list[dict[str, Any]]:
++    records = []
++    for line_number, line in enumerate(lines, 1):
++        if not line.strip():
+             continue
+-        if getattr(result, "kind", None) == RespondReason.DONE:
+-            print(f"[launcher] agent returned DONE: {result.explanation}", file=sys.stderr)
++        value = json.loads(line)
++        if not isinstance(value, dict) or value.get("protocol") != PROTOCOL:
++            raise ValueError(f"{path}:{line_number}: invalid protocol record")
++        claimed_hash = value.get("request_sha256")
++        unhashed = dict(value)
++        unhashed.pop("request_sha256", None)
++        if claimed_hash != sha256(_canonical(unhashed).encode("utf-8")).hexdigest():
++            raise ValueError(f"{path}:{line_number}: request content hash mismatch")
++        artifact_input = value.get("artifact_input")
++        if not isinstance(artifact_input, dict):
++            raise TypeError(f"{path}:{line_number}: artifact_input must be an object")
++        if artifact_input.get("phase") != value.get("phase"):
++            raise ValueError(f"{path}:{line_number}: phase binding mismatch")
++        if artifact_input.get("current_observation_id") != value.get("observation_id"):
++            raise ValueError(f"{path}:{line_number}: observation binding mismatch")
++        if sha256(_canonical(artifact_input.get("evidence")).encode("utf-8")).hexdigest() != value.get("evidence_sha256"):
++            raise ValueError(f"{path}:{line_number}: evidence binding mismatch")
++        if sha256(_canonical(artifact_input.get("model_contract")).encode("utf-8")).hexdigest() != value.get("model_contract_sha256"):
++            raise ValueError(f"{path}:{line_number}: model contract binding mismatch")
++        records.append(value)
++    identities = [(record.get("run_id"), record.get("artifact_id"), record.get("sequence")) for record in records]
++    if len(set(identities)) != len(identities):
++        raise ValueError("duplicate request identity")
++    return records
++
++
++async def _read_requests_through(path: Path, request_index: int) -> list[dict[str, Any]]:
++    lines: list[str] = []
++    async for line in _tail_from_start(str(path), poll_interval=0.01):
++        lines.append(line)
++        if len(lines) > request_index:
++            break
++    return _validate_request_lines(lines, path)
+ 
+ 
+-async def run() -> None:
+-    args = parse_args()
+-    import os
+-
+-    if args.model:
+-        os.environ["ARC_LLM_MODEL"] = args.model
+-    run_dir = Path(args.run_dir).resolve()
+-    workspace = run_dir / "team_nemo" / "shared"
+-    workspace.mkdir(parents=True, exist_ok=True)
+-
+-    from viewer_event_exporter import ViewerEventExporter
+-    from viewer_trace_exporter import ViewerMessageExporter
+-
+-    from nooa.tracing import enable_tracing, exporters
+-
+-    trace_exporters = [
+-        exporters.jsonl(trace_dir=str(run_dir / "traces")),
+-        ViewerMessageExporter(run_dir),
+-        ViewerEventExporter(run_dir),
+-    ]
+-    otlp_endpoint = os.environ.get("OTLP_ENDPOINT")
+-    if otlp_endpoint:
+-        trace_exporters.append(exporters.otlp(otlp_endpoint))
+-    enable_tracing(exporters=trace_exporters)
+-
+-    if args.seed_knowledge:
+-        seed_knowledge(Path(args.seed_knowledge).resolve(), workspace, args.variant)
+-
+-    import shutil
+-
+-    # ARC_HTTP_LOG_DIR: capture raw gateway request/response bodies (cache-awareness
+-    # debugging). Must run BEFORE build_llm() so the patched httpx transport is used.
+-    http_log_dir = os.environ.get("ARC_HTTP_LOG_DIR")
+-    if http_log_dir:
+-        from nooa.unifiedllm.http_logging import enable_http_request_logging
+-
+-        enable_http_request_logging(
+-            output_dir=http_log_dir,
+-            save_responses=True,
+-            verbose=False,
++class AuditedFixtureLLM(FakeLLMClient):
++    def __init__(self, cells: list[str]) -> None:
++        super().__init__()
++        self.audit: list[dict[str, Any]] = []
++        self._response_queue.extend(
++            LLMResponse(
++                raw_response=None,
++                content="",
++                tool_calls=[
++                    ToolCall(
++                        id=f"fixture-cell-{index}",
++                        name="execute_python",
++                        arguments=json.dumps({"code": cell}),
++                    )
++                ],
++                finish_reason="tool_calls",
++                assistant_message={"role": "assistant", "content": ""},
++            )
++            for index, cell in enumerate(cells)
+         )
+ 
+-    llm = build_llm(reasoning_effort=args.reasoning_effort)
+-    effort_ladder = parse_effort_ladder(args.effort_ladder, args.reasoning_effort)
+-    agent_cls = MemArcSolverAgent if args.variant == "memory" else MdArcSolverAgent
+-    # The agent process never receives the real game id — only the opaque alias
+-    # (passed as both game_id and alias so no self.game_id path can leak identity).
+-    _alias = args.alias or "the game"
+-    agent = agent_cls(
+-        llm=llm,
+-        run_dir=run_dir,
+-        game_id=_alias,
+-        alias=_alias,
+-        reflect_every=args.reflect_every,
+-        effort_ladder=effort_ladder,
+-        visual=args.visual,
+-        png_scale=args.png_scale,
+-        skill_path=_skill_path(args.skill),
+-        max_actions_per_turn=args.max_actions_per_turn,
+-    )
+-
+-    # Memory store lives INSIDE the neutral run dir (run_solver puts the whole
+-    # run dir on a game-name-free /tmp path), so the memory-skill guide can show
+-    # its path without leaking the benchmark/game id. Keeping it under run_dir
+-    # (not the shared /tmp/agent_stores) also means --sandbox drop's carve_own
+-    # gives the agent uid sole ownership of its own store — no cross-uid perms.
+-    # Copied back into the workspace at run end for the viewer / seeding / analysis.
+-    store_path = run_dir / "store" / "memory.sqlite"
+-    ws_store = workspace / "memory.sqlite"
+-
+-    if args.variant == "memory":
+-        from nooa_memory.generative import llm_reasoner, llm_reconciler
+-        from nooa_memory.memory_skill import MemorySkill
+-
+-        store_path.parent.mkdir(parents=True, exist_ok=True)
+-        store_path.unlink(missing_ok=True)
+-        # If seeded, the seed's memory.sqlite was copied into the workspace; move
+-        # it to the neutral live path so the run starts seeded but the agent never
+-        # sees the workspace path.
+-        if ws_store.exists():
+-            shutil.move(str(ws_store), str(store_path))
+-
+-        def _session_llm() -> object:
+-            return agent._llm
+-
+-        memory_config = build_memory_config(store_path)
+-        agent.skills.register(
+-            "nemo.memory",
+-            MemorySkill(
+-                memory_config,
+-                reasoner=llm_reasoner(_session_llm),
+-                reconciler=llm_reconciler(_session_llm),
+-            ),
++    async def acall(self, messages, tools=None, output_model=None, **kwargs):
++        visible_tools = [tool for tool in tools or () if tool.name != "return_result"]
++        if len(visible_tools) != 1 or visible_tools[0].name != "execute_python":
++            raise RuntimeError("inline-result fixture must expose only execute_python")
++        kwargs["tool_choice"] = "auto"
++        request = {
++            "messages": messages,
++            "tools": [
++                {"name": tool.name, "description": tool.description, "parameters": tool.get_parameter_schema(strict=True)}
++                for tool in visible_tools
++            ],
++        }
++        self.audit.append(
++            {
++                "canonical_request_sha256": sha256(_canonical(request).encode("utf-8")).hexdigest(),
++                "request": request,
++            }
+         )
+-        agent.skills.activate(["nemo.memory"])
+-
+-    # Kickoff parity with the TUI runner: run_solver used to type this message
+-    # into the TUI once the first game state existed. Deliver the same message
+-    # on the user_messages channel so turn 0 matches the TUI-driven agent.
+-    states_path = run_dir / "ipc" / "states.jsonl"
+-
+-    async def _kickoff() -> None:
+-        while True:
+-            try:
+-                if states_path.stat().st_size > 0:
+-                    break
+-            except OSError:
+-                pass
+-            await asyncio.sleep(2)
+-        agent._user_messages_in.put(
+-            f"Start solving {_alias}. The first game state is on your "
+-            "game_states queue. Follow the arc_skill context block."
++        return await super().acall(
++            messages,
++            tools=visible_tools,
++            output_model=output_model,
++            **kwargs,
+         )
+-        print("[launcher] kickoff message sent to the agent", file=sys.stderr)
+ 
+-    kickoff_task = asyncio.create_task(_kickoff())
+ 
++def _append(path: Path, record: dict[str, Any]) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    with path.open("a", encoding="utf-8") as handle:
++        handle.write(_canonical(record) + "\n")
++        handle.flush()
++        os.fsync(handle.fileno())
++
++
++def _client_for(request: dict[str, Any]) -> tuple[Any, bool]:
++    mode = request.get("worker_mode", "fixture")
++    if mode == "fixture":
++        cells = request.get("fixture_python_cells")
++        if not isinstance(cells, list) or not cells or not all(isinstance(cell, str) for cell in cells):
++            raise ValueError("offline request requires non-empty fixture_python_cells")
++        return AuditedFixtureLLM(cells), False
++    if mode != "provider":
++        raise ValueError("worker_mode must be fixture or provider")
++    profile = request.get("provider_request_profile")
++    if not isinstance(profile, dict):
++        raise TypeError("provider request profile is required")
++    if request.get("provider_route") != LIVE_PROVIDER_ROUTE:
++        raise ValueError("live request does not carry the frozen provider route")
++    key = os.environ.get("ARC_LLM_API_KEY")
++    if not key:
++        raise RuntimeError("ARC_LLM_API_KEY is unavailable to the provider worker")
++    provider = build_llm(profile, api_key=key)
++    if "extra_body" in provider.config:
++        raise RuntimeError("provider client unexpectedly supplied extra_body")
++    provider.config["extra_body"] = {"provider": LIVE_PROVIDER_ROUTE}
++    retries = request.get("transport_max_retries")
++    if retries != 5:
++        raise ValueError("live HTTP 429 retry cap must be exactly five")
++    return (
++        AuditedProviderClient(
++            provider,
++            profile,
++            transport_max_retries=retries,
++            require_actual_crossings=True,
++            known_credentials=(key,),
++        ),
++        True,
++    )
++
++
++def _audit_calls(client: Any) -> list[dict[str, Any]]:
++    calls = getattr(client, "audit_calls", None)
++    if isinstance(calls, list):
++        return calls
++    calls = getattr(client, "audit", None)
++    return calls if isinstance(calls, list) else []
++
++
++async def run_once(requests_path: Path, responses_path: Path, request_index: int, workspace: Path) -> None:
++    requests = await _read_requests_through(requests_path, request_index)
++    if not 0 <= request_index < len(requests):
++        raise IndexError("request_index outside append-only request log")
++    request = requests[request_index]
++    if request.get("sequence") != request_index:
++        raise ValueError("request sequence does not match append position")
++    client, live = _client_for(request)
++    workspace.mkdir(parents=True, exist_ok=False)
++    workspace = workspace.resolve()
++    limits = request.get("runtime_limits", {})
++    if not isinstance(limits, dict):
++        raise TypeError("runtime_limits must be an object")
++    agent = GroundingAgent(
++        llm=client,
++        workspace=str(workspace),
++        require_usage=live,
++        max_iterations=int(limits.get("max_iterations", 10)),
++        max_retries=int(limits.get("max_retries", 1)),
++        timeout_seconds=float(limits.get("sandbox_timeout_seconds", 20.0)),
++    )
++    identity = {
++        key: request[key]
++        for key in (
++            "protocol", "run_id", "artifact_id", "sequence", "phase", "observation_id",
++            "evidence_sha256", "model_contract_sha256", "request_sha256",
++        )
++    }
++    original_cwd = Path.cwd()
+     try:
+-        await _headless_dispatch(agent)
++        os.chdir(workspace)
++        artifact = await agent.produce(request["artifact_input"])
++        _append(
++            responses_path,
++            {
++                **identity,
++                "artifact": artifact,
++                "artifact_sha256": sha256(_canonical(artifact).encode("utf-8")).hexdigest(),
++                "audit": {"model_calls": _audit_calls(client), "usage": agent.usage},
++                "complete": True,
++            },
++        )
++    except BaseException as error:
++        encoded = str(error).encode("utf-8", errors="replace")
++        _append(
++            responses_path,
++            {
++                **identity,
++                "error": {
++                    "type": type(error).__name__,
++                    "message": (
++                        f"redacted provider failure; chars={len(str(error))}; "
++                        f"sha256={sha256(encoded).hexdigest()}"
++                        if live
++                        else str(error)
++                    ),
++                },
++                "audit": {"model_calls": _audit_calls(client), "usage": agent.usage},
++                "complete": True,
++            },
++        )
++        if not live:
++            raise
+     finally:
+-        kickoff_task.cancel()
+-        # Consolidate the neutral store and copy it into the workspace so the
+-        # viewer, analysis tools, and seeded runs find it where they expect.
+-        if args.variant == "memory" and store_path.exists():
+-            try:
+-                import sqlite3
+-
+-                con = sqlite3.connect(str(store_path))
+-                con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+-                con.close()
+-            except Exception:
+-                pass
+-            try:
+-                shutil.copy2(store_path, ws_store)
+-            except Exception:
+-                pass
++        close = getattr(client, "aclose", None)
++        if close is not None:
++            await close()
++        os.chdir(original_cwd)
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--requests", type=Path, required=True)
++    parser.add_argument("--responses", type=Path, required=True)
++    parser.add_argument("--request-index", type=int, required=True)
++    parser.add_argument("--workspace", type=Path, required=True)
++    args = parser.parse_args()
++    asyncio.run(run_once(args.requests, args.responses, args.request_index, args.workspace))
+ 
+ 
+ if __name__ == "__main__":
+-    asyncio.run(run())
++    main()

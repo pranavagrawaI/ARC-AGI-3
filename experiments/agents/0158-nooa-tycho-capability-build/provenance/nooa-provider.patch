@@ -1,0 +1,116 @@
+--- third_party/source-snapshots/arc-agi-3/0002-nooa-llm.py	2026-08-11 19:31:49.738408548 +0000
++++ nooa-runtime/provider.py	2026-08-12 13:03:18.938133399 +0000
+@@ -5,20 +5,22 @@
+ Derived by copy-and-prune from the pinned NVIDIA NOOA ARC example recorded in
+ ``../SOURCE_MANIFEST.json``. Configuration and credentials are arguments: this
+ module does not discover ``.env`` files, ambient variables, embeddings, memory,
+-fallback clients, or retry policy.
++or fallback clients. Its bounded HTTP 429 retry policy is explicit and audited.
+ """
+ 
+ from __future__ import annotations
+ 
++import asyncio
+ import base64
+ import binascii
+-from collections.abc import Iterable
++import json
++import os as _dependency_os
++import random
++from collections.abc import Iterable, Mapping
+ from dataclasses import asdict, dataclass, fields, is_dataclass
+ from enum import StrEnum
+ from hashlib import sha256
+-import json
+-import os as _dependency_os
+-from typing import Any, Mapping
++from typing import Any
+ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+ 
+ # NOOA imports LiteLLM. Force its bundled registry and suppress its implicit
+@@ -57,7 +59,7 @@
+     litellm_num_retries: int
+ 
+     @classmethod
+-    def from_record(cls, record: Mapping[str, Any]) -> "ProviderRequestProfile":
++    def from_record(cls, record: Mapping[str, Any]) -> ProviderRequestProfile:
+         expected = {field.name for field in fields(cls)}
+         received = set(record)
+         extra = sorted(received - expected)
+@@ -565,7 +567,9 @@
+         return error.disposition
+     status = getattr(error, "status_code", None)
+     if type(status) is int:
+-        if status in {429, 500, 502, 503, 504}:
++        if status == 429:
++            return TransportDisposition.RETRYABLE
++        if status in {500, 502, 503, 504}:
+             return TransportDisposition.UNCERTAIN
+         return TransportDisposition.FATAL
+     if isinstance(error, (httpx.ConnectError, httpx.ConnectTimeout)):
+@@ -586,6 +590,26 @@
+     return TransportDisposition.UNCERTAIN
+ 
+ 
++def _retry_delay(error: Exception, retry_index: int) -> tuple[float, str]:
++    """Return a bounded Retry-After or exponential-jitter delay for HTTP 429."""
++
++    response = getattr(error, "response", None)
++    headers = getattr(response, "headers", None)
++    if headers is None:
++        headers = getattr(error, "headers", None)
++    retry_after = headers.get("retry-after") if isinstance(headers, Mapping) else None
++    if retry_after is not None:
++        try:
++            seconds = float(retry_after)
++        except (TypeError, ValueError):
++            pass
++        else:
++            if 0 <= seconds <= 120:
++                return seconds, "retry-after"
++    base = min(2.0 ** retry_index, 30.0)
++    return base + random.uniform(0.0, min(1.0, base * 0.25)), "exponential-jitter"
++
++
+ def _failure_record(error: Exception, disposition: TransportDisposition) -> dict[str, Any]:
+     encoded = str(error).encode("utf-8", errors="replace")
+     status = getattr(error, "status_code", None)
+@@ -642,10 +666,16 @@
+         output_model: type[Any] | None = None,
+         **kwargs: Any,
+     ) -> Any:
++        visible_tools = [tool for tool in tools or () if tool.name != "return_result"]
++        if len(visible_tools) != 1 or visible_tools[0].name != "execute_python":
++            raise RuntimeError("inline-result runtime must expose only execute_python")
++        # Make the frozen profile explicit at the wrapper boundary. Pinned NOOA
++        # also writes ``auto`` while constructing its Responses body.
++        kwargs["tool_choice"] = self.profile.tool_choice
+         canonical = {
+             "provider_request_profile": asdict(self.profile),
+             "messages": messages,
+-            "tools": _tool_records(tools),
++            "tools": _tool_records(visible_tools),
+             "kwargs": kwargs,
+         }
+         canonical_snapshot = redact_for_audit(
+@@ -670,7 +700,7 @@
+             try:
+                 response = await self.provider.acall(
+                     messages,
+-                    tools=tools,
++                    tools=visible_tools,
+                     output_model=output_model,
+                     **kwargs,
+                 )
+@@ -691,6 +721,11 @@
+                     disposition is TransportDisposition.RETRYABLE
+                     and attempt_index < self.transport_max_retries
+                 ):
++                    if getattr(error, "status_code", None) == 429:
++                        delay, source = _retry_delay(error, attempt_index + 1)
++                        audit["attempts"][-1]["retry_delay_seconds"] = delay
++                        audit["attempts"][-1]["retry_delay_source"] = source
++                        await asyncio.sleep(delay)
+                     continue
+                 audit["outcome"] = {
+                     "kind": "transport_failure",
