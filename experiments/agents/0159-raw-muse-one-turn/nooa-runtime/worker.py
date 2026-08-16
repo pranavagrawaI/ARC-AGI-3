@@ -1518,6 +1518,14 @@ finish with exactly one action."""
 - `self.write_world_model(source: str) -> dict`
 - `self.edit_world_model_function(name: str, source: str) -> dict`
 
+ARC-AGI-3 presents a sequence of decision frames, but a useful action model may
+need to retain hidden facts from earlier interaction, predict how actions change
+them, render the resulting observation, and recognize completion or failure. A
+rendered Moore machine makes that separation explicit: actions update an
+underlying state, while each state produces the grid and outcome available to
+you; transition emissions can preserve informative animation frames between
+decision frames.
+
 The smallest source contract is `predict(grid, action) -> grid | None`.
 `grid` is the observed integer NumPy array; `action` is a dict like
 `{"action": "UP", "x": None, "y": None}`. Return a same-shaped integer grid,

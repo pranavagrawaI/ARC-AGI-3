@@ -123,6 +123,17 @@ def test_disabling_wm2_restores_byte_identical_wm1_context(monkeypatch):
     ]
 
 
+def test_fixed_world_model_prompt_explains_why_rendered_moore_machines_help():
+    strategy = ExecutableTheoryCodeActStrategy(config=_CODEACT_CONFIG)
+
+    prompt = " ".join(strategy.get_block_overrides()["self"].split())
+
+    assert "retain hidden facts from earlier interaction" in prompt
+    assert "actions update an underlying state" in prompt
+    assert "each state produces the grid and outcome" in prompt
+    assert "transition emissions" in prompt
+
+
 def _codeact_response(code: str, *, reasoning: str | None = None) -> LLMResponse:
     arguments = json.dumps({"code": code})
     call = ToolCall(id="analysis-1", name="execute_python", arguments=arguments)

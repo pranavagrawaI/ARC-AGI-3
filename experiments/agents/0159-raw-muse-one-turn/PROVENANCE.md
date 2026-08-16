@@ -103,6 +103,10 @@ cell and `None` denotes whole-action abstention. The evaluator's per-transition
 claim records are mechanical replay facts; they do not select or rewrite a
 belief. Tests exercise partial support, contradiction with activation,
 abstention, recovery after operational rejection, and later Moore promotion.
+The fixed model-facing rationale for rendered Moore machines is a concise local
+adaptation of the Tycho authors' explanation: decision-frame models may require
+hidden state, state transitions, rendered observations and outcomes, and
+transition emissions for informative animation frames.
 
 ## WM2 taught practice and workbench
 
