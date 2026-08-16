@@ -144,6 +144,12 @@ opportunity. Enable them independently with `--wm2-guidance` and
 `--wm2-workbench`; any live WM2 configuration also requires an explicit
 `--experiment-card` so the complete treatment is frozen before contact.
 
+The separately attributed WM2-C treatment is specified in
+[`WM2-C-GUIDED-FIRST-USE-SPEC.md`](WM2-C-GUIDED-FIRST-USE-SPEC.md). With
+`--wm2-guided-first-use`, repeated same-action evidence and no active
+commitment produce one exact read-only onboarding instruction. WM2-C requires
+`--wm2-workbench`; it does not require or enforce an edit.
+
 WM1 makes the first executable commitment smaller without removing WM0's full
 Moore machine. Muse may define only `predict(grid, action)`, return `None` for
 an unsupported action, and use `-1` for unclaimed cells. The evaluator scores

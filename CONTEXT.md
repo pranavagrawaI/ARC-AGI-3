@@ -304,6 +304,13 @@ _Avoid_: Opportunity oracle, semantic diagnosis, automatic tool router
 An exactly defined mechanical predicate over a Theory Workbench View whose truth can be reproduced from cited inputs. It may make a possible use legible but does not assert that using the capability would improve the current decision.
 _Avoid_: Recommended intervention, useful-opportunity label, host judgment
 
+**Guided First Use**:
+A separately attributed onboarding instruction that connects one exact
+mechanical condition to a read-only capability call and enumerates the model's
+subsequent choices. It may require inspection while leaving belief authorship,
+editing, deferral, and environment action under model authority.
+_Avoid_: Automatic tool routing, host-authored theory, mandatory belief update
+
 **Local Prospective Consequence**:
 A fixture-bound pre-successor chain in which a model state or intended decision is recorded, a capability is invoked, its output is observed, and a belief, prediction, or intended action changes before successor feedback. It establishes local interface uptake, not run-level mediation or benefit.
 _Avoid_: Tool call count, self-reported usefulness, gameplay treatment effect

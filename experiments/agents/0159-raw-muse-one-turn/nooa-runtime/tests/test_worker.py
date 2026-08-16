@@ -1181,6 +1181,61 @@ def test_wm2_guidance_only_records_its_immutable_artifact(tmp_path, monkeypatch)
     assert installed["wm2_workbench_built"] is False
 
 
+def test_guided_first_use_enters_workbench_then_disappears_after_read(
+    tmp_path, monkeypatch
+):
+    import importlib.util
+
+    monkeypatch.setenv("NOOA_0159_WM2_WORKBENCH", "1")
+    monkeypatch.setenv("NOOA_0159_WM2_GUIDED_FIRST_USE", "1")
+    e0_path = Path(__file__).resolve().parents[2] / "e0_evidence.py"
+    spec = importlib.util.spec_from_file_location("worker_wm2c_e0", e0_path)
+    assert spec is not None and spec.loader is not None
+    e0 = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = e0
+    spec.loader.exec_module(e0)
+    root = tmp_path / "evidence"
+    ledger = e0.HostEvidenceLedger(root, run_id="worker-wm2c")
+    observation = e0.PublicObservationInput(
+        frames=(((0, 0), (0, 0)),),
+        public_state="NOT_FINISHED",
+        levels_completed=0,
+        full_reset=False,
+        legal_actions=("UP", "DOWN", "LEFT", "RIGHT"),
+    )
+    ledger.record_initial_reset(observation)
+    ledger.record_action_result(
+        global_turn=0, action=e0.Action("UP"), successor=observation
+    )
+    result = ledger.record_action_result(
+        global_turn=1, action=e0.Action("UP"), successor=observation
+    )
+    snapshot_path = root / "snapshots" / f"{result.snapshot.snapshot_id}.json"
+    audit_path = tmp_path / "audit.jsonl"
+    solver = ExecutableTheoryGameSolver(
+        llm=RecordingFakeLLMClient([]),
+        audit=AuditLog(audit_path),
+        knowledge_dir=tmp_path / "knowledge",
+        world_model_dir=tmp_path / "world-model",
+    )
+
+    solver.install_world_model_evidence(snapshot_path)
+    before_read = solver.theory_workbench_context()
+    solver.read_world_model()
+    solver.install_world_model_evidence(snapshot_path)
+    after_read = solver.theory_workbench_context()
+
+    assert "## Guided first use" in before_read
+    assert "self.read_world_model()" in before_read
+    assert len(before_read.encode("utf-8")) <= 6_144
+    assert "## Guided first use" not in after_read
+    audit = [json.loads(line) for line in audit_path.read_text().splitlines()]
+    built = [item for item in audit if item["event"] == "theory_workbench_built"]
+    assert [item["guided_first_use_rendered"] for item in built] == [True, False]
+    read = next(item for item in audit if item["event"] == "world_model_read")
+    assert read["first_world_model_read"] is True
+
+
 @pytest.mark.asyncio
 async def test_compact_solver_exposes_namespaced_history_without_old_trajectory(
     tmp_path,

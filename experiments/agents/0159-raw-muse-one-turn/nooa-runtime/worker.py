@@ -38,6 +38,7 @@ from nooa.unifiedllm.registry import get_llm_client
 from PIL import Image as PILImage
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from guided_first_use import GUIDED_FIRST_USE_SCHEMA, render_guided_first_use
 from theory_guidance import (
     COMPLETE_PRACTICE_EXAMPLES,
     GUIDE_SCHEMA,
@@ -45,6 +46,7 @@ from theory_guidance import (
     render_practice_guide,
 )
 from theory_workbench import (
+    MAX_RENDER_BYTES,
     TheoryWorkbenchViewBuilder,
     theory_snapshot_from_lane_view,
 )
@@ -1568,6 +1570,7 @@ class ExecutableTheoryGameSolver(CompactBeliefsGameSolver):
     theory_lane: Annotated[ExecutableTheoryLane, hidden]
     _theory_workbench_rendered: Annotated[str, hidden]
     _latest_world_model_edit_status: Annotated[str | None, hidden]
+    _world_model_was_read: Annotated[bool, hidden]
     _allowed_self_methods = DurableBeliefsGameSolver._allowed_self_methods | frozenset(
         {
             "read_world_model",
@@ -1584,6 +1587,7 @@ class ExecutableTheoryGameSolver(CompactBeliefsGameSolver):
             "The Theory Workbench View is waiting for authoritative evidence."
         )
         self._latest_world_model_edit_status = None
+        self._world_model_was_read = False
 
     @hidden
     def install_world_model_evidence(self, snapshot_path: Path) -> None:
@@ -1618,6 +1622,22 @@ class ExecutableTheoryGameSolver(CompactBeliefsGameSolver):
                 evidence, theory
             )
             self._theory_workbench_rendered = workbench.render()
+            guided_first_use = None
+            if os.environ.get("NOOA_0159_WM2_GUIDED_FIRST_USE") == "1":
+                guided_first_use = render_guided_first_use(
+                    condition_codes=workbench.condition_codes,
+                    current_model_version_id=workbench.current_model_version_id,
+                    world_model_was_read=self._world_model_was_read,
+                )
+                if guided_first_use is not None:
+                    self._theory_workbench_rendered += "\n\n" + guided_first_use
+                    if (
+                        len(self._theory_workbench_rendered.encode("utf-8"))
+                        > MAX_RENDER_BYTES
+                    ):
+                        raise ValueError(
+                            "guided theory workbench exceeds its frozen byte bound"
+                        )
             self._analysis_audit.write(
                 "theory_workbench_built",
                 schema=workbench.schema,
@@ -1636,6 +1656,12 @@ class ExecutableTheoryGameSolver(CompactBeliefsGameSolver):
                     }
                 ),
                 rendered_bytes=len(self._theory_workbench_rendered.encode("utf-8")),
+                guided_first_use_schema=(
+                    GUIDED_FIRST_USE_SCHEMA
+                    if os.environ.get("NOOA_0159_WM2_GUIDED_FIRST_USE") == "1"
+                    else None
+                ),
+                guided_first_use_rendered=guided_first_use is not None,
                 guide_schema=(
                     GUIDE_SCHEMA
                     if os.environ.get("NOOA_0159_WM2_GUIDANCE") == "1"
@@ -1662,6 +1688,8 @@ class ExecutableTheoryGameSolver(CompactBeliefsGameSolver):
 
     def read_world_model(self) -> dict[str, Any]:
         """Read the current commitment plus quick and Moore-machine templates."""
+        first_world_model_read = not self._world_model_was_read
+        self._world_model_was_read = True
         view = self.theory_lane.read_world_model()
         if os.environ.get("NOOA_0159_WM2_GUIDANCE") == "1":
             view.update(
@@ -1688,6 +1716,7 @@ class ExecutableTheoryGameSolver(CompactBeliefsGameSolver):
             "world_model_read",
             current_model_version_id=view["current_model_version_id"],
             evidence_snapshot_id=view["installed_evidence_snapshot_id"],
+            first_world_model_read=first_world_model_read,
         )
         return view
 
@@ -2269,6 +2298,11 @@ async def serve() -> None:
     variant = os.environ.get("NOOA_0159_VARIANT", "predict")
     if variant not in {"predict", "codeact", *KNOWLEDGE_VARIANTS}:
         raise ValueError(f"unknown NOOA_0159_VARIANT {variant!r}")
+    if (
+        os.environ.get("NOOA_0159_WM2_GUIDED_FIRST_USE") == "1"
+        and os.environ.get("NOOA_0159_WM2_WORKBENCH") != "1"
+    ):
+        raise ValueError("WM2-C guided first use requires the WM2-B workbench")
     scripted_client = any(
         os.environ.get(name) is not None
         for name in (
@@ -2355,6 +2389,9 @@ async def serve() -> None:
         executable_theory=variant == WORLD_MODEL_VARIANT,
         wm2_guidance=os.environ.get("NOOA_0159_WM2_GUIDANCE") == "1",
         wm2_workbench=os.environ.get("NOOA_0159_WM2_WORKBENCH") == "1",
+        wm2_guided_first_use=(
+            os.environ.get("NOOA_0159_WM2_GUIDED_FIRST_USE") == "1"
+        ),
         implicit_context_archival=(False if variant in COMPACT_VARIANTS else None),
     )
     _write(
@@ -2375,6 +2412,9 @@ async def serve() -> None:
             "executable_theory": variant == WORLD_MODEL_VARIANT,
             "wm2_guidance": os.environ.get("NOOA_0159_WM2_GUIDANCE") == "1",
             "wm2_workbench": os.environ.get("NOOA_0159_WM2_WORKBENCH") == "1",
+            "wm2_guided_first_use": (
+                os.environ.get("NOOA_0159_WM2_GUIDED_FIRST_USE") == "1"
+            ),
             "implicit_context_archival": (
                 False if variant in COMPACT_VARIANTS else None
             ),

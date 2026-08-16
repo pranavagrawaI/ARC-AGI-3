@@ -124,3 +124,14 @@ run's source commitment. Audit records preserve rendered-content digests,
 condition/card codes, cited evidence IDs, omissions, and byte counts without
 claiming that exposure caused a model edit or action. P0 shadow prediction is
 not part of WM2 and remains unimplemented.
+
+## WM2-C guided first use
+
+The first WM2 live run is preserved at
+`artifacts/wm2-taught-theory-workbench-muse-v1/`. Its eight workbench views
+surfaced repeated-action evidence, but Muse issued no theory-lane read or edit
+and instead used 59 ad hoc Python cells. `nooa-runtime/guided_first_use.py` is a
+new, bounded delivery module for the follow-up treatment. It maps only the
+frozen `repeated_action_evidence`, no-active-model, and never-read state to an
+exact read-only call and explicit edit/notes/defer choices. It contains no game
+semantics, performs no tool call, and does not gate the environment action.
