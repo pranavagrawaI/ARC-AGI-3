@@ -5,10 +5,13 @@ import copy
 import io
 import json
 import os
+import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 from nooa.errors import GenerationError
+from nooa.events import Feedback
 from nooa.media import Image
 from nooa.runtime.sandbox.errors import SandboxUnavailable
 from nooa.runtime.sandbox.executor import SandboxedExecutor
@@ -21,14 +24,20 @@ from worker import (
     COMMIT_MAX_ATTEMPTS,
     CURRENT_SEQUENCE,
     AuditLog,
+    CompactBeliefsGameSolver,
     Decision,
     DurableBeliefsGameSolver,
     GameSolver,
+    History,
+    ImplicitContextArchivalDisabled,
+    ProviderPoolClient,
     TrajectoryGameSolver,
     _failure_stage,
+    _find_implicit_context_archival_error,
     _forbidden_cell_primitive,
     _response,
     _write,
+    disable_implicit_context_archival,
     install_provider_logging,
     retry_config,
 )
@@ -82,6 +91,104 @@ def _tool_response(
         reasoning=reasoning,
         usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
     )
+
+
+class _HangingClient:
+    def __init__(self):
+        self.calls = 0
+
+    async def acall(self, *args, **kwargs):
+        self.calls += 1
+        await asyncio.sleep(60)
+
+
+class _RecordingClient:
+    def __init__(self, response: LLMResponse):
+        self.response = response
+        self.calls = 0
+
+    async def acall(self, *args, **kwargs):
+        self.calls += 1
+        return self.response
+
+
+class _FailingClient:
+    def __init__(self, error: Exception):
+        self.error = error
+        self.calls = 0
+
+    async def acall(self, *args, **kwargs):
+        self.calls += 1
+        raise self.error
+
+
+@pytest.mark.asyncio
+async def test_provider_pool_fails_over_then_sticks_to_successor(tmp_path: Path):
+    audit_path = tmp_path / "audit.jsonl"
+    hanging = _HangingClient()
+    successor = _RecordingClient(_response("ok"))
+    pool = ProviderPoolClient(
+        [("slow", hanging), ("successor", successor)],
+        AuditLog(audit_path),
+        attempt_timeout_seconds=0.01,
+    )
+
+    assert (await pool.acall([])).content == "ok"
+    assert (await pool.acall([])).content == "ok"
+
+    assert hanging.calls == 1
+    assert successor.calls == 2
+    events = [json.loads(line) for line in audit_path.read_text().splitlines()]
+    assert [event["event"] for event in events] == [
+        "provider_attempt_started",
+        "provider_attempt_failed",
+        "provider_attempt_started",
+        "provider_attempt_completed",
+        "provider_attempt_started",
+        "provider_attempt_completed",
+    ]
+    assert events[1]["provider"] == "slow"
+    assert events[3]["provider"] == "successor"
+
+
+@pytest.mark.asyncio
+async def test_provider_pool_does_not_fallback_on_model_length_finish():
+    length_response = _response("")
+    length_response.finish_reason = "length"
+    primary = _RecordingClient(length_response)
+    fallback = _RecordingClient(_response("fallback"))
+    pool = ProviderPoolClient(
+        [("primary", primary), ("fallback", fallback)],
+        AuditLog(None),
+        attempt_timeout_seconds=0.1,
+    )
+
+    response = await pool.acall([])
+
+    assert response.finish_reason == "length"
+    assert primary.calls == 1
+    assert fallback.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_provider_pool_does_not_fallback_or_poison_on_context_error():
+    context_error = RuntimeError("This model's maximum context length is 131072 tokens")
+    primary = _FailingClient(context_error)
+    fallback = _RecordingClient(_response("fallback"))
+    pool = ProviderPoolClient(
+        [("primary", primary), ("fallback", fallback)],
+        AuditLog(None),
+        attempt_timeout_seconds=0.1,
+    )
+
+    with pytest.raises(RuntimeError, match="maximum context length"):
+        await pool.acall([])
+    with pytest.raises(RuntimeError, match="maximum context length"):
+        await pool.acall([])
+
+    assert primary.calls == 2
+    assert fallback.calls == 0
+    assert pool.unhealthy == set()
 
 
 class RecordingFakeLLMClient(FakeLLMClient):
@@ -441,6 +548,44 @@ async def test_invalid_reserved_commit_is_model_failure_without_fallback(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_illegal_analysis_commit_uses_constrained_commitment_reprompt(tmp_path):
+    frame = tmp_path / "frame.png"
+    PILImage.new("RGB", (2, 2), "white").save(frame)
+    illegal_analysis = _codeact_response(
+        "return_result(action='RESET', explanation='restart')"
+    )
+    corrected = _tool_response(
+        "return_result",
+        {"result": {"action": "RIGHT", "explanation": "legal correction"}},
+    )
+    llm = RecordingFakeLLMClient([illegal_analysis, corrected])
+    audit_path = tmp_path / "provider-events.jsonl"
+    solver = TrajectoryGameSolver(llm=llm, audit=AuditLog(audit_path))
+
+    result = await solver.choose_action(
+        image=Image.from_file(frame),
+        trajectory=[],
+        legal_actions=["UP", "DOWN", "LEFT", "RIGHT"],
+        previous_action=None,
+        turn=0,
+        levels_completed=0,
+    )
+
+    assert result == Decision(action="RIGHT", explanation="legal correction")
+    assert llm.call_count == 2
+    assert [tool.name for tool in llm.requests[-1]["tools"]] == ["return_result"]
+    starts = [
+        row
+        for row in map(json.loads, audit_path.read_text().splitlines())
+        if row["event"] == "action_commitment_started"
+    ]
+    assert len(starts) == 1
+    assert starts[0]["reason"] == "analysis_selected_illegal_action"
+    assert starts[0]["rejected_action"] == "RESET"
+    assert starts[0]["legal_actions"] == ["UP", "DOWN", "LEFT", "RIGHT"]
+
+
+@pytest.mark.asyncio
 async def test_same_agent_carries_first_decision_into_second_turn(tmp_path):
     frame = tmp_path / "frame.png"
     PILImage.new("RGB", (2, 2), "white").save(frame)
@@ -678,6 +823,319 @@ async def test_durable_beliefs_survive_between_game_turns(tmp_path):
     assert "self.choose_action" not in prompt
 
 
+@pytest.mark.asyncio
+async def test_compact_solver_exposes_namespaced_history_without_old_trajectory(
+    tmp_path,
+):
+    frame = tmp_path / "frame.png"
+    PILImage.new("RGB", (2, 2), "white").save(frame)
+    snapshot = {
+        "schema": "0159-history-snapshot-v1",
+        "events": [
+            {
+                "event_id": "trajectory:000003",
+                "stream": "trajectory",
+                "ordinal": 3,
+                "turn": 3,
+                "kind": "record",
+                "record": {"turn": 3, "action": "DOWN"},
+            }
+        ],
+        "turn_views": {
+            "3": {
+                "schema": "0159-history-turn-view-v1",
+                "turn": 3,
+                "transcript": [],
+                "mechanical_transitions": [{"action": "DOWN", "changed_cell_count": 1}],
+                "omitted_streams": ["provider"],
+                "truncated": False,
+            }
+        },
+        "provider_episodes": {},
+        "source_manifest": {},
+    }
+    llm = RecordingFakeLLMClient(
+        [
+            _codeact_response(
+                "old = history.turn(3)\n"
+                "return_result(action='LEFT', "
+                "explanation=old['mechanical_transitions'][0]['action'])"
+            )
+        ]
+    )
+    solver = CompactBeliefsGameSolver(llm=llm, knowledge_dir=tmp_path / "knowledge")
+    solver.install_history(snapshot)
+
+    result = await solver.choose_action(
+        image=Image.from_file(frame),
+        trajectory=[],
+        legal_actions=["UP", "DOWN", "LEFT", "RIGHT"],
+        previous_action="DOWN",
+        turn=8,
+        levels_completed=0,
+    )
+
+    assert result == Decision(action="LEFT", explanation="DOWN")
+    prompt = json.dumps(llm.requests[0]["messages"])
+    assert "history.turn(turn: int)" in prompt
+    assert "history_turn" not in prompt
+    assert "recent immutable-copy `trajectory`" in prompt
+
+
+@pytest.mark.asyncio
+async def test_nooa_summary_explicitly_marks_live_context_recovery(tmp_path):
+    frame = tmp_path / "frame.png"
+    PILImage.new("RGB", (2, 2), "white").save(frame)
+    marker = "CONTEXT RECOVERY — SAME GAME, SAME AGENT — NOT A RESET"
+    llm = RecordingFakeLLMClient(
+        [
+            _codeact_response("return_result(action='UP', explanation='zero')"),
+            _codeact_response("return_result(action='DOWN', explanation='one')"),
+            _codeact_response("return_result(action='LEFT', explanation='two')"),
+        ]
+    )
+    solver = CompactBeliefsGameSolver(llm=llm, knowledge_dir=tmp_path / "knowledge")
+
+    keys_before = set(solver.event_manager.keys())
+    await solver.choose_action(
+        image=Image.from_file(frame),
+        trajectory=[],
+        legal_actions=["UP", "DOWN", "LEFT", "RIGHT"],
+        previous_action=None,
+        turn=0,
+        levels_completed=0,
+    )
+    first_turn_tags = [
+        tag
+        for tag in solver.event_manager.keys()  # noqa: SIM118 - custom API
+        if tag not in keys_before
+    ]
+    await solver.choose_action(
+        image=Image.from_file(frame),
+        trajectory=[],
+        legal_actions=["UP", "DOWN", "LEFT", "RIGHT"],
+        previous_action="UP",
+        turn=1,
+        levels_completed=0,
+    )
+    solver.event_manager.collapse(first_turn_tags[0], first_turn_tags[-1], marker)
+    await solver.choose_action(
+        image=Image.from_file(frame),
+        trajectory=[],
+        legal_actions=["UP", "DOWN", "LEFT", "RIGHT"],
+        previous_action="DOWN",
+        turn=2,
+        levels_completed=0,
+    )
+
+    rendered = json.dumps(llm.requests[-1]["messages"])
+    assert "CONTEXT RECOVERY" in rendered
+    assert "SAME GAME, SAME AGENT" in rendered
+    assert "NOT A RESET" in rendered
+
+
+def test_history_namespace_is_bounded_read_only_and_exact():
+    history = History(
+        {
+            "schema": "0159-history-snapshot-v1",
+            "events": [
+                {
+                    "event_id": "transcript:000001",
+                    "stream": "transcript",
+                    "ordinal": 1,
+                    "turn": 0,
+                    "kind": "decision",
+                    "record": {"action": "UP", "api_key": "[REDACTED]"},
+                }
+            ],
+            "turn_views": {"0": {"turn": 0}},
+            "provider_episodes": {},
+            "source_manifest": {},
+        }
+    )
+
+    assert history.turn(0) == {"turn": 0}
+    assert history.get(["transcript:000001"])[0]["record"]["action"] == "UP"
+    assert history.turns(0, 0, ["transcript"])[0]["event_id"] == ("transcript:000001")
+    assert history.find("action up", {"limit": 1})[0]["event_id"] == (
+        "transcript:000001"
+    )
+    with pytest.raises(ValueError, match="1 through 20"):
+        history.find("up", {"limit": 100})
+
+
+def test_compact_variant_blocks_nooa_implicit_archival_without_mutating_events(
+    tmp_path,
+):
+    audit_path = tmp_path / "audit.jsonl"
+    solver = CompactBeliefsGameSolver(
+        llm=FakeLLMClient([]), knowledge_dir=tmp_path / "knowledge"
+    )
+    solver.event_manager.add(Feedback(content="evidence that must survive"))
+    tags_before = list(solver.event_manager.keys())
+    disable_implicit_context_archival(solver, AuditLog(audit_path))
+
+    provider_error = RuntimeError("maximum context length is 131072 tokens")
+    with pytest.raises(ImplicitContextArchivalDisabled) as caught:
+        solver.runtime._archive_on_context_error(131_072, provider_error)
+
+    assert caught.value.__cause__ is provider_error
+    assert list(solver.event_manager.keys()) == tags_before
+    event = json.loads(audit_path.read_text())
+    assert event["event"] == "implicit_context_archival_blocked"
+    assert event["context_window"] == 131_072
+
+
+@pytest.mark.asyncio
+async def test_real_nooa_context_error_surfaces_compaction_request_without_collapse(
+    tmp_path,
+):
+    frame = tmp_path / "frame.png"
+    PILImage.new("RGB", (2, 2), "white").save(frame)
+    rejecting = _FailingClient(
+        RuntimeError(
+            "request contains 130000 tokens; maximum context length is 131072 tokens"
+        )
+    )
+    rejecting.context_window = 131_072
+    solver = CompactBeliefsGameSolver(
+        llm=rejecting, knowledge_dir=tmp_path / "knowledge"
+    )
+    disable_implicit_context_archival(solver, AuditLog(None))
+
+    with pytest.raises(Exception) as caught:  # NOOA may wrap the causal error
+        await solver.choose_action(
+            image=Image.from_file(frame),
+            trajectory=[],
+            legal_actions=["UP", "DOWN", "LEFT", "RIGHT"],
+            previous_action=None,
+            turn=3,
+            levels_completed=0,
+        )
+
+    assert _find_implicit_context_archival_error(caught.value) is not None
+    assert all(
+        ".." not in tag
+        for tag in solver.event_manager.keys()  # noqa: SIM118 - custom mapping API
+    )
+
+
+def test_worker_protocol_collapses_complete_turn_and_resumes_with_history(tmp_path):
+    frame = tmp_path / "frame.png"
+    PILImage.new("RGB", (2, 2), "white").save(frame)
+    snapshot = {
+        "schema": "0159-history-snapshot-v1",
+        "events": [],
+        "turn_views": {"0": {"turn": 0}},
+        "provider_episodes": {},
+        "source_manifest": {},
+    }
+    requests = [
+        {
+            "type": "turn",
+            "sequence": 0,
+            "image_path": str(frame),
+            "legal_actions": ["UP", "DOWN", "LEFT", "RIGHT"],
+            "previous_action": None,
+            "levels_completed": 0,
+            "trajectory": [],
+            "history_snapshot": snapshot,
+        },
+        {
+            "type": "turn",
+            "sequence": 1,
+            "image_path": str(frame),
+            "legal_actions": ["UP", "DOWN", "LEFT", "RIGHT"],
+            "previous_action": "UP",
+            "levels_completed": 0,
+            "trajectory": [],
+            "history_snapshot": snapshot,
+        },
+        {
+            "type": "compact",
+            "sequence": 2,
+            "retain_from_turn": 1,
+            "summary_text": "CONTEXT RECOVERY SAME GAME SAME AGENT",
+            "history_snapshot": snapshot,
+        },
+        {
+            "type": "turn",
+            "sequence": 2,
+            "image_path": str(frame),
+            "legal_actions": ["UP", "DOWN", "LEFT", "RIGHT"],
+            "previous_action": "DOWN",
+            "levels_completed": 0,
+            "trajectory": [],
+            "history_snapshot": snapshot,
+        },
+        {
+            "type": "turn",
+            "sequence": 3,
+            "image_path": str(frame),
+            "legal_actions": ["UP", "DOWN", "LEFT", "RIGHT"],
+            "previous_action": "LEFT",
+            "levels_completed": 0,
+            "trajectory": [],
+            "history_snapshot": snapshot,
+        },
+        {
+            "type": "compact",
+            "sequence": 4,
+            "retain_from_turn": 3,
+            "summary_text": "SECOND RECOVERY REPLACES THE FIRST",
+            "history_snapshot": snapshot,
+        },
+        {"type": "close"},
+    ]
+    environment = {
+        **os.environ,
+        "NOOA_0159_VARIANT": "codeact_notes_compact",
+        "NOOA_0159_KNOWLEDGE_DIR": str(tmp_path / "knowledge"),
+        "NOOA_0159_SCRIPTED_CODEACT_CELLS": json.dumps(
+            [
+                "return_result(action='UP', explanation='zero')",
+                "return_result(action='DOWN', explanation='one')",
+                (
+                    "old=history.turn(0); "
+                    "return_result(action='LEFT', explanation=str(old['turn']))"
+                ),
+                "return_result(action='RIGHT', explanation='three')",
+            ]
+        ),
+    }
+
+    process = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve().parents[1] / "worker.py")],
+        input="".join(json.dumps(request) + "\n" for request in requests),
+        text=True,
+        capture_output=True,
+        env=environment,
+        timeout=30,
+        check=True,
+    )
+
+    responses = [
+        json.loads(line.removeprefix("0159_RESPONSE\t"))
+        for line in process.stdout.splitlines()
+        if line.startswith("0159_RESPONSE\t")
+    ]
+    assert [response["type"] for response in responses] == [
+        "decision",
+        "decision",
+        "compaction_applied",
+        "decision",
+        "decision",
+        "compaction_applied",
+    ]
+    assert responses[2]["collapsed_turns"] == [0]
+    assert responses[2]["active_events_after"] < responses[2]["active_events_before"]
+    assert responses[3]["action"] == "LEFT"
+    assert responses[3]["explanation"] == "0"
+    assert responses[4]["action"] == "RIGHT"
+    assert responses[5]["collapsed_turns"] == [1, 2]
+    assert responses[5]["active_events_after"] < responses[5]["active_events_before"]
+
+
 def test_codeact_guard_rejects_self_and_file_access():
     assert _forbidden_cell_primitive("print(self._llm)") == "self"
     assert _forbidden_cell_primitive("open('/proc/self/environ').read()") == "open"
@@ -706,6 +1164,32 @@ def test_durable_beliefs_guard_allows_only_direct_notes_calls():
             allowed_self_methods=allowed,
         )
         == "self"
+    )
+
+
+def test_compact_guard_allows_only_direct_namespaced_history_calls():
+    allowed = History._METHODS
+
+    assert (
+        _forbidden_cell_primitive(
+            "evidence = history.turn(3)",
+            allowed_history_methods=allowed,
+        )
+        is None
+    )
+    assert (
+        _forbidden_cell_primitive(
+            "print(history._events)",
+            allowed_history_methods=allowed,
+        )
+        == "history._events"
+    )
+    assert (
+        _forbidden_cell_primitive(
+            "method = history.turn",
+            allowed_history_methods=allowed,
+        )
+        == "history"
     )
 
 

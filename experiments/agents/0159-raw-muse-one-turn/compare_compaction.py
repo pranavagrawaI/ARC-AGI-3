@@ -23,13 +23,13 @@ API_URL = "https://openrouter.ai/api/v1/chat/completions"
 MAX_OUTPUT_TOKENS = 8_192
 MAX_RETRIEVAL_ROUNDS = 3
 CONDITIONS = ("suffix_control", "checkpoint", "checkpoint_search")
-PROVIDER = {
-    "order": ["deepinfra/bf16"],
-    "only": ["deepinfra/bf16"],
-    "allow_fallbacks": False,
-    "require_parameters": False,
-    "quantizations": ["bf16"],
-}
+PROVIDERS = (
+    ("deepinfra-bf16", "deepinfra/bf16", ["bf16"]),
+    ("together", "together", None),
+    ("fireworks", "fireworks", None),
+    ("phala", "phala", None),
+)
+PROVIDER_ATTEMPT_TIMEOUT_SECONDS = 90.0
 
 PROBE_FIELDS = {
     "continuity": ["same_game", "new_game", "unknown"],
@@ -187,45 +187,38 @@ def consolidation_source(
         _transition_digest(event["event_id"], event["record"])
         for event in archive.turns(0, resume_turn - 1, streams={"trajectory"})
     ]
-    provider_ids = {
-        "provider:000562",
-        "provider:000563",
-        "provider:000567",
-        "provider:000623",
-        "provider:000624",
-        "provider:000625",
-        "provider:000626",
-        "provider:000627",
-        "provider:000628",
-        "provider:000629",
-    }
-    provider = archive.get(sorted(provider_ids & archive.ids()))
+    provider = archive.turns(
+        max(0, resume_turn - 2),
+        resume_turn - 1,
+        streams={"provider"},
+    )[-80:]
     notes = archive.get(
         sorted(
             event_id for event_id in archive.ids() if event_id.startswith("knowledge:")
         )
     )
     current = archive.turns(resume_turn, resume_turn, streams={"transcript"})
-    return {
-        "source_contract": (
-            "This is a bounded projection of immutable evidence. Every record carries "
-            "a stable event_id; raw originals remain available through history retrieval."
-        ),
-        "resume_turn": resume_turn,
-        "current_observation": current,
-        "transcript": transcript,
-        "transition_digests": trajectories,
-        "context_boundary_provider_events": provider,
-        "durable_notes": notes,
-        "artifact_manifest_exact": [
+    artifacts = []
+    for event_id in sorted(
+        event_id for event_id in archive.ids() if event_id.startswith("knowledge:")
+    ):
+        event = archive.events[event_id]
+        artifacts.append(
             {
-                "artifact": "knowledge/hypotheses.md",
+                "artifact": f"knowledge/{event.record['name']}",
                 "role": "model-authored durable beliefs",
                 "status": "assess from evidence",
                 "read_when": "Recovering stable mechanics; verify volatile state.",
-                "sha256": archive.events["knowledge:hypotheses.md"].record["sha256"],
-                "event_ids": ["knowledge:hypotheses.md"],
-            },
+                "sha256": event.record["sha256"],
+                "event_ids": [event_id],
+            }
+        )
+    trajectory_file = archive.source_files.get("trajectory")
+    trajectory_ids = sorted(
+        event_id for event_id in archive.ids() if event_id.startswith("trajectory:")
+    )
+    if trajectory_file is not None and trajectory_ids:
+        artifacts.append(
             {
                 "artifact": "trajectory.jsonl",
                 "role": "host-authored immutable executed transitions",
@@ -236,9 +229,21 @@ def consolidation_source(
                     for item in archive.manifest()["source_files"]
                     if item["stream"] == "trajectory"
                 ),
-                "event_ids": ["trajectory:000000", f"trajectory:{resume_turn - 1:06d}"],
-            },
-        ],
+                "event_ids": [trajectory_ids[0], trajectory_ids[-1]],
+            }
+        )
+    return {
+        "source_contract": (
+            "This is a bounded projection of immutable evidence. Every record carries "
+            "a stable event_id; raw originals remain available through history retrieval."
+        ),
+        "resume_turn": resume_turn,
+        "current_observation": current,
+        "transcript": transcript,
+        "transition_digests": trajectories,
+        "recent_provider_events": provider,
+        "durable_notes": notes,
+        "artifact_manifest_exact": artifacts,
     }
 
 
@@ -307,52 +312,98 @@ class OpenRouter:
         self.raw_dir = raw_dir
         self.raw_dir.mkdir(parents=True, exist_ok=True)
         self.call_count = 0
-        self.client = httpx.Client(timeout=300.0)
+        self.attempt_count = 0
+        self.preferred_index = 0
+        self.unhealthy: set[int] = set()
+        self.client = httpx.Client(timeout=PROVIDER_ATTEMPT_TIMEOUT_SECONDS)
 
     def call(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
     ) -> dict[str, Any]:
         self.call_count += 1
-        payload = {
+        base_payload = {
             "model": MODEL,
             "messages": messages,
             "max_tokens": MAX_OUTPUT_TOKENS,
             "temperature": 0,
-            "provider": PROVIDER,
         }
         if tools:
-            payload["tools"] = tools
-            payload["tool_choice"] = "auto"
-        started = time.monotonic()
-        response = self.client.post(
-            API_URL,
-            headers={"Authorization": f"Bearer {self.api_key}"},
-            json=payload,
+            base_payload["tools"] = tools
+            base_payload["tool_choice"] = "auto"
+        order = list(range(self.preferred_index, len(PROVIDERS))) + list(
+            range(self.preferred_index)
         )
-        try:
-            body = response.json()
-        except ValueError:
-            body = {"non_json_body": response.text[:10_000]}
-        record = {
-            "call": self.call_count,
-            "elapsed_seconds": round(time.monotonic() - started, 3),
-            "status_code": response.status_code,
-            "request": {**payload, "messages": messages},
-            "response": body,
-        }
-        (self.raw_dir / f"call-{self.call_count:03d}.json").write_text(
-            json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
-        if response.status_code != 200:
-            raise RuntimeError(
-                f"provider HTTP {response.status_code}: {str(body)[:500]}"
+        failures = []
+        for index in order:
+            if index in self.unhealthy:
+                continue
+            name, route, quantizations = PROVIDERS[index]
+            provider = {
+                "order": [route],
+                "only": [route],
+                "allow_fallbacks": False,
+                "require_parameters": False,
+            }
+            if quantizations:
+                provider["quantizations"] = quantizations
+            payload = {**base_payload, "provider": provider}
+            started = time.monotonic()
+            self.attempt_count += 1
+            response = None
+            body: dict[str, Any] = {}
+            try:
+                response = self.client.post(
+                    API_URL,
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    json=payload,
+                )
+                try:
+                    body = response.json()
+                except ValueError:
+                    body = {"non_json_body": response.text[:10_000]}
+            except httpx.HTTPError as error:
+                body = {"transport_error": type(error).__name__, "message": str(error)}
+            record = {
+                "call": self.call_count,
+                "attempt": self.attempt_count,
+                "provider": name,
+                "elapsed_seconds": round(time.monotonic() - started, 3),
+                "status_code": None if response is None else response.status_code,
+                "request": {**payload, "messages": messages},
+                "response": body,
+            }
+            (self.raw_dir / f"call-{self.call_count:03d}-{name}.json").write_text(
+                json.dumps(record, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
             )
-        if body.get("error") is not None:
-            raise RuntimeError(f"provider error envelope: {str(body['error'])[:500]}")
-        choices = body.get("choices")
-        if not isinstance(choices, list) or not choices:
-            raise RuntimeError("provider response contained no choices")
-        return body
+            status = None if response is None else response.status_code
+            error_text = str(body.get("error") or body)[:500]
+            request_invalid = status in {400, 401, 403, 404, 413, 422} or any(
+                marker in error_text.lower()
+                for marker in ("maximum context length", "context window")
+            )
+            if request_invalid:
+                raise RuntimeError(f"provider rejected request: {error_text}")
+            if (
+                response is None
+                or status == 429
+                or (status is not None and status >= 500)
+            ):
+                self.unhealthy.add(index)
+                failures.append(f"{name}: {status or 'transport'} {error_text}")
+                continue
+            if status != 200:
+                raise RuntimeError(f"provider HTTP {status}: {error_text}")
+            if body.get("error") is not None:
+                self.unhealthy.add(index)
+                failures.append(f"{name}: error envelope {error_text}")
+                continue
+            choices = body.get("choices")
+            if not isinstance(choices, list) or not choices:
+                raise RuntimeError("provider response contained no choices")
+            self.preferred_index = index
+            return body
+        raise RuntimeError(f"all consolidation providers failed: {'; '.join(failures)}")
 
 
 def generate_checkpoint(

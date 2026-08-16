@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import inspect
 import json
 import os
 import select
+import shutil
 import subprocess
+import sys
 from datetime import UTC, datetime
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +35,7 @@ EXPERIMENT_CARDS = {
     "predict": CARDS / "0159-muse-glimmer-nooa-persistent-ls20-v2.md",
     "codeact": CARDS / "0159-muse-glimmer-native-encoding-ls20-v12.md",
     "codeact_notes": CARDS / "0159-muse-glimmer-human-action-labels-ls20-v15.md",
+    "codeact_notes_compact": (CARDS / "0159-muse-in-loop-compaction-ls20-v24.md"),
 }
 MODEL = "meta/muse-glimmer-30b"
 NOOA_REVISION = "55a4b57872b49bfe9698cda6fc8e1f3b0bdd723e"
@@ -40,7 +45,20 @@ DEFAULT_ACTION_CAP = 44
 ANALYSIS_MAX_ITERATIONS = 11
 COMMIT_MAX_ATTEMPTS = 3
 MAX_PROVIDER_CALLS_PER_TURN = ANALYSIS_MAX_ITERATIONS + COMMIT_MAX_ATTEMPTS
-VARIANTS = {"predict", "codeact", "codeact_notes"}
+VARIANTS = {"predict", "codeact", "codeact_notes", "codeact_notes_compact"}
+COMPACT_VARIANT = "codeact_notes_compact"
+DEFAULT_COMPACTION_RECENT_TURNS = 6
+DEFAULT_COMPACTION_TRIGGER_FRACTION = 0.80
+DEFAULT_COMPACTION_TARGET_FRACTION = 0.30
+AUTO_COMPACTION_SUMMARY_TOKEN_ALLOWANCE = 4_096
+MAX_IN_LOOP_COMPACTIONS_PER_TURN = 1
+QUALIFIED_PROVIDER_POOL = [
+    "deepinfra-bf16",
+    "together",
+    "fireworks",
+    "phala",
+]
+PROVIDER_ATTEMPT_TIMEOUT_SECONDS = 90.0
 ACTION_ID_TO_NAME = {
     0: "RESET",
     1: "UP",
@@ -78,6 +96,7 @@ WORKER_FAILURE_STOP_REASONS = {
     "worker": "worker_failure",
 }
 INVALID_STOP_REASONS = {
+    "compaction_failure",
     "host_failure",
     "provider_failure",
     "sandbox_failure",
@@ -105,7 +124,9 @@ def file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def source_commitments(experiment_card: Path) -> tuple[dict[str, str], str]:
+def source_commitments(
+    experiment_card: Path, *, include_compaction: bool = False
+) -> tuple[dict[str, str], str]:
     paths = {
         "host": Path(__file__).resolve(),
         "worker": WORKER.resolve(),
@@ -118,6 +139,28 @@ def source_commitments(experiment_card: Path) -> tuple[dict[str, str], str]:
             inspect.getsourcefile(shared_types) or ""
         ).resolve(),
     }
+    if include_compaction:
+        paths.update(
+            {
+                "compaction": (EXPERIMENT / "compaction.py").resolve(),
+                "checkpoint_comparison": (
+                    EXPERIMENT / "compare_compaction.py"
+                ).resolve(),
+                "provider_qualification_card": (
+                    CARDS / "0159-muse-provider-qualification-v18.md"
+                ).resolve(),
+                "provider_qualification_summary": (
+                    EXPERIMENT / "artifacts/provider-qualification-v18/summary.json"
+                ).resolve(),
+                "provider_qualification_events": (
+                    EXPERIMENT
+                    / "artifacts/provider-qualification-v18/provider-events.jsonl"
+                ).resolve(),
+                "provider_qualification_runner": (
+                    RUNTIME / "qualify_providers.py"
+                ).resolve(),
+            }
+        )
     hashes = {name: file_sha256(path) for name, path in paths.items()}
     bundle = hashlib.sha256(
         json.dumps(hashes, sort_keys=True, separators=(",", ":")).encode()
@@ -272,9 +315,9 @@ def worker_environment(
     if audit_log is not None:
         environment["NOOA_0159_AUDIT_LOG"] = str(audit_log.resolve())
     environment["NOOA_0159_VARIANT"] = variant
-    if variant == "codeact_notes":
+    if variant in {"codeact_notes", COMPACT_VARIANT}:
         if knowledge_dir is None:
-            raise ValueError("codeact_notes requires a run-local knowledge directory")
+            raise ValueError(f"{variant} requires a run-local knowledge directory")
         environment["NOOA_0159_KNOWLEDGE_DIR"] = str(knowledge_dir.resolve())
     return environment
 
@@ -316,7 +359,9 @@ class Worker:
                     run_dir / "provider-events.jsonl",
                     variant=variant,
                     knowledge_dir=(
-                        run_dir / "knowledge" if variant == "codeact_notes" else None
+                        run_dir / "knowledge"
+                        if variant in {"codeact_notes", COMPACT_VARIANT}
+                        else None
                     ),
                 ),
             )
@@ -331,9 +376,21 @@ class Worker:
                 )
             if self.ready.get("model") != MODEL:
                 raise WorkerIdentityError("NOOA worker started with the wrong model")
-            if self.ready.get("provider_route") != "deepinfra/bf16":
+            expected_route = (
+                "qualified-pool-v18" if variant == COMPACT_VARIANT else "deepinfra/bf16"
+            )
+            if self.ready.get("provider_route") != expected_route:
                 raise WorkerIdentityError(
                     "NOOA worker started with the wrong provider route"
+                )
+            if variant == COMPACT_VARIANT and (
+                self.ready.get("provider_routes") != QUALIFIED_PROVIDER_POOL
+                or self.ready.get("provider_attempt_timeout_seconds")
+                != PROVIDER_ATTEMPT_TIMEOUT_SECONDS
+                or self.ready.get("implicit_context_archival") is not False
+            ):
+                raise WorkerIdentityError(
+                    "NOOA worker started with the wrong compact-runtime policy"
                 )
             if (
                 variant != "predict"
@@ -379,6 +436,20 @@ class Worker:
             raise RuntimeError("NOOA worker returned a stale or mismatched response")
         return response
 
+    def compact(self, request: dict[str, Any]) -> dict[str, Any]:
+        if self.variant != COMPACT_VARIANT:
+            raise ValueError("compact requests require codeact_notes_compact")
+        assert self.process is not None
+        assert self.process.stdin is not None
+        self.process.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
+        self.process.stdin.flush()
+        response = self._read(RESPONSE_PREFIX)
+        if response.get("sequence") != request["sequence"]:
+            raise RuntimeError("NOOA worker returned a stale compaction response")
+        if response.get("type") != "compaction_applied":
+            raise RuntimeError(f"NOOA worker rejected compaction: {response}")
+        return response
+
     def _stop_process(self) -> None:
         if self.process is None or self.process.poll() is not None:
             return
@@ -410,11 +481,191 @@ def default_run_dir(variant: str) -> Path:
     return EXPERIMENT / "artifacts" / f"{stamp}-{variant}-nooa-ls20"
 
 
+def _load_local_module(name: str, path: Path) -> Any:
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load local module {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def freeze_compaction_sources(run_dir: Path, destination: Path) -> Path:
+    """Copy the completed evidence prefixes used by one compaction transaction."""
+    destination.mkdir(parents=True, exist_ok=False)
+    for name in ("transcript.jsonl", "trajectory.jsonl", "provider-events.jsonl"):
+        source = run_dir / name
+        if source.is_file():
+            shutil.copy2(source, destination / name)
+    knowledge = run_dir / "knowledge"
+    if knowledge.is_dir():
+        shutil.copytree(knowledge, destination / "knowledge")
+    return destination
+
+
+def prepare_live_compaction(
+    run_dir: Path,
+    *,
+    resume_turn: int,
+    recent_turns: int = DEFAULT_COMPACTION_RECENT_TURNS,
+    compaction_index: int = 1,
+) -> dict[str, Any]:
+    """Prepare and validate a live compaction without mutating NOOA context."""
+    if recent_turns < 1 or resume_turn <= recent_turns:
+        raise ValueError("compaction needs at least one old turn beyond the suffix")
+    if compaction_index < 1:
+        raise ValueError("compaction index must be positive")
+    compaction_root = run_dir / "compactions" / f"{compaction_index:04d}"
+    compaction_root.mkdir(parents=True, exist_ok=False)
+    frozen_run = freeze_compaction_sources(run_dir, compaction_root / "frozen-run")
+    compaction = _load_local_module("compaction", EXPERIMENT / "compaction.py")
+    comparison = _load_local_module(
+        "compare_compaction_live_0159", EXPERIMENT / "compare_compaction.py"
+    )
+    archive = compaction.HistoryArchive(frozen_run)
+    api_key = os.environ.get("ARC_LLM_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        raise RuntimeError("ARC_LLM_API_KEY or OPENROUTER_API_KEY is required")
+    client = comparison.OpenRouter(api_key, compaction_root / "raw-consolidation")
+    checkpoint = comparison.generate_checkpoint(
+        client, archive, resume_turn=resume_turn
+    )
+    checkpoint_path = compaction_root / "model-checkpoint.json"
+    write_json(checkpoint_path, checkpoint)
+    bundle = compaction_root / "bundle"
+    compaction.write_bundle(
+        frozen_run,
+        checkpoint_path,
+        bundle,
+        resume_turn=resume_turn,
+        recent_turns=recent_turns,
+    )
+    retained_start_turn = resume_turn - recent_turns
+    snapshot = compaction.build_history_snapshot(archive, through_turn=resume_turn)
+    summary_text = compaction.render_live_recovery_summary(
+        checkpoint,
+        archive,
+        resume_turn=resume_turn,
+        retained_start_turn=retained_start_turn,
+    )
+    write_json(compaction_root / "history-snapshot.json", snapshot)
+    (compaction_root / "active-summary.md").write_text(summary_text, encoding="utf-8")
+    result = {
+        "type": "compact",
+        "sequence": resume_turn,
+        "retain_from_turn": retained_start_turn,
+        "summary_text": summary_text,
+        "history_snapshot": snapshot,
+    }
+    write_json(
+        compaction_root / "transaction.json",
+        {
+            "schema": "0159-live-compaction-transaction-v1",
+            "resume_turn": resume_turn,
+            "retained_start_turn": retained_start_turn,
+            "recent_turns": recent_turns,
+            "checkpoint_chars": len(json.dumps(checkpoint, sort_keys=True)),
+            "summary_chars": len(summary_text),
+            "archive_event_count": len(snapshot["events"]),
+            "consolidation_provider_calls": client.call_count,
+            "status": "prepared",
+        },
+    )
+    return result
+
+
+def should_auto_compact(
+    context: dict[str, Any] | None, *, trigger_fraction: float
+) -> bool:
+    """Use NOOA's provider-anchored usable-window utilization at a safe boundary."""
+    if context is None:
+        return False
+    utilization = context.get("utilization")
+    return isinstance(utilization, int | float) and utilization >= trigger_fraction
+
+
+def choose_recent_turns(
+    prompt_samples: list[int],
+    *,
+    effective_window: int,
+    target_fraction: float,
+    summary_token_allowance: int = AUTO_COMPACTION_SUMMARY_TOKEN_ALLOWANCE,
+) -> int:
+    """Keep the largest complete suffix projected to fit the post-compact target.
+
+    Provider counts are exact at each completed boundary. Their positive deltas
+    estimate the token weight of complete environment turns; the first sample
+    estimates the fixed prompt. A final recent delta reserves room for the next
+    turn. The result never splits a turn and always retains at least one.
+    """
+    if not prompt_samples:
+        raise ValueError("adaptive compaction requires prompt samples")
+    if effective_window < 1:
+        raise ValueError("effective window must be positive")
+    if not 0 < target_fraction < 1:
+        raise ValueError("target fraction must be between zero and one")
+    samples = [max(0, int(value)) for value in prompt_samples]
+    fixed_tokens = min(samples)
+    deltas = [max(0, right - left) for left, right in pairwise(samples)]
+    next_turn_reserve = max(deltas[-3:], default=0)
+    target_tokens = int(effective_window * target_fraction)
+    for recent_turns in range(len(samples), 0, -1):
+        suffix_growth = sum(deltas[-(recent_turns - 1) :]) if recent_turns > 1 else 0
+        projected = (
+            fixed_tokens
+            + suffix_growth
+            + next_turn_reserve
+            + summary_token_allowance
+        )
+        if projected <= target_tokens:
+            return recent_turns
+    return 1
+
+
+def apply_live_compaction(
+    run_dir: Path,
+    worker: Worker,
+    transcript: Path,
+    *,
+    resume_turn: int,
+    recent_turns: int,
+    compaction_index: int,
+    trigger: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Prepare, commit, and record one evidence-preserving compaction."""
+    prepared = prepare_live_compaction(
+        run_dir,
+        resume_turn=resume_turn,
+        recent_turns=recent_turns,
+        compaction_index=compaction_index,
+    )
+    result = worker.compact(prepared)
+    append_jsonl(
+        transcript,
+        {**result, "type": "context_compaction", "trigger": trigger},
+    )
+    transaction_path = (
+        run_dir / "compactions" / f"{compaction_index:04d}" / "transaction.json"
+    )
+    transaction = json.loads(transaction_path.read_text(encoding="utf-8"))
+    transaction["status"] = "applied"
+    transaction["trigger"] = trigger
+    transaction["worker_result"] = result
+    write_json(transaction_path, transaction)
+    return prepared, result
+
+
 def run(
     run_dir: Path,
     *,
     action_cap: int = DEFAULT_ACTION_CAP,
     variant: str = "predict",
+    compact_at_turn: int | None = None,
+    compaction_recent_turns: int = DEFAULT_COMPACTION_RECENT_TURNS,
+    auto_compact: bool = False,
+    compaction_trigger_fraction: float = DEFAULT_COMPACTION_TRIGGER_FRACTION,
+    compaction_target_fraction: float = DEFAULT_COMPACTION_TARGET_FRACTION,
 ) -> dict[str, Any]:
     arc_key = os.environ.get("ARC_API_KEY")
     if not arc_key:
@@ -423,6 +674,27 @@ def run(
         raise ValueError("action cap must be positive")
     if variant not in VARIANTS:
         raise ValueError(f"unknown variant {variant!r}")
+    if variant == COMPACT_VARIANT:
+        if compaction_recent_turns < 1:
+            raise ValueError("compaction recent turns must be positive")
+        if auto_compact and compact_at_turn is not None:
+            raise ValueError("choose either automatic or forced compaction")
+        if not auto_compact and compact_at_turn is None:
+            raise ValueError(
+                "codeact_notes_compact requires --auto-compact or --compact-at-turn"
+            )
+        if compact_at_turn is not None and compact_at_turn <= compaction_recent_turns:
+            raise ValueError(
+                "compact-at-turn must leave at least one older turn beyond the suffix"
+            )
+        if compact_at_turn is not None and compact_at_turn >= action_cap:
+            raise ValueError("compact-at-turn must occur before the action cap")
+        if not 0 < compaction_trigger_fraction < 1:
+            raise ValueError("compaction trigger fraction must be between zero and one")
+        if not 0 < compaction_target_fraction < compaction_trigger_fraction:
+            raise ValueError("compaction target must be below the trigger fraction")
+    elif compact_at_turn is not None:
+        raise ValueError("--compact-at-turn is only valid for codeact_notes_compact")
 
     run_dir.mkdir(parents=True, exist_ok=False)
     frames_dir = run_dir / "frames"
@@ -432,7 +704,9 @@ def run(
     transcript = run_dir / "transcript.jsonl"
     trajectory_trace = run_dir / "trajectory.jsonl"
     experiment_card = EXPERIMENT_CARDS[variant]
-    source_sha256, source_bundle_sha256 = source_commitments(experiment_card)
+    source_sha256, source_bundle_sha256 = source_commitments(
+        experiment_card, include_compaction=variant == COMPACT_VARIANT
+    )
     write_json(
         run_dir / "run-config.json",
         {
@@ -442,15 +716,33 @@ def run(
             "operation_mode": "online",
             "fresh_reset": True,
             "model": MODEL,
-            "provider_route": "deepinfra/bf16",
+            "provider_route": (
+                "qualified-pool-v18" if variant == COMPACT_VARIANT else "deepinfra/bf16"
+            ),
+            "provider_routes": (
+                QUALIFIED_PROVIDER_POOL if variant == COMPACT_VARIANT else None
+            ),
+            "provider_attempt_timeout_seconds": (
+                PROVIDER_ATTEMPT_TIMEOUT_SECONDS if variant == COMPACT_VARIANT else None
+            ),
             "action_cap": action_cap,
             "variant": variant,
+            "compact_at_turn": compact_at_turn,
+            "auto_compact": auto_compact,
+            "compaction_recent_turns": (
+                compaction_recent_turns if variant == COMPACT_VARIANT else None
+            ),
             "capability": {
                 "predict": "persistent conversation only",
                 "codeact": "persistent conversation plus read-only trajectory CodeAct",
                 "codeact_notes": (
                     "persistent conversation plus read-only trajectory CodeAct plus "
                     "model-authored durable notes"
+                ),
+                "codeact_notes_compact": (
+                    "persistent CodeAct plus durable notes, namespaced immutable-history "
+                    "retrieval, model checkpoint, explicit recovery Summary, and recent "
+                    "trajectory suffix"
                 ),
             }[variant],
             "max_provider_calls_per_turn": (
@@ -478,7 +770,44 @@ def run(
                     "location": "knowledge/*.md",
                     "host_authored_semantics": False,
                 }
-                if variant == "codeact_notes"
+                if variant in {"codeact_notes", COMPACT_VARIANT}
+                else None
+            ),
+            "context_compaction": (
+                {
+                    "trigger": (
+                        "provider_reported_utilization_after_complete_environment_turn"
+                        if auto_compact
+                        else "forced_environment_turn_boundary"
+                    ),
+                    "prepare_validate_commit": True,
+                    "immutable_frozen_source_prefix": True,
+                    "checkpoint_generator": "separate_stateless_model_call",
+                    "history_interface": "namespaced history object",
+                    "recent_complete_turns": compaction_recent_turns,
+                    "automatic": auto_compact,
+                    "trigger_fraction_of_usable_window": (
+                        compaction_trigger_fraction if auto_compact else None
+                    ),
+                    "target_fraction_of_usable_window": (
+                        compaction_target_fraction if auto_compact else None
+                    ),
+                    "suffix_policy": (
+                        "largest_complete_suffix_projected_under_target"
+                        if auto_compact
+                        else "fixed_complete_suffix"
+                    ),
+                    "implicit_nooa_context_archival": False,
+                    "in_loop_overflow_recovery": (
+                        "compact_then_retry_same_environment_turn"
+                        if auto_compact
+                        else None
+                    ),
+                    "max_in_loop_compactions_per_turn": (
+                        MAX_IN_LOOP_COMPACTIONS_PER_TURN if auto_compact else None
+                    ),
+                }
+                if variant == COMPACT_VARIANT
                 else None
             ),
             "ipc_stdout": "duplicated_os_file_descriptor",
@@ -518,6 +847,11 @@ def run(
     previous_action: int | None = None
     trajectory: list[dict[str, Any]] = []
     animation_events = 0
+    compactions: list[dict[str, Any]] = []
+    context_samples: list[int] = []
+    last_context: dict[str, Any] | None = None
+    retained_trajectory_start = 0
+    compaction_module: Any | None = None
     try:
         arcade = arc_agi.Arcade(
             arc_api_key=arc_key,
@@ -553,6 +887,53 @@ def run(
             if not observation["legal_actions"]:
                 stop_reason = "no_available_actions"
                 break
+            prepared_compaction: dict[str, Any] | None = None
+            auto_boundary = (
+                variant == COMPACT_VARIANT
+                and auto_compact
+                and turn > 1
+                and should_auto_compact(
+                    last_context, trigger_fraction=compaction_trigger_fraction
+                )
+            )
+            forced_boundary = (
+                variant == COMPACT_VARIANT and turn == compact_at_turn
+            )
+            if auto_boundary or forced_boundary:
+                try:
+                    recent_turns = compaction_recent_turns
+                    if auto_boundary:
+                        assert last_context is not None
+                        effective_window = last_context.get("effective_window")
+                        if type(effective_window) is not int:
+                            raise RuntimeError(
+                                "automatic compaction needs a known effective window"
+                            )
+                        recent_turns = choose_recent_turns(
+                            context_samples,
+                            effective_window=effective_window,
+                            target_fraction=compaction_target_fraction,
+                        )
+                        recent_turns = min(recent_turns, turn - 1)
+                    prepared_compaction, compaction_result = apply_live_compaction(
+                        run_dir,
+                        worker,
+                        transcript,
+                        resume_turn=turn,
+                        recent_turns=recent_turns,
+                        compaction_index=len(compactions) + 1,
+                        trigger=(
+                            "automatic_boundary" if auto_boundary else "forced_boundary"
+                        ),
+                    )
+                except Exception as error:  # noqa: BLE001 - preserve boundary evidence
+                    stop_reason = "compaction_failure"
+                    record_failure(run_dir, stage="context_compaction", error=error)
+                    break
+                compactions.append(compaction_result)
+                retained_trajectory_start = prepared_compaction["retain_from_turn"]
+                context_samples = []
+                last_context = None
             request = {
                 "type": "turn",
                 "sequence": turn,
@@ -562,9 +943,78 @@ def run(
                 "levels_completed": levels_completed,
             }
             if variant != "predict":
-                request["trajectory"] = trajectory
+                request["trajectory"] = (
+                    (
+                        trajectory[retained_trajectory_start:]
+                        if auto_compact
+                        else trajectory[-compaction_recent_turns:]
+                    )
+                    if variant == COMPACT_VARIANT
+                    else trajectory
+                )
+            if variant == COMPACT_VARIANT:
+                if prepared_compaction is not None:
+                    request["history_snapshot"] = prepared_compaction[
+                        "history_snapshot"
+                    ]
+                else:
+                    if compaction_module is None:
+                        compaction_module = _load_local_module(
+                            "compaction", EXPERIMENT / "compaction.py"
+                        )
+                    archive = compaction_module.HistoryArchive(run_dir)
+                    request["history_snapshot"] = (
+                        compaction_module.build_history_snapshot(
+                            archive, through_turn=turn
+                        )
+                    )
             decision = worker.decide(request)
             append_jsonl(transcript, decision)
+            in_loop_compactions = 0
+            while decision.get("type") == "needs_compaction" and auto_compact:
+                if in_loop_compactions >= MAX_IN_LOOP_COMPACTIONS_PER_TURN:
+                    break
+                try:
+                    if turn <= 1 or not context_samples or last_context is None:
+                        raise RuntimeError(
+                            "in-loop overflow occurred before an old complete turn "
+                            "could be compacted"
+                        )
+                    effective_window = last_context.get("effective_window")
+                    if type(effective_window) is not int:
+                        raise RuntimeError(
+                            "in-loop compaction needs a known effective window"
+                        )
+                    recent_turns = choose_recent_turns(
+                        context_samples,
+                        effective_window=effective_window,
+                        target_fraction=compaction_target_fraction,
+                    )
+                    recent_turns = min(recent_turns, turn - 1)
+                    prepared_compaction, compaction_result = apply_live_compaction(
+                        run_dir,
+                        worker,
+                        transcript,
+                        resume_turn=turn,
+                        recent_turns=recent_turns,
+                        compaction_index=len(compactions) + 1,
+                        trigger="in_loop_context_rejection",
+                    )
+                except Exception as error:  # noqa: BLE001 - preserve boundary evidence
+                    stop_reason = "compaction_failure"
+                    record_failure(run_dir, stage="in_loop_compaction", error=error)
+                    break
+                compactions.append(compaction_result)
+                in_loop_compactions += 1
+                retained_trajectory_start = prepared_compaction["retain_from_turn"]
+                context_samples = []
+                last_context = None
+                request["trajectory"] = trajectory[retained_trajectory_start:]
+                request["history_snapshot"] = prepared_compaction["history_snapshot"]
+                decision = worker.decide(request)
+                append_jsonl(transcript, decision)
+            if stop_reason == "compaction_failure":
+                break
             if decision.get("type") != "decision":
                 failure_stage = str(decision.get("failure_stage", "worker"))
                 stop_reason = WORKER_FAILURE_STOP_REASONS.get(
@@ -578,6 +1028,14 @@ def run(
                     ),
                 )
                 break
+            if variant == COMPACT_VARIANT:
+                context = decision.get("context")
+                last_context = context if isinstance(context, dict) else None
+                prompt_tokens = (
+                    last_context.get("prompt_tokens") if last_context else None
+                )
+                if type(prompt_tokens) is int:
+                    context_samples.append(prompt_tokens)
             action = decision.get("action")
             x = decision.get("x")
             y = decision.get("y")
@@ -738,6 +1196,7 @@ def run(
         "invalid_reason": stop_reason if stop_reason in INVALID_STOP_REASONS else None,
         "trajectory_length": len(trajectory),
         "trajectory_sha256": trajectory_sha256(trajectory),
+        "compactions": compactions,
         "animation_events": animation_events,
         "source_bundle_sha256": source_bundle_sha256,
     }
@@ -750,11 +1209,33 @@ def main() -> None:
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument("--action-cap", type=int, default=DEFAULT_ACTION_CAP)
     parser.add_argument("--variant", choices=sorted(VARIANTS), default="predict")
+    parser.add_argument("--compact-at-turn", type=int)
+    parser.add_argument("--auto-compact", action="store_true")
+    parser.add_argument(
+        "--compaction-trigger-fraction",
+        type=float,
+        default=DEFAULT_COMPACTION_TRIGGER_FRACTION,
+    )
+    parser.add_argument(
+        "--compaction-target-fraction",
+        type=float,
+        default=DEFAULT_COMPACTION_TARGET_FRACTION,
+    )
+    parser.add_argument(
+        "--compaction-recent-turns",
+        type=int,
+        default=DEFAULT_COMPACTION_RECENT_TURNS,
+    )
     args = parser.parse_args()
     summary = run(
         (args.run_dir or default_run_dir(args.variant)).resolve(),
         action_cap=args.action_cap,
         variant=args.variant,
+        compact_at_turn=args.compact_at_turn,
+        compaction_recent_turns=args.compaction_recent_turns,
+        auto_compact=args.auto_compact,
+        compaction_trigger_fraction=args.compaction_trigger_fraction,
+        compaction_target_fraction=args.compaction_target_fraction,
     )
     print(json.dumps(summary, indent=2, sort_keys=True))
 

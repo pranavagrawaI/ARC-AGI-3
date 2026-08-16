@@ -670,6 +670,129 @@ def render_recovery_packet(
     return "\n".join(sections) + "\n"
 
 
+def build_history_snapshot(
+    archive: HistoryArchive, *, through_turn: int | None = None
+) -> dict[str, Any]:
+    """Build the immutable, model-searchable payload installed behind ``history``.
+
+    The live worker receives this redacted projection, never paths or credentials.
+    Exact source files remain outside the sandbox and are committed separately by
+    :meth:`HistoryArchive.manifest`.
+    """
+
+    events = [
+        event.model_dump()
+        for event in archive.events.values()
+        if through_turn is None or event.turn is None or event.turn <= through_turn
+    ]
+    turns = sorted(
+        {
+            event.turn
+            for event in archive.events.values()
+            if event.turn is not None
+            and (through_turn is None or event.turn <= through_turn)
+        }
+    )
+    provider_sequences = sorted(
+        {
+            event.turn
+            for event in archive.events.values()
+            if event.stream == "provider"
+            and event.turn is not None
+            and (through_turn is None or event.turn <= through_turn)
+        }
+    )
+    return {
+        "schema": "0159-history-snapshot-v1",
+        "events": events,
+        "turn_views": {str(turn): archive.turn_view(turn) for turn in turns},
+        "provider_episodes": {
+            f"{sequence}:{phase}": archive.provider_episode(sequence, phase)
+            for sequence in provider_sequences
+            for phase in ("context_recovery", "commitment", "failures")
+        },
+        "source_commitments": [
+            {key: item[key] for key in ("stream", "sha256", "bytes")}
+            for item in archive.manifest()["source_files"]
+        ],
+    }
+
+
+def render_live_recovery_summary(
+    candidate: dict[str, Any],
+    archive: HistoryArchive,
+    *,
+    resume_turn: int,
+    retained_start_turn: int,
+) -> str:
+    """Render the Summary event that precedes an intact active turn suffix.
+
+    Unlike :func:`render_recovery_packet`, this does not duplicate the recent
+    turns. NOOA keeps those events active immediately after the Summary marker.
+    """
+
+    validate_checkpoint(candidate, archive)
+    if retained_start_turn < 0 or retained_start_turn > resume_turn:
+        raise ValueError("retained start turn must be between zero and resume turn")
+    mechanical = _latest_observation(archive, resume_turn)
+    orientation = {
+        key: candidate[key]
+        for key in (
+            "episode_index",
+            "beliefs",
+            "contradictions",
+            "open_questions",
+            "current_plan",
+            "artifact_manifest",
+            "review",
+            "next_moves",
+            "suggested_capabilities",
+        )
+    }
+    return (
+        "\n".join(
+            [
+                "# CONTEXT RECOVERY — SAME GAME, SAME AGENT",
+                "",
+                (
+                    "This Summary is a context transition, not a game reset, not an "
+                    "environment action, and not an action result. Continue the existing run."
+                ),
+                f"Environment turn to resume: {resume_turn}.",
+                (
+                    f"Complete turns {retained_start_turn}–{resume_turn - 1} remain "
+                    "active immediately after this Summary."
+                ),
+                "",
+                "## Host-owned current state",
+                "```json",
+                json.dumps(mechanical, indent=2, sort_keys=True),
+                "```",
+                "",
+                "## What happened",
+                candidate["episode_summary"],
+                "",
+                "## Continuation orientation",
+                "```json",
+                json.dumps(orientation, indent=2, sort_keys=True),
+                "```",
+                "",
+                "## Retrieval contract",
+                (
+                    "Use `history.turn(turn)` for a decision-shaped single-turn view, "
+                    "`history.get(event_ids)` for cited originals, "
+                    "`history.turns(start, end, streams=None)` for a contiguous range, "
+                    "and `history.find(query, filters=None)` for deterministic search. "
+                    "Dedicated bounded views are `history.note(name)`, "
+                    "`history.provider_episode(sequence, phase)`, and "
+                    "`history.around(event_id, before, after)`."
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+
 def write_bundle(
     run_dir: Path,
     candidate_path: Path,

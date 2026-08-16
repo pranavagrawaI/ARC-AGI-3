@@ -377,6 +377,302 @@ def test_predict_request_physically_omits_trajectory(tmp_path, monkeypatch):
     assert "trajectory" not in Worker.request
 
 
+def test_compact_variant_applies_boundary_and_sends_only_six_recent_turns(
+    tmp_path, monkeypatch
+):
+    class TestFrame:
+        def __init__(self, value: int):
+            self.frame = np.array([[[value, 0], [0, 0]]], dtype=np.int8)
+            self.state = State()
+            self.levels_completed = 0
+            self.full_reset = False
+            self.available_actions = (1, 2, 3, 4)
+
+    class Environment:
+        def __init__(self):
+            self.steps = 0
+
+        def reset(self):
+            return TestFrame(0)
+
+        def step(self, action):
+            self.steps += 1
+            return TestFrame(self.steps)
+
+        def close(self):
+            return None
+
+    environment = Environment()
+
+    class Arcade:
+        def __init__(self, **kwargs):
+            pass
+
+        def make(self, *args, **kwargs):
+            return environment
+
+    class Worker:
+        instance = None
+
+        def __init__(self, run_dir, *, variant):
+            self.ready = {"variant": variant, "pid": 7, "model": "fake"}
+            self.requests = []
+            self.compactions = []
+            Worker.instance = self
+
+        def compact(self, request):
+            self.compactions.append(request)
+            return {
+                "type": "compaction_applied",
+                "sequence": request["sequence"],
+                "retained_start_turn": request["retain_from_turn"],
+                "collapsed_turns": [0, 1],
+                "summary_tag": "1..14",
+                "active_events_before": 56,
+                "active_events_after": 43,
+                "archive_event_count": len(request["history_snapshot"]["events"]),
+                "worker_pid": 7,
+            }
+
+        def decide(self, request):
+            self.requests.append(json.loads(json.dumps(request)))
+            return {
+                "type": "decision",
+                "sequence": request["sequence"],
+                "action": "UP",
+                "x": None,
+                "y": None,
+                "explanation": "probe",
+            }
+
+        def close(self):
+            return None
+
+    snapshot = {
+        "schema": "0159-history-snapshot-v1",
+        "events": [{"event_id": "trajectory:000000"}],
+        "turn_views": {},
+        "provider_episodes": {},
+        "source_manifest": {},
+    }
+
+    def prepare(run_dir, *, resume_turn, recent_turns, compaction_index):
+        assert compaction_index == 1
+        root = run_dir / "compactions" / "0001"
+        root.mkdir(parents=True)
+        MODULE.write_json(root / "transaction.json", {"status": "prepared"})
+        return {
+            "type": "compact",
+            "sequence": resume_turn,
+            "retain_from_turn": resume_turn - recent_turns,
+            "summary_text": "same game, same agent",
+            "history_snapshot": snapshot,
+        }
+
+    monkeypatch.setenv("ARC_API_KEY", "test")
+    monkeypatch.setattr(MODULE.arc_agi, "Arcade", Arcade)
+    monkeypatch.setattr(MODULE, "Worker", Worker)
+    monkeypatch.setattr(MODULE, "prepare_live_compaction", prepare)
+
+    summary = MODULE.run(
+        tmp_path / "compact",
+        action_cap=9,
+        variant="codeact_notes_compact",
+        compact_at_turn=8,
+        compaction_recent_turns=6,
+    )
+
+    assert Worker.instance is not None
+    assert len(Worker.instance.compactions) == 1
+    assert Worker.instance.compactions[0]["sequence"] == 8
+    assert Worker.instance.compactions[0]["retain_from_turn"] == 2
+    assert [len(request["trajectory"]) for request in Worker.instance.requests] == [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        6,
+        6,
+    ]
+    assert all("history_snapshot" in request for request in Worker.instance.requests)
+    assert summary["compactions"][0]["collapsed_turns"] == [0, 1]
+    transcript_rows = [
+        json.loads(line)
+        for line in (tmp_path / "compact" / "transcript.jsonl").read_text().splitlines()
+    ]
+    assert sum(row["type"] == "context_compaction" for row in transcript_rows) == 1
+    config = json.loads((tmp_path / "compact" / "run-config.json").read_text())
+    assert config["context_compaction"]["prepare_validate_commit"] is True
+    assert config["compaction_recent_turns"] == 6
+    assert {"compaction", "checkpoint_comparison"} <= set(config["source_sha256"])
+
+
+def test_auto_compaction_uses_provider_reported_usable_window_utilization():
+    assert MODULE.should_auto_compact(
+        {"utilization": 0.8}, trigger_fraction=0.8
+    )
+    assert not MODULE.should_auto_compact(
+        {"utilization": 0.799}, trigger_fraction=0.8
+    )
+    assert not MODULE.should_auto_compact(None, trigger_fraction=0.8)
+
+
+def test_adaptive_suffix_keeps_largest_complete_suffix_under_target():
+    # 10k fixed + 3k summary + a 10k next-turn reserve leaves room for one
+    # recent 10k delta under a 39k target, but not two.
+    assert (
+        MODULE.choose_recent_turns(
+            [10_000, 20_000, 30_000, 40_000],
+            effective_window=130_000,
+            target_fraction=0.30,
+            summary_token_allowance=3_000,
+        )
+        == 2
+    )
+
+
+def test_adaptive_suffix_never_splits_or_drops_the_last_complete_turn():
+    assert (
+        MODULE.choose_recent_turns(
+            [50_000, 90_000],
+            effective_window=100_000,
+            target_fraction=0.30,
+        )
+        == 1
+    )
+
+
+def test_in_loop_overflow_compacts_then_retries_same_turn_without_duplicate_action(
+    tmp_path, monkeypatch
+):
+    class TestFrame:
+        def __init__(self, value):
+            self.frame = np.array([[[value, 0], [0, 0]]], dtype=np.int8)
+            self.state = State()
+            self.levels_completed = 0
+            self.full_reset = False
+            self.available_actions = (1, 2, 3, 4)
+
+    class Environment:
+        def __init__(self):
+            self.steps = 0
+
+        def reset(self):
+            return TestFrame(0)
+
+        def step(self, action):
+            self.steps += 1
+            return TestFrame(self.steps)
+
+        def close(self):
+            return None
+
+    environment = Environment()
+
+    class Arcade:
+        def __init__(self, **kwargs):
+            pass
+
+        def make(self, *args, **kwargs):
+            return environment
+
+    class Worker:
+        instance = None
+
+        def __init__(self, run_dir, *, variant):
+            self.ready = {"variant": variant, "pid": 9, "model": "fake"}
+            self.decisions = []
+            self.compactions = []
+            self.turn_two_attempts = 0
+            Worker.instance = self
+
+        def decide(self, request):
+            self.decisions.append(request["sequence"])
+            if request["sequence"] == 2:
+                self.turn_two_attempts += 1
+                if self.turn_two_attempts == 1:
+                    return {
+                        "type": "needs_compaction",
+                        "sequence": 2,
+                        "reason": "context_window_rejected",
+                    }
+            prompt_tokens = [10_000, 20_000, 25_000][request["sequence"]]
+            return {
+                "type": "decision",
+                "sequence": request["sequence"],
+                "action": "UP",
+                "x": None,
+                "y": None,
+                "explanation": "probe",
+                "context": {
+                    "prompt_tokens": prompt_tokens,
+                    "effective_window": 100_000,
+                    "utilization": prompt_tokens / 100_000,
+                },
+            }
+
+        def compact(self, request):
+            self.compactions.append(request)
+            return {
+                "type": "compaction_applied",
+                "sequence": request["sequence"],
+                "retained_start_turn": request["retain_from_turn"],
+                "collapsed_turns": [0],
+                "worker_pid": 9,
+            }
+
+        def close(self):
+            return None
+
+    snapshot = {
+        "schema": "0159-history-snapshot-v1",
+        "events": [],
+        "turn_views": {},
+        "provider_episodes": {},
+        "source_manifest": {},
+    }
+
+    def prepare(run_dir, *, resume_turn, recent_turns, compaction_index):
+        root = run_dir / "compactions" / f"{compaction_index:04d}"
+        root.mkdir(parents=True)
+        MODULE.write_json(root / "transaction.json", {"status": "prepared"})
+        return {
+            "type": "compact",
+            "sequence": resume_turn,
+            "retain_from_turn": resume_turn - recent_turns,
+            "summary_text": "same game, same agent",
+            "history_snapshot": snapshot,
+        }
+
+    monkeypatch.setenv("ARC_API_KEY", "test")
+    monkeypatch.setattr(MODULE.arc_agi, "Arcade", Arcade)
+    monkeypatch.setattr(MODULE, "Worker", Worker)
+    monkeypatch.setattr(MODULE, "prepare_live_compaction", prepare)
+
+    summary = MODULE.run(
+        tmp_path / "in-loop",
+        action_cap=3,
+        variant="codeact_notes_compact",
+        auto_compact=True,
+    )
+
+    assert environment.steps == 3
+    assert Worker.instance.decisions == [0, 1, 2, 2]
+    assert len(Worker.instance.compactions) == 1
+    assert summary["actions"] == 3
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "in-loop" / "transcript.jsonl").read_text().splitlines()
+    ]
+    assert sum(row["type"] == "needs_compaction" for row in rows) == 1
+    compaction_rows = [row for row in rows if row["type"] == "context_compaction"]
+    assert len(compaction_rows) == 1
+    assert compaction_rows[0]["trigger"] == "in_loop_context_rejection"
+
+
 def test_step_exception_is_recorded_as_uncertain_action(tmp_path, monkeypatch):
     class TestFrame:
         frame = np.zeros((1, 2, 2), dtype=np.int8)

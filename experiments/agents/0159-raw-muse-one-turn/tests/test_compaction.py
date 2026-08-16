@@ -187,6 +187,32 @@ def test_bundle_is_an_explicit_handoff_with_recent_complete_turns(tmp_path):
     assert (output_dir / "review.json").is_file()
 
 
+def test_live_history_snapshot_and_summary_use_the_namespaced_contract(tmp_path):
+    archive = MODULE.HistoryArchive(_synthetic_run(tmp_path))
+
+    snapshot = MODULE.build_history_snapshot(archive, through_turn=1)
+    summary = MODULE.render_live_recovery_summary(
+        _candidate(),
+        archive,
+        resume_turn=1,
+        retained_start_turn=0,
+    )
+
+    assert snapshot["schema"] == "0159-history-snapshot-v1"
+    assert snapshot["turn_views"]["0"]["turn"] == 0
+    provider = next(
+        event for event in snapshot["events"] if event["event_id"] == "provider:000000"
+    )
+    assert provider["record"]["api_key"] == "[REDACTED]"
+    assert "history.turn(turn)" in summary
+    assert "history.get(event_ids)" in summary
+    assert "history.turns(start, end, streams=None)" in summary
+    assert "history.find(query, filters=None)" in summary
+    assert "not a game reset" in summary
+    assert "Complete turns 0–0 remain active" in summary
+    assert "Recent contiguous suffix" not in summary
+
+
 def test_frozen_v14_reference_checkpoint_covers_the_real_boundary(tmp_path):
     run_dir = (
         EXPERIMENT
