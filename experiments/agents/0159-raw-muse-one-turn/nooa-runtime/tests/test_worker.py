@@ -76,53 +76,6 @@ def test_capability_probe_is_an_explicit_optional_strategy_block(monkeypatch):
     assert "state how you know it" in prompt
 
 
-def test_wm2_guidance_and_workbench_context_blocks_are_independently_enabled(
-    monkeypatch,
-):
-    strategy = ExecutableTheoryCodeActStrategy(config=_CODEACT_CONFIG)
-    monkeypatch.delenv("NOOA_0159_WM2_GUIDANCE", raising=False)
-    monkeypatch.delenv("NOOA_0159_WM2_WORKBENCH", raising=False)
-    assert "theory_practice" not in strategy.get_block_overrides()
-    assert "theory_workbench" not in strategy.get_block_overrides()
-
-    monkeypatch.setenv("NOOA_0159_WM2_GUIDANCE", "1")
-    guidance = strategy.get_block_overrides()
-    assert "preserve a rule" in guidance["theory_practice"]
-    assert "theory_workbench" not in guidance
-
-    monkeypatch.delenv("NOOA_0159_WM2_GUIDANCE")
-    monkeypatch.setenv("NOOA_0159_WM2_WORKBENCH", "1")
-    workbench = strategy.get_block_overrides()
-    assert "theory_practice" not in workbench
-    assert workbench["theory_workbench"].expr == "self.theory_workbench_context()"
-
-    monkeypatch.setenv("NOOA_0159_WM2_GUIDANCE", "1")
-    order = strategy.get_block_order()
-    assert order.index("theory_practice") < order.index("theory_workbench")
-    assert order.index("theory_workbench") < order.index("self")
-
-
-def test_disabling_wm2_restores_byte_identical_wm1_context(monkeypatch):
-    monkeypatch.delenv("NOOA_0159_WM2_GUIDANCE", raising=False)
-    monkeypatch.delenv("NOOA_0159_WM2_WORKBENCH", raising=False)
-    strategy = ExecutableTheoryCodeActStrategy(config=_CODEACT_CONFIG)
-    absent = strategy.get_block_overrides()
-
-    monkeypatch.setenv("NOOA_0159_WM2_GUIDANCE", "0")
-    monkeypatch.setenv("NOOA_0159_WM2_WORKBENCH", "0")
-    explicitly_disabled = strategy.get_block_overrides()
-
-    assert absent == explicitly_disabled
-    assert strategy.get_block_order() == [
-        "system_prompt",
-        "strategy_prompt",
-        "sandbox",
-        "execution_context",
-        "history",
-        "self",
-    ]
-
-
 def test_fixed_world_model_prompt_explains_why_rendered_moore_machines_help():
     strategy = ExecutableTheoryCodeActStrategy(config=_CODEACT_CONFIG)
 
@@ -921,12 +874,10 @@ async def test_durable_beliefs_survive_between_game_turns(tmp_path):
 
 @pytest.mark.asyncio
 async def test_executable_theory_affordances_apply_edit_and_return_one_decision(
-    tmp_path, monkeypatch
+    tmp_path,
 ):
     import importlib.util
 
-    monkeypatch.setenv("NOOA_0159_WM2_GUIDANCE", "1")
-    monkeypatch.setenv("NOOA_0159_WM2_WORKBENCH", "1")
     e0_path = Path(__file__).resolve().parents[2] / "e0_evidence.py"
     spec = importlib.util.spec_from_file_location("worker_test_e0", e0_path)
     assert spec is not None and spec.loader is not None
@@ -1049,202 +1000,10 @@ async def test_executable_theory_affordances_apply_edit_and_return_one_decision(
     assert "self.read_world_model" in prompt
     assert "predict(grid, action)" in prompt
     assert "Moore-machine" in prompt
-    assert "## Executable theory practice" in prompt
-    assert "1 ordinary action result(s) are available" in prompt
     assert "quick_theory_template" in rejection_context
     assert "SYNTAX_ERROR" in recovery_context
     assert "No executable commitment is active" in recovery_context
     assert "only Muse" not in prompt
-
-
-@pytest.mark.asyncio
-async def test_wm2_context_is_frozen_from_evidence_and_lane_before_decision(
-    tmp_path, monkeypatch
-):
-    import importlib.util
-
-    monkeypatch.setenv("NOOA_0159_WM2_GUIDANCE", "1")
-    monkeypatch.setenv("NOOA_0159_WM2_WORKBENCH", "1")
-    e0_path = Path(__file__).resolve().parents[2] / "e0_evidence.py"
-    spec = importlib.util.spec_from_file_location("worker_wm2_e0", e0_path)
-    assert spec is not None and spec.loader is not None
-    e0 = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = e0
-    spec.loader.exec_module(e0)
-    root = tmp_path / "evidence"
-    ledger = e0.HostEvidenceLedger(root, run_id="worker-wm2")
-    initial = e0.PublicObservationInput(
-        frames=(((0, 0), (0, 0)),),
-        public_state="NOT_FINISHED",
-        levels_completed=0,
-        full_reset=False,
-        legal_actions=("UP", "DOWN", "LEFT", "RIGHT"),
-    )
-    ledger.record_initial_reset(initial)
-    result = ledger.record_action_result(
-        global_turn=0,
-        action=e0.Action("UP"),
-        successor=e0.PublicObservationInput(
-            frames=(((1, 0), (0, 0)),),
-            public_state="NOT_FINISHED",
-            levels_completed=0,
-            full_reset=False,
-            legal_actions=("UP", "DOWN", "LEFT", "RIGHT"),
-        ),
-    )
-    snapshot_path = root / "snapshots" / f"{result.snapshot.snapshot_id}.json"
-    audit_path = tmp_path / "audit.jsonl"
-    llm = RecordingFakeLLMClient(
-        [
-            _codeact_response(
-                "return_result(action='UP', explanation="
-                "'defer: one transition does not establish a rule')"
-            )
-        ]
-    )
-    solver = ExecutableTheoryGameSolver(
-        llm=llm,
-        audit=AuditLog(audit_path),
-        knowledge_dir=tmp_path / "knowledge",
-        world_model_dir=tmp_path / "world-model",
-    )
-    solver.install_history(
-        {
-            "schema": "0159-history-snapshot-v1",
-            "events": [],
-            "turn_views": {},
-            "provider_episodes": {},
-            "source_manifest": {},
-        }
-    )
-    solver.install_world_model_evidence(snapshot_path)
-
-    decision = await solver.choose_action(
-        image=_analysis_image(),
-        trajectory=[],
-        legal_actions=["UP", "DOWN", "LEFT", "RIGHT"],
-        previous_action="UP",
-        turn=1,
-        levels_completed=0,
-    )
-
-    messages = json.dumps(llm.requests[0]["messages"])
-    audit = [json.loads(line) for line in audit_path.read_text().splitlines()]
-    workbench_event = next(
-        event for event in audit if event["event"] == "theory_workbench_built"
-    )
-    assert decision.action == "UP"
-    assert decision.explanation.startswith("defer:")
-    assert solver.theory_lane.read_world_model()["current_model_version_id"] is None
-    assert "## Executable theory practice" in messages
-    assert "## Executable theory workbench" in messages
-    assert "1 ordinary action result(s) are available" in messages
-    assert "attempt-" not in messages
-    assert workbench_event["condition_codes"] == ["evidence_without_commitment"]
-    assert workbench_event["rendered_bytes"] > 0
-    model_view = solver.read_world_model()
-    assert "practice_examples" in model_view
-    assert "narrow_partial_predictor" in model_view["practice_examples"]
-
-
-def test_wm2_guidance_only_records_its_immutable_artifact(tmp_path, monkeypatch):
-    import importlib.util
-
-    monkeypatch.setenv("NOOA_0159_WM2_GUIDANCE", "1")
-    monkeypatch.delenv("NOOA_0159_WM2_WORKBENCH", raising=False)
-    e0_path = Path(__file__).resolve().parents[2] / "e0_evidence.py"
-    spec = importlib.util.spec_from_file_location("worker_wm2_guide_e0", e0_path)
-    assert spec is not None and spec.loader is not None
-    e0 = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = e0
-    spec.loader.exec_module(e0)
-    root = tmp_path / "evidence"
-    ledger = e0.HostEvidenceLedger(root, run_id="worker-wm2-guide")
-    ledger.record_initial_reset(
-        e0.PublicObservationInput(
-            frames=(((0, 0), (0, 0)),),
-            public_state="NOT_FINISHED",
-            levels_completed=0,
-            full_reset=False,
-            legal_actions=("UP", "DOWN", "LEFT", "RIGHT"),
-        )
-    )
-    snapshot = ledger.snapshot()
-    snapshot_path = root / "snapshots" / f"{snapshot.snapshot_id}.json"
-    audit_path = tmp_path / "audit.jsonl"
-    solver = ExecutableTheoryGameSolver(
-        llm=RecordingFakeLLMClient([]),
-        audit=AuditLog(audit_path),
-        knowledge_dir=tmp_path / "knowledge",
-        world_model_dir=tmp_path / "world-model",
-    )
-
-    solver.install_world_model_evidence(snapshot_path)
-
-    audit = [json.loads(line) for line in audit_path.read_text().splitlines()]
-    event = next(item for item in audit if item["event"] == "theory_practice_available")
-    assert event["schema"] == "0159-theory-practice-guide-v1"
-    assert len(event["guide_sha256"]) == 64
-    assert event["rendered_bytes"] <= 3_072
-    installed = next(
-        item for item in audit if item["event"] == "world_model_evidence_installed"
-    )
-    assert installed["wm2_workbench_built"] is False
-
-
-def test_guided_first_use_enters_workbench_then_disappears_after_read(
-    tmp_path, monkeypatch
-):
-    import importlib.util
-
-    monkeypatch.setenv("NOOA_0159_WM2_WORKBENCH", "1")
-    monkeypatch.setenv("NOOA_0159_WM2_GUIDED_FIRST_USE", "1")
-    e0_path = Path(__file__).resolve().parents[2] / "e0_evidence.py"
-    spec = importlib.util.spec_from_file_location("worker_wm2c_e0", e0_path)
-    assert spec is not None and spec.loader is not None
-    e0 = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = e0
-    spec.loader.exec_module(e0)
-    root = tmp_path / "evidence"
-    ledger = e0.HostEvidenceLedger(root, run_id="worker-wm2c")
-    observation = e0.PublicObservationInput(
-        frames=(((0, 0), (0, 0)),),
-        public_state="NOT_FINISHED",
-        levels_completed=0,
-        full_reset=False,
-        legal_actions=("UP", "DOWN", "LEFT", "RIGHT"),
-    )
-    ledger.record_initial_reset(observation)
-    ledger.record_action_result(
-        global_turn=0, action=e0.Action("UP"), successor=observation
-    )
-    result = ledger.record_action_result(
-        global_turn=1, action=e0.Action("UP"), successor=observation
-    )
-    snapshot_path = root / "snapshots" / f"{result.snapshot.snapshot_id}.json"
-    audit_path = tmp_path / "audit.jsonl"
-    solver = ExecutableTheoryGameSolver(
-        llm=RecordingFakeLLMClient([]),
-        audit=AuditLog(audit_path),
-        knowledge_dir=tmp_path / "knowledge",
-        world_model_dir=tmp_path / "world-model",
-    )
-
-    solver.install_world_model_evidence(snapshot_path)
-    before_read = solver.theory_workbench_context()
-    solver.read_world_model()
-    solver.install_world_model_evidence(snapshot_path)
-    after_read = solver.theory_workbench_context()
-
-    assert "## Guided first use" in before_read
-    assert "self.read_world_model()" in before_read
-    assert len(before_read.encode("utf-8")) <= 6_144
-    assert "## Guided first use" not in after_read
-    audit = [json.loads(line) for line in audit_path.read_text().splitlines()]
-    built = [item for item in audit if item["event"] == "theory_workbench_built"]
-    assert [item["guided_first_use_rendered"] for item in built] == [True, False]
-    read = next(item for item in audit if item["event"] == "world_model_read")
-    assert read["first_world_model_read"] is True
 
 
 @pytest.mark.asyncio

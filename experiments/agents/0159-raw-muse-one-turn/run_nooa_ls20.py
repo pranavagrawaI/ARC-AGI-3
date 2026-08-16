@@ -32,11 +32,6 @@ EXPERIMENT = Path(__file__).resolve().parent
 RUNTIME = EXPERIMENT / "nooa-runtime"
 WORKER = RUNTIME / "worker.py"
 E0_EVIDENCE_PATH = EXPERIMENT / "e0_evidence.py"
-THEORY_GUIDANCE_PATH = RUNTIME / "theory_guidance.py"
-THEORY_WORKBENCH_PATH = RUNTIME / "theory_workbench.py"
-GUIDED_FIRST_USE_PATH = RUNTIME / "guided_first_use.py"
-WM2_SPEC_PATH = EXPERIMENT / "WM2-GUIDANCE-AND-OPPORTUNITY-SPEC.md"
-WM2C_SPEC_PATH = EXPERIMENT / "WM2-C-GUIDED-FIRST-USE-SPEC.md"
 CARDS = EXPERIMENT.parents[1] / "cards"
 EXPERIMENT_CARDS = {
     "predict": CARDS / "0159-muse-glimmer-nooa-persistent-ls20-v2.md",
@@ -174,9 +169,6 @@ def source_commitments(
     include_compaction: bool = False,
     include_world_model: bool = False,
     model_profile: str = DEFAULT_MODEL_PROFILE,
-    include_wm2_guidance: bool = False,
-    include_wm2_workbench: bool = False,
-    include_wm2_guided_first_use: bool = False,
 ) -> tuple[dict[str, str], str]:
     paths = {
         "host": Path(__file__).resolve(),
@@ -229,19 +221,6 @@ def source_commitments(
                     EXPERIMENT / "EXECUTABLE-THEORY-LANE-SPEC.md"
                 ).resolve(),
                 "world_model_provenance": (EXPERIMENT / "PROVENANCE.md").resolve(),
-            }
-        )
-    if include_wm2_guidance:
-        paths["theory_practice_guide"] = THEORY_GUIDANCE_PATH.resolve()
-    if include_wm2_workbench:
-        paths["theory_workbench"] = THEORY_WORKBENCH_PATH.resolve()
-    if include_wm2_guidance or include_wm2_workbench:
-        paths["wm2_guidance_and_opportunity_spec"] = WM2_SPEC_PATH.resolve()
-    if include_wm2_guided_first_use:
-        paths.update(
-            {
-                "guided_first_use": GUIDED_FIRST_USE_PATH.resolve(),
-                "wm2c_guided_first_use_spec": WM2C_SPEC_PATH.resolve(),
             }
         )
     hashes = {name: file_sha256(path) for name, path in paths.items()}
@@ -407,9 +386,6 @@ def worker_environment(
     world_model_dir: Path | None = None,
     model_profile: str = DEFAULT_MODEL_PROFILE,
     capability_probe: bool = False,
-    wm2_guidance: bool = False,
-    wm2_workbench: bool = False,
-    wm2_guided_first_use: bool = False,
 ) -> dict[str, str]:
     if model_profile not in MODEL_PROFILES:
         raise ValueError(f"unknown model profile {model_profile!r}")
@@ -426,12 +402,6 @@ def worker_environment(
     environment["NOOA_0159_MODEL_PROFILE"] = model_profile
     if capability_probe:
         environment["NOOA_0159_CAPABILITY_PROBE"] = "1"
-    if wm2_guidance:
-        environment["NOOA_0159_WM2_GUIDANCE"] = "1"
-    if wm2_workbench:
-        environment["NOOA_0159_WM2_WORKBENCH"] = "1"
-    if wm2_guided_first_use:
-        environment["NOOA_0159_WM2_GUIDED_FIRST_USE"] = "1"
     if variant in KNOWLEDGE_VARIANTS:
         if knowledge_dir is None:
             raise ValueError(f"{variant} requires a run-local knowledge directory")
@@ -453,9 +423,6 @@ class Worker:
         variant: str = "predict",
         model_profile: str = DEFAULT_MODEL_PROFILE,
         capability_probe: bool = False,
-        wm2_guidance: bool = False,
-        wm2_workbench: bool = False,
-        wm2_guided_first_use: bool = False,
         timeout_seconds: float = 3_600.0,
     ):
         if variant not in VARIANTS:
@@ -501,9 +468,6 @@ class Worker:
                     ),
                     model_profile=model_profile,
                     capability_probe=capability_probe,
-                    wm2_guidance=wm2_guidance,
-                    wm2_workbench=wm2_workbench,
-                    wm2_guided_first_use=wm2_guided_first_use,
                 ),
             )
             self.ready = self._read(READY_PREFIX)
@@ -515,15 +479,6 @@ class Worker:
                 raise WorkerIdentityError(
                     "NOOA live worker did not start with the live model client"
                 )
-            if bool(self.ready.get("wm2_guidance")) != wm2_guidance:
-                raise WorkerIdentityError("NOOA worker started with the wrong WM2-A surface")
-            if bool(self.ready.get("wm2_workbench")) != wm2_workbench:
-                raise WorkerIdentityError("NOOA worker started with the wrong WM2-B surface")
-            if (
-                bool(self.ready.get("wm2_guided_first_use"))
-                != wm2_guided_first_use
-            ):
-                raise WorkerIdentityError("NOOA worker started with the wrong WM2-C surface")
             model_config = MODEL_PROFILES[model_profile]
             if self.ready.get("model_profile") != model_profile:
                 raise WorkerIdentityError(
@@ -840,9 +795,6 @@ def run(
     compaction_target_fraction: float = DEFAULT_COMPACTION_TARGET_FRACTION,
     model_profile: str = DEFAULT_MODEL_PROFILE,
     capability_probe: bool = False,
-    wm2_guidance: bool = False,
-    wm2_workbench: bool = False,
-    wm2_guided_first_use: bool = False,
     experiment_card_override: Path | None = None,
 ) -> dict[str, Any]:
     arc_key = os.environ.get("ARC_API_KEY")
@@ -860,13 +812,6 @@ def run(
         raise ValueError("the capability probe requires the world-model variant")
     if capability_probe and action_cap != 1:
         raise ValueError("the capability probe is bounded to exactly one action")
-    any_wm2 = wm2_guidance or wm2_workbench or wm2_guided_first_use
-    if any_wm2 and variant != WORLD_MODEL_VARIANT:
-        raise ValueError("WM2 modules require the world-model variant")
-    if wm2_guided_first_use and not wm2_workbench:
-        raise ValueError("WM2-C guided first use requires the WM2-B workbench")
-    if any_wm2 and experiment_card_override is None:
-        raise ValueError("WM2 live configuration requires an explicit frozen experiment card")
     if experiment_card_override is not None:
         experiment_card_override = experiment_card_override.resolve()
         if not experiment_card_override.is_file():
@@ -921,9 +866,6 @@ def run(
         include_compaction=variant in COMPACT_VARIANTS,
         include_world_model=variant == WORLD_MODEL_VARIANT,
         model_profile=model_profile,
-        include_wm2_guidance=wm2_guidance,
-        include_wm2_workbench=wm2_workbench,
-        include_wm2_guided_first_use=wm2_guided_first_use,
     )
     write_json(
         run_dir / "run-config.json",
@@ -962,11 +904,6 @@ def run(
             "model": model_config["model"],
             "model_context_window": model_config["context_window"],
             "capability_probe": capability_probe,
-            "wm2": {
-                "practice_guidance": wm2_guidance,
-                "theory_workbench": wm2_workbench,
-                "guided_first_use": wm2_guided_first_use,
-            },
             "provider_route": (
                 model_config["provider_route"]
                 if variant in COMPACT_VARIANTS
@@ -1153,12 +1090,6 @@ def run(
         }
         if capability_probe:
             worker_options["capability_probe"] = True
-        if wm2_guidance:
-            worker_options["wm2_guidance"] = True
-        if wm2_workbench:
-            worker_options["wm2_workbench"] = True
-        if wm2_guided_first_use:
-            worker_options["wm2_guided_first_use"] = True
         worker = Worker(run_dir, **worker_options)
         append_jsonl(transcript, {"type": "worker_ready", **worker.ready})
         print(json.dumps({"event": "worker_ready", **worker.ready}), flush=True)
@@ -1547,9 +1478,6 @@ def main() -> None:
     parser.add_argument("--compact-at-turn", type=int)
     parser.add_argument("--auto-compact", action="store_true")
     parser.add_argument("--capability-probe", action="store_true")
-    parser.add_argument("--wm2-guidance", action="store_true")
-    parser.add_argument("--wm2-workbench", action="store_true")
-    parser.add_argument("--wm2-guided-first-use", action="store_true")
     parser.add_argument("--experiment-card", type=Path)
     parser.add_argument(
         "--compaction-trigger-fraction",
@@ -1578,9 +1506,6 @@ def main() -> None:
         compaction_target_fraction=args.compaction_target_fraction,
         model_profile=args.model_profile,
         capability_probe=args.capability_probe,
-        wm2_guidance=args.wm2_guidance,
-        wm2_workbench=args.wm2_workbench,
-        wm2_guided_first_use=args.wm2_guided_first_use,
         experiment_card_override=args.experiment_card,
     )
     print(json.dumps(summary, indent=2, sort_keys=True))

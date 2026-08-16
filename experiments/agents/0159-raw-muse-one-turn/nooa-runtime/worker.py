@@ -38,19 +38,7 @@ from nooa.unifiedllm.registry import get_llm_client
 from PIL import Image as PILImage
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from guided_first_use import GUIDED_FIRST_USE_SCHEMA, render_guided_first_use
-from theory_guidance import (
-    COMPLETE_PRACTICE_EXAMPLES,
-    GUIDE_SCHEMA,
-    practice_guide_sha256,
-    render_practice_guide,
-)
-from theory_workbench import (
-    MAX_RENDER_BYTES,
-    TheoryWorkbenchViewBuilder,
-    theory_snapshot_from_lane_view,
-)
-from world_model_lane import E0, EditProvenance, ExecutableTheoryLane, ModelEdit
+from world_model_lane import EditProvenance, ExecutableTheoryLane, ModelEdit
 
 _PROTOCOL_FD = os.dup(sys.stdout.fileno())
 
@@ -1545,40 +1533,23 @@ Bare direct calls to broker methods automatically display their structured
 result. Assigning a result keeps ordinary Python behavior, so print the value
 when you want to inspect it. Failures report phase, code, state effect, and
 retry surface; a failed candidate never silently replaces the current model."""
-        if os.environ.get("NOOA_0159_WM2_GUIDANCE") == "1":
-            blocks["theory_practice"] = render_practice_guide()
-        if os.environ.get("NOOA_0159_WM2_WORKBENCH") == "1":
-            blocks["theory_workbench"] = DynamicContext(
-                "self.theory_workbench_context()"
-            )
         return blocks
 
-    def get_static_block_keys(self) -> set[str]:
-        return super().get_static_block_keys() | {"theory_practice"}
-
     def get_block_order(self) -> list[str] | None:
-        order = [
+        return [
             "system_prompt",
             "strategy_prompt",
             "sandbox",
             "execution_context",
             "history",
+            "self",
         ]
-        if os.environ.get("NOOA_0159_WM2_GUIDANCE") == "1":
-            order.append("theory_practice")
-        if os.environ.get("NOOA_0159_WM2_WORKBENCH") == "1":
-            order.append("theory_workbench")
-        order.append("self")
-        return order
 
 
 class ExecutableTheoryGameSolver(CompactBeliefsGameSolver):
     """Compact persistent investigator with prose and executable commitments."""
 
     theory_lane: Annotated[ExecutableTheoryLane, hidden]
-    _theory_workbench_rendered: Annotated[str, hidden]
-    _latest_world_model_edit_status: Annotated[str | None, hidden]
-    _world_model_was_read: Annotated[bool, hidden]
     _allowed_self_methods = DurableBeliefsGameSolver._allowed_self_methods | frozenset(
         {
             "read_world_model",
@@ -1591,122 +1562,19 @@ class ExecutableTheoryGameSolver(CompactBeliefsGameSolver):
         super().__init__(*args, **kwargs)
         self.theory_lane = ExecutableTheoryLane(world_model_dir)
         self._world_model_edit_index = 0
-        self._theory_workbench_rendered = (
-            "The Theory Workbench View is waiting for authoritative evidence."
-        )
-        self._latest_world_model_edit_status = None
-        self._world_model_was_read = False
 
     @hidden
     def install_world_model_evidence(self, snapshot_path: Path) -> None:
         state = self.theory_lane.advance(snapshot_path)
-        workbench = None
-        if (
-            os.environ.get("NOOA_0159_WM2_GUIDANCE") == "1"
-            and os.environ.get("NOOA_0159_WM2_WORKBENCH") != "1"
-        ):
-            rendered_guide = render_practice_guide()
-            self._analysis_audit.write(
-                "theory_practice_available",
-                schema=GUIDE_SCHEMA,
-                guide_sha256=practice_guide_sha256(),
-                rendered_bytes=len(rendered_guide.encode("utf-8")),
-            )
-        if os.environ.get("NOOA_0159_WM2_WORKBENCH") == "1":
-            evidence = E0.load_snapshot(snapshot_path)
-            blob_root = snapshot_path.parent.parent / "blobs"
-
-            def read_grid(digest: str) -> tuple[tuple[int, ...], ...]:
-                value = json.loads(
-                    (blob_root / f"grid-{digest}.json").read_text(encoding="utf-8")
-                )
-                return tuple(tuple(int(cell) for cell in row) for row in value)
-
-            theory = theory_snapshot_from_lane_view(
-                self.theory_lane.read_world_model(),
-                latest_edit_status=self._latest_world_model_edit_status,
-            )
-            workbench = TheoryWorkbenchViewBuilder(read_grid=read_grid).build(
-                evidence, theory
-            )
-            self._theory_workbench_rendered = workbench.render()
-            guided_first_use = None
-            if os.environ.get("NOOA_0159_WM2_GUIDED_FIRST_USE") == "1":
-                guided_first_use = render_guided_first_use(
-                    condition_codes=workbench.condition_codes,
-                    current_model_version_id=workbench.current_model_version_id,
-                    world_model_was_read=self._world_model_was_read,
-                )
-                if guided_first_use is not None:
-                    self._theory_workbench_rendered += "\n\n" + guided_first_use
-                    if (
-                        len(self._theory_workbench_rendered.encode("utf-8"))
-                        > MAX_RENDER_BYTES
-                    ):
-                        raise ValueError(
-                            "guided theory workbench exceeds its frozen byte bound"
-                        )
-            self._analysis_audit.write(
-                "theory_workbench_built",
-                schema=workbench.schema,
-                view_digest=workbench.view_digest,
-                evidence_snapshot_id=workbench.evidence_snapshot_id,
-                theory_snapshot_id=workbench.theory_snapshot_id,
-                condition_codes=list(workbench.condition_codes),
-                displayed_card_codes=[card.code for card in workbench.cards],
-                omitted_card_count=workbench.omitted_card_count,
-                omitted_card_codes=list(workbench.omitted_card_codes),
-                cited_evidence_event_ids=sorted(
-                    {
-                        event_id
-                        for card in workbench.cards
-                        for event_id in card.evidence_event_ids
-                    }
-                ),
-                rendered_bytes=len(self._theory_workbench_rendered.encode("utf-8")),
-                guided_first_use_schema=(
-                    GUIDED_FIRST_USE_SCHEMA
-                    if os.environ.get("NOOA_0159_WM2_GUIDED_FIRST_USE") == "1"
-                    else None
-                ),
-                guided_first_use_rendered=guided_first_use is not None,
-                guide_schema=(
-                    GUIDE_SCHEMA
-                    if os.environ.get("NOOA_0159_WM2_GUIDANCE") == "1"
-                    else None
-                ),
-                guide_sha256=(
-                    practice_guide_sha256()
-                    if os.environ.get("NOOA_0159_WM2_GUIDANCE") == "1"
-                    else None
-                ),
-            )
         self._analysis_audit.write(
             "world_model_evidence_installed",
             evidence_snapshot_id=state.evidence_snapshot_id,
             current_model_version_id=state.current_model_version_id,
-            wm2_workbench_built=workbench is not None,
         )
-
-    @hidden
-    def theory_workbench_context(self) -> str:
-        """Return the view frozen before the current environment decision."""
-
-        return self._theory_workbench_rendered
 
     def read_world_model(self) -> dict[str, Any]:
         """Read the current commitment plus quick and Moore-machine templates."""
-        first_world_model_read = not self._world_model_was_read
-        self._world_model_was_read = True
         view = self.theory_lane.read_world_model()
-        if os.environ.get("NOOA_0159_WM2_GUIDANCE") == "1":
-            view.update(
-                {
-                    "practice_guide_schema": GUIDE_SCHEMA,
-                    "practice_guide_sha256": practice_guide_sha256(),
-                    "practice_examples": COMPLETE_PRACTICE_EXAMPLES,
-                }
-            )
         view["tool_feedback"] = {
             "status": "ok",
             "operation": "read_world_model",
@@ -1724,7 +1592,6 @@ class ExecutableTheoryGameSolver(CompactBeliefsGameSolver):
             "world_model_read",
             current_model_version_id=view["current_model_version_id"],
             evidence_snapshot_id=view["installed_evidence_snapshot_id"],
-            first_world_model_read=first_world_model_read,
         )
         return view
 
@@ -1796,7 +1663,6 @@ class ExecutableTheoryGameSolver(CompactBeliefsGameSolver):
             )
         )
         evaluation = self.theory_lane.apply(edit, provenance)
-        self._latest_world_model_edit_status = evaluation.candidate_status
         self._analysis_audit.write(
             "world_model_edit_evaluated",
             edit_kind=edit.kind,
@@ -2306,11 +2172,6 @@ async def serve() -> None:
     variant = os.environ.get("NOOA_0159_VARIANT", "predict")
     if variant not in {"predict", "codeact", *KNOWLEDGE_VARIANTS}:
         raise ValueError(f"unknown NOOA_0159_VARIANT {variant!r}")
-    if (
-        os.environ.get("NOOA_0159_WM2_GUIDED_FIRST_USE") == "1"
-        and os.environ.get("NOOA_0159_WM2_WORKBENCH") != "1"
-    ):
-        raise ValueError("WM2-C guided first use requires the WM2-B workbench")
     scripted_client = any(
         os.environ.get(name) is not None
         for name in (
@@ -2395,11 +2256,6 @@ async def serve() -> None:
         durable_knowledge=variant in KNOWLEDGE_VARIANTS,
         searchable_history=variant in COMPACT_VARIANTS,
         executable_theory=variant == WORLD_MODEL_VARIANT,
-        wm2_guidance=os.environ.get("NOOA_0159_WM2_GUIDANCE") == "1",
-        wm2_workbench=os.environ.get("NOOA_0159_WM2_WORKBENCH") == "1",
-        wm2_guided_first_use=(
-            os.environ.get("NOOA_0159_WM2_GUIDED_FIRST_USE") == "1"
-        ),
         implicit_context_archival=(False if variant in COMPACT_VARIANTS else None),
     )
     _write(
@@ -2418,11 +2274,6 @@ async def serve() -> None:
             "durable_knowledge": variant in KNOWLEDGE_VARIANTS,
             "searchable_history": variant in COMPACT_VARIANTS,
             "executable_theory": variant == WORLD_MODEL_VARIANT,
-            "wm2_guidance": os.environ.get("NOOA_0159_WM2_GUIDANCE") == "1",
-            "wm2_workbench": os.environ.get("NOOA_0159_WM2_WORKBENCH") == "1",
-            "wm2_guided_first_use": (
-                os.environ.get("NOOA_0159_WM2_GUIDED_FIRST_USE") == "1"
-            ),
             "implicit_context_archival": (
                 False if variant in COMPACT_VARIANTS else None
             ),

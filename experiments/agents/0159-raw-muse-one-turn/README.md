@@ -135,20 +135,14 @@ and one-action host boundary. It adds three brokered affordances:
 - `self.write_world_model(source)`;
 - `self.edit_world_model_function(name, source)`.
 
-The implemented WM2 requirements are in
-[`WM2-GUIDANCE-AND-OPPORTUNITY-SPEC.md`](WM2-GUIDANCE-AND-OPPORTUNITY-SPEC.md).
-WM2 keeps two separately configurable modules: a game-general Theory Practice
-Guide and a deterministic Theory Workbench View. The host surfaces exact
-conditions; the model alone decides whether they constitute a useful modeling
-opportunity. Enable them independently with `--wm2-guidance` and
-`--wm2-workbench`; any live WM2 configuration also requires an explicit
-`--experiment-card` so the complete treatment is frozen before contact.
-
-The separately attributed WM2-C treatment is specified in
-[`WM2-C-GUIDED-FIRST-USE-SPEC.md`](WM2-C-GUIDED-FIRST-USE-SPEC.md). With
-`--wm2-guided-first-use`, repeated same-action evidence and no active
-commitment produce one exact read-only onboarding instruction. WM2-C requires
-`--wm2-workbench`; it does not require or enforce an edit.
+The rejected WM2 and WM2-C prompt treatments remain documented in
+[`WM2-GUIDANCE-AND-OPPORTUNITY-SPEC.md`](WM2-GUIDANCE-AND-OPPORTUNITY-SPEC.md)
+and [`WM2-C-GUIDED-FIRST-USE-SPEC.md`](WM2-C-GUIDED-FIRST-USE-SPEC.md). Their
+runtime modules and flags were removed after live contact showed that escalating
+from examples to opportunity cards and guided first use consumed attention
+without producing an executable commitment. The executable-theory interface is
+now passive: its fixed prompt explains why rendered Moore machines can help,
+and Muse alone decides whether and when to read or edit the lane.
 
 WM1 makes the first executable commitment smaller without removing WM0's full
 Moore machine. Muse may define only `predict(grid, action)`, return `None` for

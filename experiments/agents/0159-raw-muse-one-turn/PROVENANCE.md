@@ -108,34 +108,17 @@ adaptation of the Tycho authors' explanation: decision-frame models may require
 hidden state, state transitions, rendered observations and outcomes, and
 transition emissions for informative animation frames.
 
-## WM2 taught practice and workbench
-
-WM2 is original 0159-specific interface code governed by
-`WM2-GUIDANCE-AND-OPPORTUNITY-SPEC.md`:
-
-- `nooa-runtime/theory_guidance.py` freezes a game-general, bounded Theory
-  Practice Guide and complete synthetic examples. Executable examples pass the
-  real WM1 broker and isolated evaluator.
-- `nooa-runtime/theory_workbench.py` deterministically projects immutable E0
-  evidence and a narrow frozen lane snapshot into exact transition facts and
-  plain-language interpretation cards. Its closed condition registry exposes
-  no game semantics, attempt identifiers, action recommendations, or automatic
-  edits.
-
-The guide and workbench have independent host/worker flags and source hashes.
-When either is enabled, the governing WM2 specification is also included in the
-run's source commitment. Audit records preserve rendered-content digests,
-condition/card codes, cited evidence IDs, omissions, and byte counts without
-claiming that exposure caused a model edit or action. P0 shadow prediction is
-not part of WM2 and remains unimplemented.
-
-## WM2-C guided first use
+## Rejected WM2 prompt treatments
 
 The first WM2 live run is preserved at
 `artifacts/wm2-taught-theory-workbench-muse-v1/`. Its eight workbench views
 surfaced repeated-action evidence, but Muse issued no theory-lane read or edit
-and instead used 59 ad hoc Python cells. `nooa-runtime/guided_first_use.py` is a
-new, bounded delivery module for the follow-up treatment. It maps only the
-frozen `repeated_action_evidence`, no-active-model, and never-read state to an
-exact read-only call and explicit edit/notes/defer choices. It contains no game
-semantics, performs no tool call, and does not gate the environment action.
+and instead used 59 ad hoc Python cells. A follow-up guided-first-use treatment
+caused one lane read but no edit or explicit deferral. The Theory Practice
+Guide, Theory Workbench, guided-first-use runtime modules, and their host flags
+were therefore removed: further delivery pressure would steer the investigator
+toward a host-selected workflow rather than merely expose a capability.
+
+The governing WM2 specifications and frozen experiment cards remain historical
+evidence. Git history preserves the removed implementation. P0 shadow
+prediction remains unimplemented.

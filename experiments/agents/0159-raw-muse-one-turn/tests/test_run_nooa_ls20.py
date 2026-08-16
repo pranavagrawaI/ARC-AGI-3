@@ -135,56 +135,6 @@ def test_capability_probe_is_forwarded_only_when_requested(tmp_path, monkeypatch
     )
 
 
-def test_wm2_modules_are_forwarded_independently(tmp_path, monkeypatch):
-    monkeypatch.setenv("ARC_LLM_API_KEY", "model-secret")
-    arguments = {
-        "audit_log": tmp_path / "provider-events.jsonl",
-        "variant": MODULE.WORLD_MODEL_VARIANT,
-        "knowledge_dir": tmp_path / "knowledge",
-        "world_model_dir": tmp_path / "world-model",
-        "model_profile": MODULE.LUNA_MODEL_PROFILE,
-    }
-
-    guidance = MODULE.worker_environment(**arguments, wm2_guidance=True)
-    workbench = MODULE.worker_environment(**arguments, wm2_workbench=True)
-    guided = MODULE.worker_environment(**arguments, wm2_guided_first_use=True)
-
-    assert guidance["NOOA_0159_WM2_GUIDANCE"] == "1"
-    assert "NOOA_0159_WM2_WORKBENCH" not in guidance
-    assert workbench["NOOA_0159_WM2_WORKBENCH"] == "1"
-    assert "NOOA_0159_WM2_GUIDANCE" not in workbench
-    assert guided["NOOA_0159_WM2_GUIDED_FIRST_USE"] == "1"
-    assert "NOOA_0159_WM2_WORKBENCH" not in guided
-
-
-def test_wm2_source_commitments_are_independently_attributed() -> None:
-    card = MODULE.CARDS / "0160-muse-wm2-taught-theory-workbench-v1.md"
-
-    guidance, _ = MODULE.source_commitments(
-        card, include_wm2_guidance=True
-    )
-    workbench, _ = MODULE.source_commitments(
-        card, include_wm2_workbench=True
-    )
-    guided, _ = MODULE.source_commitments(
-        card, include_wm2_guided_first_use=True
-    )
-
-    assert "theory_practice_guide" in guidance
-    assert "theory_workbench" not in guidance
-    assert "wm2_guidance_and_opportunity_spec" in guidance
-    assert "theory_workbench" in workbench
-    assert "theory_practice_guide" not in workbench
-    assert "wm2_guidance_and_opportunity_spec" in workbench
-    assert set(guided) >= {"guided_first_use", "wm2c_guided_first_use_spec"}
-    assert guidance["theory_practice_guide"] == MODULE.file_sha256(
-        MODULE.THEORY_GUIDANCE_PATH
-    )
-    assert workbench["theory_workbench"] == MODULE.file_sha256(
-        MODULE.THEORY_WORKBENCH_PATH
-    )
-
-
 def test_durable_beliefs_variant_gets_only_its_run_local_knowledge_path(
     tmp_path, monkeypatch
 ):
@@ -211,39 +161,6 @@ def test_action_cap_must_be_positive(tmp_path, monkeypatch):
     monkeypatch.setenv("ARC_API_KEY", "unused")
     with pytest.raises(ValueError, match="positive"):
         MODULE.run(tmp_path / "run", action_cap=0)
-
-
-@pytest.mark.parametrize("flag", ["wm2_guidance", "wm2_workbench"])
-def test_wm2_live_configuration_requires_an_explicit_frozen_card(
-    tmp_path, monkeypatch, flag
-):
-    monkeypatch.setenv("ARC_API_KEY", "unused")
-
-    with pytest.raises(ValueError, match="explicit frozen experiment card"):
-        MODULE.run(
-            tmp_path / "run",
-            action_cap=1,
-            variant=MODULE.WORLD_MODEL_VARIANT,
-            auto_compact=True,
-            **{flag: True},
-        )
-
-    assert not (tmp_path / "run").exists()
-
-
-def test_guided_first_use_requires_the_workbench(tmp_path, monkeypatch):
-    monkeypatch.setenv("ARC_API_KEY", "unused")
-
-    with pytest.raises(ValueError, match="requires the WM2-B workbench"):
-        MODULE.run(
-            tmp_path / "run",
-            action_cap=1,
-            variant=MODULE.WORLD_MODEL_VARIANT,
-            auto_compact=True,
-            wm2_guided_first_use=True,
-        )
-
-    assert not (tmp_path / "run").exists()
 
 
 def test_transition_record_is_public_and_deterministic():
@@ -571,101 +488,6 @@ def test_world_model_variant_supplies_e0_snapshot_without_exposing_host_authorit
     assert {"world_model_lane", "world_model_evaluator"} <= set(
         config["source_sha256"]
     )
-
-
-def test_wm2_host_configuration_commits_and_forwards_both_modules(
-    tmp_path, monkeypatch
-):
-    class TestFrame:
-        frame = np.zeros((1, 2, 2), dtype=np.int8)
-        state = State()
-        levels_completed = 0
-        full_reset = False
-        available_actions = (1, 2, 3, 4)
-
-    class Environment:
-        def reset(self):
-            return TestFrame()
-
-        def step(self, action):
-            return TestFrame()
-
-        def close(self):
-            return None
-
-    class Arcade:
-        def __init__(self, **kwargs):
-            pass
-
-        def make(self, *args, **kwargs):
-            return Environment()
-
-    class Worker:
-        options = None
-
-        def __init__(self, run_dir, **options):
-            Worker.options = options
-            self.ready = {
-                "variant": options["variant"],
-                "pid": 1,
-                "model": "fake",
-                "wm2_guidance": options.get("wm2_guidance", False),
-                "wm2_workbench": options.get("wm2_workbench", False),
-                "wm2_guided_first_use": options.get(
-                    "wm2_guided_first_use", False
-                ),
-            }
-
-        def decide(self, request):
-            return {
-                "type": "decision",
-                "sequence": request["sequence"],
-                "action": "UP",
-                "x": None,
-                "y": None,
-                "explanation": "one action",
-                "context": None,
-            }
-
-        def close(self):
-            return None
-
-    monkeypatch.setenv("ARC_API_KEY", "test")
-    monkeypatch.setattr(MODULE.arc_agi, "Arcade", Arcade)
-    monkeypatch.setattr(MODULE, "Worker", Worker)
-    card = MODULE.CARDS / "0160-muse-wm2c-guided-first-use-v1.md"
-    run_dir = tmp_path / "run"
-
-    summary = MODULE.run(
-        run_dir,
-        action_cap=1,
-        variant=MODULE.WORLD_MODEL_VARIANT,
-        auto_compact=True,
-        wm2_guidance=True,
-        wm2_workbench=True,
-        wm2_guided_first_use=True,
-        experiment_card_override=card,
-    )
-
-    assert summary["actions"] == 1
-    assert Worker.options is not None
-    assert Worker.options["wm2_guidance"] is True
-    assert Worker.options["wm2_workbench"] is True
-    assert Worker.options["wm2_guided_first_use"] is True
-    config = json.loads((run_dir / "run-config.json").read_text())
-    assert config["wm2"] == {
-        "practice_guidance": True,
-        "theory_workbench": True,
-        "guided_first_use": True,
-    }
-    assert {
-        "theory_practice_guide",
-        "theory_workbench",
-        "wm2_guidance_and_opportunity_spec",
-        "guided_first_use",
-        "wm2c_guided_first_use_spec",
-    } <= set(config["source_sha256"])
-    assert config["experiment_card"] == str(card.resolve())
 
 
 def test_predict_request_physically_omits_trajectory(tmp_path, monkeypatch):

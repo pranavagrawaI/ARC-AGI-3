@@ -1,4 +1,9 @@
-# E0 / WM0 / WM1 / WM2 / P0 Executable Theory Lane Interface Specification
+# E0 / WM0 / WM1 / P0 Executable Theory Lane Interface Specification
+
+> **Current status:** E0, WM0, and WM1 define the active interface. The WM2
+> sections below are retained only as the specification of a rejected prompt
+> treatment; the guidance, workbench, guided-first-use modules, and runtime
+> flags have been removed.
 
 Status: accepted design; E0, WM0, and the WM1 quick-theory refinement are
 implemented; P0 is not yet present. Muse and GPT-5.6 Luna WM0 first contacts are
