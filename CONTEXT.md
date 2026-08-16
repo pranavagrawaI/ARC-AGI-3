@@ -292,6 +292,18 @@ _Avoid_: Gameplay benchmark, tool availability check, post-hoc tutorial
 The measurable cost introduced between a model's need for a capability and its successful cognitive use, spanning discoverability, specification, invocation, execution, interpretation, and integration. It includes avoidance when interface uncertainty or apparent cost suppresses an otherwise appropriate call, and its derived telemetry remains model-invisible.
 _Avoid_: Implementation noise, model incapability, tool-call count
 
+**Theory Practice Guide**:
+A frozen game-general contestant prior that teaches possible uses, minimal examples, legitimate non-use, and recovery patterns for executable conjectures without supplying game-specific semantics or requiring tool use.
+_Avoid_: Tool manual alone, game walkthrough, mandatory modeling procedure
+
+**Theory Workbench View**:
+A bounded deterministic model-facing projection of admissible evidence and current executable-theory state that reports mechanical artifact conditions without deciding whether they are semantically relevant or worth acting upon.
+_Avoid_: Opportunity oracle, semantic diagnosis, automatic tool router
+
+**Opportunity Condition**:
+An exactly defined mechanical predicate over a Theory Workbench View whose truth can be reproduced from cited inputs. It may make a possible use legible but does not assert that using the capability would improve the current decision.
+_Avoid_: Recommended intervention, useful-opportunity label, host judgment
+
 **Local Prospective Consequence**:
 A fixture-bound pre-successor chain in which a model state or intended decision is recorded, a capability is invoked, its output is observed, and a belief, prediction, or intended action changes before successor feedback. It establishes local interface uptake, not run-level mediation or benefit.
 _Avoid_: Tool call count, self-reported usefulness, gameplay treatment effect

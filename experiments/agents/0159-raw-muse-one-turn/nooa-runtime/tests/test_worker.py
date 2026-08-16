@@ -9,10 +9,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 from nooa.errors import GenerationError
 from nooa.events import Feedback
-from nooa.media import Image
+from nooa.media import Image as MediaImage
 from nooa.runtime.sandbox.errors import SandboxUnavailable
 from nooa.runtime.sandbox.executor import SandboxedExecutor
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
@@ -21,26 +22,105 @@ from PIL import Image as PILImage
 from worker import (
     _CODEACT_CONFIG,
     ANALYSIS_MAX_ITERATIONS,
+    ARC_PALETTE,
     COMMIT_MAX_ATTEMPTS,
     CURRENT_SEQUENCE,
     AuditLog,
     CompactBeliefsGameSolver,
     Decision,
     DurableBeliefsGameSolver,
+    ExecutableTheoryCodeActStrategy,
+    ExecutableTheoryGameSolver,
     GameSolver,
     History,
     ImplicitContextArchivalDisabled,
     ProviderPoolClient,
     TrajectoryGameSolver,
+    _auto_echo_broker_result,
     _failure_stage,
     _find_implicit_context_archival_error,
     _forbidden_cell_primitive,
     _response,
+    _validated_palette_image,
     _write,
     disable_implicit_context_archival,
     install_provider_logging,
     retry_config,
 )
+
+
+def _analysis_image() -> PILImage.Image:
+    return _validated_palette_image([[1, 2], [3, 4]])
+
+
+def test_palette_image_preserves_cell_values_and_arc_colors():
+    image = _validated_palette_image([[0, 9], [12, 14]])
+
+    assert image.mode == "P"
+    assert image.size == (2, 2)
+    assert np.asarray(image).tolist() == [[0, 9], [12, 14]]
+    assert image.convert("RGB").getpixel((1, 0)) == ARC_PALETTE[9]
+
+
+def test_capability_probe_is_an_explicit_optional_strategy_block(monkeypatch):
+    strategy = ExecutableTheoryCodeActStrategy(config=_CODEACT_CONFIG)
+    monkeypatch.delenv("NOOA_0159_CAPABILITY_PROBE", raising=False)
+    assert "One-turn capability" not in strategy.get_block_overrides()[
+        "strategy_prompt"
+    ]
+
+    monkeypatch.setenv("NOOA_0159_CAPABILITY_PROBE", "1")
+    prompt = strategy.get_block_overrides()["strategy_prompt"]
+    assert "One-turn capability and architecture probe" in prompt
+    assert "capability_probe.md" in prompt
+    assert "state how you know it" in prompt
+
+
+def test_wm2_guidance_and_workbench_context_blocks_are_independently_enabled(
+    monkeypatch,
+):
+    strategy = ExecutableTheoryCodeActStrategy(config=_CODEACT_CONFIG)
+    monkeypatch.delenv("NOOA_0159_WM2_GUIDANCE", raising=False)
+    monkeypatch.delenv("NOOA_0159_WM2_WORKBENCH", raising=False)
+    assert "theory_practice" not in strategy.get_block_overrides()
+    assert "theory_workbench" not in strategy.get_block_overrides()
+
+    monkeypatch.setenv("NOOA_0159_WM2_GUIDANCE", "1")
+    guidance = strategy.get_block_overrides()
+    assert "preserve a rule" in guidance["theory_practice"]
+    assert "theory_workbench" not in guidance
+
+    monkeypatch.delenv("NOOA_0159_WM2_GUIDANCE")
+    monkeypatch.setenv("NOOA_0159_WM2_WORKBENCH", "1")
+    workbench = strategy.get_block_overrides()
+    assert "theory_practice" not in workbench
+    assert workbench["theory_workbench"].expr == "self.theory_workbench_context()"
+
+    monkeypatch.setenv("NOOA_0159_WM2_GUIDANCE", "1")
+    order = strategy.get_block_order()
+    assert order.index("theory_practice") < order.index("theory_workbench")
+    assert order.index("theory_workbench") < order.index("self")
+
+
+def test_disabling_wm2_restores_byte_identical_wm1_context(monkeypatch):
+    monkeypatch.delenv("NOOA_0159_WM2_GUIDANCE", raising=False)
+    monkeypatch.delenv("NOOA_0159_WM2_WORKBENCH", raising=False)
+    strategy = ExecutableTheoryCodeActStrategy(config=_CODEACT_CONFIG)
+    absent = strategy.get_block_overrides()
+
+    monkeypatch.setenv("NOOA_0159_WM2_GUIDANCE", "0")
+    monkeypatch.setenv("NOOA_0159_WM2_WORKBENCH", "0")
+    explicitly_disabled = strategy.get_block_overrides()
+
+    assert absent == explicitly_disabled
+    assert strategy.get_block_order() == [
+        "system_prompt",
+        "strategy_prompt",
+        "sandbox",
+        "execution_context",
+        "history",
+        "self",
+    ]
 
 
 def _codeact_response(code: str, *, reasoning: str | None = None) -> LLMResponse:
@@ -270,7 +350,7 @@ async def test_same_agent_replays_reasoning_into_next_game_turn(tmp_path):
     solver = TrajectoryGameSolver(llm=llm)
 
     await solver.analyze_trajectory_and_choose_action(
-        image=Image.from_file(frame),
+        image=_analysis_image(),
         trajectory=[],
         legal_actions=["UP", "DOWN", "LEFT", "RIGHT"],
         previous_action=None,
@@ -278,7 +358,7 @@ async def test_same_agent_replays_reasoning_into_next_game_turn(tmp_path):
         levels_completed=0,
     )
     await solver.analyze_trajectory_and_choose_action(
-        image=Image.from_file(frame),
+        image=_analysis_image(),
         trajectory=[],
         legal_actions=["UP", "DOWN", "LEFT", "RIGHT"],
         previous_action="DOWN",
@@ -292,6 +372,11 @@ async def test_same_agent_replays_reasoning_into_next_game_turn(tmp_path):
     assert len(replayed) == 1
     assert replayed[0]["role"] == "assistant"
     assert replayed[0]["tool_calls"]
+    assert any(
+        isinstance(message.get("content"), list)
+        and any(block.get("type") == "image_url" for block in message["content"])
+        for message in llm.last_messages
+    )
 
 
 @pytest.mark.asyncio
@@ -308,7 +393,7 @@ async def test_codeact_replays_reasoning_after_tool_result(tmp_path):
     solver = TrajectoryGameSolver(llm=llm)
 
     result = await solver.analyze_trajectory_and_choose_action(
-        image=Image.from_file(frame),
+        image=_analysis_image(),
         trajectory=[],
         legal_actions=["UP", "DOWN", "LEFT", "RIGHT"],
         previous_action=None,
@@ -345,7 +430,7 @@ async def test_budget_exhaustion_reserves_one_action_only_commit_call(tmp_path):
     solver = TrajectoryGameSolver(llm=llm)
 
     result = await solver.choose_action(
-        image=Image.from_file(frame),
+        image=_analysis_image(),
         trajectory=[],
         legal_actions=["UP", "DOWN", "LEFT", "RIGHT"],
         previous_action=None,
@@ -366,7 +451,7 @@ async def test_budget_exhaustion_reserves_one_action_only_commit_call(tmp_path):
     assert "FINAL_ANALYSIS_REASONING_MARKER_0159" in transcript
 
     await solver.choose_action(
-        image=Image.from_file(frame),
+        image=_analysis_image(),
         trajectory=[],
         legal_actions=["UP", "DOWN", "LEFT", "RIGHT"],
         previous_action="LEFT",
@@ -399,7 +484,7 @@ async def test_reserved_commit_reprompts_after_unavailable_analysis_tool(tmp_pat
     solver = TrajectoryGameSolver(llm=llm)
 
     result = await solver.choose_action(
-        image=Image.from_file(frame),
+        image=_analysis_image(),
         trajectory=[],
         legal_actions=["UP", "DOWN", "LEFT", "RIGHT"],
         previous_action=None,
@@ -432,7 +517,7 @@ async def test_reserved_commit_accepts_exact_json_decision_when_provider_omits_t
     solver = TrajectoryGameSolver(llm=llm)
 
     result = await solver.choose_action(
-        image=Image.from_file(frame),
+        image=_analysis_image(),
         trajectory=[],
         legal_actions=["UP", "DOWN", "LEFT", "RIGHT"],
         previous_action=None,
@@ -462,7 +547,7 @@ async def test_reserved_commit_retry_feedback_names_the_commit_interface(tmp_pat
     solver = TrajectoryGameSolver(llm=llm, audit=AuditLog(audit_path))
 
     result = await solver.choose_action(
-        image=Image.from_file(frame),
+        image=_analysis_image(),
         trajectory=[],
         legal_actions=["UP", "DOWN", "LEFT", "RIGHT"],
         previous_action=None,
@@ -499,7 +584,7 @@ async def test_each_analysis_round_reports_exact_remaining_budget(tmp_path):
     solver = TrajectoryGameSolver(llm=llm)
 
     result = await solver.choose_action(
-        image=Image.from_file(frame),
+        image=_analysis_image(),
         trajectory=[],
         legal_actions=["UP", "DOWN", "LEFT", "RIGHT"],
         previous_action=None,
@@ -536,7 +621,7 @@ async def test_invalid_reserved_commit_is_model_failure_without_fallback(tmp_pat
 
     with pytest.raises(GenerationError, match="not one of the legal actions"):
         await solver.choose_action(
-            image=Image.from_file(frame),
+            image=_analysis_image(),
             trajectory=[],
             legal_actions=["UP", "DOWN", "LEFT", "RIGHT"],
             previous_action=None,
@@ -563,7 +648,7 @@ async def test_illegal_analysis_commit_uses_constrained_commitment_reprompt(tmp_
     solver = TrajectoryGameSolver(llm=llm, audit=AuditLog(audit_path))
 
     result = await solver.choose_action(
-        image=Image.from_file(frame),
+        image=_analysis_image(),
         trajectory=[],
         legal_actions=["UP", "DOWN", "LEFT", "RIGHT"],
         previous_action=None,
@@ -597,14 +682,14 @@ async def test_same_agent_carries_first_decision_into_second_turn(tmp_path):
     solver = GameSolver(llm=llm)
 
     await solver.next_action(
-        image=Image.from_file(frame),
+        image=MediaImage.from_file(frame),
         legal_actions=["UP", "DOWN", "LEFT", "RIGHT"],
         previous_action=None,
         turn=0,
         levels_completed=0,
     )
     result = await solver.next_action(
-        image=Image.from_file(frame),
+        image=MediaImage.from_file(frame),
         legal_actions=["UP", "DOWN", "LEFT", "RIGHT"],
         previous_action="DOWN",
         turn=1,
@@ -628,14 +713,14 @@ async def test_predict_replays_reasoning_into_next_game_turn(tmp_path):
     solver = GameSolver(llm=llm)
 
     await solver.next_action(
-        image=Image.from_file(frame),
+        image=MediaImage.from_file(frame),
         legal_actions=["UP", "DOWN", "LEFT", "RIGHT"],
         previous_action=None,
         turn=0,
         levels_completed=0,
     )
     await solver.next_action(
-        image=Image.from_file(frame),
+        image=MediaImage.from_file(frame),
         legal_actions=["UP", "DOWN", "LEFT", "RIGHT"],
         previous_action="DOWN",
         turn=1,
@@ -756,7 +841,7 @@ return_result(action='DOWN', explanation=f"observed {changed} changed cell")
     ]
 
     result = await solver.analyze_trajectory_and_choose_action(
-        image=Image.from_file(frame),
+        image=_analysis_image(),
         trajectory=trajectory,
         legal_actions=["UP", "DOWN", "LEFT", "RIGHT"],
         previous_action="UP",
@@ -796,7 +881,7 @@ async def test_durable_beliefs_survive_between_game_turns(tmp_path):
     solver = DurableBeliefsGameSolver(llm=llm, knowledge_dir=tmp_path / "knowledge")
 
     await solver.choose_action(
-        image=Image.from_file(frame),
+        image=_analysis_image(),
         trajectory=[],
         legal_actions=["UP", "DOWN", "LEFT", "RIGHT"],
         previous_action=None,
@@ -804,7 +889,7 @@ async def test_durable_beliefs_survive_between_game_turns(tmp_path):
         levels_completed=0,
     )
     result = await solver.choose_action(
-        image=Image.from_file(frame),
+        image=_analysis_image(),
         trajectory=[],
         legal_actions=["UP", "DOWN", "LEFT", "RIGHT"],
         previous_action="DOWN",
@@ -821,6 +906,279 @@ async def test_durable_beliefs_survive_between_game_turns(tmp_path):
     assert "curated semantic knowledge" in prompt
     assert str(tmp_path / "knowledge") not in prompt
     assert "self.choose_action" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_executable_theory_affordances_apply_edit_and_return_one_decision(
+    tmp_path, monkeypatch
+):
+    import importlib.util
+
+    monkeypatch.setenv("NOOA_0159_WM2_GUIDANCE", "1")
+    monkeypatch.setenv("NOOA_0159_WM2_WORKBENCH", "1")
+    e0_path = Path(__file__).resolve().parents[2] / "e0_evidence.py"
+    spec = importlib.util.spec_from_file_location("worker_test_e0", e0_path)
+    assert spec is not None and spec.loader is not None
+    e0 = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = e0
+    spec.loader.exec_module(e0)
+    ledger = e0.HostEvidenceLedger(tmp_path / "evidence", run_id="worker-test")
+    ledger.record_initial_reset(
+        e0.PublicObservationInput(
+            frames=(((0, 0), (0, 0)),),
+            public_state="NOT_FINISHED",
+            levels_completed=0,
+            full_reset=False,
+            legal_actions=("UP", "DOWN", "LEFT", "RIGHT"),
+        )
+    )
+    snapshot = ledger.record_action_result(
+        global_turn=0,
+        action=e0.Action("UP"),
+        successor=e0.PublicObservationInput(
+            frames=(((0, 0), (0, 0)),),
+            public_state="NOT_FINISHED",
+            levels_completed=0,
+            full_reset=False,
+            legal_actions=("UP", "DOWN", "LEFT", "RIGHT"),
+        ),
+    ).snapshot
+    snapshot_path = (
+        tmp_path / "evidence" / "snapshots" / f"{snapshot.snapshot_id}.json"
+    )
+    frame = tmp_path / "frame.png"
+    PILImage.new("RGB", (2, 2), "white").save(frame)
+    replacement = (
+        "def predict(grid: np.ndarray, action: dict) -> np.ndarray | None:\n"
+        "    if action['action'] != 'UP':\n"
+        "        return None\n"
+        "    prediction = np.full_like(grid, -1)\n"
+        "    prediction.ravel()[:1] = grid.ravel()[:1]\n"
+        "    return prediction\n"
+    )
+    llm = RecordingFakeLLMClient(
+        [
+            _codeact_response("self.read_world_model()"),
+            _codeact_response("self.write_world_model('def broken(:\\n')"),
+            _codeact_response(
+                "before = self.read_world_model()\n"
+                f"result = self.edit_world_model_function('predict', {replacement!r})\n"
+                "feedback = result['tool_feedback']\n"
+                "return_result(action='UP', explanation="
+                "f\"card-understood:{result['candidate_status']}:{feedback['status']}:\""
+                "+feedback['phase'])"
+            )
+        ]
+    )
+    solver = ExecutableTheoryGameSolver(
+        llm=llm,
+        knowledge_dir=tmp_path / "knowledge",
+        world_model_dir=tmp_path / "world-model",
+    )
+    solver.install_history(
+        {
+            "schema": "0159-history-snapshot-v1",
+            "events": [],
+            "turn_views": {},
+            "provider_episodes": {},
+            "source_manifest": {},
+        }
+    )
+    solver.install_world_model_evidence(snapshot_path)
+    token = CURRENT_SEQUENCE.set(0)
+    try:
+        decision = await solver.choose_action(
+            image=_analysis_image(),
+            trajectory=[],
+            legal_actions=["UP", "DOWN", "LEFT", "RIGHT"],
+            previous_action=None,
+            turn=0,
+            levels_completed=0,
+        )
+    finally:
+        CURRENT_SEQUENCE.reset(token)
+
+    assert decision.action == "UP"
+    assert decision.explanation == (
+        "card-understood:active_supported:success:empirical_replay"
+    )
+    view = solver.theory_lane.read_world_model()
+    assert view["current_model_version_id"] == "model-version-00000000"
+    assert view["source_kind"] == "active_commitment"
+    assert view["contract_kind"] == "partial_predictor"
+    evaluations = [
+        json.loads(path.read_text())
+        for path in sorted((tmp_path / "world-model" / "candidates").glob(
+            "*/evaluation.json"
+        ))
+    ]
+    assert [evaluation["candidate_status"] for evaluation in evaluations] == [
+        "rejected_operationally",
+        "active_supported",
+    ]
+    token = CURRENT_SEQUENCE.set(1)
+    try:
+        rejected = solver.write_world_model("def broken(:\n")
+    finally:
+        CURRENT_SEQUENCE.reset(token)
+    feedback = rejected["tool_feedback"]
+    assert rejected["candidate_status"] == "rejected_operationally"
+    assert feedback["status"] == "error"
+    assert feedback["phase"] == "source_validation"
+    assert feedback["code"] == "SYNTAX_ERROR"
+    assert feedback["diagnostics"]["line"] == 1
+    assert "current model" in feedback["message"]
+    assert feedback["retry"]["allowed"] is True
+    assert solver.theory_lane.read_world_model()["current_model_version_id"] == (
+        "model-version-00000000"
+    )
+    prompt = json.dumps(llm.requests[0]["messages"])
+    rejection_context = json.dumps(llm.requests[1]["messages"])
+    recovery_context = json.dumps(llm.requests[2]["messages"])
+    assert "self.read_world_model" in prompt
+    assert "predict(grid, action)" in prompt
+    assert "Moore-machine" in prompt
+    assert "## Executable theory practice" in prompt
+    assert "1 ordinary action result(s) are available" in prompt
+    assert "quick_theory_template" in rejection_context
+    assert "SYNTAX_ERROR" in recovery_context
+    assert "No executable commitment is active" in recovery_context
+    assert "only Muse" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_wm2_context_is_frozen_from_evidence_and_lane_before_decision(
+    tmp_path, monkeypatch
+):
+    import importlib.util
+
+    monkeypatch.setenv("NOOA_0159_WM2_GUIDANCE", "1")
+    monkeypatch.setenv("NOOA_0159_WM2_WORKBENCH", "1")
+    e0_path = Path(__file__).resolve().parents[2] / "e0_evidence.py"
+    spec = importlib.util.spec_from_file_location("worker_wm2_e0", e0_path)
+    assert spec is not None and spec.loader is not None
+    e0 = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = e0
+    spec.loader.exec_module(e0)
+    root = tmp_path / "evidence"
+    ledger = e0.HostEvidenceLedger(root, run_id="worker-wm2")
+    initial = e0.PublicObservationInput(
+        frames=(((0, 0), (0, 0)),),
+        public_state="NOT_FINISHED",
+        levels_completed=0,
+        full_reset=False,
+        legal_actions=("UP", "DOWN", "LEFT", "RIGHT"),
+    )
+    ledger.record_initial_reset(initial)
+    result = ledger.record_action_result(
+        global_turn=0,
+        action=e0.Action("UP"),
+        successor=e0.PublicObservationInput(
+            frames=(((1, 0), (0, 0)),),
+            public_state="NOT_FINISHED",
+            levels_completed=0,
+            full_reset=False,
+            legal_actions=("UP", "DOWN", "LEFT", "RIGHT"),
+        ),
+    )
+    snapshot_path = root / "snapshots" / f"{result.snapshot.snapshot_id}.json"
+    audit_path = tmp_path / "audit.jsonl"
+    llm = RecordingFakeLLMClient(
+        [
+            _codeact_response(
+                "return_result(action='UP', explanation="
+                "'defer: one transition does not establish a rule')"
+            )
+        ]
+    )
+    solver = ExecutableTheoryGameSolver(
+        llm=llm,
+        audit=AuditLog(audit_path),
+        knowledge_dir=tmp_path / "knowledge",
+        world_model_dir=tmp_path / "world-model",
+    )
+    solver.install_history(
+        {
+            "schema": "0159-history-snapshot-v1",
+            "events": [],
+            "turn_views": {},
+            "provider_episodes": {},
+            "source_manifest": {},
+        }
+    )
+    solver.install_world_model_evidence(snapshot_path)
+
+    decision = await solver.choose_action(
+        image=_analysis_image(),
+        trajectory=[],
+        legal_actions=["UP", "DOWN", "LEFT", "RIGHT"],
+        previous_action="UP",
+        turn=1,
+        levels_completed=0,
+    )
+
+    messages = json.dumps(llm.requests[0]["messages"])
+    audit = [json.loads(line) for line in audit_path.read_text().splitlines()]
+    workbench_event = next(
+        event for event in audit if event["event"] == "theory_workbench_built"
+    )
+    assert decision.action == "UP"
+    assert decision.explanation.startswith("defer:")
+    assert solver.theory_lane.read_world_model()["current_model_version_id"] is None
+    assert "## Executable theory practice" in messages
+    assert "## Executable theory workbench" in messages
+    assert "1 ordinary action result(s) are available" in messages
+    assert "attempt-" not in messages
+    assert workbench_event["condition_codes"] == ["evidence_without_commitment"]
+    assert workbench_event["rendered_bytes"] > 0
+    model_view = solver.read_world_model()
+    assert "practice_examples" in model_view
+    assert "narrow_partial_predictor" in model_view["practice_examples"]
+
+
+def test_wm2_guidance_only_records_its_immutable_artifact(tmp_path, monkeypatch):
+    import importlib.util
+
+    monkeypatch.setenv("NOOA_0159_WM2_GUIDANCE", "1")
+    monkeypatch.delenv("NOOA_0159_WM2_WORKBENCH", raising=False)
+    e0_path = Path(__file__).resolve().parents[2] / "e0_evidence.py"
+    spec = importlib.util.spec_from_file_location("worker_wm2_guide_e0", e0_path)
+    assert spec is not None and spec.loader is not None
+    e0 = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = e0
+    spec.loader.exec_module(e0)
+    root = tmp_path / "evidence"
+    ledger = e0.HostEvidenceLedger(root, run_id="worker-wm2-guide")
+    ledger.record_initial_reset(
+        e0.PublicObservationInput(
+            frames=(((0, 0), (0, 0)),),
+            public_state="NOT_FINISHED",
+            levels_completed=0,
+            full_reset=False,
+            legal_actions=("UP", "DOWN", "LEFT", "RIGHT"),
+        )
+    )
+    snapshot = ledger.snapshot()
+    snapshot_path = root / "snapshots" / f"{snapshot.snapshot_id}.json"
+    audit_path = tmp_path / "audit.jsonl"
+    solver = ExecutableTheoryGameSolver(
+        llm=RecordingFakeLLMClient([]),
+        audit=AuditLog(audit_path),
+        knowledge_dir=tmp_path / "knowledge",
+        world_model_dir=tmp_path / "world-model",
+    )
+
+    solver.install_world_model_evidence(snapshot_path)
+
+    audit = [json.loads(line) for line in audit_path.read_text().splitlines()]
+    event = next(item for item in audit if item["event"] == "theory_practice_available")
+    assert event["schema"] == "0159-theory-practice-guide-v1"
+    assert len(event["guide_sha256"]) == 64
+    assert event["rendered_bytes"] <= 3_072
+    installed = next(
+        item for item in audit if item["event"] == "world_model_evidence_installed"
+    )
+    assert installed["wm2_workbench_built"] is False
 
 
 @pytest.mark.asyncio
@@ -867,7 +1225,7 @@ async def test_compact_solver_exposes_namespaced_history_without_old_trajectory(
     solver.install_history(snapshot)
 
     result = await solver.choose_action(
-        image=Image.from_file(frame),
+        image=_analysis_image(),
         trajectory=[],
         legal_actions=["UP", "DOWN", "LEFT", "RIGHT"],
         previous_action="DOWN",
@@ -898,7 +1256,7 @@ async def test_nooa_summary_explicitly_marks_live_context_recovery(tmp_path):
 
     keys_before = set(solver.event_manager.keys())
     await solver.choose_action(
-        image=Image.from_file(frame),
+        image=_analysis_image(),
         trajectory=[],
         legal_actions=["UP", "DOWN", "LEFT", "RIGHT"],
         previous_action=None,
@@ -911,7 +1269,7 @@ async def test_nooa_summary_explicitly_marks_live_context_recovery(tmp_path):
         if tag not in keys_before
     ]
     await solver.choose_action(
-        image=Image.from_file(frame),
+        image=_analysis_image(),
         trajectory=[],
         legal_actions=["UP", "DOWN", "LEFT", "RIGHT"],
         previous_action="UP",
@@ -920,7 +1278,7 @@ async def test_nooa_summary_explicitly_marks_live_context_recovery(tmp_path):
     )
     solver.event_manager.collapse(first_turn_tags[0], first_turn_tags[-1], marker)
     await solver.choose_action(
-        image=Image.from_file(frame),
+        image=_analysis_image(),
         trajectory=[],
         legal_actions=["UP", "DOWN", "LEFT", "RIGHT"],
         previous_action="DOWN",
@@ -1005,7 +1363,7 @@ async def test_real_nooa_context_error_surfaces_compaction_request_without_colla
 
     with pytest.raises(Exception) as caught:  # NOOA may wrap the causal error
         await solver.choose_action(
-            image=Image.from_file(frame),
+            image=_analysis_image(),
             trajectory=[],
             legal_actions=["UP", "DOWN", "LEFT", "RIGHT"],
             previous_action=None,
@@ -1035,6 +1393,7 @@ def test_worker_protocol_collapses_complete_turn_and_resumes_with_history(tmp_pa
             "type": "turn",
             "sequence": 0,
             "image_path": str(frame),
+            "image_cells": [[1, 2], [3, 4]],
             "legal_actions": ["UP", "DOWN", "LEFT", "RIGHT"],
             "previous_action": None,
             "levels_completed": 0,
@@ -1045,6 +1404,7 @@ def test_worker_protocol_collapses_complete_turn_and_resumes_with_history(tmp_pa
             "type": "turn",
             "sequence": 1,
             "image_path": str(frame),
+            "image_cells": [[1, 2], [3, 4]],
             "legal_actions": ["UP", "DOWN", "LEFT", "RIGHT"],
             "previous_action": "UP",
             "levels_completed": 0,
@@ -1062,6 +1422,7 @@ def test_worker_protocol_collapses_complete_turn_and_resumes_with_history(tmp_pa
             "type": "turn",
             "sequence": 2,
             "image_path": str(frame),
+            "image_cells": [[1, 2], [3, 4]],
             "legal_actions": ["UP", "DOWN", "LEFT", "RIGHT"],
             "previous_action": "DOWN",
             "levels_completed": 0,
@@ -1072,6 +1433,7 @@ def test_worker_protocol_collapses_complete_turn_and_resumes_with_history(tmp_pa
             "type": "turn",
             "sequence": 3,
             "image_path": str(frame),
+            "image_cells": [[1, 2], [3, 4]],
             "legal_actions": ["UP", "DOWN", "LEFT", "RIGHT"],
             "previous_action": "LEFT",
             "levels_completed": 0,
@@ -1142,6 +1504,70 @@ def test_codeact_guard_rejects_self_and_file_access():
     assert _forbidden_cell_primitive("print(type(trajectory).__name__)") is None
     assert _forbidden_cell_primitive("print(build_llm.__globals__)") == "__globals__"
     assert _forbidden_cell_primitive("np.array(trajectory[-1]['after'])") is None
+    assert _forbidden_cell_primitive("np.argwhere(np.asarray(image) == 1)") is None
+
+
+def test_bare_broker_call_is_auto_echoed_but_assignment_is_not():
+    allowed = frozenset({"read_world_model"})
+
+    code, echoed = _auto_echo_broker_result(
+        "self.read_world_model()", allowed_self_methods=allowed
+    )
+    assigned, assigned_echoed = _auto_echo_broker_result(
+        "result = self.read_world_model()", allowed_self_methods=allowed
+    )
+
+    assert echoed is True
+    assert code == "print(self.read_world_model())"
+    assert assigned_echoed is False
+    assert assigned == "result = self.read_world_model()"
+
+
+def test_worker_exposes_one_palette_pil_image_for_visual_and_exact_analysis(tmp_path):
+    frame = tmp_path / "frame.png"
+    PILImage.new("RGB", (2, 2), "white").save(frame)
+    request = {
+        "type": "turn",
+        "sequence": 0,
+        "image_path": str(frame),
+        "image_cells": [[1, 2], [3, 4]],
+        "legal_actions": ["UP", "DOWN", "LEFT", "RIGHT"],
+        "previous_action": None,
+        "levels_completed": 0,
+        "trajectory": [],
+    }
+    code = (
+        "show(image)\n"
+        "return_result(action='UP', explanation="
+        "f'{image.mode}:{image.size}:{np.asarray(image).shape}:'"
+        "+str(np.asarray(image.crop((1, 1, 2, 2)))[0, 0]))"
+    )
+    environment = {
+        **os.environ,
+        "NOOA_0159_VARIANT": "codeact",
+        "NOOA_0159_SCRIPTED_CODEACT_CELLS": json.dumps([code]),
+    }
+
+    process = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve().parents[1] / "worker.py")],
+        input=json.dumps(request) + "\n" + json.dumps({"type": "close"}) + "\n",
+        text=True,
+        capture_output=True,
+        env=environment,
+        timeout=30,
+        check=True,
+    )
+
+    responses = [
+        json.loads(line.removeprefix("0159_RESPONSE\t"))
+        for line in process.stdout.splitlines()
+        if line.startswith("0159_RESPONSE\t")
+    ]
+    assert len(responses) == 1
+    assert responses[0]["type"] == "decision", responses[0]
+    assert responses[0]["sequence"] == 0
+    assert responses[0]["action"] == "UP"
+    assert responses[0]["explanation"] == "P:(2, 2):(2, 2):4"
 
 
 def test_durable_beliefs_guard_allows_only_direct_notes_calls():

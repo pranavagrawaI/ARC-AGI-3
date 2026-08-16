@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import arc_agi
 import numpy as np
@@ -30,14 +31,44 @@ from experiments.harness.runner import TERMINAL_STATES, public_observation
 EXPERIMENT = Path(__file__).resolve().parent
 RUNTIME = EXPERIMENT / "nooa-runtime"
 WORKER = RUNTIME / "worker.py"
+E0_EVIDENCE_PATH = EXPERIMENT / "e0_evidence.py"
+THEORY_GUIDANCE_PATH = RUNTIME / "theory_guidance.py"
+THEORY_WORKBENCH_PATH = RUNTIME / "theory_workbench.py"
+WM2_SPEC_PATH = EXPERIMENT / "WM2-GUIDANCE-AND-OPPORTUNITY-SPEC.md"
 CARDS = EXPERIMENT.parents[1] / "cards"
 EXPERIMENT_CARDS = {
     "predict": CARDS / "0159-muse-glimmer-nooa-persistent-ls20-v2.md",
     "codeact": CARDS / "0159-muse-glimmer-native-encoding-ls20-v12.md",
     "codeact_notes": CARDS / "0159-muse-glimmer-human-action-labels-ls20-v15.md",
     "codeact_notes_compact": (CARDS / "0159-muse-in-loop-compaction-ls20-v24.md"),
+    "codeact_notes_compact_world_model": (
+        CARDS / "0160-muse-wm1-recovery-feedback-v1.md"
+    ),
 }
-MODEL = "meta/muse-glimmer-30b"
+DEFAULT_MODEL_PROFILE = "muse-glimmer-30b"
+LUNA_MODEL_PROFILE = "gpt-5.6-luna"
+MODEL_PROFILES = {
+    DEFAULT_MODEL_PROFILE: {
+        "model": "meta/muse-glimmer-30b",
+        "provider_route": "qualified-pool-v18",
+        "provider_routes": [
+            "deepinfra-bf16",
+            "together",
+            "fireworks",
+            "phala",
+        ],
+        "context_window": 131_072,
+    },
+    LUNA_MODEL_PROFILE: {
+        "model": "openai/gpt-5.6-luna",
+        "provider_route": "openai",
+        "provider_routes": ["openai"],
+        "context_window": 1_050_000,
+    },
+}
+LUNA_EXPERIMENT_CARD = CARDS / "0160-luna-wm1-recovery-feedback-v1.md"
+LUNA_CAPABILITY_PROBE_CARD = CARDS / "0160-luna-wm1-capability-probe-v3.md"
+MODEL = MODEL_PROFILES[DEFAULT_MODEL_PROFILE]["model"]
 NOOA_REVISION = "55a4b57872b49bfe9698cda6fc8e1f3b0bdd723e"
 READY_PREFIX = "0159_READY\t"
 RESPONSE_PREFIX = "0159_RESPONSE\t"
@@ -45,7 +76,10 @@ DEFAULT_ACTION_CAP = 44
 ANALYSIS_MAX_ITERATIONS = 11
 COMMIT_MAX_ATTEMPTS = 3
 MAX_PROVIDER_CALLS_PER_TURN = ANALYSIS_MAX_ITERATIONS + COMMIT_MAX_ATTEMPTS
-VARIANTS = {"predict", "codeact", "codeact_notes", "codeact_notes_compact"}
+WORLD_MODEL_VARIANT = "codeact_notes_compact_world_model"
+COMPACT_VARIANTS = {"codeact_notes_compact", WORLD_MODEL_VARIANT}
+KNOWLEDGE_VARIANTS = {"codeact_notes", *COMPACT_VARIANTS}
+VARIANTS = {"predict", "codeact", *KNOWLEDGE_VARIANTS}
 COMPACT_VARIANT = "codeact_notes_compact"
 DEFAULT_COMPACTION_RECENT_TURNS = 6
 DEFAULT_COMPACTION_TRIGGER_FRACTION = 0.80
@@ -80,6 +114,13 @@ WORKER_ENVIRONMENT_KEYS = (
     "TZ",
 )
 
+_E0_SPEC = importlib.util.spec_from_file_location("e0_evidence_0159", E0_EVIDENCE_PATH)
+if _E0_SPEC is None or _E0_SPEC.loader is None:
+    raise RuntimeError(f"cannot load E0 evidence adapter {E0_EVIDENCE_PATH}")
+E0_EVIDENCE = importlib.util.module_from_spec(_E0_SPEC)
+sys.modules[_E0_SPEC.name] = E0_EVIDENCE
+_E0_SPEC.loader.exec_module(E0_EVIDENCE)
+
 
 class SandboxUnavailableError(RuntimeError):
     pass
@@ -97,6 +138,7 @@ WORKER_FAILURE_STOP_REASONS = {
 }
 INVALID_STOP_REASONS = {
     "compaction_failure",
+    "evidence_adapter_failure",
     "host_failure",
     "provider_failure",
     "sandbox_failure",
@@ -125,10 +167,17 @@ def file_sha256(path: Path) -> str:
 
 
 def source_commitments(
-    experiment_card: Path, *, include_compaction: bool = False
+    experiment_card: Path,
+    *,
+    include_compaction: bool = False,
+    include_world_model: bool = False,
+    model_profile: str = DEFAULT_MODEL_PROFILE,
+    include_wm2_guidance: bool = False,
+    include_wm2_workbench: bool = False,
 ) -> tuple[dict[str, str], str]:
     paths = {
         "host": Path(__file__).resolve(),
+        "e0_evidence": E0_EVIDENCE_PATH.resolve(),
         "worker": WORKER.resolve(),
         "worker_lock": (RUNTIME / "uv.lock").resolve(),
         "experiment_card": experiment_card.resolve(),
@@ -146,21 +195,45 @@ def source_commitments(
                 "checkpoint_comparison": (
                     EXPERIMENT / "compare_compaction.py"
                 ).resolve(),
-                "provider_qualification_card": (
-                    CARDS / "0159-muse-provider-qualification-v18.md"
-                ).resolve(),
-                "provider_qualification_summary": (
-                    EXPERIMENT / "artifacts/provider-qualification-v18/summary.json"
-                ).resolve(),
-                "provider_qualification_events": (
-                    EXPERIMENT
-                    / "artifacts/provider-qualification-v18/provider-events.jsonl"
-                ).resolve(),
-                "provider_qualification_runner": (
-                    RUNTIME / "qualify_providers.py"
-                ).resolve(),
             }
         )
+        if model_profile == DEFAULT_MODEL_PROFILE:
+            paths.update(
+                {
+                    "provider_qualification_card": (
+                        CARDS / "0159-muse-provider-qualification-v18.md"
+                    ).resolve(),
+                    "provider_qualification_summary": (
+                        EXPERIMENT / "artifacts/provider-qualification-v18/summary.json"
+                    ).resolve(),
+                    "provider_qualification_events": (
+                        EXPERIMENT
+                        / "artifacts/provider-qualification-v18/provider-events.jsonl"
+                    ).resolve(),
+                    "provider_qualification_runner": (
+                        RUNTIME / "qualify_providers.py"
+                    ).resolve(),
+                }
+            )
+    if include_world_model:
+        paths.update(
+            {
+                "world_model_lane": (RUNTIME / "world_model_lane.py").resolve(),
+                "world_model_evaluator": (
+                    RUNTIME / "world_model_evaluator.py"
+                ).resolve(),
+                "executable_theory_lane_spec": (
+                    EXPERIMENT / "EXECUTABLE-THEORY-LANE-SPEC.md"
+                ).resolve(),
+                "world_model_provenance": (EXPERIMENT / "PROVENANCE.md").resolve(),
+            }
+        )
+    if include_wm2_guidance:
+        paths["theory_practice_guide"] = THEORY_GUIDANCE_PATH.resolve()
+    if include_wm2_workbench:
+        paths["theory_workbench"] = THEORY_WORKBENCH_PATH.resolve()
+    if include_wm2_guidance or include_wm2_workbench:
+        paths["wm2_guidance_and_opportunity_spec"] = WM2_SPEC_PATH.resolve()
     hashes = {name: file_sha256(path) for name, path in paths.items()}
     bundle = hashlib.sha256(
         json.dumps(hashes, sort_keys=True, separators=(",", ":")).encode()
@@ -199,6 +272,23 @@ def frame_grid(frame: Any) -> np.ndarray:
 
 def grid_values(frame: Any) -> list[list[int]]:
     return [[int(value) for value in row] for row in frame_grid(frame)]
+
+
+def evidence_observation(frame: Any) -> Any:
+    frames = tuple(
+        tuple(tuple(int(value) for value in row) for row in grid)
+        for grid in frame_sequence(frame)
+    )
+    state = frame.state.value if hasattr(frame.state, "value") else str(frame.state)
+    return E0_EVIDENCE.PublicObservationInput(
+        frames=frames,
+        public_state=state,
+        levels_completed=int(frame.levels_completed),
+        full_reset=bool(frame.full_reset),
+        legal_actions=tuple(
+            action_name(int(action)) for action in frame.available_actions
+        ),
+    )
 
 
 def save_frame(frame: Any, path: Path) -> None:
@@ -304,7 +394,14 @@ def worker_environment(
     *,
     variant: str = "predict",
     knowledge_dir: Path | None = None,
+    world_model_dir: Path | None = None,
+    model_profile: str = DEFAULT_MODEL_PROFILE,
+    capability_probe: bool = False,
+    wm2_guidance: bool = False,
+    wm2_workbench: bool = False,
 ) -> dict[str, str]:
+    if model_profile not in MODEL_PROFILES:
+        raise ValueError(f"unknown model profile {model_profile!r}")
     llm_key = os.environ.get("ARC_LLM_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
     if not llm_key:
         raise RuntimeError("ARC_LLM_API_KEY or OPENROUTER_API_KEY is required")
@@ -315,10 +412,21 @@ def worker_environment(
     if audit_log is not None:
         environment["NOOA_0159_AUDIT_LOG"] = str(audit_log.resolve())
     environment["NOOA_0159_VARIANT"] = variant
-    if variant in {"codeact_notes", COMPACT_VARIANT}:
+    environment["NOOA_0159_MODEL_PROFILE"] = model_profile
+    if capability_probe:
+        environment["NOOA_0159_CAPABILITY_PROBE"] = "1"
+    if wm2_guidance:
+        environment["NOOA_0159_WM2_GUIDANCE"] = "1"
+    if wm2_workbench:
+        environment["NOOA_0159_WM2_WORKBENCH"] = "1"
+    if variant in KNOWLEDGE_VARIANTS:
         if knowledge_dir is None:
             raise ValueError(f"{variant} requires a run-local knowledge directory")
         environment["NOOA_0159_KNOWLEDGE_DIR"] = str(knowledge_dir.resolve())
+    if variant == WORLD_MODEL_VARIANT:
+        if world_model_dir is None:
+            raise ValueError(f"{variant} requires a run-local world-model directory")
+        environment["NOOA_0159_WORLD_MODEL_DIR"] = str(world_model_dir.resolve())
     return environment
 
 
@@ -330,11 +438,20 @@ class Worker:
         run_dir: Path,
         *,
         variant: str = "predict",
+        model_profile: str = DEFAULT_MODEL_PROFILE,
+        capability_probe: bool = False,
+        wm2_guidance: bool = False,
+        wm2_workbench: bool = False,
         timeout_seconds: float = 3_600.0,
     ):
         if variant not in VARIANTS:
             raise ValueError(f"unknown worker variant {variant!r}")
+        if model_profile not in MODEL_PROFILES:
+            raise ValueError(f"unknown model profile {model_profile!r}")
+        if model_profile == LUNA_MODEL_PROFILE and variant != WORLD_MODEL_VARIANT:
+            raise ValueError("the Luna first-contact profile is restricted to WM0")
         self.variant = variant
+        self.model_profile = model_profile
         self.timeout_seconds = timeout_seconds
         self.stdout_log = run_dir / "worker-stdout.log"
         self.stderr_handle = (run_dir / "worker-stderr.log").open("w", encoding="utf-8")
@@ -360,9 +477,18 @@ class Worker:
                     variant=variant,
                     knowledge_dir=(
                         run_dir / "knowledge"
-                        if variant in {"codeact_notes", COMPACT_VARIANT}
+                        if variant in KNOWLEDGE_VARIANTS
                         else None
                     ),
+                    world_model_dir=(
+                        run_dir / "world-model"
+                        if variant == WORLD_MODEL_VARIANT
+                        else None
+                    ),
+                    model_profile=model_profile,
+                    capability_probe=capability_probe,
+                    wm2_guidance=wm2_guidance,
+                    wm2_workbench=wm2_workbench,
                 ),
             )
             self.ready = self._read(READY_PREFIX)
@@ -374,17 +500,29 @@ class Worker:
                 raise WorkerIdentityError(
                     "NOOA live worker did not start with the live model client"
                 )
-            if self.ready.get("model") != MODEL:
+            if bool(self.ready.get("wm2_guidance")) != wm2_guidance:
+                raise WorkerIdentityError("NOOA worker started with the wrong WM2-A surface")
+            if bool(self.ready.get("wm2_workbench")) != wm2_workbench:
+                raise WorkerIdentityError("NOOA worker started with the wrong WM2-B surface")
+            model_config = MODEL_PROFILES[model_profile]
+            if self.ready.get("model_profile") != model_profile:
+                raise WorkerIdentityError(
+                    "NOOA worker started with the wrong model profile"
+                )
+            if self.ready.get("model") != model_config["model"]:
                 raise WorkerIdentityError("NOOA worker started with the wrong model")
-            expected_route = (
-                "qualified-pool-v18" if variant == COMPACT_VARIANT else "deepinfra/bf16"
-            )
+            expected_route = model_config["provider_route"]
+            if model_profile == DEFAULT_MODEL_PROFILE and variant not in COMPACT_VARIANTS:
+                expected_route = "deepinfra/bf16"
             if self.ready.get("provider_route") != expected_route:
                 raise WorkerIdentityError(
                     "NOOA worker started with the wrong provider route"
                 )
-            if variant == COMPACT_VARIANT and (
-                self.ready.get("provider_routes") != QUALIFIED_PROVIDER_POOL
+            expected_routes = model_config["provider_routes"]
+            if model_profile == DEFAULT_MODEL_PROFILE and variant not in COMPACT_VARIANTS:
+                expected_routes = None
+            if variant in COMPACT_VARIANTS and (
+                self.ready.get("provider_routes") != expected_routes
                 or self.ready.get("provider_attempt_timeout_seconds")
                 != PROVIDER_ATTEMPT_TIMEOUT_SECONDS
                 or self.ready.get("implicit_context_archival") is not False
@@ -437,8 +575,8 @@ class Worker:
         return response
 
     def compact(self, request: dict[str, Any]) -> dict[str, Any]:
-        if self.variant != COMPACT_VARIANT:
-            raise ValueError("compact requests require codeact_notes_compact")
+        if self.variant not in COMPACT_VARIANTS:
+            raise ValueError("compact requests require a compact variant")
         assert self.process is not None
         assert self.process.stdin is not None
         self.process.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
@@ -470,7 +608,7 @@ class Worker:
                 self.process.stdin.write('{"type":"close"}\n')
                 self.process.stdin.flush()
                 self.process.wait(timeout=10)
-            except BrokenPipeError, OSError, subprocess.TimeoutExpired:
+            except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
                 self._stop_process()
         if not self.stderr_handle.closed:
             self.stderr_handle.close()
@@ -510,6 +648,7 @@ def prepare_live_compaction(
     resume_turn: int,
     recent_turns: int = DEFAULT_COMPACTION_RECENT_TURNS,
     compaction_index: int = 1,
+    model_profile: str = DEFAULT_MODEL_PROFILE,
 ) -> dict[str, Any]:
     """Prepare and validate a live compaction without mutating NOOA context."""
     if recent_turns < 1 or resume_turn <= recent_turns:
@@ -527,7 +666,18 @@ def prepare_live_compaction(
     api_key = os.environ.get("ARC_LLM_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         raise RuntimeError("ARC_LLM_API_KEY or OPENROUTER_API_KEY is required")
-    client = comparison.OpenRouter(api_key, compaction_root / "raw-consolidation")
+    model_config = MODEL_PROFILES[model_profile]
+    providers = (
+        (("openai", "openai", None),)
+        if model_profile == LUNA_MODEL_PROFILE
+        else comparison.PROVIDERS
+    )
+    client = comparison.OpenRouter(
+        api_key,
+        compaction_root / "raw-consolidation",
+        model=model_config["model"],
+        providers=providers,
+    )
     checkpoint = comparison.generate_checkpoint(
         client, archive, resume_turn=resume_turn
     )
@@ -632,6 +782,7 @@ def apply_live_compaction(
     recent_turns: int,
     compaction_index: int,
     trigger: str,
+    model_profile: str = DEFAULT_MODEL_PROFILE,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Prepare, commit, and record one evidence-preserving compaction."""
     prepared = prepare_live_compaction(
@@ -639,6 +790,7 @@ def apply_live_compaction(
         resume_turn=resume_turn,
         recent_turns=recent_turns,
         compaction_index=compaction_index,
+        model_profile=model_profile,
     )
     result = worker.compact(prepared)
     append_jsonl(
@@ -666,6 +818,11 @@ def run(
     auto_compact: bool = False,
     compaction_trigger_fraction: float = DEFAULT_COMPACTION_TRIGGER_FRACTION,
     compaction_target_fraction: float = DEFAULT_COMPACTION_TARGET_FRACTION,
+    model_profile: str = DEFAULT_MODEL_PROFILE,
+    capability_probe: bool = False,
+    wm2_guidance: bool = False,
+    wm2_workbench: bool = False,
+    experiment_card_override: Path | None = None,
 ) -> dict[str, Any]:
     arc_key = os.environ.get("ARC_API_KEY")
     if not arc_key:
@@ -674,14 +831,32 @@ def run(
         raise ValueError("action cap must be positive")
     if variant not in VARIANTS:
         raise ValueError(f"unknown variant {variant!r}")
-    if variant == COMPACT_VARIANT:
+    if model_profile not in MODEL_PROFILES:
+        raise ValueError(f"unknown model profile {model_profile!r}")
+    if model_profile == LUNA_MODEL_PROFILE and variant != WORLD_MODEL_VARIANT:
+        raise ValueError("the Luna first-contact profile is restricted to WM0")
+    if capability_probe and variant != WORLD_MODEL_VARIANT:
+        raise ValueError("the capability probe requires the world-model variant")
+    if capability_probe and action_cap != 1:
+        raise ValueError("the capability probe is bounded to exactly one action")
+    if (wm2_guidance or wm2_workbench) and variant != WORLD_MODEL_VARIANT:
+        raise ValueError("WM2 modules require the world-model variant")
+    if (wm2_guidance or wm2_workbench) and experiment_card_override is None:
+        raise ValueError("WM2 live configuration requires an explicit frozen experiment card")
+    if experiment_card_override is not None:
+        experiment_card_override = experiment_card_override.resolve()
+        if not experiment_card_override.is_file():
+            raise ValueError("explicit experiment card does not exist")
+        if len(experiment_card_override.read_bytes()) > 1_024:
+            raise ValueError("explicit experiment card exceeds 1 KiB")
+    if variant in COMPACT_VARIANTS:
         if compaction_recent_turns < 1:
             raise ValueError("compaction recent turns must be positive")
         if auto_compact and compact_at_turn is not None:
             raise ValueError("choose either automatic or forced compaction")
         if not auto_compact and compact_at_turn is None:
             raise ValueError(
-                "codeact_notes_compact requires --auto-compact or --compact-at-turn"
+                "compact variants require --auto-compact or --compact-at-turn"
             )
         if compact_at_turn is not None and compact_at_turn <= compaction_recent_turns:
             raise ValueError(
@@ -694,7 +869,7 @@ def run(
         if not 0 < compaction_target_fraction < compaction_trigger_fraction:
             raise ValueError("compaction target must be below the trigger fraction")
     elif compact_at_turn is not None:
-        raise ValueError("--compact-at-turn is only valid for codeact_notes_compact")
+        raise ValueError("--compact-at-turn is only valid for compact variants")
 
     run_dir.mkdir(parents=True, exist_ok=False)
     frames_dir = run_dir / "frames"
@@ -703,34 +878,86 @@ def run(
     animations_dir.mkdir()
     transcript = run_dir / "transcript.jsonl"
     trajectory_trace = run_dir / "trajectory.jsonl"
-    experiment_card = EXPERIMENT_CARDS[variant]
+    evidence_run_id = "run-" + uuid4().hex
+    evidence_ledger = E0_EVIDENCE.HostEvidenceLedger(
+        run_dir / "evidence", run_id=evidence_run_id
+    )
+    experiment_card = experiment_card_override or (
+        LUNA_CAPABILITY_PROBE_CARD
+        if capability_probe and model_profile == LUNA_MODEL_PROFILE
+        else (
+            LUNA_EXPERIMENT_CARD
+            if model_profile == LUNA_MODEL_PROFILE
+            else EXPERIMENT_CARDS[variant]
+        )
+    )
+    model_config = MODEL_PROFILES[model_profile]
     source_sha256, source_bundle_sha256 = source_commitments(
-        experiment_card, include_compaction=variant == COMPACT_VARIANT
+        experiment_card,
+        include_compaction=variant in COMPACT_VARIANTS,
+        include_world_model=variant == WORLD_MODEL_VARIANT,
+        model_profile=model_profile,
+        include_wm2_guidance=wm2_guidance,
+        include_wm2_workbench=wm2_workbench,
     )
     write_json(
         run_dir / "run-config.json",
         {
-            "schema": "0159-nooa-ls20-run-v15",
+            "schema": (
+                "0159-nooa-ls20-run-v20"
+                if variant == WORLD_MODEL_VARIANT
+                else "0159-nooa-ls20-run-v17"
+            ),
             "game": "ls20",
             "seed": 0,
             "operation_mode": "online",
             "fresh_reset": True,
-            "model": MODEL,
+            "evidence_adapter": {
+                "schema": "0159-host-evidence-v1",
+                "run_id": evidence_run_id,
+                "event_taxonomy": "host_observable_only",
+                "attempt_ids_model_visible": False,
+                "input_and_manifest_commitments": True,
+            },
+            "decision_observation": {
+                "image": (
+                    {
+                        "source": "host settled public grid",
+                        "transport": "private JSON row-major integer cells",
+                        "worker_view": "64x64 palette-mode PIL image",
+                        "coordinates": "np.asarray(image)[y, x]",
+                        "visual_use": "show(image)",
+                        "host_authored_semantics": False,
+                    }
+                    if variant != "predict"
+                    else "rendered settled public grid for provider vision"
+                ),
+            },
+            "model_profile": model_profile,
+            "model": model_config["model"],
+            "model_context_window": model_config["context_window"],
+            "capability_probe": capability_probe,
+            "wm2": {
+                "practice_guidance": wm2_guidance,
+                "theory_workbench": wm2_workbench,
+            },
             "provider_route": (
-                "qualified-pool-v18" if variant == COMPACT_VARIANT else "deepinfra/bf16"
+                model_config["provider_route"]
+                if variant in COMPACT_VARIANTS
+                else "deepinfra/bf16"
             ),
             "provider_routes": (
-                QUALIFIED_PROVIDER_POOL if variant == COMPACT_VARIANT else None
+                model_config["provider_routes"] if variant in COMPACT_VARIANTS else None
             ),
             "provider_attempt_timeout_seconds": (
-                PROVIDER_ATTEMPT_TIMEOUT_SECONDS if variant == COMPACT_VARIANT else None
+                PROVIDER_ATTEMPT_TIMEOUT_SECONDS if variant in COMPACT_VARIANTS else None
             ),
             "action_cap": action_cap,
             "variant": variant,
             "compact_at_turn": compact_at_turn,
             "auto_compact": auto_compact,
             "compaction_recent_turns": (
-                compaction_recent_turns if variant == COMPACT_VARIANT else None
+                compaction_recent_turns if variant in COMPACT_VARIANTS else None
             ),
             "capability": {
                 "predict": "persistent conversation only",
@@ -743,6 +970,11 @@ def run(
                     "persistent CodeAct plus durable notes, namespaced immutable-history "
                     "retrieval, model checkpoint, explicit recovery Summary, and recent "
                     "trajectory suffix"
+                ),
+                "codeact_notes_compact_world_model": (
+                    "the compact persistent investigator plus brokered Muse-authored "
+                    "quick partial predictors or full Moore commitments, with isolated "
+                    "replay against E0 evidence"
                 ),
             }[variant],
             "max_provider_calls_per_turn": (
@@ -770,7 +1002,23 @@ def run(
                     "location": "knowledge/*.md",
                     "host_authored_semantics": False,
                 }
-                if variant in {"codeact_notes", COMPACT_VARIANT}
+                if variant in KNOWLEDGE_VARIANTS
+                else None
+            ),
+            "executable_theory": (
+                {
+                    "interface": [
+                        "read_world_model",
+                        "write_world_model",
+                        "edit_world_model_function",
+                    ],
+                    "location": "world-model/",
+                    "activation": "operational_validity_only",
+                    "evaluation": "fresh_isolated_process",
+                    "host_authored_semantics": False,
+                    "shadow_prediction": False,
+                }
+                if variant == WORLD_MODEL_VARIANT
                 else None
             ),
             "context_compaction": (
@@ -807,7 +1055,7 @@ def run(
                         MAX_IN_LOOP_COMPACTIONS_PER_TURN if auto_compact else None
                     ),
                 }
-                if variant == COMPACT_VARIANT
+                if variant in COMPACT_VARIANTS
                 else None
             ),
             "ipc_stdout": "duplicated_os_file_descriptor",
@@ -847,6 +1095,7 @@ def run(
     previous_action: int | None = None
     trajectory: list[dict[str, Any]] = []
     animation_events = 0
+    evidence_snapshot_id: str | None = None
     compactions: list[dict[str, Any]] = []
     context_samples: list[int] = []
     last_context: dict[str, Any] | None = None
@@ -869,12 +1118,29 @@ def run(
             raise RuntimeError(
                 "fresh LS20 reset did not start at zero completed levels"
             )
+        evidence_ledger.record_initial_reset(evidence_observation(current))
+        evidence_snapshot_id = evidence_ledger.snapshot().snapshot_id
 
-        worker = Worker(run_dir, variant=variant)
+        worker_options: dict[str, Any] = {
+            "variant": variant,
+            "model_profile": model_profile,
+        }
+        if capability_probe:
+            worker_options["capability_probe"] = True
+        if wm2_guidance:
+            worker_options["wm2_guidance"] = True
+        if wm2_workbench:
+            worker_options["wm2_workbench"] = True
+        worker = Worker(run_dir, **worker_options)
         append_jsonl(transcript, {"type": "worker_ready", **worker.ready})
         print(json.dumps({"event": "worker_ready", **worker.ready}), flush=True)
 
         for turn in range(action_cap):
+            evidence_ledger.record_decision_observation(
+                evidence_observation(current), global_turn=turn
+            )
+            decision_evidence_snapshot = evidence_ledger.snapshot()
+            evidence_snapshot_id = decision_evidence_snapshot.snapshot_id
             image_path = frames_dir / f"turn-{turn:03d}.png"
             save_frame(current, image_path)
             observation = frame_record(turn=turn, frame=current, image_path=image_path)
@@ -889,7 +1155,7 @@ def run(
                 break
             prepared_compaction: dict[str, Any] | None = None
             auto_boundary = (
-                variant == COMPACT_VARIANT
+                variant in COMPACT_VARIANTS
                 and auto_compact
                 and turn > 1
                 and should_auto_compact(
@@ -897,7 +1163,7 @@ def run(
                 )
             )
             forced_boundary = (
-                variant == COMPACT_VARIANT and turn == compact_at_turn
+                variant in COMPACT_VARIANTS and turn == compact_at_turn
             )
             if auto_boundary or forced_boundary:
                 try:
@@ -925,6 +1191,7 @@ def run(
                         trigger=(
                             "automatic_boundary" if auto_boundary else "forced_boundary"
                         ),
+                        model_profile=model_profile,
                     )
                 except Exception as error:  # noqa: BLE001 - preserve boundary evidence
                     stop_reason = "compaction_failure"
@@ -942,17 +1209,27 @@ def run(
                 "previous_action": previous_action,
                 "levels_completed": levels_completed,
             }
+            if variant == WORLD_MODEL_VARIANT:
+                request["evidence_snapshot_path"] = str(
+                    (
+                        run_dir
+                        / "evidence"
+                        / "snapshots"
+                        / f"{decision_evidence_snapshot.snapshot_id}.json"
+                    ).resolve()
+                )
             if variant != "predict":
+                request["image_cells"] = grid_values(current)
                 request["trajectory"] = (
                     (
                         trajectory[retained_trajectory_start:]
                         if auto_compact
                         else trajectory[-compaction_recent_turns:]
                     )
-                    if variant == COMPACT_VARIANT
+                    if variant in COMPACT_VARIANTS
                     else trajectory
                 )
-            if variant == COMPACT_VARIANT:
+            if variant in COMPACT_VARIANTS:
                 if prepared_compaction is not None:
                     request["history_snapshot"] = prepared_compaction[
                         "history_snapshot"
@@ -999,6 +1276,7 @@ def run(
                         recent_turns=recent_turns,
                         compaction_index=len(compactions) + 1,
                         trigger="in_loop_context_rejection",
+                        model_profile=model_profile,
                     )
                 except Exception as error:  # noqa: BLE001 - preserve boundary evidence
                     stop_reason = "compaction_failure"
@@ -1028,7 +1306,7 @@ def run(
                     ),
                 )
                 break
-            if variant == COMPACT_VARIANT:
+            if variant in COMPACT_VARIANTS:
                 context = decision.get("context")
                 last_context = context if isinstance(context, dict) else None
                 prompt_tokens = (
@@ -1130,6 +1408,29 @@ def run(
             if animation_event is not None:
                 animation_events += 1
                 append_jsonl(transcript, animation_event)
+            try:
+                evidence_result = evidence_ledger.record_action_result(
+                    global_turn=turn,
+                    action=E0_EVIDENCE.Action(action, x=x, y=y),
+                    successor=evidence_observation(successor),
+                )
+            except Exception as error:  # noqa: BLE001 - action already happened
+                stop_reason = "evidence_adapter_failure"
+                record_failure(run_dir, stage="evidence_adapter", error=error)
+                break
+            evidence_snapshot_id = evidence_result.snapshot.snapshot_id
+            append_jsonl(
+                transcript,
+                {
+                    "type": "evidence_projection",
+                    "turn": turn,
+                    "source_action_result_turn": turn,
+                    "evidence_event_id": (
+                        evidence_result.snapshot.transitions[-1].source_event_id
+                    ),
+                    "evidence_snapshot_id": evidence_snapshot_id,
+                },
+            )
             print(
                 json.dumps(
                     {
@@ -1184,7 +1485,7 @@ def run(
                 record_failure(run_dir, stage="environment_shutdown", error=error)
 
     summary = {
-        "schema": "0159-nooa-ls20-summary-v3",
+        "schema": "0159-nooa-ls20-summary-v4",
         "run_dir": str(run_dir),
         "variant": variant,
         "stop_reason": stop_reason,
@@ -1198,6 +1499,7 @@ def run(
         "trajectory_sha256": trajectory_sha256(trajectory),
         "compactions": compactions,
         "animation_events": animation_events,
+        "evidence_snapshot_id": evidence_snapshot_id,
         "source_bundle_sha256": source_bundle_sha256,
     }
     write_json(run_dir / "summary.json", summary)
@@ -1209,8 +1511,17 @@ def main() -> None:
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument("--action-cap", type=int, default=DEFAULT_ACTION_CAP)
     parser.add_argument("--variant", choices=sorted(VARIANTS), default="predict")
+    parser.add_argument(
+        "--model-profile",
+        choices=sorted(MODEL_PROFILES),
+        default=DEFAULT_MODEL_PROFILE,
+    )
     parser.add_argument("--compact-at-turn", type=int)
     parser.add_argument("--auto-compact", action="store_true")
+    parser.add_argument("--capability-probe", action="store_true")
+    parser.add_argument("--wm2-guidance", action="store_true")
+    parser.add_argument("--wm2-workbench", action="store_true")
+    parser.add_argument("--experiment-card", type=Path)
     parser.add_argument(
         "--compaction-trigger-fraction",
         type=float,
@@ -1236,6 +1547,11 @@ def main() -> None:
         auto_compact=args.auto_compact,
         compaction_trigger_fraction=args.compaction_trigger_fraction,
         compaction_target_fraction=args.compaction_target_fraction,
+        model_profile=args.model_profile,
+        capability_probe=args.capability_probe,
+        wm2_guidance=args.wm2_guidance,
+        wm2_workbench=args.wm2_workbench,
+        experiment_card_override=args.experiment_card,
     )
     print(json.dumps(summary, indent=2, sort_keys=True))
 

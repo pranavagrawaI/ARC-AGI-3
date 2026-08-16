@@ -12,6 +12,7 @@ operated in a live LS20 run.
 Python 3.14 ARC host                         Python 3.12 NOOA worker
 
 public frame -> PNG ---- JSONL IPC -------> one persistent NOOA Agent
+settled grid ----------- CodeAct only ----> one palette-mode PIL `image`
 recorded transitions -- treatment only --> Predict OR CodeAct analysis
                                                │
                               early decision ──┤
@@ -30,8 +31,11 @@ exactly one ARC action -> returned frame sequence -> settled grid -> repeat
 
 The host does only work that does not require model judgment: capture the public
 frame, list legal human-facing controls, reject an illegal result, execute one
-action, and record the transcript. Muse receives each image and the accumulated
-NOOA conversation. Provider-returned reasoning is replayed on the exact
+action, and record the transcript. CodeAct variants receive one palette-mode
+PIL `image` built from the settled public grid. The same object supports
+`show(image)`, ordinary PIL operations, and exact `np.asarray(image)[y, x]`
+cell inspection. Muse receives the
+accumulated NOOA conversation. Provider-returned reasoning is replayed on the exact
 assistant message that produced it, so it remains available after tool results
 and on later game turns while that event remains in active context. Muse returns:
 
@@ -50,9 +54,10 @@ There are four cumulative variants:
 
 - `predict`: persistent conversation only. It has no tool loop and never receives
   the structured trajectory.
-- `codeact`: the same conversation plus a host-generated copy of every executed
-  settled-grid transition. Bounded NOOA CodeAct can use NumPy in a fresh,
-  network-disabled, filesystem-confined process before returning one decision.
+- `codeact`: the same conversation plus the exact current settled grid and a
+  host-generated copy of every executed settled-grid transition. Bounded NOOA
+  CodeAct can use NumPy in a fresh, network-disabled, filesystem-confined
+  process before returning one decision.
 - `codeact_notes`: `codeact` plus the NOOA ARC solver's familiar
   `list_notes`/`read_notes`/`append_notes`/`write_notes` interface. Muse authors
   durable semantic knowledge under the run-local `knowledge/` directory; the
@@ -81,7 +86,8 @@ encodings, not NOOA's generic JSON-output instructions. Three failed attempts,
 or a malformed or illegal decision, is a model failure.
 
 The `codeact` treatment has no writable workspace. Its model-visible execution
-context is limited to the current inputs, `np`, `show`, and `return_result`;
+context is limited to `image`, the other current inputs, `np`, `show`, and
+`return_result`;
 worker helpers, generic sub-LLM fan-out, and `self` are absent. `codeact_notes`
 adds only four brokered `self.*_notes` methods; direct filesystem access and all
 other `self` access remain blocked. Note names are confined to
@@ -90,7 +96,9 @@ cells cannot execute game actions or mutate host evidence. Attempts to access
 files, dangerous reflection, or dynamic execution primitives are blocked and
 logged. NOOA's own
 input prefill is identified separately and may perform harmless type inspection,
-so the current image and trajectory are presented before the first decision call.
+so the exact current image and trajectory are presented before the first
+decision call. `image.size` and `image.crop(...)` use PIL coordinates;
+`np.asarray(image)[y, x]` returns the canonical integer cell value.
 
 There is still no claim protocol, verifier, supplied action map, world model,
 planner, action batching, host-selected action, or semantic correction. The
@@ -98,6 +106,107 @@ compact variant adds retrieval and a model-authored checkpoint, but validation
 checks structure and provenance rather than whether its game interpretation is
 true. The same NOOA `Agent` object lives for the entire game. IPC is necessary
 because the ARC SDK uses Python 3.14 while pinned NOOA uses Python 3.12.
+
+## E0 typed host evidence
+
+The cumulative 0160 worktree adds E0 beneath every existing variant without
+changing Muse's visible tools or decision context. The Python 3.14 host now
+persists `evidence/ledger.jsonl`, content-addressed public-grid blobs, immutable
+evidence snapshots, and one atomic current-snapshot pointer.
+
+E0 classifies only public host facts. It keeps boundary, outcome, and animation
+as independent channels; uses separate `attempt_before` and `attempt_after`
+identifiers for evaluator-local replay segmentation; and never infers a reset,
+terminal outcome, object, or mechanic from pixels. The authoritative input
+prefix and derived transition manifest have independently reproducible SHA-256
+commitments. Attempt identifiers and the complete E0 projection remain hidden
+from Muse in E0.
+
+The implementation and contract are documented in
+`e0_evidence.py`, `EXECUTABLE-THEORY-LANE-SPEC.md`, and `PROVENANCE.md`.
+
+## WM0 commitments and WM1 quick theories
+
+The cumulative `codeact_notes_compact_world_model` variant preserves the same
+persistent investigator, notes, archived-history interface, human action labels,
+and one-action host boundary. It adds three brokered affordances:
+
+- `self.read_world_model()`;
+- `self.write_world_model(source)`;
+- `self.edit_world_model_function(name, source)`.
+
+The implemented WM2 requirements are in
+[`WM2-GUIDANCE-AND-OPPORTUNITY-SPEC.md`](WM2-GUIDANCE-AND-OPPORTUNITY-SPEC.md).
+WM2 keeps two separately configurable modules: a game-general Theory Practice
+Guide and a deterministic Theory Workbench View. The host surfaces exact
+conditions; the model alone decides whether they constitute a useful modeling
+opportunity. Enable them independently with `--wm2-guidance` and
+`--wm2-workbench`; any live WM2 configuration also requires an explicit
+`--experiment-card` so the complete treatment is frozen before contact.
+
+WM1 makes the first executable commitment smaller without removing WM0's full
+Moore machine. Muse may define only `predict(grid, action)`, return `None` for
+an unsupported action, and use `-1` for unclaimed cells. The evaluator scores
+only claimed cells on ordinary transitions. When hidden state becomes useful,
+Muse can replace that source with the full `State` / `init_state` / `transition`
+/ `render` / `outcome` contract; no host component performs that promotion.
+
+The initial quick source is a template, not an active belief. Every Muse edit is durably stored
+as a candidate. Syntax, authority, contract, and containment failures leave the
+prior current version unchanged. Any operationally valid candidate becomes the
+current Muse-authored commitment even when replay contradicts it; the evaluator
+reports separate initial-render, transition, and outcome measurements but never
+rewrites source or recommends a repair.
+
+Candidate execution occurs in a fresh Python 3.12 process with a sanitized
+environment, closed inherited descriptors, Landlock filesystem confinement,
+seccomp network denial, and CPU, memory, process, descriptor, output, wall-time,
+and file-size bounds. The process receives only an immutable copy of the
+candidate and the exact E0 evidence/blobs required for replay. Fourteen frozen
+containment probes cover credentials, process/IPC access, path and mutation
+escape, network/process creation, resource exhaustion, reflection, and a
+transition-only hang.
+
+WM0 passing its development gate does not establish behavioral improvement or
+causal use. `P0` prospective shadow prediction is still absent. Bounded live
+first contacts with Muse and GPT-5.6 Luna both preserved the actor loop but
+produced no executable candidate; their frozen evidence is under
+`artifacts/wm0-first-contact-v2/` and `artifacts/wm0-luna-first-contact-v1/`.
+The Luna run uses `--model-profile gpt-5.6-luna`, which pins the OpenRouter
+model and OpenAI-only provider route without changing the model-visible WM0
+surface.
+
+Both first contacts independently attempted ordinary pixel inspection through
+the display-oriented NOOA transport wrapper and failed on `image.size`; Luna
+also found that `np.asarray(image)` is zero-dimensional. The subsequent
+interface repair keeps that wrapper private and exposes one 64x64 palette-mode
+PIL `image`, without adding segmentation, object labels, or game semantics.
+
+The WM1 quick-theory first contact is preserved under
+`artifacts/wm1-quick-theory-muse-v1/`. It was valid for eight actions but created
+no candidate and completed no level. Muse attempted `self.read_world_model()`
+at turns 0 and 1; both bare-expression cells returned empty stdout because the
+CodeAct cell behaves as a script rather than a REPL. The next interface boundary
+was therefore automatic visibility of broker results, not another unchanged
+paid run. The worker now auto-displays a final bare broker call and returns a
+structured feedback envelope naming status, phase, code, state effect,
+diagnostics, and the explicit retry surface. See the run-local
+`AFTER-ACTION.md`.
+
+The subsequent recovery-feedback check is preserved under
+`artifacts/wm1-recovery-feedback-muse-v1/`. Automatic display was exercised by
+a bare notes call and returned visible `[]`, closing the specific script-versus-
+REPL defect. Muse nevertheless made zero world-model reads or edits and created
+no candidate across eight valid actions. This leaves discoverability and low
+immediate utility as competing explanations; the same surface should not be run
+again unchanged.
+
+The matched-surface Luna check under
+`artifacts/wm1-recovery-feedback-luna-v1/` also produced zero world-model calls
+or candidates. Luna used only ten analysis cells and chose a more varied route
+from transition evidence, so its non-use may reflect low artifact utility rather
+than inability. Cross-model non-adoption weakens a Muse-only explanation but
+still does not separate discoverability from utility.
 
 Reasoning replay and context compaction remain separate boundaries in the three
 original variants. `codeact_notes_compact` installs the mechanism behind a

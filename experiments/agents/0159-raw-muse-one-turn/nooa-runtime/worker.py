@@ -26,7 +26,8 @@ from nooa.context_blocks import (
 )
 from nooa.errors import GenerationError
 from nooa.events import Feedback
-from nooa.media import Image
+from nooa.media import Image as TransportImage
+from nooa.runtime.media_capture import show
 from nooa.runtime.restrictions import DEFAULT_BLOCKED_MODULES, RestrictionsConfig
 from nooa.runtime.sandbox.config import SandboxConfig
 from nooa.runtime.sandbox.errors import SandboxError
@@ -34,23 +35,69 @@ from nooa.runtime.sandbox.executor import check_enforceable
 from nooa.strategies import CodeActStrategy, PredictStrategy
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, RetryConfig, Tool, ToolCall
 from nooa.unifiedllm.registry import get_llm_client
+from PIL import Image as PILImage
 from pydantic import BaseModel, ConfigDict, model_validator
+
+from theory_guidance import (
+    COMPLETE_PRACTICE_EXAMPLES,
+    GUIDE_SCHEMA,
+    practice_guide_sha256,
+    render_practice_guide,
+)
+from theory_workbench import (
+    TheoryWorkbenchViewBuilder,
+    theory_snapshot_from_lane_view,
+)
+from world_model_lane import E0, EditProvenance, ExecutableTheoryLane, ModelEdit
 
 _PROTOCOL_FD = os.dup(sys.stdout.fileno())
 
-MODEL = "meta/muse-glimmer-30b"
-MODEL_ROUTE = "openai/meta/muse-glimmer-30b"
+DEFAULT_MODEL_PROFILE = "muse-glimmer-30b"
+MODEL_PROFILES = {
+    DEFAULT_MODEL_PROFILE: {
+        "model": "meta/muse-glimmer-30b",
+        "model_route": "openai/meta/muse-glimmer-30b",
+        "context_window": 131_072,
+        "provider_route": "qualified-pool-v18",
+        "provider_routes": [
+            "deepinfra-bf16",
+            "together",
+            "fireworks",
+            "phala",
+        ],
+        "single_provider": {
+            "order": ["deepinfra/bf16"],
+            "only": ["deepinfra/bf16"],
+            "allow_fallbacks": False,
+            "require_parameters": False,
+            "quantizations": ["bf16"],
+        },
+    },
+    "gpt-5.6-luna": {
+        "model": "openai/gpt-5.6-luna",
+        "model_route": "openai/openai/gpt-5.6-luna",
+        "context_window": 1_050_000,
+        "provider_route": "openai",
+        "provider_routes": ["openai"],
+        "single_provider": {
+            "order": ["openai"],
+            "only": ["openai"],
+            "allow_fallbacks": False,
+            "require_parameters": False,
+        },
+    },
+}
+MODEL_PROFILE = os.environ.get("NOOA_0159_MODEL_PROFILE", DEFAULT_MODEL_PROFILE)
+if MODEL_PROFILE not in MODEL_PROFILES:
+    raise ValueError(f"unknown NOOA_0159_MODEL_PROFILE {MODEL_PROFILE!r}")
+MODEL_CONFIG = MODEL_PROFILES[MODEL_PROFILE]
+MODEL = MODEL_CONFIG["model"]
+MODEL_ROUTE = MODEL_CONFIG["model_route"]
 API_BASE = "https://openrouter.ai/api/v1"
-MODEL_CONTEXT_WINDOW = 131_072
+MODEL_CONTEXT_WINDOW = MODEL_CONFIG["context_window"]
 MAX_TOKENS = 8_192
 PROVIDER_ATTEMPT_TIMEOUT_SECONDS = 90.0
-SINGLE_PROVIDER = {
-    "order": ["deepinfra/bf16"],
-    "only": ["deepinfra/bf16"],
-    "allow_fallbacks": False,
-    "require_parameters": False,
-    "quantizations": ["bf16"],
-}
+SINGLE_PROVIDER = MODEL_CONFIG["single_provider"]
 QUALIFIED_PROVIDERS = (
     ("deepinfra-bf16", "deepinfra/bf16", ["bf16"]),
     ("together", "together", None),
@@ -68,9 +115,34 @@ MAX_PROVIDER_CALLS_PER_TURN = ANALYSIS_MAX_ITERATIONS + COMMIT_MAX_ATTEMPTS
 NOTE_NAME = re.compile(r"^[a-z0-9_-]+\.md$")
 MAX_NOTE_CHARS = 24_000
 MAX_KNOWLEDGE_CHARS = 72_000
+WORLD_MODEL_VARIANT = "codeact_notes_compact_world_model"
+COMPACT_VARIANTS = frozenset({"codeact_notes_compact", WORLD_MODEL_VARIANT})
+KNOWLEDGE_VARIANTS = frozenset({"codeact_notes", *COMPACT_VARIANTS})
 ActionName = Literal[
     "RESET", "UP", "DOWN", "LEFT", "RIGHT", "SPACEBAR", "CLICK", "UNDO"
 ]
+
+# Exact ARC-AGI-3 public rendering palette from arc_agi.rendering.COLOR_MAP.
+# The worker cannot import arc_agi because it intentionally runs in the pinned
+# Python 3.12 NOOA environment, separate from the Python 3.14 game host.
+ARC_PALETTE = (
+    (255, 255, 255),
+    (204, 204, 204),
+    (153, 153, 153),
+    (102, 102, 102),
+    (51, 51, 51),
+    (0, 0, 0),
+    (229, 58, 163),
+    (255, 123, 204),
+    (249, 60, 49),
+    (30, 147, 255),
+    (136, 216, 241),
+    (255, 220, 0),
+    (255, 133, 27),
+    (146, 18, 49),
+    (79, 204, 48),
+    (163, 86, 214),
+)
 
 _ANALYSIS_RESTRICTIONS = RestrictionsConfig(
     blocked_modules=DEFAULT_BLOCKED_MODULES
@@ -549,8 +621,10 @@ environment action or mutate host evidence.""",
             "execution_context": """## Execution context
 
 The current `image`, immutable-copy `trajectory`, `legal_actions`,
-`previous_action`, `turn`, and `levels_completed` are preloaded. NumPy is
-available as `np`. Use `show(image)` to inspect the image and
+`previous_action`, `turn`, and `levels_completed` are preloaded. `image` is the
+settled public 64x64 palette-mode PIL image. Use `image.size`, `image.crop(...)`,
+or `np.asarray(image)[y, x]` for exact cell computation, and `show(image)` for
+visual inspection. NumPy is available as `np`. Use
 `return_result(action=..., x=..., y=..., explanation=...)` to finish. Use null
 coordinates for every action except CLICK.""",
             "self": None,
@@ -653,8 +727,10 @@ durable writable surface."""
         blocks["execution_context"] = """## Execution context
 
 The current `image`, immutable-copy `trajectory`, `legal_actions`,
-`previous_action`, `turn`, and `levels_completed` are preloaded. NumPy is
-available as `np`. Use `show(image)` to inspect the image. Use
+`previous_action`, `turn`, and `levels_completed` are preloaded. `image` is the
+settled public 64x64 palette-mode PIL image. Use `image.size`, `image.crop(...)`,
+or `np.asarray(image)[y, x]` for exact cell computation, and `show(image)` for
+visual inspection. NumPy is available as `np`. Use
 `self.list_notes()`, `self.read_notes(name)`, `self.append_notes(name, content)`,
 and `self.write_notes(name, content)` for durable beliefs. Use
 `return_result(action=..., x=..., y=..., explanation=...)` to finish. Use null
@@ -844,7 +920,7 @@ class GameSolver(Agent):
     @strategy(PredictStrategy())
     async def next_action(
         self,
-        image: Image,
+        image: TransportImage,
         legal_actions: list[ActionName],
         previous_action: ActionName | None,
         turn: int,
@@ -930,14 +1006,57 @@ def _forbidden_cell_primitive(
     return None
 
 
+def _auto_echo_broker_result(
+    code: str, *, allowed_self_methods: frozenset[str]
+) -> tuple[str, bool]:
+    """Give bare broker calls notebook-like result visibility.
+
+    CodeAct cells are scripts, so a final expression normally disappears. Models
+    repeatedly use broker methods as if they were notebook tools. Echo only a
+    top-level final direct call on the allowed `self` surface; assignments and
+    explicit prints keep ordinary Python behavior.
+    """
+    import ast
+
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return code, False
+    if not tree.body or not isinstance(tree.body[-1], ast.Expr):
+        return code, False
+    expression = tree.body[-1].value
+    if not (
+        isinstance(expression, ast.Call)
+        and isinstance(expression.func, ast.Attribute)
+        and isinstance(expression.func.value, ast.Name)
+        and expression.func.value.id == "self"
+        and expression.func.attr in allowed_self_methods
+    ):
+        return code, False
+    statement = tree.body[-1]
+    if statement.end_lineno is None or statement.end_col_offset is None:
+        return code, False
+    lines = code.splitlines(keepends=True)
+
+    def character_offset(line_number: int, byte_column: int) -> int:
+        line = lines[line_number - 1]
+        character_column = len(line.encode("utf-8")[:byte_column].decode("utf-8"))
+        return sum(len(item) for item in lines[: line_number - 1]) + character_column
+
+    start = character_offset(statement.lineno, statement.col_offset)
+    end = character_offset(statement.end_lineno, statement.end_col_offset)
+    expression_source = code[start:end]
+    return f"{code[:start]}print({expression_source}){code[end:]}", True
+
+
 class TrajectoryGameSolver(Agent):
     """You are a game solver playing an unfamiliar ARC-AGI-3 interactive grid game.
 
     Your goal is to beat the game. You do not know the game rules or what the
     controls do inside this game. The action interface uses the same labels as
     the ARC Prize human interface: UP, DOWN, LEFT, RIGHT, SPACEBAR, CLICK x y,
-    UNDO, and RESET. Infer game-specific effects from the current image and the
-    complete executed trajectory. Choose exactly one listed legal action.
+    UNDO, and RESET. Infer game-specific effects from the exact current image
+    and complete executed trajectory. Choose exactly one listed legal action.
 
     The host supplies `trajectory`, a private analysis copy of immutable evidence
     ordered by execution time. Editing that local copy cannot change host evidence.
@@ -958,12 +1077,11 @@ class TrajectoryGameSolver(Agent):
         async def guard_and_record(ctx: Any, nxt: Any) -> Any:
             code = getattr(ctx, "code", "")
             tool_call_id = str(getattr(ctx, "params", {}).get("tool_call_id", ""))
+            allowed_self_methods = getattr(self, "_allowed_self_methods", frozenset())
             blocked = (
                 _forbidden_cell_primitive(
                     code,
-                    allowed_self_methods=getattr(
-                        self, "_allowed_self_methods", frozenset()
-                    ),
+                    allowed_self_methods=allowed_self_methods,
                     allowed_history_methods=getattr(
                         self, "_allowed_history_methods", frozenset()
                     ),
@@ -971,10 +1089,19 @@ class TrajectoryGameSolver(Agent):
                 if isinstance(code, str)
                 else None
             )
+            executed_code, auto_echoed_result = (
+                _auto_echo_broker_result(
+                    code, allowed_self_methods=allowed_self_methods
+                )
+                if isinstance(code, str) and blocked is None
+                else (code, False)
+            )
             self._analysis_audit.write(
                 "codeact_cell_submitted",
                 code=code,
                 code_sha256=hashlib.sha256(str(code).encode()).hexdigest(),
+                executed_code=(executed_code if auto_echoed_result else None),
+                auto_echoed_result=auto_echoed_result,
                 blocked_primitive=blocked,
                 framework_prefill=tool_call_id.startswith("prefill_"),
                 tool_call_id=tool_call_id,
@@ -982,8 +1109,10 @@ class TrajectoryGameSolver(Agent):
             if blocked:
                 ctx.code = (
                     f"print('BLOCKED: {blocked} is outside the read-only analysis surface. "
-                    "Use trajectory, legal_actions, the current image, and NumPy only.')"
+                    "Use image, trajectory, legal_actions, and NumPy only.')"
                 )
+            elif auto_echoed_result:
+                ctx.code = executed_code
             try:
                 ctx = await nxt(ctx)
             except Exception as error:
@@ -1010,7 +1139,7 @@ class TrajectoryGameSolver(Agent):
 
     async def choose_action(
         self,
-        image: Image,
+        image: PILImage.Image,
         trajectory: list[dict[str, Any]],
         legal_actions: list[ActionName],
         previous_action: ActionName | None,
@@ -1072,7 +1201,7 @@ class TrajectoryGameSolver(Agent):
     @strategy(ReadOnlyTrajectoryCodeActStrategy(config=_CODEACT_CONFIG))
     async def analyze_trajectory_and_choose_action(
         self,
-        image: Image,
+        image: PILImage.Image,
         trajectory: list[dict[str, Any]],
         legal_actions: list[ActionName],
         previous_action: ActionName | None,
@@ -1080,6 +1209,7 @@ class TrajectoryGameSolver(Agent):
         levels_completed: int,
     ) -> Decision:
         """Analyze recorded experience, then return the next best action and explanation."""
+        show(image)
         ...  # noqa: PIE790 - NOOA uses ellipsis as its generation-method marker
 
     @strategy(CommitActionStrategy(config=_COMMIT_CONFIG))
@@ -1207,7 +1337,7 @@ class DurableBeliefsGameSolver(TrajectoryGameSolver):
     @strategy(DurableBeliefsCodeActStrategy(config=_CODEACT_CONFIG))
     async def analyze_trajectory_and_choose_action(
         self,
-        image: Image,
+        image: PILImage.Image,
         trajectory: list[dict[str, Any]],
         legal_actions: list[ActionName],
         previous_action: ActionName | None,
@@ -1215,6 +1345,7 @@ class DurableBeliefsGameSolver(TrajectoryGameSolver):
         levels_completed: int,
     ) -> Decision:
         """Use evidence and durable beliefs to choose one action."""
+        show(image)
         ...  # noqa: PIE790 - NOOA uses ellipsis as its generation-method marker
 
 
@@ -1225,8 +1356,8 @@ class CompactBeliefsCodeActStrategy(DurableBeliefsCodeActStrategy):
         blocks = super().get_block_overrides()
         blocks["strategy_prompt"] = f"""## Strategy
 
-Use `execute_python(code)` to inspect the current image, recent trajectory suffix,
-durable notes, and archived evidence. Variables persist between analysis cells in
+Use `execute_python(code)` to inspect the exact current image and recent
+trajectory suffix, durable notes, and archived evidence. Variables persist between analysis cells in
 this decision turn. You have up to {ANALYSIS_MAX_ITERATIONS} analysis calls.
 
 After a context-recovery Summary, use the namespaced `history` API when an older
@@ -1239,8 +1370,10 @@ either directly or from a cell. Plain text does not finish the turn."""
         blocks["execution_context"] = """## Execution context
 
 The current `image`, recent immutable-copy `trajectory`, `legal_actions`,
-`previous_action`, `turn`, and `levels_completed` are preloaded. NumPy is
-available as `np`. Use `show(image)` for the current image. The namespaced
+`previous_action`, `turn`, and `levels_completed` are preloaded. `image` is the
+settled public 64x64 palette-mode PIL image. Use `image.size`, `image.crop(...)`,
+or `np.asarray(image)[y, x]` for exact cell computation, and `show(image)` for
+visual inspection. NumPy is available as `np`. The namespaced
 read-only `history` object accesses older immutable evidence. Durable notes use
 the four documented `self.*_notes` methods. Use
 `return_result(action=..., x=..., y=..., explanation=...)` to finish."""
@@ -1299,7 +1432,7 @@ class CompactBeliefsGameSolver(DurableBeliefsGameSolver):
     @strategy(CompactBeliefsCodeActStrategy(config=_CODEACT_CONFIG))
     async def analyze_trajectory_and_choose_action(
         self,
-        image: Image,
+        image: PILImage.Image,
         trajectory: list[dict[str, Any]],
         legal_actions: list[ActionName],
         previous_action: ActionName | None,
@@ -1307,6 +1440,453 @@ class CompactBeliefsGameSolver(DurableBeliefsGameSolver):
         levels_completed: int,
     ) -> Decision:
         """Use recent evidence, archived history, and durable beliefs to act."""
+        show(image)
+        ...  # noqa: PIE790 - NOOA uses ellipsis as its generation-method marker
+
+
+class ExecutableTheoryCodeActStrategy(CompactBeliefsCodeActStrategy):
+    """Expose quick theories and consolidated Moore commitments beside prose."""
+
+    def get_block_overrides(self) -> dict[str, str | DynamicContext | None]:
+        blocks = super().get_block_overrides()
+        blocks["strategy_prompt"] = f"""## Strategy
+
+Use `execute_python(code)` to inspect the exact current image and recent
+trajectory, archived evidence, prose notes, and your executable world-model commitment.
+Variables persist between analysis cells in this decision turn. You have up to
+{ANALYSIS_MAX_ITERATIONS} analysis calls.
+
+Prose notes remain the place for competing or unresolved hypotheses. An
+executable commitment can begin as one small `predict(grid, action)` theory; it
+does not need to explain the whole game. You may commit a concrete transition
+rule when you judge it useful, let replay test it, and revise, replace, or defer
+it. The full Moore-machine form remains available if you decide that history or
+hidden state warrants promotion.
+Each edit executes outside this sandbox against host evidence and returns only
+mechanical support, contradiction, or insufficiency. Evaluation never edits the
+commitment.
+
+Finish by calling `return_result(action=..., x=..., y=..., explanation=...)`,
+either directly or from a cell. Plain text does not finish the turn."""
+        if os.environ.get("NOOA_0159_CAPABILITY_PROBE") == "1":
+            blocks["strategy_prompt"] += """
+
+## One-turn capability and architecture probe
+
+Before choosing the action, write `capability_probe.md` with a deeply detailed
+self-audit. Enumerate everything you can do in this turn, including exact call
+forms, limits, persistence, authority, feedback, and the consequences of using
+each capability. Reconstruct the harness architecture end to end: observation
+and evidence, persistent actor and conversation, analysis sandbox, durable
+notes, archived history, executable-theory broker and isolated evaluator,
+decision commitment, host validation, and environment execution.
+
+For every claim, state how you know it: name the prompt block, visible runtime
+value, tool result, observed behavior, inference, or prior assumption that
+supports it. Separate directly stated facts from inferences. Identify
+uncertainties, contradictions, inaccessible components, and capabilities you
+suspect exist but cannot access. Explain what using each capability would imply
+for the game, evidence, persistence, and security boundaries. Do not invoke a
+capability merely to demonstrate that it exists. After saving the audit, inspect
+the normal game input and commit one action normally."""
+        blocks["sandbox"] = """## Analysis boundary
+
+Code runs in a fresh, network-disabled, filesystem-confined process with a
+20-second cell limit, 30 CPU seconds, and 1024 MB memory. It cannot execute an
+environment action or mutate host evidence. Durable writes are mediated only by
+the notes broker and executable-theory broker. World-model candidates execute in
+a separate fresh evaluator with tighter authority and resource limits."""
+        blocks["execution_context"] = """## Execution context
+
+The current `image`, recent immutable-copy `trajectory`, `legal_actions`,
+`previous_action`, `turn`, and `levels_completed` are preloaded. `image` is the
+settled public 64x64 palette-mode PIL image. Use `image.size`, `image.crop(...)`,
+or `np.asarray(image)[y, x]` for exact cell computation, and `show(image)` for
+visual inspection. NumPy is available as `np`; `history` provides older
+immutable evidence. Durable prose
+uses the four documented notes methods. Executable commitments use
+`self.read_world_model()`, `self.write_world_model(source)`, and
+`self.edit_world_model_function(name, source)`. Use `return_result(...)` to
+finish with exactly one action."""
+        blocks["self"] = blocks["self"] + """
+
+## Executable theory API
+
+- `self.read_world_model() -> dict`
+- `self.write_world_model(source: str) -> dict`
+- `self.edit_world_model_function(name: str, source: str) -> dict`
+
+The smallest source contract is `predict(grid, action) -> grid | None`.
+`grid` is the observed integer NumPy array; `action` is a dict like
+`{"action": "UP", "x": None, "y": None}`. Return a same-shaped integer grid,
+using `-1` for cells you do not claim, or return `None` to abstain for that
+action. This lets you commit one local or action-specific rule quickly.
+
+When a theory needs durable hidden state, replace it with the complete
+Moore-machine contract: `State`, `init_state(grid0, level)`,
+`transition(state, action)`, `render(state)`, and `outcome(state)`. `render` may
+also use `-1`; `outcome` returns `ongoing`, `level_complete`, or `game_over`.
+`self.read_world_model()` returns both templates whenever you need them.
+Operational validity controls activation; an executable but contradicted edit
+still becomes your current commitment. Only a later edit from you replaces it."""
+        blocks["self"] += """
+
+Bare direct calls to broker methods automatically display their structured
+result. Assigning a result keeps ordinary Python behavior, so print the value
+when you want to inspect it. Failures report phase, code, state effect, and
+retry surface; a failed candidate never silently replaces the current model."""
+        if os.environ.get("NOOA_0159_WM2_GUIDANCE") == "1":
+            blocks["theory_practice"] = render_practice_guide()
+        if os.environ.get("NOOA_0159_WM2_WORKBENCH") == "1":
+            blocks["theory_workbench"] = DynamicContext(
+                "self.theory_workbench_context()"
+            )
+        return blocks
+
+    def get_static_block_keys(self) -> set[str]:
+        return super().get_static_block_keys() | {"theory_practice"}
+
+    def get_block_order(self) -> list[str] | None:
+        order = [
+            "system_prompt",
+            "strategy_prompt",
+            "sandbox",
+            "execution_context",
+            "history",
+        ]
+        if os.environ.get("NOOA_0159_WM2_GUIDANCE") == "1":
+            order.append("theory_practice")
+        if os.environ.get("NOOA_0159_WM2_WORKBENCH") == "1":
+            order.append("theory_workbench")
+        order.append("self")
+        return order
+
+
+class ExecutableTheoryGameSolver(CompactBeliefsGameSolver):
+    """Compact persistent investigator with prose and executable commitments."""
+
+    theory_lane: Annotated[ExecutableTheoryLane, hidden]
+    _theory_workbench_rendered: Annotated[str, hidden]
+    _latest_world_model_edit_status: Annotated[str | None, hidden]
+    _allowed_self_methods = DurableBeliefsGameSolver._allowed_self_methods | frozenset(
+        {
+            "read_world_model",
+            "write_world_model",
+            "edit_world_model_function",
+        }
+    )
+
+    def __init__(self, *args: Any, world_model_dir: Path, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self.theory_lane = ExecutableTheoryLane(world_model_dir)
+        self._world_model_edit_index = 0
+        self._theory_workbench_rendered = (
+            "The Theory Workbench View is waiting for authoritative evidence."
+        )
+        self._latest_world_model_edit_status = None
+
+    @hidden
+    def install_world_model_evidence(self, snapshot_path: Path) -> None:
+        state = self.theory_lane.advance(snapshot_path)
+        workbench = None
+        if (
+            os.environ.get("NOOA_0159_WM2_GUIDANCE") == "1"
+            and os.environ.get("NOOA_0159_WM2_WORKBENCH") != "1"
+        ):
+            rendered_guide = render_practice_guide()
+            self._analysis_audit.write(
+                "theory_practice_available",
+                schema=GUIDE_SCHEMA,
+                guide_sha256=practice_guide_sha256(),
+                rendered_bytes=len(rendered_guide.encode("utf-8")),
+            )
+        if os.environ.get("NOOA_0159_WM2_WORKBENCH") == "1":
+            evidence = E0.load_snapshot(snapshot_path)
+            blob_root = snapshot_path.parent.parent / "blobs"
+
+            def read_grid(digest: str) -> tuple[tuple[int, ...], ...]:
+                value = json.loads(
+                    (blob_root / f"grid-{digest}.json").read_text(encoding="utf-8")
+                )
+                return tuple(tuple(int(cell) for cell in row) for row in value)
+
+            theory = theory_snapshot_from_lane_view(
+                self.theory_lane.read_world_model(),
+                latest_edit_status=self._latest_world_model_edit_status,
+            )
+            workbench = TheoryWorkbenchViewBuilder(read_grid=read_grid).build(
+                evidence, theory
+            )
+            self._theory_workbench_rendered = workbench.render()
+            self._analysis_audit.write(
+                "theory_workbench_built",
+                schema=workbench.schema,
+                view_digest=workbench.view_digest,
+                evidence_snapshot_id=workbench.evidence_snapshot_id,
+                theory_snapshot_id=workbench.theory_snapshot_id,
+                condition_codes=list(workbench.condition_codes),
+                displayed_card_codes=[card.code for card in workbench.cards],
+                omitted_card_count=workbench.omitted_card_count,
+                omitted_card_codes=list(workbench.omitted_card_codes),
+                cited_evidence_event_ids=sorted(
+                    {
+                        event_id
+                        for card in workbench.cards
+                        for event_id in card.evidence_event_ids
+                    }
+                ),
+                rendered_bytes=len(self._theory_workbench_rendered.encode("utf-8")),
+                guide_schema=(
+                    GUIDE_SCHEMA
+                    if os.environ.get("NOOA_0159_WM2_GUIDANCE") == "1"
+                    else None
+                ),
+                guide_sha256=(
+                    practice_guide_sha256()
+                    if os.environ.get("NOOA_0159_WM2_GUIDANCE") == "1"
+                    else None
+                ),
+            )
+        self._analysis_audit.write(
+            "world_model_evidence_installed",
+            evidence_snapshot_id=state.evidence_snapshot_id,
+            current_model_version_id=state.current_model_version_id,
+            wm2_workbench_built=workbench is not None,
+        )
+
+    @hidden
+    def theory_workbench_context(self) -> str:
+        """Return the view frozen before the current environment decision."""
+
+        return self._theory_workbench_rendered
+
+    def read_world_model(self) -> dict[str, Any]:
+        """Read the current commitment plus quick and Moore-machine templates."""
+        view = self.theory_lane.read_world_model()
+        if os.environ.get("NOOA_0159_WM2_GUIDANCE") == "1":
+            view.update(
+                {
+                    "practice_guide_schema": GUIDE_SCHEMA,
+                    "practice_guide_sha256": practice_guide_sha256(),
+                    "practice_examples": COMPLETE_PRACTICE_EXAMPLES,
+                }
+            )
+        view["tool_feedback"] = {
+            "status": "ok",
+            "operation": "read_world_model",
+            "message": (
+                "No executable commitment is active; choose either supplied template."
+                if view["current_model_version_id"] is None
+                else "Returned the current Muse-authored executable commitment."
+            ),
+            "state_effect": "read_only",
+            "current_model_version_id": view["current_model_version_id"],
+            "evaluation_stale": view["evaluation_stale"],
+            "available_contracts": ["partial_predictor", "moore_machine"],
+        }
+        self._analysis_audit.write(
+            "world_model_read",
+            current_model_version_id=view["current_model_version_id"],
+            evidence_snapshot_id=view["installed_evidence_snapshot_id"],
+        )
+        return view
+
+    def write_world_model(self, source: str) -> dict[str, Any]:
+        """Apply one quick predictor or full Moore commitment through the broker."""
+        if not isinstance(source, str):
+            return self._world_model_input_error(
+                operation="write_world_model",
+                code="SOURCE_NOT_TEXT",
+                message="source must be a Python source string",
+                expected="self.write_world_model(source: str)",
+            )
+        return self._apply_world_model_edit(
+            ModelEdit.whole_file(source), operation="write_world_model"
+        )
+
+    def edit_world_model_function(self, name: str, source: str) -> dict[str, Any]:
+        """Apply one function replacement through the same WM0 transaction."""
+        if not isinstance(name, str) or not isinstance(source, str):
+            return self._world_model_input_error(
+                operation="edit_world_model_function",
+                code="EDIT_ARGUMENT_NOT_TEXT",
+                message="name and source must both be strings",
+                expected="self.edit_world_model_function(name: str, source: str)",
+            )
+        return self._apply_world_model_edit(
+            ModelEdit.function(name, source), operation="edit_world_model_function"
+        )
+
+    def _world_model_input_error(
+        self, *, operation: str, code: str, message: str, expected: str
+    ) -> dict[str, Any]:
+        current = self.theory_lane.read_world_model()["current_model_version_id"]
+        return {
+            "candidate_status": "rejected_input",
+            "active_model_version_id": current,
+            "tool_feedback": {
+                "status": "error",
+                "operation": operation,
+                "phase": "input_validation",
+                "code": code,
+                "message": message,
+                "expected": expected,
+                "state_effect": "No candidate was created; the current model is unchanged.",
+                "retry": {
+                    "allowed": True,
+                    "current_model_version_id": current,
+                    "calls": [
+                        "self.read_world_model()",
+                        "self.write_world_model(source)",
+                        "self.edit_world_model_function(name, source)",
+                    ],
+                },
+            },
+        }
+
+    @hidden
+    def _apply_world_model_edit(
+        self, edit: ModelEdit, *, operation: str
+    ) -> dict[str, Any]:
+        sequence = CURRENT_SEQUENCE.get()
+        if sequence is None:
+            raise RuntimeError("world-model edits require an active worker turn")
+        self._world_model_edit_index += 1
+        provenance = EditProvenance(
+            author_event_id=(
+                f"worker-turn-{sequence}:world-model-edit-"
+                f"{self._world_model_edit_index:04d}"
+            )
+        )
+        evaluation = self.theory_lane.apply(edit, provenance)
+        self._latest_world_model_edit_status = evaluation.candidate_status
+        self._analysis_audit.write(
+            "world_model_edit_evaluated",
+            edit_kind=edit.kind,
+            function_name=edit.function_name,
+            evaluation_id=evaluation.evaluation_id,
+            candidate_id=evaluation.candidate_id,
+            candidate_status=evaluation.candidate_status,
+            active_model_version_id=evaluation.active_model_version_id,
+            evidence_snapshot_id=evaluation.evidence_snapshot_id,
+            operational_failure_code=evaluation.operational.get("failure_code"),
+        )
+        # Deliberately return measurements, not a repair instruction.
+        result = {
+            "evaluation_id": evaluation.evaluation_id,
+            "candidate_id": evaluation.candidate_id,
+            "candidate_status": evaluation.candidate_status,
+            "active_model_version_id": evaluation.active_model_version_id,
+            "previous_model_version_id": evaluation.previous_model_version_id,
+            "evidence_snapshot_id": evaluation.evidence_snapshot_id,
+            "operational": evaluation.operational,
+            "initial_render": evaluation.initial_render,
+            "dynamics": evaluation.dynamics,
+            "outcome": evaluation.outcome,
+            "first_divergence": evaluation.first_divergence,
+        }
+        result["tool_feedback"] = self._world_model_evaluation_feedback(
+            operation=operation,
+            evaluation=evaluation,
+        )
+        return result
+
+    @staticmethod
+    def _world_model_evaluation_feedback(
+        *, operation: str, evaluation: Any
+    ) -> dict[str, Any]:
+        status = evaluation.candidate_status
+        rejected = status == "rejected_operationally"
+        contradicted = status == "active_contradicted"
+        inconclusive = status == "active_inconclusive"
+        operational = evaluation.operational
+        code = operational.get("failure_code")
+        phase = (
+            "source_validation"
+            if code in {
+                "SOURCE_LIMIT",
+                "SYNTAX_ERROR",
+                "PROHIBITED_IMPORT",
+                "PROHIBITED_OPERATION",
+            }
+            else "contract_validation"
+            if code == "MISSING_CONTRACT"
+            or code == "LOAD_FAILED"
+            or str(code).startswith("CONTRACT_")
+            else "isolated_execution"
+            if code
+            in {
+                "ISOLATION_UNAVAILABLE",
+                "MEMORY_LIMIT",
+                "OUTPUT_LIMIT",
+                "PROCESS_TERMINATED",
+                "RESULT_LIMIT",
+                "WALL_TIME_LIMIT",
+            }
+            else "operational_validation"
+            if code
+            else "empirical_replay"
+        )
+        if rejected:
+            headline = "Candidate rejected; current model preserved."
+            severity = "error"
+            state_effect = (
+                "No model version was activated; the previous current version remains active."
+            )
+        elif contradicted:
+            headline = "Candidate activated, then contradicted by replay evidence."
+            severity = "warning"
+            state_effect = "The candidate is now current; only a later edit from you replaces it."
+        elif inconclusive:
+            headline = "Candidate activated; available evidence is insufficient."
+            severity = "info"
+            state_effect = "The candidate is now current; its evaluation may become stale."
+        else:
+            headline = "Candidate activated and supported by available replay evidence."
+            severity = "success"
+            state_effect = "The candidate is now current; support is provisional, not correctness."
+        diagnostics = {
+            key: operational[key]
+            for key in ("failure_code", "message", "line", "column", "contract_kind")
+            if operational.get(key) is not None
+        }
+        return {
+            "status": severity,
+            "operation": operation,
+            "phase": phase,
+            "code": code,
+            "message": headline,
+            "state_effect": state_effect,
+            "candidate_status": status,
+            "diagnostics": diagnostics,
+            "first_divergence": evaluation.first_divergence,
+            "retry": {
+                "allowed": True,
+                "active_model_version_id": evaluation.active_model_version_id,
+                "previous_model_version_id": evaluation.previous_model_version_id,
+                "calls": [
+                    "self.read_world_model()",
+                    "self.write_world_model(source)",
+                    "self.edit_world_model_function(name, source)",
+                ],
+                "note": (
+                    "Inspect the mechanical diagnostics. A new edit is optional and remains authored by you."
+                ),
+            },
+        }
+
+    @strategy(ExecutableTheoryCodeActStrategy(config=_CODEACT_CONFIG))
+    async def analyze_trajectory_and_choose_action(
+        self,
+        image: PILImage.Image,
+        trajectory: list[dict[str, Any]],
+        legal_actions: list[ActionName],
+        previous_action: ActionName | None,
+        turn: int,
+        levels_completed: int,
+    ) -> Decision:
+        """Use evidence, hypotheses, and executable commitments to act."""
+        show(image)
         ...  # noqa: PIE790 - NOOA uses ellipsis as its generation-method marker
 
 
@@ -1354,6 +1934,28 @@ def _error_fields(error: Exception) -> dict[str, Any]:
         "rate_limited": status == 429 or "429" in str(error),
         "message": str(error).replace("\n", " ")[:300],
     }
+
+
+def _validated_palette_image(value: Any) -> PILImage.Image:
+    """Build the one model-facing PIL observation from host-authored cells."""
+    if not isinstance(value, list) or not value:
+        raise TypeError("codeact request image_cells must be a non-empty row list")
+    width: int | None = None
+    for row in value:
+        if not isinstance(row, list) or not row:
+            raise TypeError("codeact request image_cells rows must be non-empty lists")
+        if width is None:
+            width = len(row)
+        elif len(row) != width:
+            raise ValueError("codeact request image_cells must be rectangular")
+        if any(type(cell) is not int for cell in row):
+            raise TypeError("codeact request image_cells cells must be integers")
+        if any(cell < 0 or cell >= len(ARC_PALETTE) for cell in row):
+            raise ValueError("codeact request image_cells cells must be in [0, 15]")
+    image = PILImage.fromarray(np.asarray(value, dtype=np.uint8))
+    palette = [channel for color in ARC_PALETTE for channel in color]
+    image.putpalette(palette + [0] * (768 - len(palette)))
+    return image
 
 
 def _failure_stage(error: Exception) -> str:
@@ -1665,7 +2267,7 @@ async def serve() -> None:
     audit_path = os.environ.get("NOOA_0159_AUDIT_LOG")
     audit = AuditLog(Path(audit_path) if audit_path else None)
     variant = os.environ.get("NOOA_0159_VARIANT", "predict")
-    if variant not in {"predict", "codeact", "codeact_notes", "codeact_notes_compact"}:
+    if variant not in {"predict", "codeact", *KNOWLEDGE_VARIANTS}:
         raise ValueError(f"unknown NOOA_0159_VARIANT {variant!r}")
     scripted_client = any(
         os.environ.get(name) is not None
@@ -1678,24 +2280,44 @@ async def serve() -> None:
     missing_sandbox_guards = (
         check_enforceable(_CODEACT_CONFIG.sandbox) if variant != "predict" else []
     )
-    multi_provider = variant == "codeact_notes_compact" and not scripted_client
+    multi_provider = (
+        variant in COMPACT_VARIANTS
+        and MODEL_PROFILE == DEFAULT_MODEL_PROFILE
+        and not scripted_client
+    )
     llm = build_llm(audit, multi_provider=multi_provider)
     solver: (
         GameSolver
         | TrajectoryGameSolver
         | DurableBeliefsGameSolver
         | CompactBeliefsGameSolver
+        | ExecutableTheoryGameSolver
     )
-    if variant in {"codeact_notes", "codeact_notes_compact"}:
+    if variant in KNOWLEDGE_VARIANTS:
         knowledge_path = os.environ.get("NOOA_0159_KNOWLEDGE_DIR")
         if not knowledge_path:
             raise RuntimeError(f"{variant} requires NOOA_0159_KNOWLEDGE_DIR")
-        solver_type = (
-            CompactBeliefsGameSolver
-            if variant == "codeact_notes_compact"
-            else DurableBeliefsGameSolver
-        )
-        solver = solver_type(llm=llm, audit=audit, knowledge_dir=Path(knowledge_path))
+        if variant == WORLD_MODEL_VARIANT:
+            world_model_path = os.environ.get("NOOA_0159_WORLD_MODEL_DIR")
+            if not world_model_path:
+                raise RuntimeError(
+                    f"{variant} requires NOOA_0159_WORLD_MODEL_DIR"
+                )
+            solver = ExecutableTheoryGameSolver(
+                llm=llm,
+                audit=audit,
+                knowledge_dir=Path(knowledge_path),
+                world_model_dir=Path(world_model_path),
+            )
+        else:
+            solver_type = (
+                CompactBeliefsGameSolver
+                if variant == "codeact_notes_compact"
+                else DurableBeliefsGameSolver
+            )
+            solver = solver_type(
+                llm=llm, audit=audit, knowledge_dir=Path(knowledge_path)
+            )
     elif variant == "codeact":
         solver = TrajectoryGameSolver(llm=llm, audit=audit)
     else:
@@ -1703,53 +2325,58 @@ async def serve() -> None:
     if isinstance(solver, CompactBeliefsGameSolver):
         disable_implicit_context_archival(solver, audit)
     reported_model = "scripted-fake" if scripted_client else MODEL
+    provider_route = None
+    provider_routes = None
+    provider_attempt_timeout_seconds = None
+    if not scripted_client:
+        if multi_provider:
+            provider_route = "qualified-pool-v18"
+            provider_routes = [name for name, _, _ in QUALIFIED_PROVIDERS]
+        else:
+            provider_route = MODEL_CONFIG["provider_route"]
+            if variant in COMPACT_VARIANTS:
+                provider_routes = MODEL_CONFIG["provider_routes"]
+        if variant in COMPACT_VARIANTS:
+            provider_attempt_timeout_seconds = PROVIDER_ATTEMPT_TIMEOUT_SECONDS
     audit.write(
         "worker_ready",
+        model_profile=MODEL_PROFILE,
         model=reported_model,
         pid=os.getpid(),
         variant=variant,
         client_kind=client_kind,
-        provider_route=(
-            "qualified-pool-v18"
-            if multi_provider
-            else ("deepinfra/bf16" if not scripted_client else None)
-        ),
-        provider_routes=(
-            [name for name, _, _ in QUALIFIED_PROVIDERS] if multi_provider else None
-        ),
-        provider_attempt_timeout_seconds=(
-            PROVIDER_ATTEMPT_TIMEOUT_SECONDS if multi_provider else None
-        ),
+        provider_route=provider_route,
+        provider_routes=provider_routes,
+        provider_attempt_timeout_seconds=provider_attempt_timeout_seconds,
         sandbox_enforceable=not missing_sandbox_guards,
         missing_sandbox_guards=missing_sandbox_guards,
-        durable_knowledge=variant in {"codeact_notes", "codeact_notes_compact"},
-        searchable_history=variant == "codeact_notes_compact",
-        implicit_context_archival=(False if variant == "codeact_notes_compact" else None),
+        durable_knowledge=variant in KNOWLEDGE_VARIANTS,
+        searchable_history=variant in COMPACT_VARIANTS,
+        executable_theory=variant == WORLD_MODEL_VARIANT,
+        wm2_guidance=os.environ.get("NOOA_0159_WM2_GUIDANCE") == "1",
+        wm2_workbench=os.environ.get("NOOA_0159_WM2_WORKBENCH") == "1",
+        implicit_context_archival=(False if variant in COMPACT_VARIANTS else None),
     )
     _write(
         READY_PREFIX,
         {
+            "model_profile": MODEL_PROFILE,
             "model": reported_model,
             "pid": os.getpid(),
             "variant": variant,
             "client_kind": client_kind,
-            "provider_route": (
-                "qualified-pool-v18"
-                if multi_provider
-                else ("deepinfra/bf16" if not scripted_client else None)
-            ),
-            "provider_routes": (
-                [name for name, _, _ in QUALIFIED_PROVIDERS] if multi_provider else None
-            ),
-            "provider_attempt_timeout_seconds": (
-                PROVIDER_ATTEMPT_TIMEOUT_SECONDS if multi_provider else None
-            ),
+            "provider_route": provider_route,
+            "provider_routes": provider_routes,
+            "provider_attempt_timeout_seconds": provider_attempt_timeout_seconds,
             "sandbox_enforceable": not missing_sandbox_guards,
             "missing_sandbox_guards": missing_sandbox_guards,
-            "durable_knowledge": variant in {"codeact_notes", "codeact_notes_compact"},
-            "searchable_history": variant == "codeact_notes_compact",
+            "durable_knowledge": variant in KNOWLEDGE_VARIANTS,
+            "searchable_history": variant in COMPACT_VARIANTS,
+            "executable_theory": variant == WORLD_MODEL_VARIANT,
+            "wm2_guidance": os.environ.get("NOOA_0159_WM2_GUIDANCE") == "1",
+            "wm2_workbench": os.environ.get("NOOA_0159_WM2_WORKBENCH") == "1",
             "implicit_context_archival": (
-                False if variant == "codeact_notes_compact" else None
+                False if variant in COMPACT_VARIANTS else None
             ),
         },
     )
@@ -1765,7 +2392,7 @@ async def serve() -> None:
                 return
             if request.get("type") == "compact":
                 if not isinstance(solver, CompactBeliefsGameSolver):
-                    raise ValueError("compact requests require codeact_notes_compact")
+                    raise ValueError("compact requests require a compact variant")
                 sequence = int(request["sequence"])
                 token = CURRENT_SEQUENCE.set(sequence)
                 retain_from_turn = int(request["retain_from_turn"])
@@ -1826,15 +2453,28 @@ async def serve() -> None:
             sequence = int(request["sequence"])
             token = CURRENT_SEQUENCE.set(sequence)
             turn_started = time.monotonic()
+            analysis_image = (
+                _validated_palette_image(request.get("image_cells"))
+                if isinstance(solver, TrajectoryGameSolver)
+                else None
+            )
             audit.write(
                 "turn_received",
                 image_path=request["image_path"],
+                analysis_image_mode=(analysis_image.mode if analysis_image else None),
+                analysis_image_size=(
+                    list(analysis_image.size) if analysis_image else None
+                ),
                 legal_actions=request["legal_actions"],
                 previous_action=request.get("previous_action"),
                 levels_completed=request["levels_completed"],
                 trajectory_length=len(request.get("trajectory", [])),
             )
-            image = Image.from_file(Path(request["image_path"]))
+            image = (
+                analysis_image
+                if analysis_image is not None
+                else TransportImage.from_file(Path(request["image_path"]))
+            )
             audit.write("nooa_generation_started")
             keys_before = set(solver.event_manager.keys())
             common = {
@@ -1850,6 +2490,13 @@ async def serve() -> None:
             }
             if isinstance(solver, TrajectoryGameSolver):
                 solver._analysis_failure_stage = None
+                if isinstance(solver, ExecutableTheoryGameSolver):
+                    evidence_snapshot_path = request.get("evidence_snapshot_path")
+                    if not isinstance(evidence_snapshot_path, str):
+                        raise TypeError(
+                            "world-model request evidence_snapshot_path must be text"
+                        )
+                    solver.install_world_model_evidence(Path(evidence_snapshot_path))
                 if isinstance(solver, CompactBeliefsGameSolver):
                     snapshot = request.get("history_snapshot")
                     if not isinstance(snapshot, dict):

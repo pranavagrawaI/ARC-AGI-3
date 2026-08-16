@@ -307,9 +307,18 @@ def _tool_arguments(call: dict[str, Any]) -> dict[str, Any]:
 
 
 class OpenRouter:
-    def __init__(self, api_key: str, raw_dir: Path):
+    def __init__(
+        self,
+        api_key: str,
+        raw_dir: Path,
+        *,
+        model: str = MODEL,
+        providers: tuple[tuple[str, str, list[str] | None], ...] = PROVIDERS,
+    ):
         self.api_key = api_key
         self.raw_dir = raw_dir
+        self.model = model
+        self.providers = providers
         self.raw_dir.mkdir(parents=True, exist_ok=True)
         self.call_count = 0
         self.attempt_count = 0
@@ -322,7 +331,7 @@ class OpenRouter:
     ) -> dict[str, Any]:
         self.call_count += 1
         base_payload = {
-            "model": MODEL,
+            "model": self.model,
             "messages": messages,
             "max_tokens": MAX_OUTPUT_TOKENS,
             "temperature": 0,
@@ -330,14 +339,14 @@ class OpenRouter:
         if tools:
             base_payload["tools"] = tools
             base_payload["tool_choice"] = "auto"
-        order = list(range(self.preferred_index, len(PROVIDERS))) + list(
+        order = list(range(self.preferred_index, len(self.providers))) + list(
             range(self.preferred_index)
         )
         failures = []
         for index in order:
             if index in self.unhealthy:
                 continue
-            name, route, quantizations = PROVIDERS[index]
+            name, route, quantizations = self.providers[index]
             provider = {
                 "order": [route],
                 "only": [route],

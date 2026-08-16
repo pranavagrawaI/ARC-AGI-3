@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import subprocess
@@ -7,12 +8,30 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from arc_agi.rendering import COLOR_MAP, hex_to_rgb
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "run_nooa_ls20.py"
 SPEC = importlib.util.spec_from_file_location("run_nooa_ls20", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+
+
+def test_worker_palette_matches_authoritative_arc_rendering():
+    tree = ast.parse(MODULE.WORKER.read_text(encoding="utf-8"))
+    assignment = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "ARC_PALETTE"
+            for target in node.targets
+        )
+    )
+    worker_palette = ast.literal_eval(assignment.value)
+    host_palette = tuple(hex_to_rgb(COLOR_MAP[index]) for index in range(16))
+
+    assert worker_palette == host_palette
 
 
 class State:
@@ -76,6 +95,87 @@ def test_worker_environment_does_not_forward_arc_key(monkeypatch):
     assert "NOOA_0159_SCRIPTED_RESPONSES" not in environment
     assert environment["NOOA_0159_AUDIT_LOG"] == "/tmp/provider-events.jsonl"
     assert environment["NOOA_0159_VARIANT"] == "codeact"
+    assert environment["NOOA_0159_MODEL_PROFILE"] == "muse-glimmer-30b"
+
+
+def test_luna_profile_is_explicitly_forwarded_without_changing_wm0_paths(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("ARC_LLM_API_KEY", "model-secret")
+    environment = MODULE.worker_environment(
+        tmp_path / "provider-events.jsonl",
+        variant=MODULE.WORLD_MODEL_VARIANT,
+        knowledge_dir=tmp_path / "knowledge",
+        world_model_dir=tmp_path / "world-model",
+        model_profile=MODULE.LUNA_MODEL_PROFILE,
+    )
+
+    assert environment["NOOA_0159_MODEL_PROFILE"] == "gpt-5.6-luna"
+    assert environment["NOOA_0159_VARIANT"] == MODULE.WORLD_MODEL_VARIANT
+    assert environment["NOOA_0159_KNOWLEDGE_DIR"].endswith("/knowledge")
+    assert environment["NOOA_0159_WORLD_MODEL_DIR"].endswith("/world-model")
+
+
+def test_capability_probe_is_forwarded_only_when_requested(tmp_path, monkeypatch):
+    monkeypatch.setenv("ARC_LLM_API_KEY", "model-secret")
+    arguments = {
+        "audit_log": tmp_path / "provider-events.jsonl",
+        "variant": MODULE.WORLD_MODEL_VARIANT,
+        "knowledge_dir": tmp_path / "knowledge",
+        "world_model_dir": tmp_path / "world-model",
+        "model_profile": MODULE.LUNA_MODEL_PROFILE,
+    }
+
+    assert "NOOA_0159_CAPABILITY_PROBE" not in MODULE.worker_environment(**arguments)
+    assert (
+        MODULE.worker_environment(**arguments, capability_probe=True)[
+            "NOOA_0159_CAPABILITY_PROBE"
+        ]
+        == "1"
+    )
+
+
+def test_wm2_modules_are_forwarded_independently(tmp_path, monkeypatch):
+    monkeypatch.setenv("ARC_LLM_API_KEY", "model-secret")
+    arguments = {
+        "audit_log": tmp_path / "provider-events.jsonl",
+        "variant": MODULE.WORLD_MODEL_VARIANT,
+        "knowledge_dir": tmp_path / "knowledge",
+        "world_model_dir": tmp_path / "world-model",
+        "model_profile": MODULE.LUNA_MODEL_PROFILE,
+    }
+
+    guidance = MODULE.worker_environment(**arguments, wm2_guidance=True)
+    workbench = MODULE.worker_environment(**arguments, wm2_workbench=True)
+
+    assert guidance["NOOA_0159_WM2_GUIDANCE"] == "1"
+    assert "NOOA_0159_WM2_WORKBENCH" not in guidance
+    assert workbench["NOOA_0159_WM2_WORKBENCH"] == "1"
+    assert "NOOA_0159_WM2_GUIDANCE" not in workbench
+
+
+def test_wm2_source_commitments_are_independently_attributed() -> None:
+    card = MODULE.CARDS / "0160-muse-wm2-taught-theory-workbench-v1.md"
+
+    guidance, _ = MODULE.source_commitments(
+        card, include_wm2_guidance=True
+    )
+    workbench, _ = MODULE.source_commitments(
+        card, include_wm2_workbench=True
+    )
+
+    assert "theory_practice_guide" in guidance
+    assert "theory_workbench" not in guidance
+    assert "wm2_guidance_and_opportunity_spec" in guidance
+    assert "theory_workbench" in workbench
+    assert "theory_practice_guide" not in workbench
+    assert "wm2_guidance_and_opportunity_spec" in workbench
+    assert guidance["theory_practice_guide"] == MODULE.file_sha256(
+        MODULE.THEORY_GUIDANCE_PATH
+    )
+    assert workbench["theory_workbench"] == MODULE.file_sha256(
+        MODULE.THEORY_WORKBENCH_PATH
+    )
 
 
 def test_durable_beliefs_variant_gets_only_its_run_local_knowledge_path(
@@ -104,6 +204,24 @@ def test_action_cap_must_be_positive(tmp_path, monkeypatch):
     monkeypatch.setenv("ARC_API_KEY", "unused")
     with pytest.raises(ValueError, match="positive"):
         MODULE.run(tmp_path / "run", action_cap=0)
+
+
+@pytest.mark.parametrize("flag", ["wm2_guidance", "wm2_workbench"])
+def test_wm2_live_configuration_requires_an_explicit_frozen_card(
+    tmp_path, monkeypatch, flag
+):
+    monkeypatch.setenv("ARC_API_KEY", "unused")
+
+    with pytest.raises(ValueError, match="explicit frozen experiment card"):
+        MODULE.run(
+            tmp_path / "run",
+            action_cap=1,
+            variant=MODULE.WORLD_MODEL_VARIANT,
+            auto_compact=True,
+            **{flag: True},
+        )
+
+    assert not (tmp_path / "run").exists()
 
 
 def test_transition_record_is_public_and_deterministic():
@@ -219,7 +337,7 @@ def test_codeact_host_supplies_growing_trajectory_and_executes_one_action_per_tu
     class Worker:
         instance = None
 
-        def __init__(self, run_dir, *, variant):
+        def __init__(self, run_dir, *, variant, model_profile=MODULE.DEFAULT_MODEL_PROFILE):
             self.ready = {"variant": variant, "pid": 1, "model": "fake"}
             self.requests = []
             Worker.instance = self
@@ -257,7 +375,17 @@ def test_codeact_host_supplies_growing_trajectory_and_executes_one_action_per_tu
     assert second[0]["after"] == [[1, 0], [0, 0]]
     run_dir = tmp_path / "run"
     config = json.loads((run_dir / "run-config.json").read_text())
-    assert config["schema"] == "0159-nooa-ls20-run-v15"
+    assert config["schema"] == "0159-nooa-ls20-run-v17"
+    evidence_config = config["evidence_adapter"]
+    assert evidence_config["run_id"].startswith("run-")
+    assert {
+        key: value for key, value in evidence_config.items() if key != "run_id"
+    } == {
+        "schema": "0159-host-evidence-v1",
+        "event_taxonomy": "host_observable_only",
+        "attempt_ids_model_visible": False,
+        "input_and_manifest_commitments": True,
+    }
     assert config["action_interface"]["sdk_ids_model_visible"] is False
     assert config["action_interface"]["model_visible"] == [
         "RESET",
@@ -294,6 +422,7 @@ def test_codeact_host_supplies_growing_trajectory_and_executes_one_action_per_tu
         "experiment_card",
         "shared_harness_runner",
         "shared_harness_types",
+        "e0_evidence",
     }
     assert len(config["source_bundle_sha256"]) == 64
     persisted = [
@@ -313,6 +442,200 @@ def test_codeact_host_supplies_growing_trajectory_and_executes_one_action_per_tu
     ]
     assert len(animation_rows) == 1
     assert animation_rows[0]["frame_count"] == 2
+    assert summary["evidence_snapshot_id"].startswith("snapshot-")
+    assert (run_dir / "evidence" / "ledger.jsonl").is_file()
+    pointer = json.loads((run_dir / "evidence" / "current-snapshot.json").read_text())
+    assert pointer["snapshot_id"] == summary["evidence_snapshot_id"]
+
+
+def test_world_model_variant_supplies_e0_snapshot_without_exposing_host_authority(
+    tmp_path, monkeypatch
+):
+    class TestFrame:
+        frame = np.zeros((1, 2, 2), dtype=np.int8)
+        state = State()
+        levels_completed = 0
+        full_reset = False
+        available_actions = (1, 2, 3, 4)
+
+    class Environment:
+        def __init__(self):
+            self.steps = 0
+
+        def reset(self):
+            return TestFrame()
+
+        def step(self, action):
+            self.steps += 1
+            return TestFrame()
+
+        def close(self):
+            return None
+
+    environment = Environment()
+
+    class Arcade:
+        def __init__(self, **kwargs):
+            pass
+
+        def make(self, *args, **kwargs):
+            return environment
+
+    class Worker:
+        instance = None
+
+        def __init__(self, run_dir, *, variant, model_profile=MODULE.DEFAULT_MODEL_PROFILE):
+            self.ready = {"variant": variant, "pid": 1, "model": "fake"}
+            self.requests = []
+            Worker.instance = self
+
+        def decide(self, request):
+            self.requests.append(json.loads(json.dumps(request)))
+            return {
+                "type": "decision",
+                "sequence": request["sequence"],
+                "action": "UP",
+                "x": None,
+                "y": None,
+                "explanation": "one action",
+                "context": None,
+            }
+
+        def close(self):
+            return None
+
+    monkeypatch.setenv("ARC_API_KEY", "test")
+    monkeypatch.setattr(MODULE.arc_agi, "Arcade", Arcade)
+    monkeypatch.setattr(MODULE, "Worker", Worker)
+
+    run_dir = tmp_path / "run"
+    summary = MODULE.run(
+        run_dir,
+        action_cap=1,
+        variant=MODULE.WORLD_MODEL_VARIANT,
+        auto_compact=True,
+        model_profile=MODULE.LUNA_MODEL_PROFILE,
+    )
+
+    assert summary["actions"] == 1
+    assert Worker.instance is not None
+    request = Worker.instance.requests[0]
+    assert request["trajectory"] == []
+    assert request["image_cells"] == [[0, 0], [0, 0]]
+    assert "current_grid" not in request
+    assert request["history_snapshot"]["schema"] == "0159-history-snapshot-v1"
+    snapshot_path = Path(request["evidence_snapshot_path"])
+    assert snapshot_path.is_file()
+    assert snapshot_path.is_relative_to(run_dir / "evidence" / "snapshots")
+    snapshot = json.loads(snapshot_path.read_text())
+    assert snapshot["snapshot_id"] == snapshot_path.stem
+    assert "attempt_before" not in request
+    config = json.loads((run_dir / "run-config.json").read_text())
+    assert config["schema"] == "0159-nooa-ls20-run-v20"
+    assert config["model_profile"] == "gpt-5.6-luna"
+    assert config["model"] == "openai/gpt-5.6-luna"
+    assert config["provider_route"] == "openai"
+    assert config["provider_routes"] == ["openai"]
+    assert config["decision_observation"]["image"] == {
+        "source": "host settled public grid",
+        "transport": "private JSON row-major integer cells",
+        "worker_view": "64x64 palette-mode PIL image",
+        "coordinates": "np.asarray(image)[y, x]",
+        "visual_use": "show(image)",
+        "host_authored_semantics": False,
+    }
+    assert config["executable_theory"]["activation"] == "operational_validity_only"
+    assert config["executable_theory"]["shadow_prediction"] is False
+    assert {"world_model_lane", "world_model_evaluator"} <= set(
+        config["source_sha256"]
+    )
+
+
+def test_wm2_host_configuration_commits_and_forwards_both_modules(
+    tmp_path, monkeypatch
+):
+    class TestFrame:
+        frame = np.zeros((1, 2, 2), dtype=np.int8)
+        state = State()
+        levels_completed = 0
+        full_reset = False
+        available_actions = (1, 2, 3, 4)
+
+    class Environment:
+        def reset(self):
+            return TestFrame()
+
+        def step(self, action):
+            return TestFrame()
+
+        def close(self):
+            return None
+
+    class Arcade:
+        def __init__(self, **kwargs):
+            pass
+
+        def make(self, *args, **kwargs):
+            return Environment()
+
+    class Worker:
+        options = None
+
+        def __init__(self, run_dir, **options):
+            Worker.options = options
+            self.ready = {
+                "variant": options["variant"],
+                "pid": 1,
+                "model": "fake",
+                "wm2_guidance": options.get("wm2_guidance", False),
+                "wm2_workbench": options.get("wm2_workbench", False),
+            }
+
+        def decide(self, request):
+            return {
+                "type": "decision",
+                "sequence": request["sequence"],
+                "action": "UP",
+                "x": None,
+                "y": None,
+                "explanation": "one action",
+                "context": None,
+            }
+
+        def close(self):
+            return None
+
+    monkeypatch.setenv("ARC_API_KEY", "test")
+    monkeypatch.setattr(MODULE.arc_agi, "Arcade", Arcade)
+    monkeypatch.setattr(MODULE, "Worker", Worker)
+    card = MODULE.CARDS / "0160-muse-wm2-taught-theory-workbench-v1.md"
+    run_dir = tmp_path / "run"
+
+    summary = MODULE.run(
+        run_dir,
+        action_cap=1,
+        variant=MODULE.WORLD_MODEL_VARIANT,
+        auto_compact=True,
+        wm2_guidance=True,
+        wm2_workbench=True,
+        experiment_card_override=card,
+    )
+
+    assert summary["actions"] == 1
+    assert Worker.options is not None
+    assert Worker.options["wm2_guidance"] is True
+    assert Worker.options["wm2_workbench"] is True
+    config = json.loads((run_dir / "run-config.json").read_text())
+    assert config["wm2"] == {
+        "practice_guidance": True,
+        "theory_workbench": True,
+    }
+    assert {
+        "theory_practice_guide",
+        "theory_workbench",
+        "wm2_guidance_and_opportunity_spec",
+    } <= set(config["source_sha256"])
+    assert config["experiment_card"] == str(card.resolve())
 
 
 def test_predict_request_physically_omits_trajectory(tmp_path, monkeypatch):
@@ -345,7 +668,7 @@ def test_predict_request_physically_omits_trajectory(tmp_path, monkeypatch):
     class Worker:
         request = None
 
-        def __init__(self, run_dir, *, variant):
+        def __init__(self, run_dir, *, variant, model_profile=MODULE.DEFAULT_MODEL_PROFILE):
             self.ready = {
                 "variant": variant,
                 "pid": 1,
@@ -375,6 +698,83 @@ def test_predict_request_physically_omits_trajectory(tmp_path, monkeypatch):
 
     assert Worker.request is not None
     assert "trajectory" not in Worker.request
+
+
+def test_e0_failure_after_step_preserves_the_executed_action_without_retry(
+    tmp_path, monkeypatch
+):
+    class TestFrame:
+        frame = np.zeros((1, 2, 2), dtype=np.int8)
+        state = State()
+        levels_completed = 0
+        full_reset = False
+        available_actions = (1, 2, 3, 4)
+
+    class Environment:
+        def __init__(self):
+            self.steps = 0
+
+        def reset(self):
+            return TestFrame()
+
+        def step(self, action):
+            self.steps += 1
+            return TestFrame()
+
+        def close(self):
+            return None
+
+    environment = Environment()
+
+    class Arcade:
+        def __init__(self, **kwargs):
+            pass
+
+        def make(self, *args, **kwargs):
+            return environment
+
+    class Worker:
+        def __init__(self, run_dir, *, variant, model_profile=MODULE.DEFAULT_MODEL_PROFILE):
+            self.ready = {"variant": variant, "pid": 1, "model": "fake"}
+
+        def decide(self, request):
+            return {
+                "type": "decision",
+                "sequence": request["sequence"],
+                "action": "UP",
+                "x": None,
+                "y": None,
+                "explanation": "probe",
+            }
+
+        def close(self):
+            return None
+
+    original = MODULE.E0_EVIDENCE.HostEvidenceLedger.record_action_result
+
+    def fail_after_step(self, **kwargs):
+        raise MODULE.E0_EVIDENCE.EvidenceIntegrityError("frozen fault")
+
+    monkeypatch.setenv("ARC_API_KEY", "test")
+    monkeypatch.setattr(MODULE.arc_agi, "Arcade", Arcade)
+    monkeypatch.setattr(MODULE, "Worker", Worker)
+    monkeypatch.setattr(
+        MODULE.E0_EVIDENCE.HostEvidenceLedger,
+        "record_action_result",
+        fail_after_step,
+    )
+
+    summary = MODULE.run(tmp_path / "run", action_cap=2, variant="predict")
+
+    assert original is not fail_after_step
+    assert environment.steps == 1
+    assert summary["actions"] == 1
+    assert summary["action_attempts"] == 1
+    assert summary["trajectory_length"] == 1
+    assert summary["stop_reason"] == "evidence_adapter_failure"
+    assert summary["valid"] is False
+    failure = json.loads((tmp_path / "run" / "failure.json").read_text())
+    assert failure["stage"] == "evidence_adapter"
 
 
 def test_compact_variant_applies_boundary_and_sends_only_six_recent_turns(
@@ -414,7 +814,7 @@ def test_compact_variant_applies_boundary_and_sends_only_six_recent_turns(
     class Worker:
         instance = None
 
-        def __init__(self, run_dir, *, variant):
+        def __init__(self, run_dir, *, variant, model_profile=MODULE.DEFAULT_MODEL_PROFILE):
             self.ready = {"variant": variant, "pid": 7, "model": "fake"}
             self.requests = []
             self.compactions = []
@@ -456,7 +856,14 @@ def test_compact_variant_applies_boundary_and_sends_only_six_recent_turns(
         "source_manifest": {},
     }
 
-    def prepare(run_dir, *, resume_turn, recent_turns, compaction_index):
+    def prepare(
+        run_dir,
+        *,
+        resume_turn,
+        recent_turns,
+        compaction_index,
+        model_profile=MODULE.DEFAULT_MODEL_PROFILE,
+    ):
         assert compaction_index == 1
         root = run_dir / "compactions" / "0001"
         root.mkdir(parents=True)
@@ -582,7 +989,7 @@ def test_in_loop_overflow_compacts_then_retries_same_turn_without_duplicate_acti
     class Worker:
         instance = None
 
-        def __init__(self, run_dir, *, variant):
+        def __init__(self, run_dir, *, variant, model_profile=MODULE.DEFAULT_MODEL_PROFILE):
             self.ready = {"variant": variant, "pid": 9, "model": "fake"}
             self.decisions = []
             self.compactions = []
@@ -635,7 +1042,14 @@ def test_in_loop_overflow_compacts_then_retries_same_turn_without_duplicate_acti
         "source_manifest": {},
     }
 
-    def prepare(run_dir, *, resume_turn, recent_turns, compaction_index):
+    def prepare(
+        run_dir,
+        *,
+        resume_turn,
+        recent_turns,
+        compaction_index,
+        model_profile=MODULE.DEFAULT_MODEL_PROFILE,
+    ):
         root = run_dir / "compactions" / f"{compaction_index:04d}"
         root.mkdir(parents=True)
         MODULE.write_json(root / "transaction.json", {"status": "prepared"})
@@ -699,7 +1113,7 @@ def test_step_exception_is_recorded_as_uncertain_action(tmp_path, monkeypatch):
             return Environment()
 
     class Worker:
-        def __init__(self, run_dir, *, variant):
+        def __init__(self, run_dir, *, variant, model_profile=MODULE.DEFAULT_MODEL_PROFILE):
             self.ready = {
                 "variant": variant,
                 "pid": 1,
