@@ -29,15 +29,46 @@
   receives `validated_plan_hint` output whenever the builder produces a
   validated plan artifact, unchanged.
 - documented deviation: `wm_trigger.j2`'s builder-fires sentence names three
-  triggers (divergence, level start, GAME_OVER reset), but this slice's
-  `TriggerBuilderLoop.before_actor` (`trigger_builder.py`) only implements
-  divergence — no level-start or GAME_OVER-reset firing exists. Left
-  byte-exact, that sentence would promise the actor builder refreshes that
-  never happen. `tycho_nooa.planner.trigger_actor_world_model_paragraph`
-  rewrites that one sentence to name only the implemented trigger and raises
-  loudly if the upstream sentence changes. Everything else in the paragraph
-  stays byte-exact. Implementing the missing lifecycle triggers is a separate,
-  not-yet-scoped change.
+  triggers (divergence, level start, GAME_OVER reset). `TriggerBuilderLoop
+  .before_actor` (`trigger_builder.py`) implements two of the three:
+  divergence (`TychoTransitionTrigger.evaluate`, unchanged) and level start
+  (`TychoTransitionTrigger.evaluate_level_start`, new — fires unconditionally
+  on a genuine level advance, mirroring Tycho's own
+  `elif ... turn_in_level == 0 and level > 0` branch, which never calls
+  `should_fire()` for this cause). GAME_OVER-reset is excluded, and not merely
+  deferred: arc-host's episode loop (`arc-host/src/arc_host/runner.py`)
+  treats `GAME_OVER` as a member of `TERMINAL_STATES` and breaks the loop the
+  instant it is observed — `solver.decide()` is never called again in that
+  episode, so there is no live turn on which a GAME_OVER-reset trigger could
+  ever fire against this deployment. `tycho_nooa.planner
+  .trigger_actor_world_model_paragraph` rewrites the builder-fires sentence to
+  name only the two implemented triggers and raises loudly if the upstream
+  sentence changes. Everything else in the paragraph stays byte-exact.
+- scribe reuse: pinned `tycho/agent/agent.py::_build_agent_graph` registers
+  the scribe as `AgentSpec(id="scribe", trigger=on_events(Event
+  .LEVEL_COMPLETE), sees_full_history=True, run=lambda ctx:
+  self._summarize_level())` — unlike the builder (`sees_full_history=False`,
+  a fresh transcript per fire), the scribe reuses the actor's own growing
+  conversation. NOOA's `Agent` owns exactly one `event_manager` for its whole
+  lifetime, so `tycho_nooa.scribe.ScribeStrategy` is a second
+  `@strategy`-decorated method directly on `TychoNooaAgent`
+  (`TychoNooaAgent._summarize_level`), not a separate `FocusedBuilder`-style
+  fresh `Agent`. It is invoked from `TychoNooaAgent.observe`
+  (`agent.py`), on the same two conditions pinned `Event.LEVEL_COMPLETE`
+  covers — `levels_completed` advancing, and terminal `WIN` — deliberately
+  before `GameWorkspace.new_level()` runs, so the scribe still sees the
+  just-finished level's own directory as current; this is a separate call
+  site from the LEVEL_START trigger above, which fires from
+  `TriggerBuilderLoop.before_actor` on the following turn once `turn.level`
+  itself has advanced. `take_action`/`submit_action` are
+  withheld from the scribe's offered tools rather than offered-then-
+  intercepted (Tycho's own approach), matching `strategy.py`'s
+  `_enforce_actor_beliefs_checkpoint` precedent. `_is_world_model_edit` and
+  `_write_level_insight_fallback` are byte-exact ports of
+  `agent.py`'s equivalents, adapted only for tycho_nooa's always-
+  `actor_writes_wm=False` mode (so the builder-owned check needs no mode
+  branch) and for a pre-parsed argument dict rather than Tycho's
+  `{"input": {...}}` call shape. See `tests/test_scribe.py`.
 - prompt-assembly decision: Tycho's own actor.system.j2 states the
   `world_model.py` ownership boundary, the `notes/actor_beliefs.md` channel,
   and "report is advisory" exactly once. To stay comparable — this slice is
@@ -49,8 +80,9 @@
   instruction.
 - trigger reuse: `tycho.agent.dispatcher.TriggerDispatcher.should_fire` invokes
   the pinned `tycho.agent.wm_signal.wm_signal` unchanged after each recorded
-  same-level transition. No level-start or GAME_OVER-reset trigger was added in
-  this slice.
+  same-level transition. Level-start firing is added separately (see
+  "documented deviation" above); GAME_OVER-reset firing is not, for the
+  structural-unreachability reason given there.
 - builder reuse: the system and kickoff messages are rendered directly from
   pinned `tycho/prompts/builder.system.j2` and `builder.user.j2`; the
   auto-attached verification text comes directly from pinned
@@ -141,9 +173,10 @@
   and
   `tests/test_native_flow.py::test_actor_beliefs_checkpoint_withholds_take_action_from_offered_tools`.
 
-Explicitly excluded from this integration slice: Tycho's scribe, reflection
-cadence, context compaction, level-start/GAME_OVER trigger paths, and any new
-planner policy.
+Explicitly excluded from this integration slice: reflection cadence, context
+compaction, the GAME_OVER-reset trigger path (structurally unreachable under
+arc-host's `TERMINAL_STATES` design — see "documented deviation" above), and
+any new planner policy.
 
 No source is imported from a numbered ARC experiment.
 

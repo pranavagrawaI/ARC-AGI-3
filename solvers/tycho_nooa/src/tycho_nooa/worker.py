@@ -80,14 +80,14 @@ class WorkerSession:
         self.pending = (message.sequence, decision)
         return {"sequence": message.sequence, "decision": decision.model_dump()}
 
-    def observe(self, message: ActionResultMessage) -> dict[str, Any]:
+    async def observe(self, message: ActionResultMessage) -> dict[str, Any]:
         agent = self._agent()
         if self.pending is None:
             raise RuntimeError("action_result arrived without a pending decision")
         sequence, decision = self.pending
         if message.sequence != sequence or message.decision != decision:
             raise RuntimeError("action_result does not match the pending decision")
-        agent.observe(message)
+        await agent.observe(message)
         self.pending = None
         self.next_sequence += 1
         return {"sequence": message.sequence}
@@ -124,7 +124,7 @@ async def serve(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> None:
             elif isinstance(message, TurnMessage):
                 _write(stdout, "decision", **await session.decide(message))
             elif isinstance(message, ActionResultMessage):
-                _write(stdout, "observed", **session.observe(message))
+                _write(stdout, "observed", **await session.observe(message))
             elif isinstance(message, FinishMessage):
                 _write(stdout, "finished", **session.finish(message))
         except Exception as error:  # noqa: BLE001 - protocol errors must be returned

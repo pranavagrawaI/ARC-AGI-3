@@ -90,7 +90,7 @@ async def test_worker_keeps_one_agent_and_observes_level_boundary(
         )
     )
     decision = response["decision"]
-    session.observe(
+    await session.observe(
         ActionResultMessage(
             protocol_version=PROTOCOL_VERSION,
             type="action_result",
@@ -128,6 +128,9 @@ async def test_worker_keeps_one_agent_and_observes_level_boundary(
         "row": None,
         "col": None,
     }
+    insights = (agent.workspace_dir / "notes/level_0_insights.md").read_text()
+    assert insights.startswith("# Level 0 Insights")
+    assert "summary pass did not create the requested note" in insights
 
 
 def test_action_decision_contract_matches_host() -> None:

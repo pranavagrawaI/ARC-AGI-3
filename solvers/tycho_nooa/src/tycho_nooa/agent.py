@@ -15,6 +15,7 @@ from tycho.workspace.workspace import GameWorkspace
 from tycho_nooa.builder import BuilderConfig
 from tycho_nooa.models import ActionDecision, GameTurn
 from tycho_nooa.protocol import ActionResultMessage
+from tycho_nooa.scribe import ScribeConfig, ScribeStrategy
 from tycho_nooa.strategy import NativeToolConfig, NativeToolStrategy
 from tycho_nooa.tools import WorkspaceToolSurface
 from tycho_nooa.trigger_builder import TriggerBuilderLoop
@@ -33,6 +34,7 @@ class TychoNooaAgent(Agent, context={"self": None, "state": None}):
     _tool_executor: Annotated[ToolExecutor, hidden_field]
     _tool_surface: Annotated[WorkspaceToolSurface, hidden_field]
     _native_tool_config: Annotated[NativeToolConfig, hidden_field]
+    _scribe_config: Annotated[ScribeConfig, hidden_field]
     _trigger_builder: Annotated[TriggerBuilderLoop | None, hidden_field]
 
     def __init__(
@@ -45,6 +47,7 @@ class TychoNooaAgent(Agent, context={"self": None, "state": None}):
         tool_trace_path: str | Path | None = None,
         render: bool = False,
         strategy_config: NativeToolConfig | None = None,
+        scribe_config: ScribeConfig | None = None,
         builder_config: BuilderConfig | None = None,
         trigger_builder: bool = True,
         **kwargs: Any,
@@ -62,6 +65,7 @@ class TychoNooaAgent(Agent, context={"self": None, "state": None}):
             trace_path=Path(tool_trace_path) if tool_trace_path is not None else None,
         )
         self._native_tool_config = strategy_config or NativeToolConfig()
+        self._scribe_config = scribe_config or ScribeConfig()
         trace_path = Path(tool_trace_path) if tool_trace_path is not None else None
         self._trigger_builder = (
             TriggerBuilderLoop(
@@ -130,7 +134,7 @@ class TychoNooaAgent(Agent, context={"self": None, "state": None}):
             )
         return decision
 
-    def observe(self, result: ActionResultMessage) -> None:
+    async def observe(self, result: ActionResultMessage) -> None:
         """Preserve action outcomes that may never become another decision turn."""
         decision = result.decision
         before = result.before
@@ -152,6 +156,9 @@ class TychoNooaAgent(Agent, context={"self": None, "state": None}):
                 row=decision.row,
                 col=decision.col,
             )
+            # Fires (Tycho's Event.LEVEL_COMPLETE) BEFORE the workspace advances,
+            # so the scribe still sees this level's own directory as current.
+            await self._summarize_level(result.level)
             self._workspace.new_level()
         elif after.state.upper() == "WIN":
             self._workspace.record_terminal(
@@ -167,10 +174,17 @@ class TychoNooaAgent(Agent, context={"self": None, "state": None}):
                 row=decision.row,
                 col=decision.col,
             )
+            await self._summarize_level(result.level)
         elif after.full_reset:
             self._workspace.reset_level(result.level, reason="public_full_reset")
 
     @strategy(NativeToolStrategy())
     async def _choose_action(self, turn: GameTurn) -> ActionDecision:
         """Investigate this observation and commit the next legal action."""
+        ...  # noqa: PIE790 - NOOA uses ellipsis as its generation-method marker
+
+    @strategy(ScribeStrategy())
+    async def _summarize_level(self, level: int) -> None:
+        """Consolidate the just-completed level's terminal evidence before the
+        next level's transcript reuses this same growing history."""
         ...  # noqa: PIE790 - NOOA uses ellipsis as its generation-method marker

@@ -326,7 +326,8 @@ async def test_first_model_context_omits_internal_self_and_protocol_docs(
     expected_wm_trigger = render_prompt("wm_trigger").replace(
         "The builder fires when the model is detectably wrong on dynamics or "
         "outcome, at level starts, and after GAME_OVER resets.",
-        "The builder fires when the model is detectably wrong on dynamics or outcome.",
+        "The builder fires when the model is detectably wrong on dynamics or "
+        "outcome, and at level starts.",
     )
     expected_system = render_prompt(
         "actor.system",

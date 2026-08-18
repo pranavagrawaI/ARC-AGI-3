@@ -49,6 +49,14 @@ class TychoTransitionTrigger:
         self._dispatcher.note_fired(level)
         return TriggerDecision(fired=True, cause=cause, reason=reason)
 
+    def evaluate_level_start(self, level: int) -> TriggerDecision:
+        """LEVEL_START fires unconditionally (no divergence probe), mirroring
+        Tycho's own `elif ... turn_in_level == 0 and level > 0` branch, which
+        never calls should_fire() for this cause."""
+        reason = self._dispatcher.level_start_reason(level)
+        self._dispatcher.note_fired(level)
+        return TriggerDecision(fired=True, cause="level_start", reason=reason)
+
 
 class TriggerBuilderLoop:
     """Run a fresh builder after divergent transitions, before the actor acts."""
@@ -69,17 +77,38 @@ class TriggerBuilderLoop:
         self._builder_config = builder_config
         self._trigger = TychoTransitionTrigger()
         self.builder: FocusedBuilder | None = None
+        # -1 never equals a real level, so a genuine level-start check at level 0
+        # (guarded out below regardless) never depends on this sentinel.
+        self._last_level = -1
 
     async def before_actor(self, turn: GameTurn) -> BuilderExposure | None:
-        """Evaluate only a recorded same-level transition, then build if signaled."""
-        if turn.turn_in_level <= 0 or not turn.previous_action:
+        """Evaluate the recorded transition into this turn, then build if signaled.
+
+        arc-host's `full_reset` resets `turn_in_level` to 0 WITHOUT changing
+        `level` (runner.py), so `turn_in_level == 0` alone cannot distinguish a
+        genuine level advance from a same-level restart — Tycho's own three
+        `turn_in_level = 0` call sites have the identical ambiguity, disambiguated
+        there only by if/elif branch priority. `_last_level`, updated
+        unconditionally before either branch below, plays that same role here:
+        only a level that actually differs from the immediately preceding turn's
+        level counts as a level-start.
+        """
+        last_level = self._last_level
+        self._last_level = turn.level
+
+        if turn.turn_in_level == 0 and turn.level > 0 and turn.level != last_level:
+            decision = self._trigger.evaluate_level_start(turn.level)
+            mechanism = "tycho TriggerDispatcher.level_start_reason (unconditional)"
+        elif turn.turn_in_level > 0 and turn.previous_action:
+            decision = self._trigger.evaluate(turn.level, self._executor)
+            mechanism = "tycho TriggerDispatcher.should_fire -> wm_signal"
+        else:
             return None
 
-        decision = self._trigger.evaluate(turn.level, self._executor)
         self._write_trace(
             {
                 "event": "mechanical_trigger",
-                "mechanism": "tycho TriggerDispatcher.should_fire -> wm_signal",
+                "mechanism": mechanism,
                 "level": turn.level,
                 "turn_in_level": turn.turn_in_level,
                 "fired": decision.fired,

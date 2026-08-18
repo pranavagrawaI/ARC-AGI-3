@@ -19,16 +19,19 @@ from tycho_nooa.models import GameTurn
 
 # wm_trigger.j2's own words claim all three of Tycho's real trigger paths
 # (divergence, level start, GAME_OVER reset). This slice's TriggerBuilderLoop
-# only implements divergence (trigger_builder.py before_actor: same-level
-# transitions only) — see PROVENANCE.md. Left unedited, the byte-exact sentence
-# would tell the actor to trust builder refreshes that never happen. Adapt this
-# one sentence to the implemented trigger only; everything else stays byte-exact.
+# (trigger_builder.py before_actor) implements divergence and level start;
+# GAME_OVER-reset is structurally unreachable under arc-host's TERMINAL_STATES
+# design, not merely unimplemented — see PROVENANCE.md. Left unedited, the
+# byte-exact sentence would promise a GAME_OVER-reset refresh that can never
+# happen. Adapt this one sentence to the two implemented triggers only;
+# everything else stays byte-exact.
 _LIFECYCLE_CLAIM = (
     "The builder fires when the model is detectably wrong on dynamics or "
     "outcome, at level starts, and after GAME_OVER resets."
 )
-_DIVERGENCE_ONLY_CLAIM = (
-    "The builder fires when the model is detectably wrong on dynamics or outcome."
+_IMPLEMENTED_TRIGGERS_CLAIM = (
+    "The builder fires when the model is detectably wrong on dynamics or "
+    "outcome, and at level starts."
 )
 
 
@@ -48,7 +51,7 @@ def trigger_actor_world_model_paragraph() -> str:
             "wm_trigger.j2's builder-fires sentence changed upstream; "
             "re-check the divergence-only adaptation against the new text"
         )
-    wm_trigger = wm_trigger.replace(_LIFECYCLE_CLAIM, _DIVERGENCE_ONLY_CLAIM)
+    wm_trigger = wm_trigger.replace(_LIFECYCLE_CLAIM, _IMPLEMENTED_TRIGGERS_CLAIM)
     system_prompt = render_prompt(
         "actor.system",
         colormap=COLORMAP,

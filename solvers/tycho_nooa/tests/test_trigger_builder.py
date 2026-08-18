@@ -528,6 +528,70 @@ async def test_world_model_checkpoint_executes_a_genuine_model_edit(
 
 
 @pytest.mark.asyncio
+async def test_level_start_fires_only_on_genuine_level_advance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for the same-level `full_reset` ambiguity: arc-host resets
+    turn_in_level to 0 WITHOUT changing level (runner.py), so turn_in_level ==
+    0 alone cannot distinguish a genuine level advance from a same-level
+    restart. Only a level that actually differs from the immediately
+    preceding turn's level (`_last_level`) may fire the unconditional
+    LEVEL_START cause."""
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "tycho_nooa.trigger_builder.TychoTransitionTrigger.evaluate_level_start",
+        lambda self, level: calls.append(f"level_start:{level}")
+        or TriggerDecision(fired=False, cause="level_start", reason="entered level"),
+    )
+    monkeypatch.setattr(
+        "tycho_nooa.trigger_builder.TychoTransitionTrigger.evaluate",
+        lambda self, level, executor: calls.append(f"evaluate:{level}")
+        or TriggerDecision(fired=False, cause=None, reason=None),
+    )
+    llm = FakeLLMClient(scripted_responses=[])
+    agent = TychoNooaAgent(
+        llm=llm,
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+        tool_trace_path=tmp_path / "tool-trace.jsonl",
+    )
+    loop = agent._trigger_builder
+    assert loop is not None
+
+    def level_turn(level: int, turn_in_level: int) -> GameTurn:
+        return GameTurn(
+            grid=[[0, 1], [2, 3]],
+            available_actions=["UP", "DOWN"],
+            level=level,
+            turn_in_level=turn_in_level,
+            previous_action="UP" if turn_in_level > 0 else "",
+        )
+
+    # Level 0's own turn_in_level == 0 is guarded out unconditionally (level > 0
+    # is required), so it neither fires nor consumes a scripted response.
+    assert await loop.before_actor(level_turn(0, 0)) is None
+    # A genuine advance into level 1 fires level_start exactly once.
+    assert await loop.before_actor(level_turn(1, 0)) is None
+    # arc-host's full_reset recurs turn_in_level == 0 at the SAME level — this
+    # must not be mistaken for a second level-start.
+    assert await loop.before_actor(level_turn(1, 0)) is None
+
+    assert calls == ["level_start:1"]
+
+    trace = [
+        json.loads(line)
+        for line in (tmp_path / "trigger-builder-trace.jsonl").read_text().splitlines()
+    ]
+    assert [entry["mechanism"] for entry in trace] == [
+        "tycho TriggerDispatcher.level_start_reason (unconditional)"
+    ]
+    assert trace[0]["level"] == 1
+    assert trace[0]["turn_in_level"] == 0
+
+
+@pytest.mark.asyncio
 async def test_clean_signal_does_not_dispatch_builder(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
