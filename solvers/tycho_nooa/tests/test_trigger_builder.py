@@ -205,6 +205,7 @@ async def test_stale_or_missing_report_is_replaced_by_tool_free_final_report(
         scripted_responses=[
             tool_response("take_action", {"action": "UP"}, "actor-0"),
             prose_response("done"),
+            prose_response("nothing new yet"),
             prose_response(fallback),
             tool_response("take_action", {"action": "DOWN"}, "actor-1"),
         ]
@@ -244,6 +245,8 @@ async def test_stale_or_missing_report_is_replaced_by_tool_free_final_report(
     ]
     assert trace[1]["report_fresh"] is True
     assert trace[1]["report_forced"] is True
+    assert trace[1]["world_model_checkpoint_forced"] is True
+    assert trace[1]["artifact_hashes"]["notes/world_model.md"]["changed"] is True
 
 
 @pytest.mark.asyncio
@@ -259,6 +262,7 @@ async def test_forced_report_identical_to_prior_report_is_not_fresh(
         scripted_responses=[
             tool_response("take_action", {"action": "UP"}, "actor-0"),
             prose_response("done"),
+            prose_response("nothing new yet"),
             prose_response("done"),
             tool_response("take_action", {"action": "DOWN"}, "actor-1"),
         ]
@@ -317,6 +321,7 @@ async def test_forced_report_call_offers_tools_but_ignores_attempted_tool_calls(
         scripted_responses=[
             tool_response("take_action", {"action": "UP"}, "actor-0"),
             prose_response("still exploring"),
+            prose_response("nothing new yet"),
             tool_response(
                 "write_file",
                 {"path": "notes/world_model_report.md", "content": "sneaky"},
@@ -351,13 +356,24 @@ async def test_forced_report_call_offers_tools_but_ignores_attempted_tool_calls(
     )
 
     # Call order: actor turn 0, builder main loop (breaks on the prose reply),
-    # builder forced final call, actor turn 1.
-    forced_call_tools = llm.tools_per_call[2]
+    # builder world-model checkpoint enforcement, builder forced final call,
+    # actor turn 1.
+    checkpoint_call_tools = llm.tools_per_call[2]
+    assert checkpoint_call_tools, "checkpoint call must offer tools too"
+    assert "take_action" not in checkpoint_call_tools
+
+    forced_call_tools = llm.tools_per_call[3]
     assert forced_call_tools, "forced call must still offer tools, like Tycho does"
     assert "take_action" not in forced_call_tools
 
     report_path = agent.workspace_dir / "notes/world_model_report.md"
     assert report_path.read_text() == FALLBACK_REPORT
+
+    # The checkpoint step offered no tool calls, so the fallback checkpoint text
+    # (not the "sneaky" write) is what advances notes/world_model.md. The forced
+    # final call's tool-call attempt is never executed regardless.
+    world_model_notes = agent.workspace_dir / "notes/world_model.md"
+    assert world_model_notes.read_text() != "sneaky"
 
     builder_trace_path = tmp_path / "builder-tool-trace.jsonl"
     if builder_trace_path.exists():
@@ -368,6 +384,139 @@ async def test_forced_report_call_offers_tools_but_ignores_attempted_tool_calls(
         for line in (tmp_path / "trigger-builder-trace.jsonl").read_text().splitlines()
     ]
     assert trace[1]["report_forced"] is True
+    assert trace[1]["world_model_checkpoint_forced"] is True
+
+
+@pytest.mark.asyncio
+async def test_world_model_checkpoint_is_forced_when_pass_leaves_it_stale(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for DIAGNOSIS.md: notes/world_model.md was read on all 12
+    post-turn-8 builder firings in the first live run but never updated, so every
+    later pass repeated the same stale turn-1 scratchpad. A pass that leaves this
+    file untouched must not be allowed to end quietly."""
+    fallback_report = (
+        "confidence: low\nmodel: none — insufficient evidence\n"
+        "dynamics: n/a\noutcome: unknown\noutcome_verified: no-terminal-yet\n"
+        "plan: start=current; validated=no; length=none; assumptions=unknown\n"
+        "recommended_action: none   subgoal: gather one more transition\n"
+        "note: test DOWN"
+    )
+    llm = FakeLLMClient(
+        scripted_responses=[
+            tool_response("take_action", {"action": "UP"}, "actor-0"),
+            prose_response("done"),
+            prose_response("nothing new yet"),
+            prose_response(fallback_report),
+            tool_response("take_action", {"action": "DOWN"}, "actor-1"),
+        ]
+    )
+    monkeypatch.setattr(
+        "tycho_nooa.trigger_builder.TychoTransitionTrigger.evaluate",
+        lambda self, level, executor: TriggerDecision(
+            fired=True, cause="dynamics", reason="exact trigger reason"
+        ),
+    )
+    monkeypatch.setattr(
+        "tycho_nooa.builder.verify_state",
+        lambda executor: ("[verify state] test divergence", None),
+    )
+    agent = TychoNooaAgent(
+        llm=llm,
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+        tool_trace_path=tmp_path / "tool-trace.jsonl",
+    )
+    notes_path = agent.workspace_dir / "notes/world_model.md"
+    notes_path.parent.mkdir(parents=True, exist_ok=True)
+    notes_path.write_text("turn 1: UP moved the marker\n")
+
+    await agent.act(turn(0))
+    assert await agent.act(turn(1, previous_action="UP")) == ActionDecision(
+        action="DOWN"
+    )
+
+    updated = notes_path.read_text()
+    assert updated.startswith("turn 1: UP moved the marker")
+    assert "[checkpoint: pass ended with no model-authored update]" in updated
+
+    builder_tasks = [
+        event
+        for event in agent._trigger_builder.builder.event_manager.values()
+        if isinstance(event, Task)
+    ]
+    assert any(
+        "Before this pass ends, checkpoint your current understanding" in task.prompt
+        for task in builder_tasks
+    )
+
+    trace = [
+        json.loads(line)
+        for line in (tmp_path / "trigger-builder-trace.jsonl").read_text().splitlines()
+    ]
+    assert trace[1]["world_model_checkpoint_forced"] is True
+    assert trace[1]["artifact_hashes"]["notes/world_model.md"]["changed"] is True
+
+
+@pytest.mark.asyncio
+async def test_world_model_checkpoint_executes_a_genuine_model_edit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unlike the forced-report call, the checkpoint call's tool calls are real:
+    the model gets one genuine chance to write before the fallback breadcrumb
+    would apply, and that write must actually land."""
+    llm = FakeLLMClient(
+        scripted_responses=[
+            tool_response("take_action", {"action": "UP"}, "actor-0"),
+            prose_response("done"),
+            tool_response(
+                "write_file",
+                {
+                    "path": "notes/world_model.md",
+                    "content": "genuine checkpoint: UP moves the marker up",
+                },
+                "checkpoint-write",
+            ),
+            prose_response("done"),
+            tool_response("take_action", {"action": "DOWN"}, "actor-1"),
+        ]
+    )
+    monkeypatch.setattr(
+        "tycho_nooa.trigger_builder.TychoTransitionTrigger.evaluate",
+        lambda self, level, executor: TriggerDecision(
+            fired=True, cause="dynamics", reason="exact trigger reason"
+        ),
+    )
+    monkeypatch.setattr(
+        "tycho_nooa.builder.verify_state",
+        lambda executor: ("[verify state] test divergence", None),
+    )
+    agent = TychoNooaAgent(
+        llm=llm,
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+        tool_trace_path=tmp_path / "tool-trace.jsonl",
+    )
+
+    await agent.act(turn(0))
+    assert await agent.act(turn(1, previous_action="UP")) == ActionDecision(
+        action="DOWN"
+    )
+
+    notes_path = agent.workspace_dir / "notes/world_model.md"
+    content = notes_path.read_text()
+    assert content == "genuine checkpoint: UP moves the marker up"
+    assert "[checkpoint: pass ended" not in content
+
+    trace = [
+        json.loads(line)
+        for line in (tmp_path / "trigger-builder-trace.jsonl").read_text().splitlines()
+    ]
+    assert trace[1]["world_model_checkpoint_forced"] is True
 
 
 @pytest.mark.asyncio

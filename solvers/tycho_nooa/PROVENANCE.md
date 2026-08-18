@@ -103,6 +103,22 @@
   tools" instruction and attempts one anyway still falls through to
   `FALLBACK_REPORT` instead of having that tool call run. See
   `tests/test_trigger_builder.py::test_forced_report_call_offers_tools_but_ignores_attempted_tool_calls`.
+- bugfix: the same `DIAGNOSIS.md` run found `notes/world_model.md` read on all
+  12 divergence-triggered builder passes after turn 8 but never once advanced
+  — every later pass re-read the same stale turn-1 scratchpad, so the durable
+  handoff between builder passes was silently broken even though the report
+  hand-off to the actor kept working. `BuilderStrategy.execute` now runs
+  `_enforce_world_model_checkpoint` after the main tool loop and before the
+  forced-report call: it prompts the model once to checkpoint
+  `notes/world_model.md` via `write_file`/`edit_file`, and — unlike the
+  forced-report call — actually executes any tool call the model attempts
+  there, since a real edit is the point. Only if the file is still
+  byte-identical afterward does it force a deterministic breadcrumb
+  (`_fallback_world_model_checkpoint`) so the file changes unconditionally.
+  `BuilderResult.world_model_checkpoint_forced` traces which path ran. See
+  `tests/test_trigger_builder.py::test_world_model_checkpoint_is_forced_when_pass_leaves_it_stale`
+  and
+  `tests/test_trigger_builder.py::test_world_model_checkpoint_executes_a_genuine_model_edit`.
 
 Explicitly excluded from this integration slice: Tycho's scribe, reflection
 cadence, context compaction, level-start/GAME_OVER trigger paths, and any new

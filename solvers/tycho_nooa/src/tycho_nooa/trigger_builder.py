@@ -122,6 +122,7 @@ class TriggerBuilderLoop:
                 "builder_agent_id": self.builder.agent_id,
                 "report_fresh": result.report_fresh,
                 "report_forced": result.report_forced,
+                "world_model_checkpoint_forced": result.world_model_checkpoint_forced,
                 "artifact_hashes": result.artifact_hashes,
                 "tool_calls": [
                     {

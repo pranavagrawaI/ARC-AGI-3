@@ -27,10 +27,19 @@ if TYPE_CHECKING:
     from nooa.strategies.current_call import CurrentCall
 
 
+WORLD_MODEL_PY = "world_model.py"
+WORLD_MODEL_NOTES = "notes/world_model.md"
 ARTIFACT_PATHS = (
-    "world_model.py",
-    "notes/world_model.md",
+    WORLD_MODEL_PY,
+    WORLD_MODEL_NOTES,
     REPORT_FILE,
+)
+WORLD_MODEL_CHECKPOINT_REQUEST = (
+    f"Before this pass ends, checkpoint your current understanding into "
+    f"{WORLD_MODEL_NOTES} with write_file or edit_file. Do this even if you have no "
+    "confirmed model change: record what you tried, what you ruled out, and what "
+    "remains open, so the next builder invocation is not reading the same stale "
+    "notes it started from."
 )
 FINAL_REPORT_REQUEST = (
     "Step budget reached. Do NOT call any more tools. Right now, in your reply, give "
@@ -71,6 +80,7 @@ class BuilderResult:
     report: str
     report_fresh: bool
     report_forced: bool
+    world_model_checkpoint_forced: bool
     artifact_hashes: dict[str, dict[str, str | bool | None]]
     tool_calls: list[dict[str, Any]]
 
@@ -94,7 +104,7 @@ class BuilderStrategy(GenerationStrategy):
         self,
         runtime: RuntimeServices,
         call: CurrentCall,
-    ) -> tuple[str, bool]:
+    ) -> tuple[str, bool, bool]:
         builder = self._builder(runtime)
         request = call.bound_parameters().get("request")
         if not isinstance(request, BuilderRequest):
@@ -136,9 +146,13 @@ class BuilderStrategy(GenerationStrategy):
                     else None,
                 )
 
+        checkpoint_forced = await self._enforce_world_model_checkpoint(
+            runtime, builder, surface, tools_by_name, tools, config
+        )
+
         report = _read_report(builder._executor.ws.dir)
         if report is not None and report != builder._report_before:
-            return report, False
+            return report, False, checkpoint_forced
 
         runtime.event_manager.add(Task(prompt=FINAL_REPORT_REQUEST))
         # Tycho's own forced-report call (builder.py's post-loop fallback) still
@@ -158,7 +172,60 @@ class BuilderStrategy(GenerationStrategy):
         builder._executor.ws.write_file(REPORT_FILE, text)
         if _read_report(builder._executor.ws.dir) != text:
             raise RuntimeError(f"failed to persist mandatory fresh {REPORT_FILE}")
-        return text, True
+        return text, True, checkpoint_forced
+
+    async def _enforce_world_model_checkpoint(
+        self,
+        runtime: RuntimeServices,
+        builder: FocusedBuilder,
+        surface: WorkspaceToolSurface,
+        tools_by_name: dict[str, Any],
+        tools: list[Any],
+        config: BuilderConfig,
+    ) -> bool:
+        """Guarantee notes/world_model.md advances before this pass can end.
+
+        DIAGNOSIS.md's first live run found this file read on every one of 12
+        divergence-triggered passes but never advanced — each pass repeated the
+        same stale turn-1 scratchpad. Give the model one real chance to write a
+        genuine update (tool calls here are executed, unlike the forced-report
+        call below); if it still leaves the file unchanged, force a minimal
+        breadcrumb so the invariant holds unconditionally rather than trusting
+        the model to remember.
+        """
+        workspace_dir = builder._executor.ws.dir
+        before = builder._world_model_before
+        if _read_optional(workspace_dir, WORLD_MODEL_NOTES) != before:
+            return False
+
+        runtime.event_manager.add(Task(prompt=WORLD_MODEL_CHECKPOINT_REQUEST))
+        response, event_id = await runtime.generate(
+            tools=tools,
+            max_tokens=config.max_tokens,
+            temperature=config.temperature,
+            tool_choice="auto",
+        )
+        if response.tool_calls:
+            runtime.event_manager.remove(event_id)
+            for index, tool_call in enumerate(response.tool_calls):
+                self._execute_tool_call(
+                    runtime,
+                    surface,
+                    tools_by_name,
+                    tool_call,
+                    reasoning=(response.reasoning or str(response.content) or None)
+                    if index == 0
+                    else None,
+                )
+
+        if _read_optional(workspace_dir, WORLD_MODEL_NOTES) != before:
+            return True
+
+        fallback = _fallback_world_model_checkpoint(before)
+        builder._executor.ws.write_file(WORLD_MODEL_NOTES, fallback)
+        if _read_optional(workspace_dir, WORLD_MODEL_NOTES) != fallback:
+            raise RuntimeError(f"failed to persist mandatory {WORLD_MODEL_NOTES} checkpoint")
+        return True
 
     @staticmethod
     def _execute_tool_call(
@@ -232,6 +299,7 @@ class FocusedBuilder(Agent, context={"self": None, "state": None}):
     _tool_surface: Annotated[WorkspaceToolSurface, hidden_field]
     _builder_config: Annotated[BuilderConfig, hidden_field]
     _report_before: Annotated[str | None, hidden_field]
+    _world_model_before: Annotated[str | None, hidden_field]
     _builder_system_prompt: Annotated[str, hidden_field]
 
     def __init__(
@@ -265,6 +333,7 @@ class FocusedBuilder(Agent, context={"self": None, "state": None}):
         )
         self._builder_config = config or BuilderConfig()
         self._report_before = None
+        self._world_model_before = None
 
     def _resolve_system_prompt(self) -> str:
         """Return Tycho's rendered builder.system prompt byte-for-byte."""
@@ -275,7 +344,8 @@ class FocusedBuilder(Agent, context={"self": None, "state": None}):
         self._tool_surface.begin_turn(request.turn)
         before = _workspace_hashes(self._executor.ws.dir)
         self._report_before = _read_report(self._executor.ws.dir)
-        report, forced = await self._construct(request)
+        self._world_model_before = _read_optional(self._executor.ws.dir, WORLD_MODEL_NOTES)
+        report, forced, checkpoint_forced = await self._construct(request)
         after = _workspace_hashes(self._executor.ws.dir)
         artifact_paths = set(ARTIFACT_PATHS)
         artifact_paths.update(
@@ -299,12 +369,13 @@ class FocusedBuilder(Agent, context={"self": None, "state": None}):
             # and that must not read as a genuine update.
             report_fresh=hashes[REPORT_FILE]["changed"] is True,
             report_forced=forced,
+            world_model_checkpoint_forced=checkpoint_forced,
             artifact_hashes=hashes,
             tool_calls=self._tool_surface.turn_tool_calls(),
         )
 
     @strategy(BuilderStrategy())
-    async def _construct(self, request: BuilderRequest) -> tuple[str, bool]: ...
+    async def _construct(self, request: BuilderRequest) -> tuple[str, bool, bool]: ...
 
 
 def _workspace_hashes(workspace_dir: Path) -> dict[str, str]:
@@ -325,7 +396,26 @@ def _file_hash(path: Path) -> str | None:
 
 
 def _read_report(workspace_dir: Path) -> str | None:
-    path = workspace_dir / REPORT_FILE
+    return _read_optional(workspace_dir, REPORT_FILE)
+
+
+def _read_optional(workspace_dir: Path, relative_path: str) -> str | None:
+    path = workspace_dir / relative_path
     if not path.is_file():
         return None
     return path.read_text(encoding="utf-8")
+
+
+def _fallback_world_model_checkpoint(previous: str | None) -> str:
+    """A guaranteed-to-advance checkpoint entry, used when the model left no edit.
+
+    DIAGNOSIS.md (turns 8-19 of the first live run) found notes/world_model.md read
+    on every one of 12 divergence-triggered builder passes but never advanced, so
+    every later pass repeated the same stale turn-1 scratchpad. This mirrors
+    FALLBACK_REPORT: rather than trust the model to always leave a real edit, force
+    the invariant "this pass changed the durable notes" to hold unconditionally.
+    """
+    marker = "[checkpoint: pass ended with no model-authored update]"
+    if previous is None:
+        return f"{marker}\n(no prior notes/world_model.md content)\n"
+    return f"{previous.rstrip('\n')}\n\n{marker}\n"
