@@ -95,8 +95,8 @@ Implemented and hermetically tested:
 Not yet implemented:
 
 - image attachment and Tycho's context-eviction policy;
-- Tycho's scribe, reflection cadence, context compaction, and broader
-  orchestrator modes;
+- Tycho's reflection cadence, context compaction, and broader orchestrator
+  modes (the scribe and the LEVEL_START trigger landed in `712f892`);
 - a live model run proving spontaneous note or world-model use.
 
 Those omissions are explicit. This tracer establishes the architecture and its

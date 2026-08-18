@@ -592,6 +592,54 @@ async def test_level_start_fires_only_on_genuine_level_advance(
 
 
 @pytest.mark.asyncio
+async def test_unavailable_sandbox_degrades_the_trigger_instead_of_ending_the_episode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The divergence probe runs verify.py in Tycho's sandbox. When no container
+    runtime exists it raises on the actor's path, where the same fault is only a
+    tool result — that killed a whole live run at action 1. An unanswerable probe
+    must be traced as absence of signal and let the actor's turn proceed."""
+
+    def unavailable(self, level, executor):
+        raise RuntimeError("no usable container runtime found")
+
+    monkeypatch.setattr(
+        "tycho_nooa.trigger_builder.TychoTransitionTrigger.evaluate", unavailable
+    )
+    llm = FakeLLMClient(
+        scripted_responses=[
+            tool_response("take_action", {"action": "UP"}, "actor-0"),
+            prose_response("actor checkpoint after turn 0"),
+            tool_response("take_action", {"action": "DOWN"}, "actor-1"),
+            prose_response("actor checkpoint after turn 1"),
+        ]
+    )
+    agent = TychoNooaAgent(
+        llm=llm,
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+        tool_trace_path=tmp_path / "tool-trace.jsonl",
+    )
+
+    await agent.act(turn(0))
+    assert await agent.act(turn(1, previous_action="UP")) == ActionDecision(
+        action="DOWN"
+    )
+
+    trace = [
+        json.loads(line)
+        for line in (tmp_path / "trigger-builder-trace.jsonl").read_text().splitlines()
+    ]
+    assert [entry["event"] for entry in trace] == ["trigger_error"]
+    assert trace[0]["error_type"] == "RuntimeError"
+    assert "no usable container runtime" in trace[0]["message"]
+    assert trace[0]["turn_in_level"] == 1
+    assert not (agent.workspace_dir / "notes/world_model_report.md").exists()
+
+
+@pytest.mark.asyncio
 async def test_clean_signal_does_not_dispatch_builder(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

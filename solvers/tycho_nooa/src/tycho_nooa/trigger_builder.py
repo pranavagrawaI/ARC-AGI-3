@@ -100,8 +100,29 @@ class TriggerBuilderLoop:
             decision = self._trigger.evaluate_level_start(turn.level)
             mechanism = "tycho TriggerDispatcher.level_start_reason (unconditional)"
         elif turn.turn_in_level > 0 and turn.previous_action:
-            decision = self._trigger.evaluate(turn.level, self._executor)
             mechanism = "tycho TriggerDispatcher.should_fire -> wm_signal"
+            try:
+                decision = self._trigger.evaluate(turn.level, self._executor)
+            except Exception as error:  # noqa: BLE001 - an unanswerable probe is no signal
+                # wm_signal runs verify.py in Tycho's sandbox, so an unavailable
+                # container runtime raises here — on the actor's path, where the
+                # identical fault is merely a tool result the actor reads and
+                # works around (`runs/tycho-nooa-level-start-ar25-
+                # 20260818T174559Z/ABORT.md`). An unanswerable probe is absence
+                # of signal, not a reason to end the episode; the builder itself
+                # still fails loudly below, since a builder that cannot run
+                # Python would produce a model that only looks like evidence.
+                self._write_trace(
+                    {
+                        "event": "trigger_error",
+                        "mechanism": mechanism,
+                        "level": turn.level,
+                        "turn_in_level": turn.turn_in_level,
+                        "error_type": type(error).__name__,
+                        "message": str(error),
+                    }
+                )
+                return None
         else:
             return None
 

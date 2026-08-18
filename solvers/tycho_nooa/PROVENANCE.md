@@ -173,6 +173,23 @@
   and
   `tests/test_native_flow.py::test_actor_beliefs_checkpoint_withholds_take_action_from_offered_tools`.
 
+- adaptation: `TriggerBuilderLoop.before_actor` catches any exception raised by
+  the divergence probe (`TychoTransitionTrigger.evaluate` ->
+  `TriggerDispatcher.should_fire` -> `wm_signal`), traces it as `trigger_error`,
+  and treats the turn as unsignaled instead of letting it escape `decide()`.
+  Pinned Tycho does not guard this call. The asymmetry that motivates the guard
+  is deployment-specific: `wm_signal` executes `verify.py` in Tycho's sandbox,
+  and when no container runtime exists the resulting `SandboxError` is only a
+  tool *result* on the actor's path (the actor reads it and works around it)
+  while being fatal on the trigger's path, where it surfaces as an arc-host
+  `ProtocolError` that ends the episode. `runs/tycho-nooa-level-start-ar25-
+  20260818T174559Z/ABORT.md` records a live run lost this way at action 1,
+  before any trigger, builder, or planner trace existed. The builder's own
+  `except Exception` still re-raises, deliberately: a probe that cannot answer
+  is absence of signal, but a builder that cannot run Python would produce a
+  world model that only looks like evidence. See
+  `tests/test_trigger_builder.py::test_unavailable_sandbox_degrades_the_trigger_instead_of_ending_the_episode`.
+
 Explicitly excluded from this integration slice: reflection cadence, context
 compaction, the GAME_OVER-reset trigger path (structurally unreachable under
 arc-host's `TERMINAL_STATES` design — see "documented deviation" above), and
