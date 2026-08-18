@@ -37,8 +37,32 @@ A human-provided label or explanation attached to an admissible trace, such as a
 _Avoid_: Trace field, admissible observation
 
 **Experiment**:
-An isolated agent implementation and research log under `/experiments`, used for integrated contestant or oracle-coach work after lesson 0049. Experiments are the default unit of new work unless the project explicitly returns to lesson mode.
-_Avoid_: Lesson, teaching brick
+One isolated research question, precommitted contrast, and result record under `/experiments`. An experiment selects frozen Solver Candidates; it does not contain or inherit their implementation. Experiments are the default unit of new empirical work unless the project explicitly returns to lesson mode.
+_Avoid_: Agent implementation, architecture lineage, lesson, teaching brick
+
+**Solver Module**:
+A stable, buildable implementation under `/solvers/<family>` whose public interface, source, tests, and dependency pins can be understood without opening an experiment directory. Experiments configure and evaluate it but do not own it.
+_Avoid_: Numbered experiment implementation, run artifact
+
+**ARC Host Module**:
+The stable Python 3.14 environment-side module under `/arc-host`. It owns only the ARC SDK boundary, public observation projection, human-label action validation and translation, episode limits, and host-visible evidence. It communicates with a persistent Solver Module process through a versioned protocol and imports neither solvers nor experiments.
+_Avoid_: Solver implementation, experiment runner copy, host-authored game judgment
+
+**Solver Candidate**:
+A frozen identity consisting of one Solver Module revision plus its complete behavior-affecting configuration and dependency pins. The same candidate may participate in several experiments without copying or inheriting source.
+_Avoid_: Experiment number, mutable latest agent
+
+**Candidate Lineage**:
+The explicit ancestry between Solver Candidates recorded in manifests or architecture history. It is independent of chronological experiment and run numbering.
+_Avoid_: Folder import chain, experiment chronology
+
+**Mechanism Test**:
+An experiment whose frozen arms differ in one named mechanism or interface condition so the observed contrast can bear on that difference.
+_Avoid_: Bundled architecture rebuild, development comparison
+
+**Capability Build**:
+A bundled implementation change intended to establish whether a whole capability path can function. It may establish feasibility and failure surfaces, but it does not identify the effect of any included mechanism without a later Mechanism Test.
+_Avoid_: Ablation, single-factor estimate
 
 **Program Identification Experiment**:
 A falsifiable contestant experiment that tests whether admissible interaction can recover an executable theory sufficient for a specified decision. It establishes feasibility for one bounded claim rather than specifying or building a complete agent architecture.
