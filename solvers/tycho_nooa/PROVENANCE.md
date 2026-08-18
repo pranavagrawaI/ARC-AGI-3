@@ -119,6 +119,27 @@
   `tests/test_trigger_builder.py::test_world_model_checkpoint_is_forced_when_pass_leaves_it_stale`
   and
   `tests/test_trigger_builder.py::test_world_model_checkpoint_executes_a_genuine_model_edit`.
+- adaptation: pinned Tycho has no forcing mechanism for `notes/actor_beliefs.md`
+  — it is a voluntary actor scratchpad that the builder treats as a disposable
+  starting hypothesis, not ground truth (`tycho/agent/builder.py`'s
+  `WorldModelBuilder` reads it once as a prompt seed and never checks whether
+  it advanced), so a stale copy costs Tycho's own design nothing. This is a
+  deliberate customization beyond Tycho's fidelity target, not a bugfix:
+  `DIAGNOSIS.md`'s first live run found `notes/actor_beliefs.md` written once
+  at turn 1 and never refreshed despite two later probing bursts, and our goal
+  — reliable level solving — benefits from the builder seeing the actor's
+  current thinking rather than its turn-1 draft. `NativeToolStrategy.execute`
+  now runs `_enforce_actor_beliefs_checkpoint` after every turn's action is
+  committed, mirroring `_enforce_world_model_checkpoint`'s shape: one real
+  chance for the model to write a genuine update (with `take_action` and
+  `submit_action` withheld from the offered tools, since the turn's action is
+  already committed), and only if the file is still byte-identical afterward
+  does it force a deterministic breadcrumb
+  (`_fallback_actor_beliefs_checkpoint`). See
+  `tests/test_native_flow.py::test_actor_beliefs_checkpoint_is_forced_when_turn_leaves_it_stale`,
+  `tests/test_native_flow.py::test_actor_beliefs_checkpoint_executes_a_genuine_model_edit`,
+  and
+  `tests/test_native_flow.py::test_actor_beliefs_checkpoint_withholds_take_action_from_offered_tools`.
 
 Explicitly excluded from this integration slice: Tycho's scribe, reflection
 cadence, context compaction, level-start/GAME_OVER trigger paths, and any new

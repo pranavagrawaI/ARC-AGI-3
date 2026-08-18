@@ -40,6 +40,53 @@ def batched_response(calls: list[tuple[str, dict, str]]) -> LLMResponse:
     )
 
 
+def prose_response(content: str) -> LLMResponse:
+    """A tool-free reply, used to satisfy the mandatory actor_beliefs.md
+    checkpoint call without exercising a genuine model-authored edit."""
+    return LLMResponse(
+        raw_response=None,
+        content=content,
+        tool_calls=[],
+        finish_reason="stop",
+        assistant_message={"role": "assistant", "content": content},
+        usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    )
+
+
+class ToolsRecordingFakeLLMClient(FakeLLMClient):
+    """A FakeLLMClient that also records the tools offered on every call."""
+
+    def __init__(self, scripted_responses: list[LLMResponse]) -> None:
+        super().__init__(scripted_responses=scripted_responses)
+        self.tools_per_call: list[list[str]] = []
+
+    async def acall(self, messages, tools=None, output_model=None, **kwargs):
+        self.tools_per_call.append([tool.name for tool in tools] if tools else [])
+        return await super().acall(
+            messages, tools=tools, output_model=output_model, **kwargs
+        )
+
+
+class MessageRecordingFakeLLMClient(FakeLLMClient):
+    """A FakeLLMClient that keeps every call's messages, not just the last.
+
+    The mandatory actor_beliefs.md checkpoint now fires one extra generate()
+    call after every turn-ending action, so `last_messages` no longer reflects
+    the turn's own first call. Tests asserting on "what the model saw" need
+    the specific call, not whichever call happened to run last.
+    """
+
+    def __init__(self, scripted_responses: list[LLMResponse]) -> None:
+        super().__init__(scripted_responses=scripted_responses)
+        self.messages_per_call: list[list[dict]] = []
+
+    async def acall(self, messages, tools=None, output_model=None, **kwargs):
+        self.messages_per_call.append(messages)
+        return await super().acall(
+            messages, tools=tools, output_model=output_model, **kwargs
+        )
+
+
 def turn(number: int, previous_action: str = "") -> GameTurn:
     return GameTurn(
         grid=[[0, number], [2, 3]],
@@ -66,6 +113,7 @@ async def test_files_and_conversation_survive_the_action_boundary(
                 "write-1",
             ),
             response("take_action", {"action": "UP"}, "act-1"),
+            prose_response("actor checkpoint after turn 0"),
             response("read_file", {"path": "notes/world_model.md"}, "read-2"),
             response("take_action", {"action": "DOWN"}, "act-2"),
         ]
@@ -119,6 +167,106 @@ async def test_files_and_conversation_survive_the_action_boundary(
 
 
 @pytest.mark.asyncio
+async def test_actor_beliefs_checkpoint_is_forced_when_turn_leaves_it_stale(
+    tmp_path: Path,
+) -> None:
+    """Adaptation beyond Tycho: real Tycho never forces notes/actor_beliefs.md
+    (see PROVENANCE.md), but a turn that leaves it untouched must not be
+    allowed to end quietly here, since the goal is a fresher hand-off to the
+    builder than Tycho's own design guarantees."""
+    llm = FakeLLMClient(
+        scripted_responses=[
+            response("take_action", {"action": "UP"}, "act-1"),
+            prose_response("nothing to add yet"),
+        ]
+    )
+    agent = TychoNooaAgent(
+        llm=llm,
+        trigger_builder=False,
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+    )
+    notes_path = agent.workspace_dir / "notes/actor_beliefs.md"
+    notes_path.parent.mkdir(parents=True, exist_ok=True)
+    notes_path.write_text("turn 0: UP moved the marker\n")
+
+    assert await agent.act(turn(0)) == ActionDecision(action="UP")
+
+    updated = notes_path.read_text()
+    assert updated.startswith("turn 0: UP moved the marker")
+    assert "[checkpoint: turn ended with no model-authored update]" in updated
+
+    tasks = [event for event in agent.event_manager.values() if isinstance(event, Task)]
+    assert any(
+        "checkpoint your current hypotheses" in task.prompt for task in tasks
+    )
+
+
+@pytest.mark.asyncio
+async def test_actor_beliefs_checkpoint_executes_a_genuine_model_edit(
+    tmp_path: Path,
+) -> None:
+    """Unlike the fallback breadcrumb, the checkpoint call's tool calls are
+    real: the model gets one genuine chance to write before the fallback
+    would apply, and that write must actually land verbatim."""
+    llm = FakeLLMClient(
+        scripted_responses=[
+            response("take_action", {"action": "UP"}, "act-1"),
+            response(
+                "write_file",
+                {
+                    "path": "notes/actor_beliefs.md",
+                    "content": "genuine hypothesis: UP moves the marker up",
+                },
+                "checkpoint-write",
+            ),
+        ]
+    )
+    agent = TychoNooaAgent(
+        llm=llm,
+        trigger_builder=False,
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+    )
+
+    assert await agent.act(turn(0)) == ActionDecision(action="UP")
+
+    content = (agent.workspace_dir / "notes/actor_beliefs.md").read_text()
+    assert content == "genuine hypothesis: UP moves the marker up"
+    assert "[checkpoint: turn ended" not in content
+
+
+@pytest.mark.asyncio
+async def test_actor_beliefs_checkpoint_withholds_take_action_from_offered_tools(
+    tmp_path: Path,
+) -> None:
+    llm = ToolsRecordingFakeLLMClient(
+        scripted_responses=[
+            response("take_action", {"action": "UP"}, "act-1"),
+            prose_response("nothing to add yet"),
+        ]
+    )
+    agent = TychoNooaAgent(
+        llm=llm,
+        trigger_builder=False,
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+    )
+
+    assert await agent.act(turn(0)) == ActionDecision(action="UP")
+
+    checkpoint_call_tools = llm.tools_per_call[1]
+    assert checkpoint_call_tools, "checkpoint call must offer tools too"
+    assert "take_action" not in checkpoint_call_tools
+    assert "submit_action" not in checkpoint_call_tools
+    assert "write_file" in checkpoint_call_tools
+    assert "edit_file" in checkpoint_call_tools
+
+
+@pytest.mark.asyncio
 async def test_illegal_action_is_feedback_not_a_host_action(tmp_path: Path) -> None:
     llm = FakeLLMClient(
         scripted_responses=[
@@ -150,7 +298,7 @@ async def test_illegal_action_is_feedback_not_a_host_action(tmp_path: Path) -> N
 async def test_first_model_context_omits_internal_self_and_protocol_docs(
     tmp_path: Path,
 ) -> None:
-    llm = FakeLLMClient(
+    llm = MessageRecordingFakeLLMClient(
         scripted_responses=[response("take_action", {"action": "UP"}, "act-1")]
     )
     agent = TychoNooaAgent(
@@ -163,8 +311,9 @@ async def test_first_model_context_omits_internal_self_and_protocol_docs(
 
     await agent.act(turn(0))
 
-    assert [message["role"] for message in llm.last_messages] == ["system", "user"]
-    rendered = json.dumps(llm.last_messages)
+    first_call_messages = llm.messages_per_call[0]
+    assert [message["role"] for message in first_call_messages] == ["system", "user"]
+    rendered = json.dumps(first_call_messages)
     assert "<strategy_prompt>" in rendered
     assert "grid (row labels at left" in rendered
     assert "<self " not in rendered
@@ -198,7 +347,7 @@ async def test_first_model_context_omits_internal_self_and_protocol_docs(
     # text is present verbatim in the actual prompt.
     system_content = next(
         message["content"]
-        for message in llm.last_messages
+        for message in first_call_messages
         if message["role"] == "system"
     )
 
@@ -222,6 +371,7 @@ async def test_validated_plan_hint_is_injected_and_traced(tmp_path: Path) -> Non
     llm = FakeLLMClient(
         scripted_responses=[
             response("take_action", {"action": "UP"}, "act-1"),
+            prose_response("actor checkpoint after turn 0"),
             response("take_action", {"action": "DOWN"}, "act-2"),
         ]
     )
@@ -263,9 +413,11 @@ async def test_validated_plan_hint_is_injected_and_traced(tmp_path: Path) -> Non
     )
 
     tasks = [event for event in agent.event_manager.values() if isinstance(event, Task)]
+    # index 1 is the actor_beliefs.md checkpoint task inserted after turn 0's
+    # decision; turn 1's own task is index 2, not 1.
     assert "validated planner feedback:" in tasks[0].prompt
     assert "next action is UP" in tasks[0].prompt
-    assert "observed frame diverged" in tasks[1].prompt
+    assert "observed frame diverged" in tasks[2].prompt
     planner_trace = [
         json.loads(line)
         for line in (tmp_path / "planner-trace.jsonl").read_text().splitlines()
@@ -535,6 +687,7 @@ async def test_verbosity_changes_the_next_observation_payload(tmp_path: Path) ->
                 "verbosity-1",
             ),
             response("take_action", {"action": "UP"}, "act-1"),
+            prose_response("actor checkpoint after turn 0"),
             response("take_action", {"action": "DOWN"}, "act-2"),
         ]
     )
@@ -549,12 +702,14 @@ async def test_verbosity_changes_the_next_observation_payload(tmp_path: Path) ->
     await agent.act(turn(0))
     await agent.act(turn(1, previous_action="UP"))
 
+    # Each turn now also inserts an actor_beliefs.md checkpoint task right
+    # after its decision: [turn0, checkpoint0, turn1, checkpoint1].
     tasks = [event for event in agent.event_manager.values() if isinstance(event, Task)]
-    assert len(tasks) == 2
+    assert len(tasks) == 4
     assert "grid (row labels at left" in tasks[0].prompt
-    assert "grid (row labels at left" not in tasks[1].prompt
-    assert "1 cells changed; region [rows 0-0, cols 1-1]" in tasks[1].prompt
-    assert "  0->1" not in tasks[1].prompt
+    assert "grid (row labels at left" not in tasks[2].prompt
+    assert "1 cells changed; region [rows 0-0, cols 1-1]" in tasks[2].prompt
+    assert "  0->1" not in tasks[2].prompt
 
 
 def test_native_surface_matches_tycho_and_not_codeact(tmp_path: Path) -> None:

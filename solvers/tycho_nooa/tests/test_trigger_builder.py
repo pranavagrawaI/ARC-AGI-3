@@ -80,6 +80,7 @@ async def test_trigger_builds_fresh_report_before_actor_and_traces_uptake(
     llm = FakeLLMClient(
         scripted_responses=[
             tool_response("take_action", {"action": "UP"}, "actor-0"),
+            prose_response("actor checkpoint after turn 0"),
             tool_response(
                 "write_file",
                 {
@@ -162,7 +163,9 @@ async def test_trigger_builds_fresh_report_before_actor_and_traces_uptake(
     actor_tasks = [
         event for event in agent.event_manager.values() if isinstance(event, Task)
     ]
-    assert report in actor_tasks[-1].prompt
+    # The last task is turn 1's own actor_beliefs.md checkpoint prompt, inserted
+    # after the decision; the turn's observation (carrying the report) is -2.
+    assert report in actor_tasks[-2].prompt
 
     builder_trace = [
         json.loads(line)
@@ -204,6 +207,7 @@ async def test_stale_or_missing_report_is_replaced_by_tool_free_final_report(
     llm = FakeLLMClient(
         scripted_responses=[
             tool_response("take_action", {"action": "UP"}, "actor-0"),
+            prose_response("actor checkpoint after turn 0"),
             prose_response("done"),
             prose_response("nothing new yet"),
             prose_response(fallback),
@@ -261,6 +265,7 @@ async def test_forced_report_identical_to_prior_report_is_not_fresh(
     llm = FakeLLMClient(
         scripted_responses=[
             tool_response("take_action", {"action": "UP"}, "actor-0"),
+            prose_response("actor checkpoint after turn 0"),
             prose_response("done"),
             prose_response("nothing new yet"),
             prose_response("done"),
@@ -320,6 +325,7 @@ async def test_forced_report_call_offers_tools_but_ignores_attempted_tool_calls(
     llm = RecordingFakeLLMClient(
         scripted_responses=[
             tool_response("take_action", {"action": "UP"}, "actor-0"),
+            prose_response("actor checkpoint after turn 0"),
             prose_response("still exploring"),
             prose_response("nothing new yet"),
             tool_response(
@@ -355,14 +361,14 @@ async def test_forced_report_call_offers_tools_but_ignores_attempted_tool_calls(
         action="DOWN"
     )
 
-    # Call order: actor turn 0, builder main loop (breaks on the prose reply),
-    # builder world-model checkpoint enforcement, builder forced final call,
-    # actor turn 1.
-    checkpoint_call_tools = llm.tools_per_call[2]
+    # Call order: actor turn 0, actor's own actor_beliefs.md checkpoint (filler),
+    # builder main loop (breaks on the prose reply), builder world-model
+    # checkpoint enforcement, builder forced final call, actor turn 1.
+    checkpoint_call_tools = llm.tools_per_call[3]
     assert checkpoint_call_tools, "checkpoint call must offer tools too"
     assert "take_action" not in checkpoint_call_tools
 
-    forced_call_tools = llm.tools_per_call[3]
+    forced_call_tools = llm.tools_per_call[4]
     assert forced_call_tools, "forced call must still offer tools, like Tycho does"
     assert "take_action" not in forced_call_tools
 
@@ -406,6 +412,7 @@ async def test_world_model_checkpoint_is_forced_when_pass_leaves_it_stale(
     llm = FakeLLMClient(
         scripted_responses=[
             tool_response("take_action", {"action": "UP"}, "actor-0"),
+            prose_response("actor checkpoint after turn 0"),
             prose_response("done"),
             prose_response("nothing new yet"),
             prose_response(fallback_report),
@@ -471,6 +478,7 @@ async def test_world_model_checkpoint_executes_a_genuine_model_edit(
     llm = FakeLLMClient(
         scripted_responses=[
             tool_response("take_action", {"action": "UP"}, "actor-0"),
+            prose_response("actor checkpoint after turn 0"),
             prose_response("done"),
             tool_response(
                 "write_file",
@@ -527,6 +535,7 @@ async def test_clean_signal_does_not_dispatch_builder(
     llm = FakeLLMClient(
         scripted_responses=[
             tool_response("take_action", {"action": "UP"}, "actor-0"),
+            prose_response("actor checkpoint after turn 0"),
             tool_response("take_action", {"action": "DOWN"}, "actor-1"),
         ]
     )
