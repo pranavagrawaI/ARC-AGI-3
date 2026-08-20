@@ -12,9 +12,16 @@ from nooa.events import Error, Task
 from nooa.strategies.base import GenerationStrategy, RuntimeServices
 from tycho.workspace.workspace import GameWorkspace
 
+from tycho_nooa.history import (
+    ELIDED_OBSERVATION,
+    evict_old_grids,
+    replayed_reasoning,
+    retain_assistant_turn,
+)
 from tycho_nooa.models import ActionDecision, GameTurn
-from tycho_nooa.planner import trigger_actor_world_model_paragraph
-from tycho_nooa.tools import WorkspaceToolSurface, tool_by_name
+from tycho_nooa.modes import mode_from_env
+from tycho_nooa.planner import actor_world_model_paragraph
+from tycho_nooa.tools import Observation, WorkspaceToolSurface, tool_by_name
 
 if TYPE_CHECKING:
     from nooa.strategies.current_call import CurrentCall
@@ -28,12 +35,21 @@ ACTOR_BELIEFS_CHECKPOINT_REQUEST = (
     "remains open, so the builder is not reading the same stale hypotheses the "
     "next time it fires."
 )
-_NON_CHECKPOINT_TOOL_NAMES = {"take_action", "submit_action"}
+ACTION_DEMAND_REQUEST = (
+    "Your workspace tool budget for this turn is spent. take_action is the only "
+    "tool left. Commit the single best action the evidence you already gathered "
+    "can justify, by calling take_action exactly once now."
+)
+# The turn-ending tools: withheld from the beliefs checkpoint, which runs after
+# the action is already committed, and the only ones offered by the final demand.
+_ACTION_TOOL_NAMES = {"take_action", "submit_action"}
 
 
 @dataclass(frozen=True)
 class NativeToolConfig:
     max_tool_steps: int = 25
+    # Tycho's TYCHO_GRID_KEEP default: how many recent turns keep their inlined grid.
+    grid_keep: int = 3
     max_tokens: int = 16_000
     temperature: float | None = None
 
@@ -55,7 +71,7 @@ class NativeToolStrategy(GenerationStrategy):
                 "past evidence, and test executable ideas with run_python. End this turn "
                 "only by calling take_action exactly once. The resulting observation will "
                 "arrive on the next call to this same agent.\n\n"
-                + trigger_actor_world_model_paragraph()
+                + actor_world_model_paragraph(mode_from_env().wm_variant)
             )
         }
 
@@ -70,7 +86,14 @@ class NativeToolStrategy(GenerationStrategy):
         tools = surface.native_tools()
         tools_by_name = tool_by_name(tools)
         actor_beliefs_before = _read_optional(workspace.dir, ACTOR_BELIEFS_NOTES)
-        runtime.event_manager.add(Task(prompt=self._turn_prompt(call, surface)))
+        observation = self._observation(call, surface)
+        runtime.event_manager.add(
+            Task(
+                prompt=observation.prompt,
+                metadata={ELIDED_OBSERVATION: observation.elided},
+            )
+        )
+        evict_old_grids(runtime.event_manager, keep=config.grid_keep)
 
         for _ in range(config.max_tool_steps):
             response, event_id = await runtime.generate(
@@ -90,7 +113,7 @@ class NativeToolStrategy(GenerationStrategy):
                 )
                 continue
 
-            runtime.event_manager.remove(event_id)
+            retain_assistant_turn(runtime.event_manager, event_id, response)
             planner_in_batch = self._planner_in_batch(response.tool_calls, surface)
             for index, tool_call in enumerate(response.tool_calls):
                 decision = self._execute_tool_call(
@@ -98,9 +121,7 @@ class NativeToolStrategy(GenerationStrategy):
                     surface,
                     tools_by_name,
                     tool_call,
-                    reasoning=(response.reasoning or str(response.content) or None)
-                    if index == 0
-                    else None,
+                    reasoning=replayed_reasoning(response) if index == 0 else None,
                     block_action=planner_in_batch,
                 )
                 if decision is not None:
@@ -109,9 +130,63 @@ class NativeToolStrategy(GenerationStrategy):
                     )
                     return decision
 
-        raise GenerationError(
-            f"No action was committed within {config.max_tool_steps} native tool steps"
+        decision = await self._demand_action(runtime, surface, tools, config)
+        if decision is None:
+            raise GenerationError(
+                f"No action was committed within {config.max_tool_steps} native "
+                "tool steps, and none was committed when take_action was the only "
+                "tool left"
+            )
+        await self._enforce_actor_beliefs_checkpoint(
+            runtime, surface, tools, config, workspace, actor_beliefs_before
         )
+        return decision
+
+    async def _demand_action(
+        self,
+        runtime: RuntimeServices,
+        surface: WorkspaceToolSurface,
+        tools: list[Any],
+        config: NativeToolConfig,
+    ) -> ActionDecision | None:
+        """Spend one last step asking for the action, before losing the episode.
+
+        Exhausting `max_tool_steps` is not the same failure as a model that will
+        not act. `runs/tycho-nooa-goal-gate-ar25-20260819T120904Z` died here at
+        action 0 with all 25 steps spent reading the grid and never a
+        `take_action`; the episode's remaining 19 actions went with it. An ARC
+        episode has no "no action" branch, so a turn that ends in silence throws
+        the run either way. Mirrors _enforce_actor_beliefs_checkpoint: restrict
+        the offered tools to the one that must be called, then let the raise
+        stand if the model still declines. `tool_choice` stays "auto" because
+        "required" draws 500s from some gateways (nooa's own codeact says so).
+        """
+        action_tools = [tool for tool in tools if tool.name in _ACTION_TOOL_NAMES]
+        if not action_tools:
+            return None
+
+        runtime.event_manager.add(Task(prompt=ACTION_DEMAND_REQUEST))
+        response, event_id = await runtime.generate(
+            tools=action_tools,
+            max_tokens=config.max_tokens,
+            temperature=config.temperature,
+            tool_choice="auto",
+        )
+        if not response.tool_calls:
+            return None
+
+        retain_assistant_turn(runtime.event_manager, event_id, response)
+        for index, tool_call in enumerate(response.tool_calls):
+            decision = self._execute_tool_call(
+                runtime,
+                surface,
+                tool_by_name(action_tools),
+                tool_call,
+                reasoning=replayed_reasoning(response) if index == 0 else None,
+            )
+            if decision is not None:
+                return decision
+        return None
 
     async def _enforce_actor_beliefs_checkpoint(
         self,
@@ -141,7 +216,7 @@ class NativeToolStrategy(GenerationStrategy):
             return False
 
         checkpoint_tools = [
-            tool for tool in tools if tool.name not in _NON_CHECKPOINT_TOOL_NAMES
+            tool for tool in tools if tool.name not in _ACTION_TOOL_NAMES
         ]
         checkpoint_tools_by_name = tool_by_name(checkpoint_tools)
         runtime.event_manager.add(Task(prompt=ACTOR_BELIEFS_CHECKPOINT_REQUEST))
@@ -152,16 +227,14 @@ class NativeToolStrategy(GenerationStrategy):
             tool_choice="auto",
         )
         if response.tool_calls:
-            runtime.event_manager.remove(event_id)
+            retain_assistant_turn(runtime.event_manager, event_id, response)
             for index, tool_call in enumerate(response.tool_calls):
                 self._execute_tool_call(
                     runtime,
                     surface,
                     checkpoint_tools_by_name,
                     tool_call,
-                    reasoning=(response.reasoning or str(response.content) or None)
-                    if index == 0
-                    else None,
+                    reasoning=replayed_reasoning(response) if index == 0 else None,
                 )
 
         if _read_optional(workspace.dir, ACTOR_BELIEFS_NOTES) != before:
@@ -176,16 +249,16 @@ class NativeToolStrategy(GenerationStrategy):
         return True
 
     @staticmethod
-    def _turn_prompt(
+    def _observation(
         call: CurrentCall,
         surface: WorkspaceToolSurface,
-    ) -> str:
+    ) -> Observation:
         turn = call.bound_parameters().get("turn")
         if not isinstance(turn, GameTurn):
             raise TypeError(
                 "NativeToolStrategy requires a GameTurn argument named 'turn'"
             )
-        return surface.observation_prompt(turn)
+        return surface.observation(turn)
 
     def _execute_tool_call(
         self,
@@ -194,16 +267,32 @@ class NativeToolStrategy(GenerationStrategy):
         tools_by_name: dict[str, Any],
         tool_call: Any,
         *,
-        reasoning: str | None,
+        reasoning: str | None = None,
         block_action: bool = False,
     ) -> ActionDecision | None:
         try:
             arguments = json.loads(tool_call.arguments)
-            tool = tools_by_name[tool_call.name]
-        except (json.JSONDecodeError, KeyError) as error:
-            runtime.event_manager.add(
-                Error(content=f"Invalid native tool call {tool_call.name!r}: {error}")
+        except json.JSONDecodeError as error:
+            message = f"Invalid native tool call {tool_call.name!r}: {error}"
+            surface.record_rejected_call(
+                tool_call.name,
+                {"raw_arguments": tool_call.arguments},
+                message,
+                tool_call_id=tool_call.id,
             )
+            runtime.event_manager.add(Error(content=message))
+            return None
+        try:
+            tool = tools_by_name[tool_call.name]
+        except KeyError as error:
+            message = f"Invalid native tool call {tool_call.name!r}: {error}"
+            surface.record_rejected_call(
+                tool_call.name,
+                arguments,
+                message,
+                tool_call_id=tool_call.id,
+            )
+            runtime.event_manager.add(Error(content=message))
             return None
 
         event_id = runtime.event_manager.add(
@@ -215,20 +304,27 @@ class NativeToolStrategy(GenerationStrategy):
             )
         )
         if block_action and tool_call.name in {"take_action", "submit_action"}:
+            message = (
+                "A planner call and take_action cannot share one tool batch. "
+                "Inspect the planner result, then choose an action in the next step."
+            )
+            surface.record_rejected_call(
+                tool_call.name,
+                arguments,
+                message,
+                tool_call_id=tool_call.id,
+            )
             runtime.event_manager.update(
                 event_id,
                 result=ToolResult(
                     tool_call_id=tool_call.id,
-                    content=(
-                        "A planner call and take_action cannot share one tool batch. "
-                        "Inspect the planner result, then choose an action in the next step."
-                    ),
+                    content=message,
                     result_status=ResultStatus.ERROR,
                 ),
             )
             return None
         try:
-            result = surface.dispatch(tool, arguments)
+            result = surface.dispatch(tool, arguments, tool_call_id=tool_call.id)
         except Exception as error:  # noqa: BLE001 - a model tool error is recoverable feedback
             runtime.event_manager.update(
                 event_id,
@@ -278,7 +374,9 @@ class NativeToolStrategy(GenerationStrategy):
         executor = getattr(runtime.agent, "_tool_executor", None)
         workspace = getattr(executor, "ws", None)
         if not isinstance(workspace, GameWorkspace):
-            raise TypeError("NativeToolStrategy requires a ToolExecutor with a GameWorkspace")
+            raise TypeError(
+                "NativeToolStrategy requires a ToolExecutor with a GameWorkspace"
+            )
         return workspace
 
 

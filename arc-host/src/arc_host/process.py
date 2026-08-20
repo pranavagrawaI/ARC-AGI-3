@@ -27,6 +27,8 @@ WORKER_ENVIRONMENT_KEYS = frozenset(
     {
         "ARC_LLM_API_KEY",
         "ARC_LLM_BASE_URL",
+        "ARC_LLM_CONTEXT_WINDOW",
+        "ARC_LLM_MAX_TOKENS",
         "ARC_LLM_MODEL",
         "ARC_LLM_USE_RESPONSES",
         "HOME",
@@ -38,6 +40,8 @@ WORKER_ENVIRONMENT_KEYS = frozenset(
         "PATH",
         "REQUESTS_CA_BUNDLE",
         "SSL_CERT_FILE",
+        "TYCHO_MODE",
+        "TYCHO_NOOA_CAPTURE_REASONING",
         "TZ",
     }
 )

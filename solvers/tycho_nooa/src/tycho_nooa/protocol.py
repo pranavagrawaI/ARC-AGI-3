@@ -28,7 +28,7 @@ class ObservationPayload(BaseModel):
     state: str
     full_reset: bool
 
-    @field_validator("grid")
+    @field_validator("grid", mode="before")
     @classmethod
     def validate_grid(cls, grid: list[list[int]]) -> list[list[int]]:
         if not grid or not grid[0]:
@@ -38,11 +38,13 @@ class ObservationPayload(BaseModel):
             raise ValueError("grid must fit within 64x64")
         if any(len(row) != width for row in grid):
             raise ValueError("grid must be rectangular")
-        if any(
-            type(cell) is not int or not 0 <= cell <= 15 for row in grid for cell in row
-        ):
+        if not _has_valid_cells(grid):
             raise ValueError("grid cells must be integers in [0, 15]")
         return grid
+
+
+def _has_valid_cells(grid: list[list[int]]) -> bool:
+    return all(type(cell) is int and 0 <= cell <= 15 for row in grid for cell in row)
 
 
 class StartGameMessage(ProtocolModel):

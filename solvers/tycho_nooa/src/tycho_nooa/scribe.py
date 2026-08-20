@@ -23,6 +23,8 @@ from tycho.prompts.render import render_prompt
 from tycho.workspace.agent_tools import canonical
 from tycho.workspace.workspace import GameWorkspace
 
+from tycho_nooa.history import replayed_reasoning, retain_assistant_turn
+from tycho_nooa.modes import mode_from_env
 from tycho_nooa.tools import WorkspaceToolSurface, tool_by_name
 
 if TYPE_CHECKING:
@@ -70,11 +72,16 @@ class ScribeStrategy(GenerationStrategy):
         # offers take_action here and replaces its execution with a skip message;
         # tycho_nooa withholds it structurally instead.
         tools = [
-            tool for tool in surface.native_tools() if tool.name not in _NON_SCRIBE_TOOL_NAMES
+            tool
+            for tool in surface.native_tools()
+            if tool.name not in _NON_SCRIBE_TOOL_NAMES
         ]
         tools_by_name = tool_by_name(tools)
         kickoff = render_prompt(
-            "scribe.user", level=level, actor_writes_wm=False, wm_variant="trigger"
+            "scribe.user",
+            level=level,
+            actor_writes_wm=False,
+            wm_variant=mode_from_env().wm_variant,
         )
         runtime.event_manager.add(Task(prompt=kickoff))
 
@@ -88,16 +95,14 @@ class ScribeStrategy(GenerationStrategy):
             if not response.tool_calls:
                 runtime.event_manager.remove(event_id)
                 break
-            runtime.event_manager.remove(event_id)
+            retain_assistant_turn(runtime.event_manager, event_id, response)
             for index, tool_call in enumerate(response.tool_calls):
                 self._execute_tool_call(
                     runtime,
                     surface,
                     tools_by_name,
                     tool_call,
-                    reasoning=(response.reasoning or str(response.content) or None)
-                    if index == 0
-                    else None,
+                    reasoning=replayed_reasoning(response) if index == 0 else None,
                 )
 
         _write_level_insight_fallback(workspace, level, _FALLBACK_REASON)
@@ -109,14 +114,17 @@ class ScribeStrategy(GenerationStrategy):
         tools_by_name: dict[str, Any],
         tool_call: Any,
         *,
-        reasoning: str | None,
+        reasoning: str | None = None,
     ) -> None:
         try:
             arguments = json.loads(tool_call.arguments)
         except json.JSONDecodeError as error:
             message = f"Invalid scribe tool call {tool_call.name!r}: {error}"
             surface.record_rejected_call(
-                tool_call.name, {"raw_arguments": tool_call.arguments}, message
+                tool_call.name,
+                {"raw_arguments": tool_call.arguments},
+                message,
+                tool_call_id=tool_call.id,
             )
             runtime.event_manager.add(Error(content=message))
             return
@@ -124,7 +132,12 @@ class ScribeStrategy(GenerationStrategy):
             tool = tools_by_name[tool_call.name]
         except KeyError as error:
             message = f"Invalid scribe tool call {tool_call.name!r}: {error}"
-            surface.record_rejected_call(tool_call.name, arguments, message)
+            surface.record_rejected_call(
+                tool_call.name,
+                arguments,
+                message,
+                tool_call_id=tool_call.id,
+            )
             runtime.event_manager.add(Error(content=message))
             return
 
@@ -147,7 +160,7 @@ class ScribeStrategy(GenerationStrategy):
             )
             return
         try:
-            result = surface.dispatch(tool, arguments)
+            result = surface.dispatch(tool, arguments, tool_call_id=tool_call.id)
         except Exception as error:  # noqa: BLE001 - a model tool error is recoverable feedback
             runtime.event_manager.update(
                 event_id,
@@ -179,7 +192,9 @@ class ScribeStrategy(GenerationStrategy):
         executor = getattr(runtime.agent, "_tool_executor", None)
         workspace = getattr(executor, "ws", None)
         if not isinstance(workspace, GameWorkspace):
-            raise TypeError("ScribeStrategy requires a ToolExecutor with a GameWorkspace")
+            raise TypeError(
+                "ScribeStrategy requires a ToolExecutor with a GameWorkspace"
+            )
         return workspace
 
 
@@ -195,19 +210,25 @@ def _is_world_model_edit(name: str, arguments: dict[str, Any]) -> bool:
     return path.replace("\\", "/").split("/")[-1] in _WORLD_MODEL_BASENAMES
 
 
-def _write_level_insight_fallback(workspace: GameWorkspace, level: int, reason: str) -> None:
+def _write_level_insight_fallback(
+    workspace: GameWorkspace, level: int, reason: str
+) -> None:
     """Byte-exact port of pinned `agent.py::_write_level_insight_fallback`."""
     path = LEVEL_INSIGHTS_NOTES.format(level=level)
     existing = workspace.read_file(path, max_bytes=200)
     if not existing.startswith("(no such file"):
         return
     solved = workspace.read_file(f"level_{level}/solved.json", max_bytes=1000)
+    level_complete = workspace.read_file(
+        f"level_{level}/level_complete.json", max_bytes=1800
+    )
     terminal = workspace.read_file(f"level_{level}/terminal.json", max_bytes=1800)
     content = (
         f"# Level {level} Insights\n\n"
         f"Deterministic fallback note: {reason}. The LLM consolidation step did not write "
         "a carry-forward note before the next level began.\n\n"
         f"solved.json:\n{solved}\n\n"
+        f"level_complete.json:\n{level_complete}\n\n"
         f"terminal.json:\n{terminal}\n"
     )
     workspace.write_file(path, content)

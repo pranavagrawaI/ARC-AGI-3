@@ -18,9 +18,11 @@ from nooa.unifiedllm import UnifiedLLM
 from tycho.agent.builder import REPORT_FILE, _verify_state
 from tycho.agent.colors import COLORMAP
 from tycho.prompts.render import render_prompt
-from tycho.workspace.agent_tools import ToolExecutor
+from tycho.workspace.agent_tools import ToolExecutor, canonical
 
+from tycho_nooa.history import replayed_reasoning, retain_assistant_turn
 from tycho_nooa.models import GameTurn
+from tycho_nooa.symmetry_notice import PROMPT_BRIEF
 from tycho_nooa.tools import BUILDER_TOOL_PROFILE, WorkspaceToolSurface, tool_by_name
 
 if TYPE_CHECKING:
@@ -60,6 +62,20 @@ FALLBACK_REPORT = (
     "recommended_action: none   subgoal: none\n"
     "note: keep exploring; re-invoke with more specific mechanics once you have them"
 )
+OUTCOME_CHECKPOINT_REQUEST = """HOST-CONFIRMED OUTCOME CHECKPOINT (mandatory)
+
+The ARC host, not an actor hypothesis, observed a public levels_completed increase:
+{evidence}
+
+The verifier still says the just-completed transition is missed by outcome(). Repair that
+specific false negative before exploring anything else. Preserve current non-terminal
+behavior and avoid game-specific constants. Re-run verification after editing
+world_model.py. Do not investigate current-level dynamics first while this checkpoint is
+unresolved."""
+OUTCOME_CHECKPOINT_REFUSAL = (
+    "The host-confirmed outcome checkpoint is unresolved. A workspace tool call is "
+    "required; prose cannot end this repair prefix."
+)
 
 
 @dataclass(frozen=True)
@@ -73,6 +89,7 @@ class BuilderConfig:
 class BuilderRequest:
     turn: GameTurn
     reason: str
+    outcome_evidence: str | None = None
 
 
 @dataclass(frozen=True)
@@ -81,6 +98,8 @@ class BuilderResult:
     report_fresh: bool
     report_forced: bool
     world_model_checkpoint_forced: bool
+    outcome_checkpoint_required: bool
+    outcome_checkpoint_resolved: bool
     artifact_hashes: dict[str, dict[str, str | bool | None]]
     tool_calls: list[dict[str, Any]]
 
@@ -88,6 +107,51 @@ class BuilderResult:
 def verify_state(executor: ToolExecutor) -> tuple[str, tuple[int, int] | None]:
     """Call Tycho's pinned, auto-attached builder verifier unchanged."""
     return _verify_state(executor)
+
+
+@dataclass
+class OutcomeCheckpoint:
+    """Mandatory repair state derived from host-confirmed terminal evidence."""
+
+    evidence: str | None
+    resolved: bool
+
+    @classmethod
+    def begin(cls, evidence: str | None, verifier_text: str) -> OutcomeCheckpoint:
+        required = evidence is not None
+        return cls(
+            evidence=evidence,
+            resolved=not required or not _misses_completed_level(verifier_text),
+        )
+
+    @property
+    def required(self) -> bool:
+        return self.evidence is not None
+
+    def request_repair(self, runtime: RuntimeServices) -> None:
+        if self.required and not self.resolved:
+            runtime.event_manager.add(
+                Task(prompt=OUTCOME_CHECKPOINT_REQUEST.format(evidence=self.evidence))
+            )
+
+    def reject_prose_exit(self, runtime: RuntimeServices) -> bool:
+        if not self.required or self.resolved:
+            return False
+        runtime.event_manager.add(Error(content=OUTCOME_CHECKPOINT_REFUSAL))
+        return True
+
+    def inspect_edits(
+        self,
+        runtime: RuntimeServices,
+        executor: ToolExecutor,
+        tool_calls: list[Any],
+    ) -> None:
+        if not self.required or self.resolved or not _edits_world_model(tool_calls):
+            return
+        verifier_text, _ = verify_state(executor)
+        self.resolved = not _misses_completed_level(verifier_text)
+        runtime.event_manager.add(Task(prompt=verifier_text))
+        self.request_repair(runtime)
 
 
 class BuilderStrategy(GenerationStrategy):
@@ -104,7 +168,7 @@ class BuilderStrategy(GenerationStrategy):
         self,
         runtime: RuntimeServices,
         call: CurrentCall,
-    ) -> tuple[str, bool, bool]:
+    ) -> tuple[str, bool, bool, bool, bool]:
         builder = self._builder(runtime)
         request = call.bound_parameters().get("request")
         if not isinstance(request, BuilderRequest):
@@ -124,6 +188,8 @@ class BuilderStrategy(GenerationStrategy):
         verifier_text, _ = verify_state(builder._executor)
         runtime.event_manager.add(Task(prompt=kickoff))
         runtime.event_manager.add(Task(prompt=verifier_text))
+        checkpoint = OutcomeCheckpoint.begin(request.outcome_evidence, verifier_text)
+        checkpoint.request_repair(runtime)
 
         for _ in range(config.max_tool_steps):
             response, event_id = await runtime.generate(
@@ -133,26 +199,45 @@ class BuilderStrategy(GenerationStrategy):
                 tool_choice="auto",
             )
             if not response.tool_calls:
+                if checkpoint.reject_prose_exit(runtime):
+                    continue
                 break
-            runtime.event_manager.remove(event_id)
+            retain_assistant_turn(runtime.event_manager, event_id, response)
             for index, tool_call in enumerate(response.tool_calls):
                 self._execute_tool_call(
                     runtime,
                     surface,
                     tools_by_name,
                     tool_call,
-                    reasoning=(response.reasoning or str(response.content) or None)
-                    if index == 0
-                    else None,
+                    reasoning=replayed_reasoning(response) if index == 0 else None,
                 )
+            checkpoint.inspect_edits(runtime, builder._executor, response.tool_calls)
 
         checkpoint_forced = await self._enforce_world_model_checkpoint(
             runtime, builder, surface, tools_by_name, tools, config
         )
+        return await self._finish_report(
+            runtime, builder, tools, config, checkpoint_forced, checkpoint
+        )
 
+    async def _finish_report(
+        self,
+        runtime: RuntimeServices,
+        builder: FocusedBuilder,
+        tools: list[Any],
+        config: BuilderConfig,
+        checkpoint_forced: bool,
+        checkpoint: OutcomeCheckpoint,
+    ) -> tuple[str, bool, bool, bool, bool]:
         report = _read_report(builder._executor.ws.dir)
         if report is not None and report != builder._report_before:
-            return report, False, checkpoint_forced
+            return (
+                report,
+                False,
+                checkpoint_forced,
+                checkpoint.required,
+                checkpoint.resolved,
+            )
 
         runtime.event_manager.add(Task(prompt=FINAL_REPORT_REQUEST))
         # Tycho's own forced-report call (builder.py's post-loop fallback) still
@@ -172,7 +257,7 @@ class BuilderStrategy(GenerationStrategy):
         builder._executor.ws.write_file(REPORT_FILE, text)
         if _read_report(builder._executor.ws.dir) != text:
             raise RuntimeError(f"failed to persist mandatory fresh {REPORT_FILE}")
-        return text, True, checkpoint_forced
+        return text, True, checkpoint_forced, checkpoint.required, checkpoint.resolved
 
     async def _enforce_world_model_checkpoint(
         self,
@@ -206,16 +291,14 @@ class BuilderStrategy(GenerationStrategy):
             tool_choice="auto",
         )
         if response.tool_calls:
-            runtime.event_manager.remove(event_id)
+            retain_assistant_turn(runtime.event_manager, event_id, response)
             for index, tool_call in enumerate(response.tool_calls):
                 self._execute_tool_call(
                     runtime,
                     surface,
                     tools_by_name,
                     tool_call,
-                    reasoning=(response.reasoning or str(response.content) or None)
-                    if index == 0
-                    else None,
+                    reasoning=replayed_reasoning(response) if index == 0 else None,
                 )
 
         if _read_optional(workspace_dir, WORLD_MODEL_NOTES) != before:
@@ -224,7 +307,9 @@ class BuilderStrategy(GenerationStrategy):
         fallback = _fallback_world_model_checkpoint(before)
         builder._executor.ws.write_file(WORLD_MODEL_NOTES, fallback)
         if _read_optional(workspace_dir, WORLD_MODEL_NOTES) != fallback:
-            raise RuntimeError(f"failed to persist mandatory {WORLD_MODEL_NOTES} checkpoint")
+            raise RuntimeError(
+                f"failed to persist mandatory {WORLD_MODEL_NOTES} checkpoint"
+            )
         return True
 
     @staticmethod
@@ -234,7 +319,7 @@ class BuilderStrategy(GenerationStrategy):
         tools_by_name: dict[str, Any],
         tool_call: Any,
         *,
-        reasoning: str | None,
+        reasoning: str | None = None,
     ) -> None:
         try:
             arguments = json.loads(tool_call.arguments)
@@ -244,6 +329,7 @@ class BuilderStrategy(GenerationStrategy):
                 tool_call.name,
                 {"raw_arguments": tool_call.arguments},
                 message,
+                tool_call_id=tool_call.id,
             )
             runtime.event_manager.add(Error(content=message))
             return
@@ -251,7 +337,12 @@ class BuilderStrategy(GenerationStrategy):
             tool = tools_by_name[tool_call.name]
         except KeyError as error:
             message = f"Invalid builder tool call {tool_call.name!r}: {error}"
-            surface.record_rejected_call(tool_call.name, arguments, message)
+            surface.record_rejected_call(
+                tool_call.name,
+                arguments,
+                message,
+                tool_call_id=tool_call.id,
+            )
             runtime.event_manager.add(Error(content=message))
             return
 
@@ -264,7 +355,7 @@ class BuilderStrategy(GenerationStrategy):
             )
         )
         try:
-            result = surface.dispatch(tool, arguments)
+            result = surface.dispatch(tool, arguments, tool_call_id=tool_call.id)
         except Exception as error:  # noqa: BLE001 - tool failures are builder feedback
             runtime.event_manager.update(
                 event_id,
@@ -319,7 +410,11 @@ class FocusedBuilder(Agent, context={"self": None, "state": None}):
             meta_reflect=False,
         )
         super().__init__(llm=llm)
-        self._builder_system_prompt = system_prompt
+        # Upstream's prompt enumerates run_python's preloads as a closed list -- `grid`, `np`,
+        # `wmlib`, `frames`/`transitions` -- written before `symmetry` existed. Appending is not
+        # optional politeness: an authoritative list that excludes a preload actively tells the
+        # builder it is not there.
+        self._builder_system_prompt = f"{system_prompt}\n\n{PROMPT_BRIEF}"
         self._executor = executor
         self._tool_surface = WorkspaceToolSurface(
             executor,
@@ -336,7 +431,7 @@ class FocusedBuilder(Agent, context={"self": None, "state": None}):
         self._world_model_before = None
 
     def _resolve_system_prompt(self) -> str:
-        """Return Tycho's rendered builder.system prompt byte-for-byte."""
+        """Tycho's rendered builder.system prompt, plus our `symmetry` brief appended."""
         return self._builder_system_prompt
 
     async def build(self, request: BuilderRequest) -> BuilderResult:
@@ -344,8 +439,16 @@ class FocusedBuilder(Agent, context={"self": None, "state": None}):
         self._tool_surface.begin_turn(request.turn)
         before = _workspace_hashes(self._executor.ws.dir)
         self._report_before = _read_report(self._executor.ws.dir)
-        self._world_model_before = _read_optional(self._executor.ws.dir, WORLD_MODEL_NOTES)
-        report, forced, checkpoint_forced = await self._construct(request)
+        self._world_model_before = _read_optional(
+            self._executor.ws.dir, WORLD_MODEL_NOTES
+        )
+        (
+            report,
+            forced,
+            checkpoint_forced,
+            outcome_required,
+            outcome_resolved,
+        ) = await self._construct(request)
         after = _workspace_hashes(self._executor.ws.dir)
         artifact_paths = set(ARTIFACT_PATHS)
         artifact_paths.update(
@@ -370,12 +473,37 @@ class FocusedBuilder(Agent, context={"self": None, "state": None}):
             report_fresh=hashes[REPORT_FILE]["changed"] is True,
             report_forced=forced,
             world_model_checkpoint_forced=checkpoint_forced,
+            outcome_checkpoint_required=outcome_required,
+            outcome_checkpoint_resolved=outcome_resolved,
             artifact_hashes=hashes,
             tool_calls=self._tool_surface.turn_tool_calls(),
         )
 
     @strategy(BuilderStrategy())
-    async def _construct(self, request: BuilderRequest) -> tuple[str, bool, bool]: ...
+    async def _construct(
+        self, request: BuilderRequest
+    ) -> tuple[str, bool, bool, bool, bool]: ...
+
+
+def _misses_completed_level(verifier_text: str) -> bool:
+    return (
+        "post-winning-action missed terminal" in verifier_text
+        or "misses observed level_complete terminal" in verifier_text
+    )
+
+
+def _edits_world_model(tool_calls: list[Any]) -> bool:
+    return any(_edits_world_model_file(tool_call) for tool_call in tool_calls)
+
+
+def _edits_world_model_file(tool_call: Any) -> bool:
+    if canonical(tool_call.name) not in {"write_file", "edit_file", "edit_function"}:
+        return False
+    try:
+        arguments = json.loads(tool_call.arguments)
+    except json.JSONDecodeError:
+        return False
+    return Path(str(arguments.get("path", ""))).name == WORLD_MODEL_PY
 
 
 def _workspace_hashes(workspace_dir: Path) -> dict[str, str]:

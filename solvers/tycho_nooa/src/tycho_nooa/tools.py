@@ -15,6 +15,7 @@ from tycho.workspace.workspace import diff_text, grid_text
 
 from tycho_nooa.models import ActionDecision, GameTurn
 from tycho_nooa.planner import PlannerIntegration, planner_command
+from tycho_nooa.symmetry_notice import TOOL_NOTE
 
 
 class _Arguments(BaseModel):
@@ -83,12 +84,38 @@ class ToolProfile:
     include_set_verbosity: bool = True
 
 
+@dataclass(frozen=True)
+class Observation:
+    """One turn's evidence in the two sizes the actor's conversation needs.
+
+    `prompt` inlines the grid and the transition; `elided` keeps every other
+    part of the same message and replaces those two payloads with a pointer to
+    the frame on disk. Both are built once, at the turn they describe, so
+    eviction later is a swap rather than a re-parse of rendered text.
+    """
+
+    prompt: str
+    elided: str
+
+
 ACTOR_TOOL_PROFILE = ToolProfile()
 BUILDER_TOOL_PROFILE = ToolProfile(
     include_edit_function=True,
     include_take_action=False,
     include_set_verbosity=False,
 )
+
+
+# What replaces the two heavy payloads once newer turns have arrived. The frame
+# and its diff stay on disk, so this is a pointer, not a loss of evidence.
+_ELIDED_PAYLOAD = [
+    "",
+    (
+        "grid and transition elided to bound this conversation. Re-read the frame "
+        "named above with read_file, or reconstruct any turn or diff with "
+        "run_python."
+    ),
+]
 
 
 class WorkspaceToolSurface:
@@ -139,10 +166,19 @@ class WorkspaceToolSurface:
         """Return a copy of the current turn's observable tool-use evidence."""
         return [dict(call) for call in self._turn_tool_calls]
 
-    def observation_prompt(self, turn: GameTurn) -> str:
+    def observation(self, turn: GameTurn) -> Observation:
         """Render evidence selected by the actor's persistent verbosity state."""
+        frame = f"level_{turn.level}/turn_{turn.turn_in_level:03d}.txt"
+        head = self._observation_head(turn, frame)
+        advisory = self._observation_advisory(turn)
+        return Observation(
+            prompt="\n".join(head + self._observation_payload(turn) + advisory),
+            elided="\n".join(head + _ELIDED_PAYLOAD + advisory),
+        )
+
+    def _observation_head(self, turn: GameTurn, frame: str) -> list[str]:
         metadata = turn.model_dump(exclude={"grid"})
-        lines = [
+        return [
             (
                 "Investigate the following new public observation. It has already "
                 "been recorded in the durable Tycho workspace."
@@ -150,12 +186,17 @@ class WorkspaceToolSurface:
             "",
             f"turn = {metadata!r}",
             "",
+            f"frame on disk = {frame}",
+            "",
             (
                 "display = "
                 f"grid={self.grid_verbosity!r}, diff={self.diff_verbosity!r}; "
                 "the full grid and exact transition remain available through run_python"
             ),
         ]
+
+    def _observation_payload(self, turn: GameTurn) -> list[str]:
+        lines: list[str] = []
         if self.grid_verbosity == "on":
             lines.extend(
                 [
@@ -183,6 +224,10 @@ class WorkspaceToolSurface:
                     ),
                 ]
             )
+        return lines
+
+    def _observation_advisory(self, turn: GameTurn) -> list[str]:
+        lines: list[str] = []
         planner_hint = self._planner.hint(turn)
         if planner_hint is not None:
             lines.extend(
@@ -200,7 +245,7 @@ class WorkspaceToolSurface:
                     self._builder_report,
                 ]
             )
-        return "\n".join(lines)
+        return lines
 
     def native_tools(self) -> list[Tool]:
         """Return Tycho's generic tool names/descriptions as NOOA tools."""
@@ -225,14 +270,20 @@ class WorkspaceToolSurface:
             tools.append(
                 Tool(
                     name=name,
-                    description=spec["description"],
+                    description=spec["description"] + TOOL_NOTE.get(name, ""),
                     callable=dispatch[name],
                     parameters_model=_ARGUMENT_MODELS[name],
                 )
             )
         return tools
 
-    def dispatch(self, tool: Tool, arguments: dict[str, Any]) -> str | ActionDecision:
+    def dispatch(
+        self,
+        tool: Tool,
+        arguments: dict[str, Any],
+        *,
+        tool_call_id: str | None = None,
+    ) -> str | ActionDecision:
         model = tool.parameters_model
         assert model is not None
         try:
@@ -244,9 +295,16 @@ class WorkspaceToolSurface:
                 arguments,
                 status="error",
                 result=f"{type(error).__name__}: {error}",
+                tool_call_id=tool_call_id,
             )
             raise
-        self._record_tool_call(tool.name, arguments, status="complete", result=result)
+        self._record_tool_call(
+            tool.name,
+            arguments,
+            status="complete",
+            result=result,
+            tool_call_id=tool_call_id,
+        )
         return result
 
     def record_rejected_call(
@@ -254,9 +312,17 @@ class WorkspaceToolSurface:
         name: str,
         arguments: dict[str, Any],
         message: str,
+        *,
+        tool_call_id: str | None = None,
     ) -> None:
         """Keep malformed or unavailable model tool attempts in the durable trace."""
-        self._record_tool_call(name, arguments, status="error", result=message)
+        self._record_tool_call(
+            name,
+            arguments,
+            status="error",
+            result=message,
+            tool_call_id=tool_call_id,
+        )
 
     def _record_tool_call(
         self,
@@ -265,11 +331,13 @@ class WorkspaceToolSurface:
         *,
         status: Literal["complete", "error"],
         result: str | ActionDecision,
+        tool_call_id: str | None = None,
     ) -> None:
         self._tool_call_index += 1
         turn = self._require_turn()
         record = {
             "call_index": self._tool_call_index,
+            "tool_call_id": tool_call_id,
             "level": turn.level,
             "turn_in_level": turn.turn_in_level,
             "name": name,

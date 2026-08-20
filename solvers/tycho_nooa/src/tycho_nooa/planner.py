@@ -35,6 +35,25 @@ _IMPLEMENTED_TRIGGERS_CLAIM = (
 )
 
 
+def actor_world_model_paragraph(wm_variant: str) -> str:
+    """Return the actor's world-model paragraph for one of Tycho's modes.
+
+    `none` is the direct-reasoning baseline and carries wm_none.j2 alone.
+    actor.system.j2 gates its actor_beliefs.md paragraph on the builder modes
+    (`orch`/`trigger`) because that paragraph is addressed to an actor whose
+    notes a builder will read; wm_none.j2 names the same file in its own words,
+    so the baseline still keeps durable hypotheses and is not simply the trigger
+    prompt minus a sentence.
+    """
+    if wm_variant == "trigger":
+        return trigger_actor_world_model_paragraph()
+    if wm_variant == "none":
+        return render_prompt("wm_none").strip()
+    raise NotImplementedError(
+        f"no actor world-model paragraph is wired for wm_variant={wm_variant!r}"
+    )
+
+
 def trigger_actor_world_model_paragraph() -> str:
     """Return Tycho's trigger-mode world-model paragraph plus its actor_beliefs.md channel.
 
@@ -231,18 +250,24 @@ def _python_wrapped_planner_command(source: str) -> str | None:
     }
     methods = {"auto", "astar", "bfs", "subgoals"}
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or _dotted_name(node.func) not in runners:
+        strings = _runner_strings(node, runners)
+        if strings is None:
             continue
-        strings = [
-            child.value
-            for child in ast.walk(node)
-            if isinstance(child, ast.Constant) and isinstance(child.value, str)
-        ]
         if not any(Path(value).name == "plan.py" for value in strings):
             continue
         method = next((value for value in strings if value in methods), None)
         return shlex.join(["python", "plan.py", *([method] if method else [])])
     return None
+
+
+def _runner_strings(node: ast.AST, runners: set[str]) -> list[str] | None:
+    if not isinstance(node, ast.Call) or _dotted_name(node.func) not in runners:
+        return None
+    return [
+        child.value
+        for child in ast.walk(node)
+        if isinstance(child, ast.Constant) and isinstance(child.value, str)
+    ]
 
 
 def _dotted_name(node: ast.expr) -> str:
@@ -278,12 +303,13 @@ def _planner_status(result: str) -> str:
 def _hint_status(hint: str) -> str:
     if hint.startswith("Validated plan continuation:"):
         return "continuation"
-    if "world_model.py changed" in hint:
-        return "invalidated_model_changed"
-    if "observed frame diverged" in hint:
-        return "invalidated_observation_diverged"
-    if "is not available" in hint:
-        return "invalidated_action_unavailable"
-    if "matched all" in hint:
-        return "trajectory_complete"
+    markers = (
+        ("world_model.py changed", "invalidated_model_changed"),
+        ("observed frame diverged", "invalidated_observation_diverged"),
+        ("is not available", "invalidated_action_unavailable"),
+        ("matched all", "trajectory_complete"),
+    )
+    for marker, status in markers:
+        if marker in hint:
+            return status
     return "unknown"

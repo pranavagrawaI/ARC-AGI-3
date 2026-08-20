@@ -112,3 +112,31 @@ def test_worker_environment_does_not_receive_arc_environment_key():
     )
 
     assert result == {"ARC_LLM_API_KEY": "model-secret", "PATH": "/bin"}
+
+
+def test_worker_environment_forwards_solver_context_and_capture_settings():
+    """An allowlist silently drops what it does not name.
+
+    Both of these change what a run does, not just what it reports:
+    ARC_LLM_CONTEXT_WINDOW arms the model client's context-limit defence, and
+    TYCHO_NOOA_CAPTURE_REASONING makes the run ask the provider for reasoning.
+    TYCHO_MODE selects which orchestration topology the solver runs; dropped, a
+    comparison arm silently becomes the default `trigger` control and the whole
+    run measures nothing. Dropped, they leave a run that looks valid and answers
+    nothing.
+    """
+    result = worker_environment(
+        {
+            "ARC_LLM_CONTEXT_WINDOW": "131072",
+            "ARC_LLM_MAX_TOKENS": "8000",
+            "TYCHO_MODE": "no_world_model",
+            "TYCHO_NOOA_CAPTURE_REASONING": "1",
+        }
+    )
+
+    assert result == {
+        "ARC_LLM_CONTEXT_WINDOW": "131072",
+        "ARC_LLM_MAX_TOKENS": "8000",
+        "TYCHO_MODE": "no_world_model",
+        "TYCHO_NOOA_CAPTURE_REASONING": "1",
+    }
