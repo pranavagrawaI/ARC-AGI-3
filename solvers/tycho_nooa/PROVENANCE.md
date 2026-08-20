@@ -84,12 +84,17 @@
   "documented deviation" above); GAME_OVER-reset firing is not, for the
   structural-unreachability reason given there.
 - builder reuse: the system and kickoff messages are rendered directly from
-  pinned `tycho/prompts/builder.system.j2` and `builder.user.j2`; the
+  pinned `tycho/prompts/builder.system.j2` and `builder.user.j2` — the system
+  message with `symmetry_notice.PROMPT_BRIEF` appended, because that template
+  enumerates run_python's preloads as a closed list written before `symmetry`
+  existed, so leaving it alone would have told the builder the module is not
+  there; the
   auto-attached verification text comes directly from pinned
   `tycho.agent.builder._verify_state`; and the mandatory report path is pinned
   `tycho.agent.builder.REPORT_FILE`.
 - semantic parity: the tool names and descriptions come from Tycho's
-  `tool_specs("generic")`; the actor receives Tycho's default generic surface,
+  `tool_specs("generic")`, with `symmetry_notice.TOOL_NOTE` appended to
+  `run_python` only; the actor receives Tycho's default generic surface,
   while the builder uses Tycho's builder flags (`include_edit_func=True`,
   `include_take_action=False`, `include_set_verbosity=False`). Non-action
   execution is delegated to Tycho's `ToolExecutor` without copying it.
@@ -190,10 +195,211 @@
   world model that only looks like evidence. See
   `tests/test_trigger_builder.py::test_unavailable_sandbox_degrades_the_trigger_instead_of_ending_the_episode`.
 
-Explicitly excluded from this integration slice: reflection cadence, context
-compaction, the GAME_OVER-reset trigger path (structurally unreachable under
-arc-host's `TERMINAL_STATES` design — see "documented deviation" above), and
-any new planner policy.
+- adaptation: `tycho_nooa.wm_probe.GatedToolExecutor` splices a goal
+  satisfiability gate into pinned Tycho's `wm_feedback_probe.py.tmpl` before
+  running it, and `tycho_nooa.probe_gate` is the spliced code. Upstream's probe
+  guards the planner with four preconditions — the model imports, `plan.py`
+  exists, `actions()` returns something, `heuristic()` is finite — and none of
+  them asks whether a goal state exists, so a `world_model.py` whose `outcome()`
+  is still the seed's unconditional `return "ongoing"` reaches full A*/BFS.
+  `runs/tycho-nooa-level-start-ar25-20260818T175557Z` records six such searches
+  across 60 actions (5x `no_plan_within_budget`, 1x `planner_timeout`), each
+  costing ~1.8s and ~8500 expanded states to produce upstream's unranked
+  six-way `interpretation` disjunction — "wrong outcome(), incomplete
+  actions(), unseen or unencoded target/route/off-screen state, game_over
+  current state, insufficient budget, or planner/heuristic weakness" — whose
+  first disjunct was the answer and was statically decidable in ~40ms. The splice asserts both anchors
+  (`_PLAN_METHOD` and the unconditional `if planner_ready:` entry) and raises if
+  either moves, refuses a gate whose top-level names would shadow a template
+  helper, and re-parses the result; the gate itself fails open, so any error in
+  it costs the search nothing. Two things are printed: `PLANNER_STATUS:
+  not_run_goal_unsatisfiable` in place of a search that provably cannot reach a
+  goal, and a `PLANNER_CONTRACT:` audit that classifies each `actions()` entry
+  by what it does to `wmlib._planner_key` — `no_op`, `restart`, `retrograde`,
+  `retrograde_partial`, `forward` — plus the bounded closure statistic for all
+  declared operators and for the forward ones alone. The audit is reported, never
+  enforced: an unsound key can make the planner fast while making it wrong, so
+  naming the state field that blocks closure is the whole diagnosis and the
+  builder decides.
+
+  The verdict is a disjunction of two independently sufficient static
+  conditions: `outcome()` is one unconditional `return <string>` that is not
+  `"level_complete"`, or the literal appears in no executable string in the
+  module. The second alone was the first implementation and it failed in vivo.
+  Pinned Tycho's `seed_world_model.py.tmpl` already spends the literal in
+  `subgoals()` — `return [lambda s: outcome(s) == "level_complete"]` — while
+  `outcome()` is still `return "ongoing"`, so a module-wide literal search
+  clears the exact model the gate exists to catch. Every replay had been run
+  against `runs/tycho-nooa-level-start-ar25-20260818T175557Z`'s
+  builder-edited model, which had rewritten `subgoals()` and removed the
+  literal, masking the interaction; only the live
+  `runs/tycho-nooa-goal-gate-ar25-20260819T120904Z` exposed it. See
+  `tests/test_probe_gate.py`, whose regression reads the real pinned template.
+
+- adaptation: `NativeToolStrategy.execute` spends one final generate with
+  `take_action` as the only offered tool before raising on an exhausted
+  `max_tool_steps` budget. Pinned Tycho's loop has no equivalent because its
+  turn boundary is not an ARC action. Exhausting the budget and refusing to act
+  are different failures: `runs/tycho-nooa-goal-gate-ar25-20260819T120904Z`
+  spent all 25 steps reading the grid with `run_python`, never called
+  `take_action`, and lost the episode's other 19 actions to an arc-host
+  `ProtocolError` at action 0. An ARC episode has no "no action" branch, so a
+  silent turn throws the run either way; a model that still declines when
+  `take_action` is the only tool left is a real refusal and still raises. Shape
+  mirrors `_enforce_actor_beliefs_checkpoint` (restrict the offered tools, then
+  let the failure stand), and `tool_choice` stays `"auto"` because `"required"`
+  draws 500s from some gateways — nooa's own `codeact.py` says so. See
+  `tests/test_native_flow.py::test_a_spent_tool_budget_demands_the_action_instead_of_ending_the_episode`
+  and
+  `tests/test_native_flow.py::test_a_model_that_declines_the_demand_still_ends_the_episode`.
+
+- port: `NativeToolStrategy` keeps the inlined grid on the most recent three
+  observations and elides the rest to a breadcrumb, which is pinned Tycho's
+  `agent.py::_truncate_old_grids` under its `TYCHO_GRID_KEEP=3` default
+  (`agent/context_config.py`). Upstream's justification transfers unchanged —
+  the frames stay on disk and the agent re-reads them by tool — and this solver
+  has the same `read_file`/`run_python` affordance over the same
+  `GameWorkspace`. The mechanism differs because the histories differ: upstream
+  rewrites provider messages in place, so it must recognise a heavy payload by
+  its rendered shape; here each observation carries its own breadcrumb form in
+  event metadata (`history.py::ELIDED_OBSERVATION`), built at the turn it
+  describes, so eviction is a swap and never a re-parse. The other two halves of upstream's
+  context discipline — bounded reasoning (`TYCHO_REASONING_KEEP`) and prompt
+  caching — are still absent; see the exclusion note below. See
+  `tests/test_native_flow.py::test_only_the_last_three_observations_keep_their_inlined_grid`.
+
+- correction, revised after the ar25 reasoning-channel failure: prose and
+  reasoning take different retention paths. `history.py::retain_assistant_turn`
+  keeps `LLMOutput` only when `response.content` is non-empty; a reasoning-only
+  response removes that otherwise blank assistant message. The reasoning is
+  replayed instead on the corresponding `ToolCallEvent` by
+  `history.py::replayed_reasoning`, matching upstream's single assistant message
+  with tool calls plus raw reasoning. This revision matters empirically:
+  `runs/tycho-nooa-llm-trace-ar25-20260819T155638Z` returned all output on the
+  reasoning channel. Retaining blank `LLMOutput` messages made the model read its
+  own history as failed tool syntax and commit 0 actions. The current split keeps
+  prose when present without manufacturing blank turns, while reasoning remains
+  attached to the tool-call message. Old reasoning is still unbounded; upstream's
+  `TYCHO_REASONING_KEEP=3` remains excluded below. See
+  `history.py::retain_assistant_turn`, `history.py::replayed_reasoning`, and the
+  history assertions in `tests/test_native_flow.py`.
+
+- instrumentation: the model leg of a run is now recorded, and NOOA's
+  context-limit defence is switched on. Four traces already existed and all four
+  are written by our own code about our own actions, so a finished run could not
+  say whether the model emitted any reasoning at all — the question the previous
+  entry's bound depends on. NOOA already publishes the answer: `ActorRuntime`
+  adds an `LLMComplete` (tokens incl. `reasoning_tokens`, cost, tool calls,
+  `reasoning_content`) followed immediately by the `LLMOutput` carrying the same
+  response's prose, and although `LLMComplete` is `Role.RUNTIME_EVENT` added with
+  `record=False`, `EventManager.add` emits to handlers *before* the record check
+  — so a subscriber sees every one without a client wrapper or a NOOA change.
+  `llm_trace.py::LLMTrace` subscribes to both and pairs them (they are adjacent
+  and unconditional in one return path), writing `llm-trace.jsonl`. It attaches
+  to the actor's event manager and to each per-fire builder as the trigger loop
+  creates it, since a builder is a separate agent with a separate stream.
+  Counters are always written; text only under `TYCHO_NOOA_CAPTURE_REASONING=1`,
+  because OpenRouter returns no reasoning unless asked and asking changes the run
+  (`unifiedllm.py`: `if reasoning := self.config.get("reasoning")`), not merely
+  what we observe of it. Separately, `ARC_LLM_CONTEXT_WINDOW` now reaches the
+  client. Measured: `client.context_window` resolved to `None` for
+  `openai/meta/muse-glimmer-30b`, and every layer of NOOA's defence is gated on
+  it — the proactive budget in `_build_messages`, `_archive_on_context_error`
+  (`if not stats or not ctx_window: return`) and `_compute_reduced_max_tokens`
+  (returns `None`, so the retry re-raises). An overflow therefore propagated
+  through `agent.act` to `worker.py`'s error message and ended the run. Note two
+  things the knob does *not* buy: `render_context` evicts system blocks only
+  (`events_dropped=0` is hardcoded), so the event pile is still never bounded
+  proactively, and `TruncationConfig.max_event_tokens`/`min_preserved_events` are
+  declared but consumed nowhere in this pin despite `interactive.py:204` claiming
+  otherwise. See
+  `tests/test_native_flow.py::test_the_llm_trace_records_the_counters_for_every_round_trip`
+  and `tests/test_trigger_builder.py::test_the_llm_trace_covers_the_builder_as_well_as_the_actor`.
+
+- mode reuse: `TYCHO_MODE` now selects the orchestration topology, and the
+  registry is imported rather than restated — `tycho_nooa.modes` calls upstream's
+  own `tycho.agent.modes.resolve_mode`, so a mode name means here exactly what it
+  means there and an upstream change to a `ModeSpec` is inherited, not mirrored.
+  Two of the four are wired. `trigger` stays the default, so every run recorded
+  before this entry names the arm it actually ran. `no_world_model` is served by
+  the two switches upstream derives from one predicate
+  (`agent/agent.py:288`: `wm_variant != "none"`): `GameWorkspace(seed_world_model=)`
+  and `ToolExecutor(wm_feedback_enabled=)`. Keeping them together is what makes
+  the arm coherent — a workspace that seeds no `world_model.py` but still runs the
+  automatic feedback probe (and its goal gate) on every edit would report a
+  missing model as a defect on every turn. `single` and `orchestrator` raise
+  `NotImplementedError` naming the unwired `ModeSpec` field rather than falling
+  back, because the dangerous failure for a comparison is silence: an unwired arm
+  running as `trigger` is secretly a second control. `single` needs
+  `actor_writes_wm` (the actor is never told it owns `world_model.py`);
+  `orchestrator` needs `include_builder` (no `invoke_builder` tool exists on the
+  actor's surface). The actor's baseline paragraph is `wm_none.j2` rendered
+  byte-exact and alone: `actor.system.j2:29` gates its `actor_beliefs.md`
+  paragraph on `orch`/`trigger`, and `wm_none.j2` names the same file in its own
+  words, so the baseline is upstream's `none` mode and not the trigger prompt
+  minus a sentence. `arc-host`'s worker allowlist carries `TYCHO_MODE` for the
+  same reason it carries `TYCHO_NOOA_CAPTURE_REASONING`: dropped, the run looks
+  valid and measures the wrong arm. See `tests/test_modes.py`.
+
+Added beside upstream, not into it: `symmetry_template.py` is ours, seeded to the
+workspace as `symmetry.py` by `TychoNooaAgent.__init__`. It is a separate file because
+`GameWorkspace._seed_worldmodel` rewrites `wmlib.py` from `tycho/workspace/wmlib_template.py`
+on every fresh start ("wmlib + helper scripts are OURS — always refresh to current version"),
+so anything merged into wmlib would either be overwritten or fork 1,627 vendored lines. The
+two things a merge would have bought are arranged instead through extension points we already
+own: `GatedToolExecutor._PREAMBLE` appends the import to upstream's, and
+`WorkspaceToolSurface.native_tools` appends `TOOL_NOTE` to upstream's `run_python`
+description rather than rewriting it. Verified by `tests/test_symmetry.py`, whose theorems run
+against the seeded bytes.
+
+Telling the model it exists is a separate problem from seeding it, and needed three channels,
+all sourced from `symmetry_notice.py` so they cannot drift: `TOOL_NOTE` on `run_python`, and
+`PROMPT_BRIEF` appended to both system prompts — the actor's via
+`TychoNooaAgent._resolve_system_prompt`, the builder's via `FocusedBuilder.__init__`. The
+builder channel is the load-bearing one: `builder.system.j2` lists run_python's preloads as
+`grid`, `np`, `wmlib`, `frames`/`transitions` and nothing else, so an unamended prompt does not
+merely omit `symmetry`, it denies it. A tool description is read when choosing a tool; a system
+prompt is read when forming a hypothesis, which is where a comparison library is either reached
+for or not.
+
+The first live run then showed that being told is not the same as being able to call: two of its four reaches died on `canon(fig, point='full')`, because `point` took a group object while `colours`, in the same signature, took a string, and the brief printed `point=...` while printing `colours="fixed"` literally. `symmetry_template.group()` now coerces a name at every entry that takes a group, `colours` rejects anything outside `{'fixed', 'any'}` rather than silently permuting, and all three channels enumerate every admissible value. The rule this encodes: where the model's reasonable guess and the API disagree, the API is what changes.
+
+The same run completed level 0 but exposed a second handoff defect. The builder
+already read `notes/actor_beliefs.md`, `level_0/solved.json`, and verifier feedback
+that named the missed terminal; the failure was not an absent read lane. A later
+`REPAIR_FOCUS: current_level_dynamics` displaced the unresolved outcome mismatch,
+and the builder spent its pass on level 1 without editing `outcome()`. The repair
+records the host-observed levels-completed transition as
+`level_<N>/level_complete.json`, injects that authoritative evidence into the
+builder directly from the action-result callback, and keeps it as the latest
+mandatory checkpoint until verification no longer reports the missed completion.
+If that pass fails, the evidence remains pending for the level-start builder to
+retry. The direct callback matters because a winning action can exhaust the action
+budget, leaving no next actor turn on which a level-start repair could fire. Prose
+alone cannot end that prefix. This prioritizes a known false negative without
+letting the host invent the game's goal semantics.
+
+The first credited replication attempt exposed a different ownership boundary:
+`recommended_action: CLICK` is useful prose but not a valid `ActionDecision`
+without coordinates. The advisory parser constructed it as if it were an actor
+commitment, and Pydantic ended the episode before the actor could choose. The
+parser now validates availability and coordinates without throwing, records a
+`recommendation_parse_error`, and exposes no recommendation on malformed advice.
+The actor lane, which still owns the environment action, continues normally.
+
+The repaired ar25 seed-0 retry completed level 0 on its twentieth action and made
+two successful `symmetry.canon` calls. Together with the earlier 19-action run,
+this is a same-seed local replication of completion and symmetry uptake. The
+routes were not identical and no second seed or game has yet replicated it.
+
+Explicitly excluded from this integration slice: reflection cadence, emergency
+context compaction, upstream's bounded reasoning (`TYCHO_REASONING_KEEP=3`) and
+prompt caching (`TYCHO_PROMPT_CACHING=1`, `TYCHO_CACHE_ROLLING_EVERY=1`), the
+GAME_OVER-reset trigger path (structurally unreachable under arc-host's
+`TERMINAL_STATES` design — see "documented deviation" above), and any new
+planner policy. The two context defaults are named here because they are
+upstream defaults, not upstream options: omitting them is a divergence from the
+pinned commit, not a smaller version of it.
 
 No source is imported from a numbered ARC experiment.
 
