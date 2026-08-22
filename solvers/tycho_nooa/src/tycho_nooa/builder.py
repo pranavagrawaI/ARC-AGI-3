@@ -343,6 +343,17 @@ class BuilderStrategy(GenerationStrategy):
                 tool_choice="auto",
             )
             if not response.tool_calls:
+                if response.finish_reason == "length":
+                    runtime.event_manager.add(
+                        Error(
+                            content=(
+                                "Builder response was truncated before a tool call; "
+                                "construction is still active. Use the next call to "
+                                "externalize the smallest executable edit."
+                            )
+                        )
+                    )
+                    continue
                 if checkpoint.reject_prose_exit(runtime):
                     continue
                 break

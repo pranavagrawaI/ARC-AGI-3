@@ -84,6 +84,18 @@ def prose_response(content: str) -> LLMResponse:
     )
 
 
+def truncated_reasoning_response(content: str) -> LLMResponse:
+    return LLMResponse(
+        raw_response=None,
+        content="",
+        tool_calls=[],
+        finish_reason="length",
+        assistant_message={"role": "assistant", "content": None},
+        reasoning=content,
+        usage={"prompt_tokens": 1, "completion_tokens": 4096, "total_tokens": 4097},
+    )
+
+
 class RecordingFakeLLMClient(FakeLLMClient):
     """A FakeLLMClient that also records the tools offered on every call."""
 
@@ -110,6 +122,44 @@ class MessageRecordingFakeLLMClient(FakeLLMClient):
         )
 
 
+class EditAfterTruncationLLM(FakeLLMClient):
+    """Replay the live failure, then edit only if construction continues."""
+
+    def __init__(self) -> None:
+        super().__init__(scripted_responses=[])
+        self.call_count = 0
+
+    async def acall(self, messages, tools=None, output_model=None, **kwargs):
+        self.call_count += 1
+        if self.call_count == 1:
+            return truncated_reasoning_response("I am ready to edit, but")
+        latest = str(messages[-1].get("content", ""))
+        if "BUILDER BUDGET" in latest:
+            return tool_batch_response(
+                [
+                    (
+                        "write_file",
+                        {"path": "world_model.py", "content": "candidate"},
+                        "candidate-edit",
+                    ),
+                    (
+                        "write_file",
+                        {"path": "notes/world_model.md", "content": "hypothesis"},
+                        "notes-edit",
+                    ),
+                    (
+                        "write_file",
+                        {
+                            "path": "notes/world_model_report.md",
+                            "content": "recommended_action: none",
+                        },
+                        "report-edit",
+                    ),
+                ]
+            )
+        return prose_response("recommended_action: none")
+
+
 def turn(number: int, previous_action: str = "") -> GameTurn:
     return GameTurn(
         grid=[[0, number], [2, 3]],
@@ -118,6 +168,32 @@ def turn(number: int, previous_action: str = "") -> GameTurn:
         turn_in_level=number,
         previous_action=previous_action,
     )
+
+
+@pytest.mark.asyncio
+async def test_builder_does_not_treat_token_truncation_as_completed_construction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reasoning response cut off before its tool call is not a prose exit."""
+    monkeypatch.setattr(
+        "tycho_nooa.builder.verify_state",
+        lambda executor: ("[verify state] first divergence remains", None),
+    )
+    workspace = GameWorkspace(
+        "game", root=str(tmp_path), available_actions=["UP", "DOWN"]
+    )
+    (workspace.dir / "world_model.py").write_text("parent")
+    llm = EditAfterTruncationLLM()
+    builder = FocusedBuilder(
+        llm=llm,
+        executor=ToolExecutor(workspace, wm_feedback_enabled=False),
+        trace_path=tmp_path / "builder-tools.jsonl",
+        config=BuilderConfig(max_tool_steps=2, show_budget_telemetry=True),
+    )
+
+    await builder.build(BuilderRequest(turn=turn(0), reason="repair divergence"))
+
+    assert (workspace.dir / "world_model.py").read_text() == "candidate"
 
 
 @pytest.mark.asyncio
