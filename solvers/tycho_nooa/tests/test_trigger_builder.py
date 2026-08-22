@@ -160,6 +160,44 @@ class EditAfterTruncationLLM(FakeLLMClient):
         return prose_response("recommended_action: none")
 
 
+class EditWhenInvestigationClosesLLM(FakeLLMClient):
+    """Keep investigating while run_python remains available."""
+
+    def __init__(self) -> None:
+        super().__init__(scripted_responses=[])
+        self.call_count = 0
+        self.tool_choices: list[str] = []
+
+    async def acall(self, messages, tools=None, output_model=None, **kwargs):
+        self.call_count += 1
+        self.tool_choices.append(kwargs["tool_choice"])
+        names = {tool.name for tool in tools or []}
+        if self.call_count == 1 or "run_python" in names:
+            return tool_response("run_python", {"code": "print('probe')"}, "probe")
+        return tool_batch_response(
+            [
+                (
+                    "write_file",
+                    {"path": "world_model.py", "content": "candidate"},
+                    "candidate-edit",
+                ),
+                (
+                    "write_file",
+                    {"path": "notes/world_model.md", "content": "hypothesis"},
+                    "notes-edit",
+                ),
+                (
+                    "write_file",
+                    {
+                        "path": "notes/world_model_report.md",
+                        "content": "recommended_action: none",
+                    },
+                    "report-edit",
+                ),
+            ]
+        )
+
+
 def turn(number: int, previous_action: str = "") -> GameTurn:
     return GameTurn(
         grid=[[0, number], [2, 3]],
@@ -194,6 +232,33 @@ async def test_builder_does_not_treat_token_truncation_as_completed_construction
     await builder.build(BuilderRequest(turn=turn(0), reason="repair divergence"))
 
     assert (workspace.dir / "world_model.py").read_text() == "candidate"
+
+
+@pytest.mark.asyncio
+async def test_builder_commit_mode_mechanically_closes_investigation_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Commit mode changes capability, rather than merely adding more prose."""
+    monkeypatch.setattr(
+        "tycho_nooa.builder.verify_state",
+        lambda executor: ("[verify state] first divergence remains", None),
+    )
+    workspace = GameWorkspace(
+        "game", root=str(tmp_path), available_actions=["UP", "DOWN"]
+    )
+    (workspace.dir / "world_model.py").write_text("parent")
+    llm = EditWhenInvestigationClosesLLM()
+    builder = FocusedBuilder(
+        llm=llm,
+        executor=ToolExecutor(workspace, wm_feedback_enabled=False),
+        trace_path=tmp_path / "builder-tools.jsonl",
+        config=BuilderConfig(max_tool_steps=4, show_budget_telemetry=True),
+    )
+
+    await builder.build(BuilderRequest(turn=turn(0), reason="repair divergence"))
+
+    assert (workspace.dir / "world_model.py").read_text() == "candidate"
+    assert llm.tool_choices[:2] == ["auto", "required"]
 
 
 @pytest.mark.asyncio

@@ -115,6 +115,9 @@ OUTCOME_CHECKPOINT_REFUSAL = (
 )
 COMMIT_CALLS_REMAINING = 3
 COMMIT_SECONDS_REMAINING = 90
+COMMIT_TOOL_NAMES = frozenset(
+    {"write_file", "edit_file", "edit_function", "checkout_theory_candidate"}
+)
 
 
 @dataclass(frozen=True)
@@ -141,6 +144,20 @@ def _builder_budget_notice(
     repair_calls_remaining: int,
     commit_seconds_remaining: int = COMMIT_SECONDS_REMAINING,
 ) -> str:
+    notice, _ = _builder_budget(
+        request,
+        repair_calls_remaining=repair_calls_remaining,
+        commit_seconds_remaining=commit_seconds_remaining,
+    )
+    return notice
+
+
+def _builder_budget(
+    request: BuilderRequest,
+    *,
+    repair_calls_remaining: int,
+    commit_seconds_remaining: int,
+) -> tuple[str, bool]:
     seconds_remaining = (
         None
         if request.deadline_at is None
@@ -159,7 +176,8 @@ def _builder_budget_notice(
         mode = "commit"
         instruction = (
             "Make the smallest reversible edit now and predict its verifier effect. "
-            "If no falsifiable edit is possible, state the exact missing evidence."
+            "Investigation tools are unavailable in this mode. If no falsifiable "
+            "edit is possible, checkpoint the exact missing evidence."
         )
     else:
         mode = "investigate"
@@ -167,7 +185,7 @@ def _builder_budget_notice(
             "Investigate the named divergence, but externalize one falsifiable "
             "hypothesis before commitment mode."
         )
-    return (
+    notice = (
         "BUILDER BUDGET (host-authoritative; supersedes earlier notices)\n"
         f"Time remaining: {time_text}\n"
         "Repair model calls remaining (including this call): "
@@ -176,6 +194,7 @@ def _builder_budget_notice(
         f"Mode: {mode}\n"
         f"{instruction}"
     )
+    return notice, commit
 
 
 @dataclass(frozen=True)
@@ -321,26 +340,31 @@ class BuilderStrategy(GenerationStrategy):
         objective_review: bool,
     ) -> None:
         for round_index in range(config.max_tool_steps):
+            commit_mode = False
             if config.show_budget_telemetry:
+                notice, commit_mode = _builder_budget(
+                    request,
+                    repair_calls_remaining=config.max_tool_steps - round_index,
+                    commit_seconds_remaining=config.commit_seconds_remaining,
+                )
                 runtime.event_manager.add(
-                    Task(
-                        prompt=_builder_budget_notice(
-                            request,
-                            repair_calls_remaining=config.max_tool_steps - round_index,
-                            commit_seconds_remaining=config.commit_seconds_remaining,
-                        )
-                    )
+                    Task(prompt=notice)
                 )
                 # Keep telemetry fresh without displacing the assignment as the
                 # final, highest-priority instruction visible to the model.
                 if objective_review:
                     runtime.event_manager.add(Task(prompt=OBJECTIVE_REVIEW_REQUEST))
                 checkpoint.request_repair(runtime)
+            available_tools = (
+                [tool for tool in tools if canonical(tool.name) in COMMIT_TOOL_NAMES]
+                if commit_mode
+                else tools
+            )
             response, event_id = await runtime.generate(
-                tools=tools,
+                tools=available_tools,
                 max_tokens=config.max_tokens,
                 temperature=config.temperature,
-                tool_choice="auto",
+                tool_choice="required" if commit_mode else "auto",
             )
             if not response.tool_calls:
                 if response.finish_reason == "length":
