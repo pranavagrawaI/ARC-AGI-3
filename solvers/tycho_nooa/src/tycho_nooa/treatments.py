@@ -37,6 +37,10 @@ TREATMENTS = {
     TRANSACTIONAL_BUILDER: TreatmentPolicy(
         TRANSACTIONAL_BUILDER,
         transactional_builder=True,
+        # The live Gemma route can spend the entire decision allowance before
+        # Tycho's 40-step laboratory ceiling. Bound the named treatment, not
+        # the source control, so transactions can finish or fail closed.
+        builder_max_tool_steps=12,
     ),
 }
 

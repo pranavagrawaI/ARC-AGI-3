@@ -95,6 +95,9 @@ def test_transactional_builder_is_a_named_treatment_not_the_trigger_control(
     assert treatment.treatment_name == "transactional_builder"
     assert treatment._trigger_builder is not None
     assert treatment._trigger_builder._theory_evaluator is not None
+    assert treatment._trigger_builder._builder_config.max_tool_steps == 12
+    assert control._trigger_builder is not None
+    assert control._trigger_builder._builder_config.max_tool_steps == 40
 
 
 def test_transactional_builder_requires_a_builder_owned_source_mode(
