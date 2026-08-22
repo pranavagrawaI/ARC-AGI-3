@@ -26,6 +26,14 @@ from tycho_nooa.deadlines import DecisionDeadline
 from tycho_nooa.decision_checkpoints import DecisionCheckpointRecorder
 from tycho_nooa.llm_trace import LLMTrace
 from tycho_nooa.models import ActionDecision, GameTurn
+from tycho_nooa.theory_evaluation import (
+    EvidenceFrontier,
+    PublicationDecision,
+)
+from tycho_nooa.theory_transaction import (
+    TheoryEvaluator,
+    TheoryTransaction,
+)
 from tycho_nooa.wm_probe import AST_UNCHANGED_NOTICE
 
 
@@ -41,6 +49,14 @@ class BuilderExposure:
     result: BuilderResult
     recommended_action: ActionDecision | None
     recommendation_parse_error: str | None = None
+    publication_decision: PublicationDecision | None = None
+    publication_feedback: str | None = None
+
+    @property
+    def delivered_report(self) -> str:
+        if self.publication_feedback is None:
+            return self.result.report
+        return f"{self.result.report}\n\n{self.publication_feedback}"
 
 
 class BuilderDeadlineError(RuntimeError):
@@ -384,9 +400,7 @@ def _contemporaneous_score(
             ),
             "ast_preserving_edits_since_grade": ast_preserving_edits,
         }
-    provenance: dict[str, Any] = {"tool_call_index": call.get("call_index")}
-    if ast_preserving_edits:
-        provenance["ast_preserving_edits_since_grade"] = ast_preserving_edits
+    provenance = _score_provenance(call, ast_preserving_edits)
     result = str(call.get("result", ""))
     if _FEEDBACK_MARKER not in result:
         return {
@@ -425,6 +439,15 @@ def _contemporaneous_score(
         **provenance,
         **reading,
     }
+
+
+def _score_provenance(
+    call: dict[str, Any], ast_preserving_edits: int
+) -> dict[str, Any]:
+    provenance: dict[str, Any] = {"tool_call_index": call.get("call_index")}
+    if ast_preserving_edits:
+        provenance["ast_preserving_edits_since_grade"] = ast_preserving_edits
+    return provenance
 
 
 def _is_model_changing(row: dict[str, Any]) -> bool:
@@ -486,9 +509,13 @@ class TriggerBuilderLoop:
         builder_config: BuilderConfig | None = None,
         llm_trace: LLMTrace | None = None,
         decision_checkpoints: DecisionCheckpointRecorder | None = None,
+        builder_executor: ToolExecutor | None = None,
+        theory_evaluator: TheoryEvaluator | None = None,
     ) -> None:
         self._llm = llm
         self._executor = executor
+        self._builder_executor = builder_executor or executor
+        self._theory_evaluator = theory_evaluator
         self._trace_path = trace_path
         self._builder_tool_trace_path = builder_tool_trace_path
         self._builder_config = builder_config
@@ -617,18 +644,25 @@ class TriggerBuilderLoop:
             partial_tool_calls = (
                 self.builder.completed_tool_calls() if self.builder is not None else []
             )
-            (
-                rolled_back_paths,
-                retained_candidate,
-                candidate_retention_error,
-            ) = _rollback_with_candidate_retention(
-                self._executor.ws.dir,
-                workspace_before,
-                partial_tool_calls,
-                turn=turn,
-                reason=reason,
-                focus=focus,
-            )
+            if self._theory_evaluator is None:
+                (
+                    rolled_back_paths,
+                    retained_candidate,
+                    candidate_retention_error,
+                ) = _rollback_with_candidate_retention(
+                    self._executor.ws.dir,
+                    workspace_before,
+                    partial_tool_calls,
+                    turn=turn,
+                    reason=reason,
+                    focus=focus,
+                )
+            else:
+                # TheoryTransaction already restored canonical executable theory.
+                # Advisory notes and reports intentionally survive the deadline.
+                rolled_back_paths = []
+                retained_candidate = None
+                candidate_retention_error = None
             self._write_trace(
                 {
                     "event": "builder_deadline_exceeded",
@@ -707,7 +741,18 @@ class TriggerBuilderLoop:
         focus: str | None = None,
         deadline_at: float | None = None,
     ) -> BuilderExposure:
-        self.builder = self._new_builder()
+        transaction = (
+            TheoryTransaction.begin(
+                workspace=self._builder_executor.ws.dir,
+                evaluator=self._theory_evaluator,
+                frontier=EvidenceFrontier.freeze(self._builder_executor.ws.dir),
+                cause=reason,
+                focus=focus,
+            )
+            if self._theory_evaluator is not None
+            else None
+        )
+        self.builder = self._new_builder(transaction)
         try:
             result = await self.builder.build(
                 BuilderRequest(
@@ -718,8 +763,11 @@ class TriggerBuilderLoop:
                     deadline_at=deadline_at,
                 )
             )
-        except Exception as error:
-            self._record_builder_error(turn, error)
+        except BaseException as error:
+            if transaction is not None:
+                transaction.abort(f"{type(error).__name__}: {error}")
+            if isinstance(error, Exception):
+                self._record_builder_error(turn, error)
             raise
         if result.outcome_checkpoint_resolved:
             if self._pending_outcome_level is not None:
@@ -727,11 +775,19 @@ class TriggerBuilderLoop:
             self._pending_outcome_evidence = None
             self._pending_outcome_level = None
         recommendation = _recommended_action(result.report, turn.available_actions)
+        publication_decision = transaction.finish() if transaction is not None else None
+        publication_feedback = (
+            _publication_feedback(publication_decision)
+            if publication_decision is not None
+            else None
+        )
         self._record_builder_result(turn, result, recommendation)
         return BuilderExposure(
             result=result,
             recommended_action=recommendation.action,
             recommendation_parse_error=recommendation.error,
+            publication_decision=publication_decision,
+            publication_feedback=publication_feedback,
         )
 
     def _evaluate_trigger(self, turn: GameTurn) -> tuple[TriggerDecision, str] | None:
@@ -776,14 +832,17 @@ class TriggerBuilderLoop:
             self._pending_outcome_evidence = evidence
             self._pending_outcome_level = completed_level
 
-    def _new_builder(self) -> FocusedBuilder:
+    def _new_builder(
+        self, transaction: TheoryTransaction | None = None
+    ) -> FocusedBuilder:
         # A new Agent per fire is the NOOA equivalent of Tycho's local builder
         # transcript: same LLM/workspace/verifier, but no actor-history leakage.
         builder = FocusedBuilder(
             llm=self._llm,
-            executor=self._executor,
+            executor=self._builder_executor,
             trace_path=self._builder_tool_trace_path,
             config=self._builder_config,
+            theory_transaction=transaction,
         )
         # Each fresh agent has a fresh event stream; attach the run-wide trace now.
         if self._llm_trace is not None:
@@ -910,6 +969,24 @@ class TriggerBuilderLoop:
         self._trace_path.parent.mkdir(parents=True, exist_ok=True)
         with self._trace_path.open("a", encoding="utf-8") as trace:
             trace.write(json.dumps(record, separators=(",", ":")) + "\n")
+
+
+def _publication_feedback(decision: PublicationDecision) -> str:
+    lines = [
+        "[host theory publication decision — authoritative]",
+        f"disposition: {decision.disposition.value}",
+    ]
+    if decision.gained:
+        lines.append("gained obligations:")
+        lines.extend(f"- {item}" for item in decision.gained)
+    if decision.lost:
+        lines.append("lost obligations:")
+        lines.extend(f"- {item}" for item in decision.lost)
+    if decision.inconclusive:
+        lines.append("inconclusive obligations:")
+        lines.extend(f"- {item}" for item in decision.inconclusive)
+    lines.append(f"reason: {decision.reason}")
+    return "\n".join(lines)
 
 
 def _level_complete_evidence(workspace_dir: Path, level: int) -> str | None:

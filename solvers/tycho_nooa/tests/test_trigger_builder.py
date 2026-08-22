@@ -13,6 +13,8 @@ from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 from tycho.agent.builder import REPORT_FILE
 from tycho.agent.colors import COLORMAP
 from tycho.prompts.render import render_prompt
+from tycho.workspace.agent_tools import ToolExecutor
+from tycho.workspace.workspace import GameWorkspace
 
 from tycho_nooa import ActionDecision, GameTurn, TychoNooaAgent
 from tycho_nooa.builder import (
@@ -25,10 +27,22 @@ from tycho_nooa.builder import (
 )
 from tycho_nooa.deadlines import DecisionDeadlineConfig
 from tycho_nooa.symmetry_notice import PROMPT_BRIEF
+from tycho_nooa.theory_evaluation import (
+    EvaluationRunStatus,
+    EvidenceFrontier,
+    ObligationKind,
+    ObligationResult,
+    ObligationStatus,
+    PublicationDecision,
+    PublicationDisposition,
+    TheoryEvaluation,
+)
+from tycho_nooa.theory_transaction import TheoryTransaction
 from tycho_nooa.trigger_builder import (
     BuilderExposure,
     TriggerDecision,
     _contemporaneous_score,
+    _publication_feedback,
 )
 from tycho_nooa.wm_probe import AST_UNCHANGED_NOTICE
 
@@ -103,6 +117,100 @@ def turn(number: int, previous_action: str = "") -> GameTurn:
         turn_in_level=number,
         previous_action=previous_action,
     )
+
+
+@pytest.mark.asyncio
+async def test_transactional_builder_second_edit_sees_restored_incumbent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "tycho_nooa.builder.verify_state",
+        lambda executor: ("[typed evaluator owns publication]", None),
+    )
+    workspace = GameWorkspace(
+        "game", root=str(tmp_path), available_actions=["UP", "DOWN"]
+    )
+    (workspace.dir / "world_model.py").write_text("parent")
+    frontier = EvidenceFrontier.freeze(workspace.dir)
+
+    class Evaluator:
+        evaluator_sha256 = "fixture"
+
+        def evaluate(self, model: bytes, frozen: EvidenceFrontier) -> TheoryEvaluation:
+            statuses = {
+                b"parent": (ObligationStatus.PASSED, ObligationStatus.FAILED),
+                b"regression": (ObligationStatus.FAILED, ObligationStatus.FAILED),
+                b"next": (ObligationStatus.PASSED, ObligationStatus.PASSED),
+            }[model]
+            return TheoryEvaluation(
+                hashlib.sha256(model).hexdigest(),
+                frozen.sha256,
+                self.evaluator_sha256,
+                EvaluationRunStatus.COMPLETE,
+                tuple(
+                    ObligationResult(
+                        f"T{index}",
+                        ObligationKind.TRANSITION,
+                        status,
+                        f"transition {index}",
+                    )
+                    for index, status in enumerate(statuses, start=1)
+                ),
+            )
+
+    transaction = TheoryTransaction.begin(
+        workspace=workspace.dir,
+        evaluator=Evaluator(),
+        frontier=frontier,
+        cause="preserved-boundary integration",
+        store_root=tmp_path / "store",
+    )
+    llm = FakeLLMClient(
+        scripted_responses=[
+            tool_response(
+                "write_file",
+                {"path": "world_model.py", "content": "regression"},
+                "broad-regression",
+            ),
+            tool_response(
+                "edit_file",
+                {"path": "world_model.py", "old": "parent", "new": "next"},
+                "edit-restored-parent",
+            ),
+            tool_response(
+                "write_file",
+                {
+                    "path": "notes/world_model.md",
+                    "content": "broad rewrite regressed; narrow edit survived",
+                },
+                "notes",
+            ),
+            tool_response(
+                "write_file",
+                {
+                    "path": "notes/world_model_report.md",
+                    "content": "recommended_action: none\nnote: transaction exercised",
+                },
+                "report",
+            ),
+            prose_response("complete"),
+        ]
+    )
+    builder = FocusedBuilder(
+        llm=llm,
+        executor=ToolExecutor(workspace, wm_feedback_enabled=False),
+        trace_path=tmp_path / "builder-tools.jsonl",
+        config=BuilderConfig(max_tool_steps=5),
+        theory_transaction=transaction,
+    )
+
+    result = await builder.build(
+        BuilderRequest(turn=turn(0), reason="repair a divergence")
+    )
+
+    assert "rejected_and_restored" in result.tool_calls[0]["result"]
+    assert result.tool_calls[1]["result"].startswith("edited world_model.py")
+    assert (workspace.dir / "world_model.py").read_bytes() == b"next"
 
 
 @pytest.mark.asyncio
@@ -1955,3 +2063,31 @@ def test_an_entirely_cosmetic_pass_reports_an_ungraded_body() -> None:
     assert score["status"] == "unavailable"
     assert "never graded" in score["reason"]
     assert score["ast_preserving_edits_since_grade"] == 2
+
+
+@pytest.mark.parametrize(
+    ("field", "heading"),
+    [
+        ("gained", "gained obligations:"),
+        ("lost", "lost obligations:"),
+        ("inconclusive", "inconclusive obligations:"),
+    ],
+)
+def test_publication_feedback_names_every_typed_delta(
+    field: str,
+    heading: str,
+) -> None:
+    values = {field: ("transition:L0:T4:RIGHT",)}
+    decision = PublicationDecision(
+        PublicationDisposition.WITHHELD_INCONCLUSIVE,
+        reason="fixture decision",
+        **values,
+    )
+
+    feedback = _publication_feedback(decision)
+
+    assert "[host theory publication decision — authoritative]" in feedback
+    assert "disposition: withheld_inconclusive" in feedback
+    assert heading in feedback
+    assert "- transition:L0:T4:RIGHT" in feedback
+    assert "reason: fixture decision" in feedback

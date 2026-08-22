@@ -12,6 +12,7 @@ from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 from tycho_nooa.shadow_eval import (
     SPEC_SCHEMA,
     ShadowValidationError,
+    _jsonable,
     canonical_commitment,
     execute_shadow,
     inspect_checkpoint,
@@ -679,3 +680,61 @@ def test_cli_refuses_paid_execution_without_an_explicit_monetary_limit(
         main()
 
     assert not output.exists()
+
+
+def test_jsonable_handles_every_supported_shape_and_rejects_opaque_values() -> None:
+    class ModelValue:
+        def model_dump(self, *, mode: str) -> dict[str, str]:
+            assert mode == "json"
+            return {"value": "model"}
+
+    assert _jsonable(None) is None
+    assert _jsonable({1: [True, ModelValue()]}) == {
+        "1": [True, {"value": "model"}]
+    }
+    with pytest.raises(TypeError, match="not JSON-safe"):
+        _jsonable(object())
+
+
+def test_cli_paid_path_persists_the_precommitted_report_without_provider_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    packet = prepared_packet(tmp_path)
+    output = tmp_path / "result"
+    client = ConditionalClient("constant")
+    calls: list[Path] = []
+
+    async def fake_execute(packet_path: Path, **kwargs: Any) -> dict[str, Any]:
+        calls.append(packet_path)
+        return {"schema": "test", "status": "complete"}
+
+    monkeypatch.setattr("tycho_nooa.shadow_eval.build_llm", lambda: (client, "live"))
+    monkeypatch.setattr("tycho_nooa.shadow_eval.execute_shadow", fake_execute)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "shadow_eval",
+            "run",
+            str(packet),
+            str(output),
+            "--repeats",
+            "2",
+            "--max-calls",
+            "4",
+            "--max-cost-usd",
+            "1.0",
+            "--cost-reserve-per-call-usd",
+            "0.25",
+            "--execute",
+        ],
+    )
+
+    assert main() == 0
+    assert calls == [packet]
+    assert json.loads((output / "report.json").read_text()) == {
+        "schema": "test",
+        "status": "complete",
+    }
+    assert client.call_count == 0

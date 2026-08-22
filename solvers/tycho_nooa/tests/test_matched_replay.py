@@ -9,6 +9,7 @@ from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 from tycho_nooa import TychoNooaAgent
 from tycho_nooa.matched_replay import (
     ARMS,
+    THEORY_TRANSACTION_ARMS,
     execute_matched_replay,
     prepare_legacy_run_packet,
     validate_packet,
@@ -207,3 +208,68 @@ async def test_matched_warm_restart_exercises_all_three_authority_arms(
     assert typed["goal_events"] == ["goal_proposed", "goal_updated"]
     assert "request_builder" in typed["tool_names"]
     assert "actor_uptake" in typed["builder_events"]
+
+
+@pytest.mark.asyncio
+async def test_transactional_replay_matches_control_and_treatment_on_one_packet(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TYCHO_SANDBOX_RUNTIME", "host")
+    packet = tmp_path / "packet"
+    manifest = prepare_legacy_run_packet(
+        make_legacy_run(tmp_path),
+        packet,
+        arms=THEORY_TRANSACTION_ARMS,
+    )
+    monkeypatch.setattr(
+        "tycho_nooa.trigger_builder.TychoTransitionTrigger.evaluate",
+        lambda self, level, executor: TriggerDecision(
+            True, "wm_signal", "matched transaction replay"
+        ),
+    )
+    monkeypatch.setattr(
+        "tycho_nooa.builder.verify_state",
+        lambda executor: ("[verify state] matched transaction fixture", None),
+    )
+    builder_turn = [
+        response(
+            "write_file",
+            {"path": "world_model.py", "content": "# candidate body\n"},
+            "builder-edit",
+        ),
+        response(
+            "write_file",
+            {"path": "notes/world_model.md", "content": "candidate finding"},
+            "builder-notes",
+        ),
+        response(
+            "write_file",
+            {
+                "path": "notes/world_model_report.md",
+                "content": "recommended_action: UP\nnote: matched replay",
+            },
+            "builder-report",
+        ),
+        prose("builder complete"),
+        response("take_action", {"action": "UP"}, "actor-action"),
+    ]
+    llms = {
+        arm.name: FakeLLMClient(scripted_responses=list(builder_turn))
+        for arm in THEORY_TRANSACTION_ARMS
+    }
+
+    report = await execute_matched_replay(
+        packet,
+        tmp_path / "result",
+        llms=llms,
+        arms=THEORY_TRANSACTION_ARMS,
+    )
+
+    assert manifest["arms"] == [arm.__dict__ for arm in THEORY_TRANSACTION_ARMS]
+    by_arm = {row["arm"]["name"]: row for row in report["observations"]}
+    assert by_arm["builder_control"]["world_model_changed"] is True
+    treatment = by_arm["builder_transactional"]
+    assert treatment["world_model_changed"] is False
+    assert treatment["theory_publication"]["disposition"] == "canonical_restored"
+    assert "transaction_finished" in treatment["theory_ledger_events"]

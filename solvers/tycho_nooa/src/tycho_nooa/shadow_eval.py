@@ -158,17 +158,57 @@ def prepare_shadow_packet(
 
 def validate_shadow_packet(path: Path) -> PreparedShadow:
     """Recheck every commitment and the one-factor transform before execution."""
-
-    manifest = _read_object(path / "manifest.json")
+    manifest, spec, control, treatment, source_request, source_response, workspace = (
+        _packet_components(path)
+    )
     if manifest.get("schema") != PACKET_SCHEMA:
         raise ShadowValidationError("unsupported shadow packet schema")
-    spec = _read_object(path / "perturbation.json")
-    control = _read_object(path / "control-request.json")
-    treatment = _read_object(path / "treatment-request.json")
-    source_request = _read_object(path / "source" / "request.json")
-    source_response = _read_object(path / "source" / "response.json")
-    workspace = _read_object(path / "source" / "workspace.json")
+    _verify_packet_commitments(
+        manifest, spec, control, treatment, source_request, source_response, workspace
+    )
+    _validate_perturbation(spec, source_request)
+    if _apply_operation(control, spec["operation"]) != treatment:
+        raise ShadowValidationError("treatment does not follow the committed operation")
+    changed = _different_leaf_paths(control, treatment)
+    if changed != manifest.get("changed_paths") or len(changed) != 1:
+        raise ShadowValidationError(
+            "packet no longer contains exactly one changed leaf"
+        )
+    _verify_manifest_fields(manifest, spec, control, source_request)
+    _verify_packet_blobs(path, workspace)
+    _validate_request_body(control)
+    _validate_request_body(treatment)
+    return PreparedShadow(
+        path=path,
+        manifest=manifest,
+        control=control,
+        treatment=treatment,
+        perturbation=spec,
+        source_response=source_response,
+    )
 
+
+def _packet_components(path: Path) -> tuple[dict[str, Any], ...]:
+    return (
+        _read_object(path / "manifest.json"),
+        _read_object(path / "perturbation.json"),
+        _read_object(path / "control-request.json"),
+        _read_object(path / "treatment-request.json"),
+        _read_object(path / "source" / "request.json"),
+        _read_object(path / "source" / "response.json"),
+        _read_object(path / "source" / "workspace.json"),
+    )
+
+
+def _verify_packet_commitments(
+    manifest: dict[str, Any],
+    spec: dict[str, Any],
+    control: dict[str, Any],
+    treatment: dict[str, Any],
+    source_request: dict[str, Any],
+    source_response: dict[str, Any],
+    workspace: dict[str, Any],
+) -> None:
     checks = {
         "source_request_payload_commitment": _commitment(control),
         "source_workspace_commitment": _commitment(workspace),
@@ -186,14 +226,14 @@ def validate_shadow_packet(path: Path) -> PreparedShadow:
         raise ShadowValidationError("control differs from source/request.json")
     if source_request.get("workspace_commitment") != _commitment(workspace):
         raise ShadowValidationError("source workspace commitment is stale")
-    _validate_perturbation(spec, source_request)
-    if _apply_operation(control, spec["operation"]) != treatment:
-        raise ShadowValidationError("treatment does not follow the committed operation")
-    changed = _different_leaf_paths(control, treatment)
-    if changed != manifest.get("changed_paths") or len(changed) != 1:
-        raise ShadowValidationError(
-            "packet no longer contains exactly one changed leaf"
-        )
+
+
+def _verify_manifest_fields(
+    manifest: dict[str, Any],
+    spec: dict[str, Any],
+    control: dict[str, Any],
+    source_request: dict[str, Any],
+) -> None:
     manifest_fields = {
         "call_index": source_request.get("call_index"),
         "source": source_request.get("source"),
@@ -205,17 +245,6 @@ def validate_shadow_packet(path: Path) -> PreparedShadow:
     for field, expected in manifest_fields.items():
         if manifest.get(field) != expected:
             raise ShadowValidationError(f"packet manifest drift: {field}")
-    _verify_packet_blobs(path, workspace)
-    _validate_request_body(control)
-    _validate_request_body(treatment)
-    return PreparedShadow(
-        path=path,
-        manifest=manifest,
-        control=control,
-        treatment=treatment,
-        perturbation=spec,
-        source_response=source_response,
-    )
 
 
 async def execute_shadow(
@@ -231,43 +260,99 @@ async def execute_shadow(
     enforce_replay_context: bool = True,
 ) -> dict[str, Any]:
     """Sample both arms under call and observed-cost stops; never execute tools."""
-
     packet = validate_shadow_packet(packet_path)
+    max_cost, reserve = _validate_shadow_execution(
+        packet,
+        llm,
+        repeats=repeats,
+        max_calls=max_calls,
+        max_cost_usd=max_cost_usd,
+        cost_reserve_per_call_usd=cost_reserve_per_call_usd,
+        enforce_replay_context=enforce_replay_context,
+    )
+    schedule = _shadow_schedule(repeats, schedule_seed)
+    observations, observed_cost, stop_reason = await _sample_schedule(
+        packet,
+        llm,
+        schedule,
+        max_cost_usd=max_cost,
+        reserve_per_call_usd=reserve,
+        record_call=record_call,
+    )
+    assessment = _assess(
+        observations,
+        effect=packet.perturbation["expected_effect"],
+        repeats=repeats,
+        source_response=packet.source_response,
+    )
+    return _shadow_report(
+        packet_path,
+        packet,
+        observations,
+        assessment,
+        repeats=repeats,
+        max_calls=max_calls,
+        schedule_seed=schedule_seed,
+        max_cost_usd=max_cost,
+        reserve_per_call_usd=reserve,
+        observed_cost_usd=observed_cost,
+        stop_reason=stop_reason,
+    )
+
+
+def _validate_shadow_execution(
+    packet: PreparedShadow,
+    llm: UnifiedLLM,
+    *,
+    repeats: int,
+    max_calls: int,
+    max_cost_usd: float | None,
+    cost_reserve_per_call_usd: float | None,
+    enforce_replay_context: bool,
+) -> tuple[float, float]:
     if repeats < 1:
         raise ShadowValidationError("repeats must be positive")
-    planned_calls = repeats * 2
-    if planned_calls > max_calls:
+    if repeats * 2 > max_calls:
         raise ShadowValidationError(
-            f"planned calls {planned_calls} exceed hard cap {max_calls}"
+            f"planned calls {repeats * 2} exceed hard cap {max_calls}"
         )
-    cost_limit_enabled = _validate_cost_limit(
-        max_cost_usd,
-        cost_reserve_per_call_usd,
-    )
+    _validate_cost_limit(max_cost_usd, cost_reserve_per_call_usd)
     if llm.model != packet.manifest["model"]:
         raise ShadowValidationError(
             f"model drift: packet={packet.manifest['model']!r}, client={llm.model!r}"
         )
-    if enforce_replay_context:
-        actual_context = _replay_context(llm)
-        if actual_context != packet.manifest["replay_context"]:
-            raise ShadowValidationError("client or provider configuration drift")
+    if enforce_replay_context and _replay_context(llm) != packet.manifest["replay_context"]:
+        raise ShadowValidationError("client or provider configuration drift")
+    assert max_cost_usd is not None
+    assert cost_reserve_per_call_usd is not None
+    return max_cost_usd, cost_reserve_per_call_usd
 
+
+def _shadow_schedule(repeats: int, schedule_seed: int) -> list[dict[str, Any]]:
     schedule = [
         {"pair_index": pair, "arm": arm}
         for pair in range(repeats)
         for arm in ("control", "treatment")
     ]
     random.Random(schedule_seed).shuffle(schedule)
+    return schedule
+
+
+async def _sample_schedule(
+    packet: PreparedShadow,
+    llm: UnifiedLLM,
+    schedule: list[dict[str, Any]],
+    *,
+    max_cost_usd: float,
+    reserve_per_call_usd: float,
+    record_call: Callable[[dict[str, Any]], None] | None,
+) -> tuple[list[dict[str, Any]], float, str | None]:
     observations: list[dict[str, Any]] = []
     observed_cost_usd = 0.0
-    cost_stop_reason: str | None = None
+    stop_reason: str | None = None
     for order_index, item in enumerate(schedule):
-        if (
-            cost_limit_enabled
-            and observed_cost_usd + cost_reserve_per_call_usd > max_cost_usd
-        ):
-            cost_stop_reason = "insufficient_reserved_cost"
+        if observed_cost_usd + reserve_per_call_usd > max_cost_usd:
+            stop_reason = "insufficient_reserved_cost"
             break
         body = packet.control if item["arm"] == "control" else packet.treatment
         observation = await _sample_once(
@@ -280,25 +365,35 @@ async def execute_shadow(
         observations.append(observation)
         if record_call is not None:
             record_call(observation)
-        if cost_limit_enabled:
-            call_cost = _observation_cost(observation)
-            if call_cost is None:
-                cost_stop_reason = "missing_observed_cost"
-                break
-            observed_cost_usd += call_cost
-            if observed_cost_usd > max_cost_usd:
-                cost_stop_reason = "observed_cost_exceeded"
-                break
+        call_cost = _observation_cost(observation)
+        if call_cost is None:
+            stop_reason = "missing_observed_cost"
+            break
+        observed_cost_usd += call_cost
+        if observed_cost_usd > max_cost_usd:
+            stop_reason = "observed_cost_exceeded"
+            break
+    return observations, observed_cost_usd, stop_reason
 
-    assessment = _assess(
-        observations,
-        effect=packet.perturbation["expected_effect"],
-        repeats=repeats,
-        source_response=packet.source_response,
-    )
+
+def _shadow_report(
+    packet_path: Path,
+    packet: PreparedShadow,
+    observations: list[dict[str, Any]],
+    assessment: dict[str, Any],
+    *,
+    repeats: int,
+    max_calls: int,
+    schedule_seed: int,
+    max_cost_usd: float,
+    reserve_per_call_usd: float,
+    observed_cost_usd: float,
+    stop_reason: str | None,
+) -> dict[str, Any]:
+    planned_calls = repeats * 2
     return {
         "schema": REPORT_SCHEMA,
-        "status": "stopped_cost_limit" if cost_stop_reason else "complete",
+        "status": "stopped_cost_limit" if stop_reason else "complete",
         "packet": str(packet_path.resolve()),
         "packet_manifest_commitment": _commitment(packet.manifest),
         "perturbation_id": packet.perturbation["id"],
@@ -309,21 +404,16 @@ async def execute_shadow(
         "repeats_per_arm": repeats,
         "max_calls": max_calls,
         "executed_calls": len(observations),
-        "cost_budget": (
-            {
-                "max_cost_usd": max_cost_usd,
-                "reserve_per_call_usd": cost_reserve_per_call_usd,
-                "observed_cost_usd": round(observed_cost_usd, 12),
-                "remaining_cost_usd": round(
-                    max(0.0, max_cost_usd - observed_cost_usd),
-                    12,
-                ),
-                "calls_withheld": planned_calls - len(observations),
-                "stop_reason": cost_stop_reason,
-            }
-            if cost_limit_enabled
-            else None
-        ),
+        "cost_budget": {
+            "max_cost_usd": max_cost_usd,
+            "reserve_per_call_usd": reserve_per_call_usd,
+            "observed_cost_usd": round(observed_cost_usd, 12),
+            "remaining_cost_usd": round(
+                max(0.0, max_cost_usd - observed_cost_usd), 12
+            ),
+            "calls_withheld": planned_calls - len(observations),
+            "stop_reason": stop_reason,
+        },
         "assessment": assessment,
         "promotion_allowed": assessment["judgment"] == "supported",
         "observations": observations,
@@ -373,116 +463,182 @@ def _assess(
 ) -> dict[str, Any]:
     completed = [row for row in observations if row["status"] == "complete"]
     errors = len(observations) - len(completed)
-    by_arm = {
-        arm: [row for row in completed if row["arm"] == arm]
-        for arm in ("control", "treatment")
-    }
-    signatures = {
-        arm: [_effect_signature(row["response"], effect) for row in rows]
-        for arm, rows in by_arm.items()
-    }
-    unique = {arm: set(values) for arm, values in signatures.items()}
-    route_signatures = [
-        _canonical_json(row["response"]["provider_route"]).decode("utf-8")
-        for row in completed
-        if row["response"].get("provider_route")
-    ]
-    missing_routes = len(completed) - len(route_signatures)
-    route_identities = set(route_signatures)
-
-    if errors:
-        judgment = "inconclusive"
-        reason = "one or more sampled calls failed"
-    elif any(len(rows) != repeats for rows in by_arm.values()):
-        judgment = "inconclusive"
-        reason = "the cost limit stopped the matched schedule before completion"
-    elif len(route_identities) > 1:
-        judgment = "inconclusive"
-        reason = "observed provider route drift prevents matched attribution"
-    elif repeats < 2:
-        judgment = "inconclusive"
-        reason = "one pair cannot separate content dependence from model variability"
-    elif all(len(values) == 1 for values in unique.values()):
-        if unique["control"] != unique["treatment"]:
-            judgment = "supported"
-            reason = (
-                "each arm was internally stable and the expected signature differed"
-            )
-        else:
-            judgment = "contradicted"
-            reason = "both arms were internally stable with the same expected signature"
-    else:
-        judgment = "inconclusive"
-        reason = "within-arm variability prevents attribution to the perturbation"
-
-    pairs = []
-    for pair_index in range(repeats):
-        rows = {row["arm"]: row for row in completed if row["pair_index"] == pair_index}
-        if set(rows) != {"control", "treatment"}:
-            continue
-        pairs.append(
-            {
-                "pair_index": pair_index,
-                "semantic_response_changed": _effect_signature(
-                    rows["control"]["response"], "semantic_response"
-                )
-                != _effect_signature(
-                    rows["treatment"]["response"], "semantic_response"
-                ),
-                "content_changed": _effect_signature(
-                    rows["control"]["response"], "content"
-                )
-                != _effect_signature(rows["treatment"]["response"], "content"),
-                "first_tool_call_changed": _effect_signature(
-                    rows["control"]["response"], "first_tool_call"
-                )
-                != _effect_signature(rows["treatment"]["response"], "first_tool_call"),
-                "take_action_changed": _effect_signature(
-                    rows["control"]["response"], "take_action"
-                )
-                != _effect_signature(rows["treatment"]["response"], "take_action"),
-            }
-        )
-    source_signature = (
-        _effect_signature(_normalize_recorded_response(source_response), effect)
-        if source_response.get("status") == "complete"
-        else None
+    by_arm = _rows_by_arm(completed)
+    signatures = _arm_signatures(by_arm, effect)
+    unique = _unique_arm_signatures(signatures)
+    route = _provider_route_assessment(completed)
+    judgment, reason = _shadow_judgment(
+        errors=errors,
+        by_arm=by_arm,
+        unique=unique,
+        route_identities=route["identities"],
+        repeats=repeats,
     )
-    control_matches_source = (
-        sum(value == source_signature for value in signatures["control"])
-        if source_signature is not None
-        else 0
+    pairs = _paired_changes(completed, repeats)
+    source_rate = _recorded_source_match_rate(
+        signatures["control"], source_response, effect
     )
     return {
         "judgment": judgment,
         "reason": reason,
         "error_calls": errors,
-        "arm_signature_counts": {
-            arm: _signature_counts(values) for arm, values in signatures.items()
+        "arm_signature_counts": _arm_signature_counts(signatures),
+        "control_recorded_response_match_rate": source_rate,
+        "paired_change_rates": _paired_change_rates(pairs),
+        "provider_route": route["report"],
+        "usage": _arm_usage(by_arm),
+    }
+
+
+def _rows_by_arm(
+    completed: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    return {
+        arm: [row for row in completed if row["arm"] == arm]
+        for arm in ("control", "treatment")
+    }
+
+
+def _arm_signatures(
+    by_arm: dict[str, list[dict[str, Any]]], effect: str
+) -> dict[str, list[str]]:
+    return {
+        arm: [_effect_signature(row["response"], effect) for row in rows]
+        for arm, rows in by_arm.items()
+    }
+
+
+def _unique_arm_signatures(
+    signatures: dict[str, list[str]],
+) -> dict[str, set[str]]:
+    return {arm: set(values) for arm, values in signatures.items()}
+
+
+def _arm_signature_counts(
+    signatures: dict[str, list[str]],
+) -> dict[str, list[dict[str, Any]]]:
+    return {arm: _signature_counts(values) for arm, values in signatures.items()}
+
+
+def _arm_usage(
+    by_arm: dict[str, list[dict[str, Any]]],
+) -> dict[str, dict[str, int]]:
+    return {arm: _sum_usage(rows) for arm, rows in by_arm.items()}
+
+
+def _provider_route_assessment(completed: list[dict[str, Any]]) -> dict[str, Any]:
+    signatures = [
+        _canonical_json(row["response"]["provider_route"]).decode("utf-8")
+        for row in completed
+        if row["response"].get("provider_route")
+    ]
+    missing = len(completed) - len(signatures)
+    identities = set(signatures)
+    return {
+        "identities": identities,
+        "report": {
+            "verifiable": bool(completed) and missing == 0,
+            "stable": bool(completed) and missing == 0 and len(identities) == 1,
+            "missing_calls": missing,
+            "identity_counts": _signature_counts(signatures),
         },
-        "control_recorded_response_match_rate": (
-            control_matches_source / len(signatures["control"])
-            if signatures["control"] and source_signature is not None
-            else None
-        ),
-        "paired_change_rates": {
-            field: sum(pair[field] for pair in pairs) / len(pairs) if pairs else None
-            for field in (
-                "semantic_response_changed",
-                "content_changed",
-                "first_tool_call_changed",
-                "take_action_changed",
-            )
+    }
+
+
+def _shadow_judgment(
+    *,
+    errors: int,
+    by_arm: dict[str, list[dict[str, Any]]],
+    unique: dict[str, set[str]],
+    route_identities: set[str],
+    repeats: int,
+) -> tuple[str, str]:
+    if errors:
+        return "inconclusive", "one or more sampled calls failed"
+    if any(len(rows) != repeats for rows in by_arm.values()):
+        return (
+            "inconclusive",
+            "the cost limit stopped the matched schedule before completion",
+        )
+    if len(route_identities) > 1:
+        return (
+            "inconclusive",
+            "observed provider route drift prevents matched attribution",
+        )
+    if repeats < 2:
+        return (
+            "inconclusive",
+            "one pair cannot separate content dependence from model variability",
+        )
+    stable = all(len(values) == 1 for values in unique.values())
+    if not stable:
+        return (
+            "inconclusive",
+            "within-arm variability prevents attribution to the perturbation",
+        )
+    if unique["control"] != unique["treatment"]:
+        return (
+            "supported",
+            "each arm was internally stable and the expected signature differed",
+        )
+    return (
+        "contradicted",
+        "both arms were internally stable with the same expected signature",
+    )
+
+
+def _paired_changes(
+    completed: list[dict[str, Any]], repeats: int
+) -> list[dict[str, Any]]:
+    pairs = []
+    for pair_index in range(repeats):
+        rows = {row["arm"]: row for row in completed if row["pair_index"] == pair_index}
+        if set(rows) != {"control", "treatment"}:
+            continue
+        pairs.append(_pair_changes(pair_index, rows))
+    return pairs
+
+
+def _pair_changes(
+    pair_index: int, rows: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    fields = ("semantic_response", "content", "first_tool_call", "take_action")
+    return {
+        "pair_index": pair_index,
+        **{
+            f"{field}_changed": _effect_signature(rows["control"]["response"], field)
+            != _effect_signature(rows["treatment"]["response"], field)
+            for field in fields
         },
-        "provider_route": {
-            "verifiable": bool(completed) and missing_routes == 0,
-            "stable": bool(completed)
-            and missing_routes == 0
-            and len(route_identities) == 1,
-            "missing_calls": missing_routes,
-            "identity_counts": _signature_counts(route_signatures),
-        },
-        "usage": {arm: _sum_usage(rows) for arm, rows in by_arm.items()},
+    }
+
+
+def _recorded_source_match_rate(
+    control_signatures: list[str],
+    source_response: dict[str, Any],
+    effect: str,
+) -> float | None:
+    source_signature = (
+        _effect_signature(_normalize_recorded_response(source_response), effect)
+        if source_response.get("status") == "complete"
+        else None
+    )
+    if not control_signatures or source_signature is None:
+        return None
+    matches = sum(value == source_signature for value in control_signatures)
+    return matches / len(control_signatures)
+
+
+def _paired_change_rates(pairs: list[dict[str, Any]]) -> dict[str, float | None]:
+    fields = (
+        "semantic_response_changed",
+        "content_changed",
+        "first_tool_call_changed",
+        "take_action_changed",
+    )
+    return {
+        field: sum(pair[field] for pair in pairs) / len(pairs) if pairs else None
+        for field in fields
     }
 
 
@@ -633,6 +789,17 @@ def _captured_tools(rows: list[dict[str, Any]]) -> list[CapturedTool]:
 def _validate_perturbation(
     spec: dict[str, Any], request: dict[str, Any]
 ) -> dict[str, Any]:
+    _validate_perturbation_fields(spec)
+    committed = request.get("request_payload_commitment")
+    if spec["source_request_payload_commitment"] != committed:
+        raise ShadowValidationError("perturbation targets a different source request")
+    operation = spec["operation"]
+    _validate_operation_fields(operation)
+    _validate_operation_target(operation, request["request_body"])
+    return spec
+
+
+def _validate_perturbation_fields(spec: dict[str, Any]) -> None:
     required = {
         "schema",
         "id",
@@ -649,44 +816,56 @@ def _validate_perturbation(
         )
     if spec["schema"] != SPEC_SCHEMA:
         raise ShadowValidationError("unsupported perturbation schema")
-    for field in ("id", "question", "hypothesis", "invalid_if"):
-        if not isinstance(spec[field], str) or not spec[field].strip():
-            raise ShadowValidationError(f"perturbation {field} must be non-empty text")
+    _validate_perturbation_text(spec)
     if spec["expected_effect"] not in SUPPORTED_EFFECTS:
         raise ShadowValidationError(
             f"expected_effect must be one of {sorted(SUPPORTED_EFFECTS)!r}"
         )
-    committed = request.get("request_payload_commitment")
-    if spec["source_request_payload_commitment"] != committed:
-        raise ShadowValidationError("perturbation targets a different source request")
-    operation = spec["operation"]
-    if not isinstance(operation, dict) or set(operation) != {
+
+
+def _validate_perturbation_text(spec: dict[str, Any]) -> None:
+    for field in ("id", "question", "hypothesis", "invalid_if"):
+        if not isinstance(spec[field], str) or not spec[field].strip():
+            raise ShadowValidationError(f"perturbation {field} must be non-empty text")
+
+
+def _validate_operation_fields(operation: Any) -> None:
+    expected = {
         "type",
         "pointer",
         "target_value_commitment",
         "old",
         "new",
-    }:
+    }
+    if not isinstance(operation, dict) or set(operation) != expected:
         raise ShadowValidationError("operation must be one exact replace_exact_text")
     if operation["type"] != "replace_exact_text":
         raise ShadowValidationError("only replace_exact_text is supported")
-    if not isinstance(operation["old"], str) or not isinstance(operation["new"], str):
+    _validate_replacement_text(operation["old"], operation["new"])
+
+
+def _validate_replacement_text(old: Any, new: Any) -> None:
+    if not isinstance(old, str) or not isinstance(new, str):
         raise ShadowValidationError("operation old and new must be text")
-    if not operation["old"] or operation["old"] == operation["new"]:
+    if not old or old == new:
         raise ShadowValidationError(
             "operation must replace non-empty text with a change"
         )
+
+
+def _validate_operation_target(
+    operation: dict[str, Any], request_body: dict[str, Any]
+) -> None:
     pointer = operation["pointer"]
     if not isinstance(pointer, str) or not pointer.startswith("/messages/"):
         raise ShadowValidationError("operation pointer must target request messages")
-    target = _resolve_pointer(request["request_body"], pointer)
+    target = _resolve_pointer(request_body, pointer)
     if not isinstance(target, str):
         raise ShadowValidationError("operation pointer must resolve to text")
     if operation["target_value_commitment"] != _commitment(target):
         raise ShadowValidationError("operation target value commitment is stale")
     if target.count(operation["old"]) != 1:
         raise ShadowValidationError("old text must occur exactly once at the target")
-    return spec
 
 
 def _apply_operation(body: dict[str, Any], operation: dict[str, Any]) -> dict[str, Any]:
@@ -714,43 +893,63 @@ def _resolve_pointer_parent(value: Any, pointer: str) -> tuple[Any, str | int]:
     ]
     current = value
     for part in parts[:-1]:
-        try:
-            current = current[int(part)] if isinstance(current, list) else current[part]
-        except (IndexError, KeyError, TypeError, ValueError) as error:
-            raise ShadowValidationError(
-                f"JSON pointer does not resolve: {pointer}"
-            ) from error
+        current = _pointer_child(current, part, pointer)
     final: str | int = int(parts[-1]) if isinstance(current, list) else parts[-1]
+    _require_pointer_key(current, final, pointer)
+    return current, final
+
+
+def _pointer_child(current: Any, part: str, pointer: str) -> Any:
     try:
-        current[final]
+        return current[int(part)] if isinstance(current, list) else current[part]
+    except (IndexError, KeyError, TypeError, ValueError) as error:
+        raise ShadowValidationError(
+            f"JSON pointer does not resolve: {pointer}"
+        ) from error
+
+
+def _require_pointer_key(current: Any, key: str | int, pointer: str) -> None:
+    try:
+        current[key]
     except (IndexError, KeyError, TypeError) as error:
         raise ShadowValidationError(
             f"JSON pointer does not resolve: {pointer}"
         ) from error
-    return current, final
 
 
 def _different_leaf_paths(left: Any, right: Any, pointer: str = "") -> list[str]:
     if type(left) is not type(right):
         return [pointer or "/"]
     if isinstance(left, dict):
-        if set(left) != set(right):
-            return [pointer or "/"]
-        changed: list[str] = []
-        for key in sorted(left):
-            escaped = str(key).replace("~", "~0").replace("/", "~1")
-            changed.extend(
-                _different_leaf_paths(left[key], right[key], f"{pointer}/{escaped}")
-            )
-        return changed
+        return _different_mapping_paths(left, right, pointer)
     if isinstance(left, list):
-        if len(left) != len(right):
-            return [pointer or "/"]
-        changed = []
-        for index, (a, b) in enumerate(zip(left, right, strict=True)):
-            changed.extend(_different_leaf_paths(a, b, f"{pointer}/{index}"))
-        return changed
+        return _different_sequence_paths(left, right, pointer)
     return [] if left == right else [pointer or "/"]
+
+
+def _different_mapping_paths(
+    left: dict[Any, Any], right: dict[Any, Any], pointer: str
+) -> list[str]:
+    if set(left) != set(right):
+        return [pointer or "/"]
+    changed: list[str] = []
+    for key in sorted(left):
+        escaped = str(key).replace("~", "~0").replace("/", "~1")
+        changed.extend(
+            _different_leaf_paths(left[key], right[key], f"{pointer}/{escaped}")
+        )
+    return changed
+
+
+def _different_sequence_paths(
+    left: list[Any], right: list[Any], pointer: str
+) -> list[str]:
+    if len(left) != len(right):
+        return [pointer or "/"]
+    changed: list[str] = []
+    for index, (before, after) in enumerate(zip(left, right, strict=True)):
+        changed.extend(_different_leaf_paths(before, after, f"{pointer}/{index}"))
+    return changed
 
 
 def _message_text_leaves(messages: list[dict[str, Any]]) -> list[tuple[str, str]]:
@@ -780,24 +979,7 @@ def _load_checkpoint(root: Path, call_index: int) -> dict[str, Any]:
     workspace = _read_object(call_dir / "workspace.json")
     body = request.get("request_body")
     _validate_request_body(body)
-    if request.get("call_index") != call_index:
-        raise ShadowValidationError("checkpoint call index mismatch")
-    if request.get("request_boundary") != REQUEST_BOUNDARY:
-        raise ShadowValidationError("checkpoint was captured at a different boundary")
-    if request.get("source") not in {"actor", "builder"}:
-        raise ShadowValidationError("checkpoint source lane is invalid")
-    if not isinstance(request.get("replay_context"), dict):
-        raise ShadowValidationError("checkpoint replay context is missing")
-    if request.get("request_payload_commitment") != _commitment(body):
-        raise ShadowValidationError("checkpoint request commitment is stale")
-    if request.get("workspace_commitment") != _commitment(workspace):
-        raise ShadowValidationError("checkpoint workspace commitment is stale")
-    if response.get("status") not in {"complete", "error"}:
-        raise ShadowValidationError("checkpoint response status is invalid")
-    if body.get("output_model") is not None:
-        raise ShadowValidationError(
-            "structured output checkpoints are not replayable yet"
-        )
+    _validate_checkpoint_metadata(request, response, workspace, body, call_index)
     _verify_source_blobs(root, workspace)
     return {
         "call_dir": call_dir,
@@ -807,32 +989,85 @@ def _load_checkpoint(root: Path, call_index: int) -> dict[str, Any]:
     }
 
 
+def _validate_checkpoint_metadata(
+    request: dict[str, Any],
+    response: dict[str, Any],
+    workspace: dict[str, Any],
+    body: dict[str, Any],
+    call_index: int,
+) -> None:
+    _validate_checkpoint_identity(request, call_index)
+    _validate_checkpoint_commitments(request, response, workspace, body)
+    if body.get("output_model") is not None:
+        raise ShadowValidationError(
+            "structured output checkpoints are not replayable yet"
+        )
+
+
+def _validate_checkpoint_identity(request: dict[str, Any], call_index: int) -> None:
+    if request.get("call_index") != call_index:
+        raise ShadowValidationError("checkpoint call index mismatch")
+    if request.get("request_boundary") != REQUEST_BOUNDARY:
+        raise ShadowValidationError("checkpoint was captured at a different boundary")
+    if request.get("source") not in {"actor", "builder"}:
+        raise ShadowValidationError("checkpoint source lane is invalid")
+    if not isinstance(request.get("replay_context"), dict):
+        raise ShadowValidationError("checkpoint replay context is missing")
+
+
+def _validate_checkpoint_commitments(
+    request: dict[str, Any],
+    response: dict[str, Any],
+    workspace: dict[str, Any],
+    body: dict[str, Any],
+) -> None:
+    if request.get("request_payload_commitment") != _commitment(body):
+        raise ShadowValidationError("checkpoint request commitment is stale")
+    if request.get("workspace_commitment") != _commitment(workspace):
+        raise ShadowValidationError("checkpoint workspace commitment is stale")
+    if response.get("status") not in {"complete", "error"}:
+        raise ShadowValidationError("checkpoint response status is invalid")
+
+
 def _validate_request_body(value: Any) -> None:
-    if not isinstance(value, dict) or set(value) != {
+    expected = {
         "model",
         "messages",
         "tools",
         "output_model",
         "parameters",
-    }:
+    }
+    if not isinstance(value, dict) or set(value) != expected:
         raise ShadowValidationError("request body has an unsupported shape")
-    if not isinstance(value["model"], str) or not value["model"]:
-        raise ShadowValidationError("request model is missing")
-    if not isinstance(value["messages"], list) or not all(
-        isinstance(row, dict) for row in value["messages"]
-    ):
-        raise ShadowValidationError("request messages must be objects")
+    _validate_request_model(value["model"])
+    _validate_request_messages(value["messages"])
     if not isinstance(value["tools"], list):
         raise ShadowValidationError("request tools must be a list")
-    for tool in value["tools"]:
+    _validate_captured_tools(value["tools"])
+    if not isinstance(value["parameters"], dict):
+        raise ShadowValidationError("request parameters must be an object")
+
+
+def _validate_request_model(model: Any) -> None:
+    if not isinstance(model, str) or not model:
+        raise ShadowValidationError("request model is missing")
+
+
+def _validate_request_messages(messages: Any) -> None:
+    if not isinstance(messages, list):
+        raise ShadowValidationError("request messages must be objects")
+    if not all(isinstance(row, dict) for row in messages):
+        raise ShadowValidationError("request messages must be objects")
+
+
+def _validate_captured_tools(tools: list[Any]) -> None:
+    for tool in tools:
         if not isinstance(tool, dict) or set(tool) != {
             "name",
             "description",
             "parameters",
         }:
             raise ShadowValidationError("captured tool schema is malformed")
-    if not isinstance(value["parameters"], dict):
-        raise ShadowValidationError("request parameters must be an object")
 
 
 def _verify_source_blobs(root: Path, workspace: dict[str, Any]) -> None:
@@ -852,17 +1087,28 @@ def _workspace_files(workspace: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(files, list):
         raise ShadowValidationError("workspace files must be a list")
     for entry in files:
-        if not isinstance(entry, dict):
-            raise ShadowValidationError("workspace file entry must be an object")
-        relative = entry.get("path")
-        if not _safe_relative(relative):
-            raise ShadowValidationError(f"unsafe workspace path: {relative!r}")
-        digest = entry.get("sha256")
-        if not isinstance(digest, str) or len(digest) != 64:
-            raise ShadowValidationError("workspace blob digest is malformed")
-        if not isinstance(entry.get("size"), int) or entry["size"] < 0:
-            raise ShadowValidationError("workspace blob size is malformed")
+        _validate_workspace_file(entry)
     return files
+
+
+def _validate_workspace_file(entry: Any) -> None:
+    if not isinstance(entry, dict):
+        raise ShadowValidationError("workspace file entry must be an object")
+    relative = entry.get("path")
+    if not _safe_relative(relative):
+        raise ShadowValidationError(f"unsafe workspace path: {relative!r}")
+    _validate_workspace_digest(entry.get("sha256"))
+    _validate_workspace_size(entry.get("size"))
+
+
+def _validate_workspace_digest(digest: Any) -> None:
+    if not isinstance(digest, str) or len(digest) != 64:
+        raise ShadowValidationError("workspace blob digest is malformed")
+
+
+def _validate_workspace_size(size: Any) -> None:
+    if not isinstance(size, int) or size < 0:
+        raise ShadowValidationError("workspace blob size is malformed")
 
 
 def _safe_relative(value: Any) -> bool:
@@ -902,7 +1148,7 @@ def _read_object(path: Path) -> dict[str, Any]:
 
 
 def _jsonable(value: Any) -> Any:
-    if value is None or isinstance(value, (bool, int, float, str)):
+    if isinstance(value, (type(None), bool, int, float, str)):
         return value
     if isinstance(value, Mapping):
         return {str(key): _jsonable(item) for key, item in value.items()}
@@ -971,6 +1217,16 @@ def _disable_provider_retries(llm: UnifiedLLM) -> None:
 
 
 def main() -> int:
+    args = _argument_parser().parse_args()
+    handlers = {
+        "inspect": _inspect_command,
+        "prepare": _prepare_command,
+        "run": _run_command,
+    }
+    return handlers[args.command](args)
+
+
+def _argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     inspect = commands.add_parser(
@@ -992,27 +1248,27 @@ def main() -> int:
     run.add_argument("--cost-reserve-per-call-usd", type=float)
     run.add_argument("--schedule-seed", type=int, default=0)
     run.add_argument("--execute", action="store_true")
-    args = parser.parse_args()
+    return parser
 
-    if args.command == "inspect":
-        result = inspect_checkpoint(
-            args.checkpoint_root,
-            call_index=args.call_index,
-        )
-        print(json.dumps(result, indent=2, sort_keys=True))
-        return 0
 
-    if args.command == "prepare":
-        spec = _read_object(args.perturbation)
-        result = prepare_shadow_packet(
-            args.checkpoint_root,
-            call_index=args.call_index,
-            perturbation=spec,
-            destination=args.destination,
-        )
-        print(json.dumps(result, indent=2, sort_keys=True))
-        return 0
+def _inspect_command(args: argparse.Namespace) -> int:
+    result = inspect_checkpoint(args.checkpoint_root, call_index=args.call_index)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
 
+
+def _prepare_command(args: argparse.Namespace) -> int:
+    result = prepare_shadow_packet(
+        args.checkpoint_root,
+        call_index=args.call_index,
+        perturbation=_read_object(args.perturbation),
+        destination=args.destination,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_command(args: argparse.Namespace) -> int:
     packet = validate_shadow_packet(args.packet)
     plan = _execution_plan(
         packet,
@@ -1028,6 +1284,10 @@ def main() -> int:
         print(json.dumps(plan, indent=2, sort_keys=True))
         print("refusing model calls without --execute", flush=True)
         return 2
+    return _execute_command(args, plan)
+
+
+def _execute_command(args: argparse.Namespace, plan: dict[str, Any]) -> int:
     if args.max_cost_usd is None or args.cost_reserve_per_call_usd is None:
         raise ShadowValidationError(
             "paid execution requires an explicit monetary limit and per-call reserve"

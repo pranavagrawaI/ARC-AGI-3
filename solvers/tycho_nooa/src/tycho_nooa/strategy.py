@@ -232,30 +232,12 @@ class NativeToolStrategy(GenerationStrategy):
         reasoning: str | None = None,
         block_action: bool = False,
     ) -> ActionDecision | None:
-        try:
-            arguments = json.loads(tool_call.arguments)
-        except json.JSONDecodeError as error:
-            message = f"Invalid native tool call {tool_call.name!r}: {error}"
-            surface.record_rejected_call(
-                tool_call.name,
-                {"raw_arguments": tool_call.arguments},
-                message,
-                tool_call_id=tool_call.id,
-            )
-            runtime.event_manager.add(Error(content=message))
+        validated = self._validated_tool_call(
+            runtime, surface, tools_by_name, tool_call
+        )
+        if validated is None:
             return None
-        try:
-            tool = tools_by_name[tool_call.name]
-        except KeyError as error:
-            message = f"Invalid native tool call {tool_call.name!r}: {error}"
-            surface.record_rejected_call(
-                tool_call.name,
-                arguments,
-                message,
-                tool_call_id=tool_call.id,
-            )
-            runtime.event_manager.add(Error(content=message))
-            return None
+        arguments, tool = validated
 
         event_id = runtime.event_manager.add(
             ToolCallEvent(
@@ -265,70 +247,10 @@ class NativeToolStrategy(GenerationStrategy):
                 reasoning=reasoning,
             )
         )
-        if tool_call.name in {"take_action", "submit_action"}:
-            goal_tools = surface.goal_tools
-            required = (
-                goal_tools.required_before_action()
-                if goal_tools is not None
-                else None
-            )
-            if required is not None:
-                message = f"Typed objective lifecycle incomplete: {required}"
-                surface.record_rejected_call(
-                    tool_call.name,
-                    arguments,
-                    message,
-                    tool_call_id=tool_call.id,
-                )
-                runtime.event_manager.update(
-                    event_id,
-                    result=ToolResult(
-                        tool_call_id=tool_call.id,
-                        content=message,
-                        result_status=ResultStatus.ERROR,
-                    ),
-                )
-                return None
-        if block_action and tool_call.name == "update_goal":
-            message = (
-                "update_goal cannot share a tool batch with request_builder. Inspect "
-                "the returned objective review, then resolve the candidate in the next "
-                "model step."
-            )
-            surface.record_rejected_call(
-                tool_call.name,
-                arguments,
-                message,
-                tool_call_id=tool_call.id,
-            )
-            runtime.event_manager.update(
-                event_id,
-                result=ToolResult(
-                    tool_call_id=tool_call.id,
-                    content=message,
-                    result_status=ResultStatus.ERROR,
-                ),
-            )
-            return None
-        if block_action and tool_call.name in {"take_action", "submit_action"}:
-            message = (
-                "A builder request, world-model edit, or planner call cannot share "
-                "one tool batch with take_action. Inspect that feedback, then choose "
-                "an action in the next step."
-            )
-            surface.record_rejected_call(
-                tool_call.name,
-                arguments,
-                message,
-                tool_call_id=tool_call.id,
-            )
-            runtime.event_manager.update(
-                event_id,
-                result=ToolResult(
-                    tool_call_id=tool_call.id,
-                    content=message,
-                    result_status=ResultStatus.ERROR,
-                ),
+        blocked = self._tool_block_reason(surface, tool_call.name, block_action)
+        if blocked is not None:
+            self._reject_tool_event(
+                runtime, surface, tool_call, arguments, event_id, blocked
             )
             return None
         if tool_call.name in {"invoke_builder", "request_builder"}:
@@ -364,6 +286,85 @@ class NativeToolStrategy(GenerationStrategy):
             ),
         )
         return action
+
+    @staticmethod
+    def _validated_tool_call(
+        runtime: RuntimeServices,
+        surface: WorkspaceToolSurface,
+        tools_by_name: dict[str, Any],
+        tool_call: Any,
+    ) -> tuple[dict[str, Any], Any] | None:
+        try:
+            arguments = json.loads(tool_call.arguments)
+        except json.JSONDecodeError as error:
+            message = f"Invalid native tool call {tool_call.name!r}: {error}"
+            surface.record_rejected_call(
+                tool_call.name,
+                {"raw_arguments": tool_call.arguments},
+                message,
+                tool_call_id=tool_call.id,
+            )
+            runtime.event_manager.add(Error(content=message))
+            return None
+        try:
+            return arguments, tools_by_name[tool_call.name]
+        except KeyError as error:
+            message = f"Invalid native tool call {tool_call.name!r}: {error}"
+            surface.record_rejected_call(
+                tool_call.name,
+                arguments,
+                message,
+                tool_call_id=tool_call.id,
+            )
+            runtime.event_manager.add(Error(content=message))
+            return None
+
+    @staticmethod
+    def _tool_block_reason(
+        surface: WorkspaceToolSurface, name: str, block_action: bool
+    ) -> str | None:
+        action_names = {"take_action", "submit_action"}
+        if name in action_names and surface.goal_tools is not None:
+            required = surface.goal_tools.required_before_action()
+            if required is not None:
+                return f"Typed objective lifecycle incomplete: {required}"
+        if block_action and name == "update_goal":
+            return (
+                "update_goal cannot share a tool batch with request_builder. Inspect "
+                "the returned objective review, then resolve the candidate in the next "
+                "model step."
+            )
+        if block_action and name in action_names:
+            return (
+                "A builder request, world-model edit, or planner call cannot share "
+                "one tool batch with take_action. Inspect that feedback, then choose "
+                "an action in the next step."
+            )
+        return None
+
+    @staticmethod
+    def _reject_tool_event(
+        runtime: RuntimeServices,
+        surface: WorkspaceToolSurface,
+        tool_call: Any,
+        arguments: dict[str, Any],
+        event_id: Any,
+        message: str,
+    ) -> None:
+        surface.record_rejected_call(
+            tool_call.name,
+            arguments,
+            message,
+            tool_call_id=tool_call.id,
+        )
+        runtime.event_manager.update(
+            event_id,
+            result=ToolResult(
+                tool_call_id=tool_call.id,
+                content=message,
+                result_status=ResultStatus.ERROR,
+            ),
+        )
 
     async def _invoke_builder(
         self,

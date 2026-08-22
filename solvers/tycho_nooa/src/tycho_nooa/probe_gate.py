@@ -257,31 +257,47 @@ def _goal_facts(world_model, wmlib, source):
         "sampled_states": 0,
     }
     text = source if source is not None else _module_source(world_model)
-    if text is not None:
-        tree = ast.parse(text)
-        facts["literal_in_module"] = GOAL_LITERAL in _executable_strings(tree)
-        facts["literal_in_outcome"] = GOAL_LITERAL in _function_strings(
-            tree, "outcome"
-        )
-        facts["constant_return"] = _constant_return(tree, "outcome")
+    facts.update(_source_goal_facts(text))
+    facts.update(_observed_goal_facts(world_model, wmlib))
+    facts["status"] = _goal_status(facts)
+    return facts
+
+
+def _source_goal_facts(source):
+    if source is None:
+        return {}
+    tree = ast.parse(source)
+    return {
+        "literal_in_module": GOAL_LITERAL in _executable_strings(tree),
+        "literal_in_outcome": GOAL_LITERAL in _function_strings(tree, "outcome"),
+        "constant_return": _constant_return(tree, "outcome"),
+    }
+
+
+def _observed_goal_facts(world_model, wmlib):
     try:
         states = _sample_states(world_model, wmlib)
-        facts["sampled_states"] = len(states)
-        facts["observed_values"] = sorted(
-            {str(wmlib.outcome(world_model, s)) for s in states}
-        )
-    except Exception:  # noqa: BLE001, S110 - corroboration only, never the verdict
-        pass
+        return {
+            "sampled_states": len(states),
+            "observed_values": sorted(
+                {str(wmlib.outcome(world_model, state)) for state in states}
+            ),
+        }
+    except Exception:  # noqa: BLE001 - corroboration only, never the verdict
+        return {}
+
+
+def _goal_status(facts):
     constant = facts["constant_return"]
     if constant is not None and constant != GOAL_LITERAL:
-        facts["status"] = GOAL_PROVEN_UNSATISFIABLE
-    elif (
+        return GOAL_PROVEN_UNSATISFIABLE
+    if (
         constant == GOAL_LITERAL
         or GOAL_LITERAL in facts["observed_values"]
         or facts["literal_in_outcome"] is True
     ):
-        facts["status"] = GOAL_CANDIDATE_PRESENT
-    return facts
+        return GOAL_CANDIDATE_PRESENT
+    return GOAL_UNKNOWN
 
 
 def _executable_strings(tree):

@@ -11,6 +11,7 @@ from tycho_nooa.modes import ModePolicy
 TREATMENT_ENV = "TYCHO_NOOA_TREATMENT"
 CONTROL = "control"
 TYPED_CANDIDATE_GOALS = "typed_candidate_goals"
+TRANSACTIONAL_BUILDER = "transactional_builder"
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,7 @@ class TreatmentPolicy:
 
     name: str
     typed_candidate_goals: bool = False
+    transactional_builder: bool = False
     builder_max_tool_steps: int | None = None
 
 
@@ -31,6 +33,10 @@ TREATMENTS = {
         # inherit the source control's 40-step laboratory budget and be cancelled
         # halfway through a live decision. The exact orchestrator remains unchanged.
         builder_max_tool_steps=10,
+    ),
+    TRANSACTIONAL_BUILDER: TreatmentPolicy(
+        TRANSACTIONAL_BUILDER,
+        transactional_builder=True,
     ),
 }
 
@@ -51,5 +57,10 @@ def treatment_from_env(
         raise ValueError(
             f"{TREATMENT_ENV}={name!r} requires TYCHO_MODE='orchestrator'; "
             "it is a named adaptation, not a replacement for another source mode"
+        )
+    if treatment.transactional_builder and not mode.needs_builder:
+        raise ValueError(
+            f"{TREATMENT_ENV}={name!r} requires a Builder-owned source mode; "
+            "it does not add a Builder to single or no_world_model controls"
         )
     return treatment

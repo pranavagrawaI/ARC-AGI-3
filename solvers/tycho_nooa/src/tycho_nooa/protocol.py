@@ -76,32 +76,36 @@ class EvidenceEnvelopePayload(BaseModel):
     @model_validator(mode="after")
     def evidence_indices_match_frames(self) -> EvidenceEnvelopePayload:
         provenance = self.provenance
-        indices = [
-            provenance.decision_frame_index,
-            *provenance.event_frame_indices,
-        ]
-        if provenance.terminal_frame_index is not None:
-            indices.append(provenance.terminal_frame_index)
-        if any(index >= provenance.raw_frame_count for index in indices):
-            raise ValueError("frame provenance index exceeds raw_frame_count")
-        event_role_indices = [
-            provenance.decision_frame_index,
-            *provenance.event_frame_indices,
-        ]
-        if len(event_role_indices) != len(set(event_role_indices)):
-            raise ValueError("event frames must not overlap the decision frame")
-        if provenance.terminal_frame_index in provenance.event_frame_indices:
-            raise ValueError("event frames must not overlap the terminal frame")
-        if (self.terminal_frame is None) != (
-            provenance.terminal_frame_index is None
-        ):
-            raise ValueError("terminal frame and provenance must agree")
-        if (self.terminal_frame is None) != (provenance.terminal_reason is None):
-            raise ValueError("terminal frame and terminal reason must agree")
+        _validate_provenance_indices(provenance)
+        _validate_terminal_provenance(self.terminal_frame, provenance)
         event_indices = [event.source_index for event in self.event_frames]
         if event_indices != provenance.event_frame_indices:
             raise ValueError("event frames and provenance indices must agree")
         return self
+
+
+def _validate_provenance_indices(provenance: FrameSelectionProvenancePayload) -> None:
+    event_roles = [provenance.decision_frame_index, *provenance.event_frame_indices]
+    indices = [*event_roles]
+    if provenance.terminal_frame_index is not None:
+        indices.append(provenance.terminal_frame_index)
+    if any(index >= provenance.raw_frame_count for index in indices):
+        raise ValueError("frame provenance index exceeds raw_frame_count")
+    if len(event_roles) != len(set(event_roles)):
+        raise ValueError("event frames must not overlap the decision frame")
+    if provenance.terminal_frame_index in provenance.event_frame_indices:
+        raise ValueError("event frames must not overlap the terminal frame")
+
+
+def _validate_terminal_provenance(
+    terminal_frame: list[list[int]] | None,
+    provenance: FrameSelectionProvenancePayload,
+) -> None:
+    absent = terminal_frame is None
+    if absent != (provenance.terminal_frame_index is None):
+        raise ValueError("terminal frame and provenance must agree")
+    if absent != (provenance.terminal_reason is None):
+        raise ValueError("terminal frame and terminal reason must agree")
 
 
 # Compatibility name for existing worker internals; the wire schema is the

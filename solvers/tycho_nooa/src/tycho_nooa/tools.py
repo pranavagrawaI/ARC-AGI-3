@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 from nooa.unifiedllm import Tool
@@ -18,6 +18,7 @@ from tycho_nooa.models import ActionDecision, GameTurn
 from tycho_nooa.modes import ModePolicy
 from tycho_nooa.planner import PlannerIntegration, planner_command
 from tycho_nooa.symmetry_notice import TOOL_NOTE
+from tycho_nooa.theory_transaction import TheoryTransaction
 
 
 class _Arguments(BaseModel):
@@ -67,6 +68,10 @@ class _ActionArguments(_Arguments):
     action: str
     row: int | None = Field(default=None, ge=0, le=63)
     col: int | None = Field(default=None, ge=0, le=63)
+
+
+class _CheckoutTheoryArguments(_Arguments):
+    record_id: str
 
 
 _ARGUMENT_MODELS: dict[str, type[BaseModel]] = {
@@ -146,12 +151,14 @@ class WorkspaceToolSurface:
         goal_tools: GoalToolSurface | None = None,
         trace_path: Path | None = None,
         planner_trace_path: Path | None = None,
+        theory_transaction: TheoryTransaction | None = None,
     ):
         self._executor = executor
         self._profile = profile
         self._mode_policy = mode_policy
         self._goal_tools = goal_tools
         self._trace_path = trace_path
+        self._theory_transaction = theory_transaction
         if planner_trace_path is None and trace_path is not None:
             planner_trace_path = trace_path.with_name("planner-trace.jsonl")
         self._planner = PlannerIntegration(executor.ws, planner_trace_path)
@@ -305,6 +312,19 @@ class WorkspaceToolSurface:
             )
         if self._goal_tools is not None:
             tools.extend(self._goal_tools.native_tools())
+        if self._theory_transaction is not None:
+            tools.append(
+                Tool(
+                    name="checkout_theory_candidate",
+                    description=(
+                        "Checkout an immutable retained theory by record ID. The host "
+                        "re-evaluates it against the current frozen frontier and working "
+                        "incumbent; checkout never grants publication authority."
+                    ),
+                    callable=self.checkout_theory_candidate,
+                    parameters_model=_CheckoutTheoryArguments,
+                )
+            )
         return tools
 
     def dispatch(
@@ -420,23 +440,73 @@ class WorkspaceToolSurface:
 
     def write_file(self, path: str, content: str) -> str:
         self._authorize_actor_write(path)
-        return self._executor.execute("write_file", {"path": path, "content": content})
+        self._authorize_transactional_builder_write(path)
+        return self._execute_theory_edit(
+            "write_file",
+            path,
+            lambda: self._executor.execute(
+                "write_file", {"path": path, "content": content}
+            ),
+        )
 
     def edit_file(self, path: str, old: str, new: str) -> str:
         self._authorize_actor_write(path)
-        return self._executor.execute(
-            "edit_file", {"path": path, "old": old, "new": new}
+        self._authorize_transactional_builder_write(path)
+        return self._execute_theory_edit(
+            "edit_file",
+            path,
+            lambda: self._executor.execute(
+                "edit_file", {"path": path, "old": old, "new": new}
+            ),
         )
 
     def edit_function(self, path: str, name: str, code: str) -> str:
         self._authorize_actor_write(path)
-        return self._executor.execute(
-            "edit_function", {"path": path, "name": name, "code": code}
+        self._authorize_transactional_builder_write(path)
+        return self._execute_theory_edit(
+            "edit_function",
+            path,
+            lambda: self._executor.execute(
+                "edit_function", {"path": path, "name": name, "code": code}
+            ),
         )
 
     def _authorize_actor_write(self, path: str) -> None:
         if self._mode_policy is not None:
             self._mode_policy.authorize_actor_write(path)
+
+    def _authorize_transactional_builder_write(self, path: str) -> None:
+        if self._theory_transaction is None:
+            return
+        normalized = path.replace("\\", "/")
+        parsed = PurePosixPath(normalized)
+        allowed = {
+            "world_model.py",
+            "notes/world_model.md",
+            "notes/world_model_report.md",
+        }
+        if parsed.is_absolute() or ".." in parsed.parts or parsed.as_posix() not in allowed:
+            raise PermissionError(
+                f"transactional Builder cannot write {path!r}; owned paths are "
+                f"{sorted(allowed)}"
+            )
+
+    def _execute_theory_edit(
+        self,
+        operation: str,
+        path: str,
+        mutate: Callable[[], str],
+    ) -> str:
+        if self._theory_transaction is None or PurePosixPath(
+            path.replace("\\", "/")
+        ).as_posix() != "world_model.py":
+            return mutate()
+        return self._theory_transaction.apply_edit(operation, mutate).render()
+
+    def checkout_theory_candidate(self, record_id: str) -> str:
+        if self._theory_transaction is None:
+            raise RuntimeError("no active theory transaction")
+        return self._theory_transaction.checkout(record_id).render()
 
     def run_python(self, code: str, timeout_s: int = 15) -> str:
         invocation = self._planner.begin_invocation(code)

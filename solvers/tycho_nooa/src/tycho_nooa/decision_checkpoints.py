@@ -310,16 +310,22 @@ def _response_record(response: Any) -> dict[str, Any]:
 
 
 def _jsonable(value: Any) -> Any:
-    if value is None or isinstance(value, (bool, int, float, str)):
+    if isinstance(value, (type(None), bool, int, float, str)):
         return value
     if isinstance(value, Mapping):
         return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+    if _is_json_sequence(value):
         return [_jsonable(item) for item in value]
     if hasattr(value, "model_dump"):
         return _jsonable(value.model_dump(mode="json"))
     raise TypeError(
         f"request checkpoint value is not JSON-safe: {type(value).__name__}"
+    )
+
+
+def _is_json_sequence(value: Any) -> bool:
+    return isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
     )
 
 

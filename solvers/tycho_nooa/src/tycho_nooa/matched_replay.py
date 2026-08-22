@@ -45,9 +45,18 @@ ARMS = (
         "typed_candidate_goals",
     ),
 )
+THEORY_TRANSACTION_ARMS = (
+    ReplayArm("builder_control", "trigger"),
+    ReplayArm("builder_transactional", "trigger", "transactional_builder"),
+)
 
 
-def prepare_legacy_run_packet(run_dir: Path, destination: Path) -> dict[str, Any]:
+def prepare_legacy_run_packet(
+    run_dir: Path,
+    destination: Path,
+    *,
+    arms: tuple[ReplayArm, ...] = ARMS,
+) -> dict[str, Any]:
     """Freeze the final observed transition and workspace of a legacy run."""
     if destination.exists():
         raise FileExistsError(destination)
@@ -55,16 +64,36 @@ def prepare_legacy_run_packet(run_dir: Path, destination: Path) -> dict[str, Any
     workspace = run_dir / "workspace" / game_id
     if not workspace.is_dir():
         raise FileNotFoundError(workspace)
-    events = [json.loads(line) for line in (run_dir / "transcript.jsonl").read_text().splitlines()]
+    last, finish = _final_run_records(run_dir / "transcript.jsonl")
+    if finish["final_observation"] != last["after"]:
+        raise ValueError("finish observation differs from the last action result")
+    previous_turn, replay_turn = _replay_turns(workspace, last)
+    _write_legacy_packet(
+        run_dir,
+        destination,
+        game_id,
+        workspace,
+        last,
+        finish,
+        previous_turn,
+        replay_turn,
+        arms,
+    )
+    return validate_packet(destination, arms=arms)
+
+
+def _final_run_records(transcript: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    events = [json.loads(line) for line in transcript.read_text().splitlines()]
     action_results = [event for event in events if event.get("type") == "action_result"]
     finishes = [event for event in events if event.get("type") == "finish"]
     if not action_results or not finishes:
         raise ValueError("run lacks a final action_result and finish record")
-    last = action_results[-1]
-    finish = finishes[-1]
-    if finish["final_observation"] != last["after"]:
-        raise ValueError("finish observation differs from the last action result")
+    return action_results[-1], finishes[-1]
 
+
+def _replay_turns(
+    workspace: Path, last: dict[str, Any]
+) -> tuple[GameTurn, GameTurn]:
     current_frame = _read_object(workspace / ".current_frame.json")
     previous_turn = _turn_from_observation(
         last["before"],
@@ -79,7 +108,20 @@ def prepare_legacy_run_packet(run_dir: Path, destination: Path) -> dict[str, Any
         turn_in_level=int(current_frame["turn"]) + 1,
         previous_decision=last["decision"],
     )
+    return previous_turn, replay_turn
 
+
+def _write_legacy_packet(
+    run_dir: Path,
+    destination: Path,
+    game_id: str,
+    workspace: Path,
+    last: dict[str, Any],
+    finish: dict[str, Any],
+    previous_turn: GameTurn,
+    replay_turn: GameTurn,
+    arms: tuple[ReplayArm, ...],
+) -> None:
     temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
     temporary.mkdir(parents=True)
     try:
@@ -93,7 +135,7 @@ def prepare_legacy_run_packet(run_dir: Path, destination: Path) -> dict[str, Any
             "schema": PACKET_SCHEMA,
             "source_run": str(run_dir.resolve()),
             "game_id": game_id,
-            "arms": [arm.__dict__ for arm in ARMS],
+            "arms": [arm.__dict__ for arm in arms],
             "workspace_commitment": _tree_commitment(source / "workspace"),
             "transition_commitment": _commitment(last),
             "replay_turn_commitment": _commitment(replay_turn.model_dump()),
@@ -108,10 +150,13 @@ def prepare_legacy_run_packet(run_dir: Path, destination: Path) -> dict[str, Any
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
-    return validate_packet(destination)
 
 
-def validate_packet(path: Path) -> dict[str, Any]:
+def validate_packet(
+    path: Path,
+    *,
+    arms: tuple[ReplayArm, ...] = ARMS,
+) -> dict[str, Any]:
     manifest = _read_object(path / "manifest.json")
     if manifest.get("schema") != PACKET_SCHEMA:
         raise ValueError("unsupported matched replay packet schema")
@@ -128,7 +173,7 @@ def validate_packet(path: Path) -> dict[str, Any]:
     for field, actual in checks.items():
         if manifest.get(field) != actual:
             raise ValueError(f"stale matched replay packet: {field}")
-    if manifest.get("arms") != [arm.__dict__ for arm in ARMS]:
+    if manifest.get("arms") != [arm.__dict__ for arm in arms]:
         raise ValueError("matched replay arms drifted")
     return manifest
 
@@ -138,18 +183,25 @@ async def execute_matched_replay(
     destination: Path,
     *,
     llms: Mapping[str, UnifiedLLM],
+    arms: tuple[ReplayArm, ...] = ARMS,
 ) -> dict[str, Any]:
     """Run each frozen arm once; callers own model/cost authorization."""
-    manifest = validate_packet(packet)
+    manifest = validate_packet(packet, arms=arms)
     if destination.exists():
         raise FileExistsError(destination)
-    if set(llms) != {arm.name for arm in ARMS}:
+    if set(llms) != {arm.name for arm in arms}:
         raise ValueError("one LLM client is required for every precommitted arm")
     destination.mkdir(parents=True)
     observations = []
-    for arm in ARMS:
+    for arm in arms:
         observations.append(
-            await _execute_arm(packet, destination / arm.name, arm, llms[arm.name])
+            await _execute_arm(
+                packet,
+                destination / arm.name,
+                arm,
+                llms[arm.name],
+                arms,
+            )
         )
     report = {
         "schema": REPORT_SCHEMA,
@@ -167,8 +219,9 @@ async def _execute_arm(
     arm_dir: Path,
     arm: ReplayArm,
     llm: UnifiedLLM,
+    arms: tuple[ReplayArm, ...],
 ) -> dict[str, Any]:
-    manifest = validate_packet(packet)
+    manifest = validate_packet(packet, arms=arms)
     workspace_root = arm_dir / "workspace"
     workspace = workspace_root / manifest["game_id"]
     workspace.parent.mkdir(parents=True)
@@ -199,7 +252,36 @@ async def _execute_arm(
     )
     planner_records = _jsonl_records(arm_dir / "planner-trace.jsonl")
     builder_records = _jsonl_records(arm_dir / "trigger-builder-trace.jsonl")
-    result = {
+    result = _arm_result(
+        arm,
+        decision,
+        before_hash,
+        world_model,
+        goal_snapshot,
+        workspace,
+        trace_path,
+        verifier_text,
+        planner_records,
+        builder_records,
+    )
+    _write_json(arm_dir / "result.json", result)
+    return result
+
+
+def _arm_result(
+    arm: ReplayArm,
+    decision: Any,
+    before_hash: str,
+    world_model: Path,
+    goal_snapshot: list[Any],
+    workspace: Path,
+    trace_path: Path,
+    verifier_text: str,
+    planner_records: list[dict[str, Any]],
+    builder_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    theory_store = workspace.parent / ".theory-transactions" / workspace.name
+    return {
         "arm": arm.__dict__,
         "decision": decision.model_dump(),
         "world_model_changed": before_hash != _file_hash(world_model),
@@ -210,27 +292,31 @@ async def _execute_arm(
         "verifier_result": verifier_text,
         "planner_invocations": len(planner_records),
         "planner_events": [record.get("event", "") for record in planner_records],
-        "builder_requests": [
-            record
-            for record in builder_records
-            if record.get("event") == "actor_request"
-            or (
-                record.get("event") == "mechanical_trigger"
-                and record.get("fired") is True
-            )
-        ],
-        "builder_results": [
-            record for record in builder_records if record.get("event") == "builder_result"
-        ],
-        "actor_uptake": [
-            record for record in builder_records if record.get("event") == "actor_uptake"
-        ],
+        "builder_requests": _builder_requests(builder_records),
+        "builder_results": _event_records(builder_records, "builder_result"),
+        "actor_uptake": _event_records(builder_records, "actor_uptake"),
         "builder_events": [record.get("event", "") for record in builder_records],
+        "theory_publication": _read_optional_object(theory_store / "canonical.json"),
+        "theory_ledger_events": _event_names(theory_store / "ledger.jsonl"),
         "tool_names": _tool_names(trace_path),
         "workspace_commitment_after": _tree_commitment(workspace),
     }
-    _write_json(arm_dir / "result.json", result)
-    return result
+
+
+def _builder_requests(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [record for record in records if _is_builder_request(record)]
+
+
+def _is_builder_request(record: dict[str, Any]) -> bool:
+    if record.get("event") == "actor_request":
+        return True
+    return record.get("event") == "mechanical_trigger" and record.get("fired") is True
+
+
+def _event_records(
+    records: list[dict[str, Any]], event: str
+) -> list[dict[str, Any]]:
+    return [record for record in records if record.get("event") == event]
 
 
 def _turn_from_observation(
@@ -328,6 +414,10 @@ def _read_object(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise TypeError(f"expected JSON object: {path}")
     return value
+
+
+def _read_optional_object(path: Path) -> dict[str, Any] | None:
+    return _read_object(path) if path.is_file() else None
 
 
 def _write_json(path: Path, value: Any) -> None:

@@ -82,6 +82,31 @@ def test_typed_goals_cannot_silently_change_another_source_mode(
         _agent(tmp_path)
 
 
+def test_transactional_builder_is_a_named_treatment_not_the_trigger_control(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(MODE_ENV, "trigger")
+    control = _agent(tmp_path / "control")
+
+    monkeypatch.setenv(TREATMENT_ENV, "transactional_builder")
+    treatment = _agent(tmp_path / "treatment")
+
+    assert control.treatment_name == "control"
+    assert treatment.treatment_name == "transactional_builder"
+    assert treatment._trigger_builder is not None
+    assert treatment._trigger_builder._theory_evaluator is not None
+
+
+def test_transactional_builder_requires_a_builder_owned_source_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(MODE_ENV, "single")
+    monkeypatch.setenv(TREATMENT_ENV, "transactional_builder")
+
+    with pytest.raises(ValueError, match="requires a Builder-owned source mode"):
+        _agent(tmp_path)
+
+
 @pytest.mark.parametrize("mode", ["trigger", "no_world_model"])
 def test_builder_owned_modes_block_actor_world_model_writes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str

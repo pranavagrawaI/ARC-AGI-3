@@ -29,6 +29,7 @@ import inspect
 from pathlib import Path
 
 from tycho.workspace.agent_tools import ToolExecutor
+from tycho.workspace.sandbox import PythonSandbox, SandboxError
 
 from tycho_nooa import probe_gate
 
@@ -82,6 +83,21 @@ AST_UNCHANGED_NOTICE = "skipped: Python syntax tree is unchanged"
 _UPSTREAM_WM_FEEDBACK_SHA256 = (
     "44e9dac2216ae6b3d3a70f60d9f61e8e9814520031d177516e804c47f0bd1b11"
 )
+
+
+class ReadOnlyWorkspacePythonSandbox(PythonSandbox):
+    """Builder Python may inspect the workspace but never mutate its authority."""
+
+    def command(self, workspace, script, *, name, args=()):
+        if self.runtime == "host":
+            raise SandboxError(
+                "transactional Builder run_python requires container isolation; "
+                "host runtime cannot enforce a read-only workspace"
+            )
+        command = super().command(workspace, script, name=name, args=args)
+        mount_index = command.index("--mount") + 1
+        command[mount_index] = command[mount_index] + ",readonly"
+        return command
 
 
 def gated_probe_source() -> str:

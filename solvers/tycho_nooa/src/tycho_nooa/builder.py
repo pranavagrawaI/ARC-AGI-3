@@ -25,6 +25,7 @@ from tycho.workspace.agent_tools import ToolExecutor, canonical
 from tycho_nooa.history import replayed_reasoning, retain_assistant_turn
 from tycho_nooa.models import GameTurn
 from tycho_nooa.symmetry_notice import PROMPT_BRIEF
+from tycho_nooa.theory_transaction import TheoryTransaction
 from tycho_nooa.tools import BUILDER_TOOL_PROFILE, WorkspaceToolSurface, tool_by_name
 
 if TYPE_CHECKING:
@@ -53,6 +54,13 @@ the present discrepancy instead of reconstructing it from memory. These files ar
 evidence, not authority: they are never canonical, publication-approved, or
 planner-eligible. Only a completed, verified edit to world_model.py changes the current
 model.
+"""
+TRANSACTIONAL_CANDIDATE_BRIEF = """RETAINED NONCANONICAL CANDIDATES
+
+The host preserves every assessed world_model.py body outside your writable workspace.
+When a transaction result names a relevant record ID, use
+checkout_theory_candidate(record_id) instead of reconstructing its source through file
+copying. Checkout re-evaluates the immutable body and grants no publication authority.
 """
 FINAL_REPORT_REQUEST = (
     "Step budget reached. Do NOT call any more tools. Right now, in your reply, give "
@@ -269,7 +277,47 @@ class BuilderStrategy(GenerationStrategy):
         )
         checkpoint = OutcomeCheckpoint.begin(request.outcome_evidence, verifier_text)
         checkpoint.request_repair(runtime)
+        await self._construction_loop(
+            runtime,
+            builder,
+            request,
+            surface,
+            config,
+            tools,
+            tools_by_name,
+            checkpoint,
+            objective_review=objective_review,
+        )
+        checkpoint_forced = (
+            False
+            if objective_review
+            else await self._enforce_world_model_checkpoint(
+                runtime, builder, surface, tools_by_name, tools, config
+            )
+        )
+        return await self._finish_report(
+            runtime,
+            builder,
+            tools,
+            config,
+            checkpoint_forced,
+            checkpoint,
+            objective_review=objective_review,
+        )
 
+    async def _construction_loop(
+        self,
+        runtime: RuntimeServices,
+        builder: FocusedBuilder,
+        request: BuilderRequest,
+        surface: WorkspaceToolSurface,
+        config: BuilderConfig,
+        tools: list[Any],
+        tools_by_name: dict[str, Any],
+        checkpoint: OutcomeCheckpoint,
+        *,
+        objective_review: bool,
+    ) -> None:
         for round_index in range(config.max_tool_steps):
             if config.show_budget_telemetry:
                 runtime.event_manager.add(
@@ -307,23 +355,6 @@ class BuilderStrategy(GenerationStrategy):
                 )
             checkpoint.inspect_edits(runtime, builder._executor, response.tool_calls)
 
-        checkpoint_forced = (
-            False
-            if objective_review
-            else await self._enforce_world_model_checkpoint(
-                runtime, builder, surface, tools_by_name, tools, config
-            )
-        )
-        return await self._finish_report(
-            runtime,
-            builder,
-            tools,
-            config,
-            checkpoint_forced,
-            checkpoint,
-            objective_review=objective_review,
-        )
-
     async def _finish_report(
         self,
         runtime: RuntimeServices,
@@ -335,11 +366,8 @@ class BuilderStrategy(GenerationStrategy):
         *,
         objective_review: bool,
     ) -> tuple[str, bool, bool, bool, bool]:
-        report = _read_report(builder._executor.ws.dir)
-        report_ready = report is not None and report != builder._report_before
-        if report_ready and (
-            not objective_review or _objective_report_complete(report)
-        ):
+        report = self._fresh_report(builder, objective_review)
+        if report is not None:
             return (
                 report,
                 False,
@@ -370,7 +398,27 @@ class BuilderStrategy(GenerationStrategy):
             temperature=config.temperature,
             tool_choice="auto",
         )
-        for tool_call in response.tool_calls:
+        self._reject_final_tool_calls(builder, response.tool_calls)
+        text = str(response.content or "").strip() or FALLBACK_REPORT
+        builder._executor.ws.write_file(REPORT_FILE, text)
+        if _read_report(builder._executor.ws.dir) != text:
+            raise RuntimeError(f"failed to persist mandatory fresh {REPORT_FILE}")
+        return text, True, checkpoint_forced, checkpoint.required, checkpoint.resolved
+
+    @staticmethod
+    def _fresh_report(builder: FocusedBuilder, objective_review: bool) -> str | None:
+        report = _read_report(builder._executor.ws.dir)
+        if report is None or report == builder._report_before:
+            return None
+        if objective_review and not _objective_report_complete(report):
+            return None
+        return report
+
+    @staticmethod
+    def _reject_final_tool_calls(
+        builder: FocusedBuilder, tool_calls: list[Any]
+    ) -> None:
+        for tool_call in tool_calls:
             try:
                 arguments = json.loads(tool_call.arguments)
             except json.JSONDecodeError:
@@ -381,11 +429,6 @@ class BuilderStrategy(GenerationStrategy):
                 "Builder final-report phase accepts prose only; tool call was not executed",
                 tool_call_id=tool_call.id,
             )
-        text = str(response.content or "").strip() or FALLBACK_REPORT
-        builder._executor.ws.write_file(REPORT_FILE, text)
-        if _read_report(builder._executor.ws.dir) != text:
-            raise RuntimeError(f"failed to persist mandatory fresh {REPORT_FILE}")
-        return text, True, checkpoint_forced, checkpoint.required, checkpoint.resolved
 
     async def _enforce_world_model_checkpoint(
         self,
@@ -450,30 +493,12 @@ class BuilderStrategy(GenerationStrategy):
         reasoning: str | None = None,
         allow_world_model_edit: bool = True,
     ) -> None:
-        try:
-            arguments = json.loads(tool_call.arguments)
-        except json.JSONDecodeError as error:
-            message = f"Invalid builder tool call {tool_call.name!r}: {error}"
-            surface.record_rejected_call(
-                tool_call.name,
-                {"raw_arguments": tool_call.arguments},
-                message,
-                tool_call_id=tool_call.id,
-            )
-            runtime.event_manager.add(Error(content=message))
+        validated = BuilderStrategy._validated_tool_call(
+            runtime, surface, tools_by_name, tool_call
+        )
+        if validated is None:
             return
-        try:
-            tool = tools_by_name[tool_call.name]
-        except KeyError as error:
-            message = f"Invalid builder tool call {tool_call.name!r}: {error}"
-            surface.record_rejected_call(
-                tool_call.name,
-                arguments,
-                message,
-                tool_call_id=tool_call.id,
-            )
-            runtime.event_manager.add(Error(content=message))
-            return
+        arguments, tool = validated
 
         event_id = runtime.event_manager.add(
             ToolCallEvent(
@@ -525,6 +550,38 @@ class BuilderStrategy(GenerationStrategy):
         )
 
     @staticmethod
+    def _validated_tool_call(
+        runtime: RuntimeServices,
+        surface: WorkspaceToolSurface,
+        tools_by_name: dict[str, Any],
+        tool_call: Any,
+    ) -> tuple[dict[str, Any], Any] | None:
+        try:
+            arguments = json.loads(tool_call.arguments)
+        except json.JSONDecodeError as error:
+            message = f"Invalid builder tool call {tool_call.name!r}: {error}"
+            surface.record_rejected_call(
+                tool_call.name,
+                {"raw_arguments": tool_call.arguments},
+                message,
+                tool_call_id=tool_call.id,
+            )
+            runtime.event_manager.add(Error(content=message))
+            return None
+        try:
+            return arguments, tools_by_name[tool_call.name]
+        except KeyError as error:
+            message = f"Invalid builder tool call {tool_call.name!r}: {error}"
+            surface.record_rejected_call(
+                tool_call.name,
+                arguments,
+                message,
+                tool_call_id=tool_call.id,
+            )
+            runtime.event_manager.add(Error(content=message))
+            return None
+
+    @staticmethod
     def _builder(runtime: RuntimeServices) -> FocusedBuilder:
         builder = runtime.agent
         if not isinstance(builder, FocusedBuilder):
@@ -549,6 +606,7 @@ class FocusedBuilder(Agent, context={"self": None, "state": None}):
         executor: ToolExecutor,
         trace_path: Path | None,
         config: BuilderConfig | None = None,
+        theory_transaction: TheoryTransaction | None = None,
     ) -> None:
         # Reflection is deliberately disabled: this experiment adds only Tycho's
         # construction loop, not its separate meta-reflection mechanism.
@@ -563,9 +621,12 @@ class FocusedBuilder(Agent, context={"self": None, "state": None}):
         # `wmlib`, `frames`/`transitions` -- written before `symmetry` existed. Appending is not
         # optional politeness: an authoritative list that excludes a preload actively tells the
         # builder it is not there.
-        self._builder_system_prompt = (
-            f"{system_prompt}\n\n{RETAINED_CANDIDATE_BRIEF}\n\n{PROMPT_BRIEF}"
+        candidate_brief = (
+            TRANSACTIONAL_CANDIDATE_BRIEF
+            if theory_transaction is not None
+            else RETAINED_CANDIDATE_BRIEF
         )
+        self._builder_system_prompt = f"{system_prompt}\n\n{candidate_brief}\n\n{PROMPT_BRIEF}"
         self._executor = executor
         self._tool_surface = WorkspaceToolSurface(
             executor,
@@ -576,6 +637,7 @@ class FocusedBuilder(Agent, context={"self": None, "state": None}):
                 if trace_path is not None
                 else None
             ),
+            theory_transaction=theory_transaction,
         )
         self._builder_config = config or BuilderConfig()
         self._report_before = None

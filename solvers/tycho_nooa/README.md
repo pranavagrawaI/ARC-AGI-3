@@ -187,6 +187,20 @@ orchestrator / control
 orchestrator / typed_candidate_goals
 ```
 
+For the executable-theory publication mechanism test, the same packet and
+executor accept the explicitly frozen `THEORY_TRANSACTION_ARMS` contrast:
+
+```text
+builder_control       / trigger / control
+builder_transactional / trigger / transactional_builder
+```
+
+Pass that arm tuple to both `prepare_legacy_run_packet(..., arms=...)` and
+`execute_matched_replay(..., arms=...)`. The per-arm result records the final
+theory publication artifact and ledger events in addition to the shared Builder,
+actor, planner, verifier, and workspace measurements. Provider clients and
+enforce-before-call cost limits remain caller-owned.
+
 The third arm is explicitly a local treatment. It gives the actor typed,
 durable `CandidateGoal` records with evidence references, a falsifier, and a
 status, then lets `request_builder(focus="objective", ...)` carry that hypothesis
@@ -339,7 +353,7 @@ strict intervention gate with:
 
 ```bash
 (cd solvers/tycho_nooa && uv run --frozen python tools/crap.py --format json)
-(cd solvers/tycho_nooa && uv run --frozen python tools/crap.py --fail-above 30)
+(cd solvers/tycho_nooa && uv run --frozen python tools/crap.py --fail-above 9.999999)
 ```
 
 The gate fails only for a raw score strictly greater than the threshold. Exit
@@ -347,11 +361,12 @@ code `1` means a CRAP violation, `2` means the analysis could not be trusted,
 and `3` means pytest failed. Arguments after `--` replace the default
 `pytest -s` selection.
 
-CRAP identifies pressure rather than prescribing a mechanical refactor. When a
-function exceeds 30, compare its complexity with the threshold first: if the
-complexity alone is already above 30, additional coverage cannot make it pass.
-Delete or simplify before refactoring, and add tests only when they constrain
-meaningful behavior.
+The solver standard is **strictly below CRAP 10**. The gate uses `9.999999`
+because `--fail-above` is intentionally strict and would otherwise allow a raw
+score equal to 10. CRAP identifies pressure rather than prescribing a mechanical
+refactor: compare complexity with the threshold first, delete or split mixed
+decisions when complexity alone makes the target impossible, and add coverage
+only when the test constrains meaningful behavior.
 
 During local source development, the same tests can be run against the pinned
 checkouts without resolving dependencies again:
