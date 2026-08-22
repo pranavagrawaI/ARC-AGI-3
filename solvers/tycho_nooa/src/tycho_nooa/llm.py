@@ -15,6 +15,7 @@ from tycho_nooa.llm_trace import request_reasoning
 SCRIPTED_TOOL_CALLS_ENV = "TYCHO_NOOA_SCRIPTED_TOOL_CALLS"
 MAX_TOKENS_ENV = "ARC_LLM_MAX_TOKENS"
 DEFAULT_MAX_TOKENS = 16_000
+PROVIDER_ENDPOINT_ENV = "ARC_LLM_PROVIDER_ENDPOINT"
 
 
 def generation_max_tokens(
@@ -86,6 +87,14 @@ def _apply_optional_overrides(
     # on the next tool call.
     if request_reasoning(env):
         overrides["reasoning"] = {"enabled": True}
+    if endpoint := env.get(PROVIDER_ENDPOINT_ENV):
+        if endpoint != endpoint.strip() or "/" not in endpoint:
+            raise ValueError(
+                f"{PROVIDER_ENDPOINT_ENV} must be one exact provider endpoint"
+            )
+        overrides["extra_body"] = {
+            "provider": {"order": [endpoint], "allow_fallbacks": False}
+        }
 
 
 def _scripted_llm(script: str) -> FakeLLMClient:

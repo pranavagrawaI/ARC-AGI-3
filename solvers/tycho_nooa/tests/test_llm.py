@@ -60,6 +60,7 @@ def test_live_llm_normalizes_gateway_and_optional_provider_settings(
             "ARC_LLM_BASE_URL": "https://gateway",
             "ARC_LLM_API_KEY": "secret",
             "ARC_LLM_CONTEXT_WINDOW": "131072",
+            "ARC_LLM_PROVIDER_ENDPOINT": "open-inference/bf16",
             REQUEST_REASONING_ENV: "1",
         }
     )
@@ -74,6 +75,12 @@ def test_live_llm_normalizes_gateway_and_optional_provider_settings(
         "api_key": "secret",
         "context_window": 131072,
         "reasoning": {"enabled": True},
+        "extra_body": {
+            "provider": {
+                "order": ["open-inference/bf16"],
+                "allow_fallbacks": False,
+            }
+        },
     }
 
 
