@@ -78,6 +78,14 @@ def _builder_config(
     return BuilderConfig(
         max_tool_steps=max_steps if max_steps is not None else BuilderConfig.max_tool_steps,
         max_tokens=max_tokens,
+        show_budget_telemetry=treatment.transactional_builder,
+        # Measured live calls reached 148 seconds on DeepSeek and 305 seconds
+        # on Gemma. Commit before one more tail-latency call can consume the pass.
+        commit_seconds_remaining=(
+            180
+            if treatment.transactional_builder
+            else BuilderConfig.commit_seconds_remaining
+        ),
     )
 
 

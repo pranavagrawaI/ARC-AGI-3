@@ -96,6 +96,8 @@ def test_transactional_builder_is_a_named_treatment_not_the_trigger_control(
     assert treatment._trigger_builder is not None
     assert treatment._trigger_builder._theory_evaluator is not None
     assert treatment._trigger_builder._builder_config.max_tool_steps == 12
+    assert treatment._trigger_builder._builder_config.show_budget_telemetry is True
+    assert treatment._trigger_builder._builder_config.commit_seconds_remaining == 180
     assert control._trigger_builder is not None
     assert control._trigger_builder._builder_config.max_tool_steps == 40
 

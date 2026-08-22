@@ -24,6 +24,7 @@ from tycho_nooa.builder import (
     BuilderRequest,
     BuilderResult,
     FocusedBuilder,
+    _builder_budget_notice,
 )
 from tycho_nooa.deadlines import DecisionDeadlineConfig
 from tycho_nooa.symmetry_notice import PROMPT_BRIEF
@@ -1657,6 +1658,24 @@ async def test_unresolved_completion_is_the_latest_builder_priority(
     assert len(llm.messages_per_call) == 4
     assert result.outcome_checkpoint_required is True
     assert result.outcome_checkpoint_resolved is False
+
+
+def test_builder_budget_commit_threshold_is_runtime_configurable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("tycho_nooa.builder.monotonic", lambda: 100.0)
+    notice = _builder_budget_notice(
+        BuilderRequest(
+            turn=turn(0),
+            reason="repair",
+            deadline_at=250.0,
+        ),
+        repair_calls_remaining=10,
+        commit_seconds_remaining=180,
+    )
+
+    assert "Time remaining: 150 seconds" in notice
+    assert "Mode: commit" in notice
 
 
 @pytest.mark.asyncio

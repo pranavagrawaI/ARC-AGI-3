@@ -123,6 +123,7 @@ class BuilderConfig:
     max_tokens: int = 16_000
     temperature: float | None = None
     show_budget_telemetry: bool = False
+    commit_seconds_remaining: int = COMMIT_SECONDS_REMAINING
 
 
 @dataclass(frozen=True)
@@ -138,6 +139,7 @@ def _builder_budget_notice(
     request: BuilderRequest,
     *,
     repair_calls_remaining: int,
+    commit_seconds_remaining: int = COMMIT_SECONDS_REMAINING,
 ) -> str:
     seconds_remaining = (
         None
@@ -146,7 +148,7 @@ def _builder_budget_notice(
     )
     commit = repair_calls_remaining <= COMMIT_CALLS_REMAINING or (
         seconds_remaining is not None
-        and seconds_remaining <= COMMIT_SECONDS_REMAINING
+        and seconds_remaining <= commit_seconds_remaining
     )
     time_text = (
         "unavailable"
@@ -325,6 +327,7 @@ class BuilderStrategy(GenerationStrategy):
                         prompt=_builder_budget_notice(
                             request,
                             repair_calls_remaining=config.max_tool_steps - round_index,
+                            commit_seconds_remaining=config.commit_seconds_remaining,
                         )
                     )
                 )
