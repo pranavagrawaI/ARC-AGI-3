@@ -14,7 +14,7 @@ from tycho.agent.colors import COLORMAP
 from tycho.prompts.render import render_prompt
 
 from tycho_nooa import ActionDecision, GameTurn, TychoNooaAgent
-from tycho_nooa.llm_trace import CAPTURE_REASONING_ENV
+from tycho_nooa.llm_trace import CAPTURE_RESPONSE_TEXT_ENV
 from tycho_nooa.strategy import NativeToolConfig
 
 
@@ -70,8 +70,7 @@ def reasoned_response(
 
 
 def prose_response(content: str) -> LLMResponse:
-    """A tool-free reply, used to satisfy the mandatory actor_beliefs.md
-    checkpoint call without exercising a genuine model-authored edit."""
+    """A tool-free reply, used to model refusal or prose-only output."""
     return LLMResponse(
         raw_response=None,
         content=content,
@@ -97,13 +96,7 @@ class ToolsRecordingFakeLLMClient(FakeLLMClient):
 
 
 class MessageRecordingFakeLLMClient(FakeLLMClient):
-    """A FakeLLMClient that keeps every call's messages, not just the last.
-
-    The mandatory actor_beliefs.md checkpoint now fires one extra generate()
-    call after every turn-ending action, so `last_messages` no longer reflects
-    the turn's own first call. Tests asserting on "what the model saw" need
-    the specific call, not whichever call happened to run last.
-    """
+    """A FakeLLMClient that keeps every call's messages, not just the last."""
 
     def __init__(self, scripted_responses: list[LLMResponse]) -> None:
         super().__init__(scripted_responses=scripted_responses)
@@ -127,6 +120,30 @@ def turn(number: int, previous_action: str = "") -> GameTurn:
 
 
 @pytest.mark.asyncio
+async def test_accepted_action_does_not_wait_for_post_action_llm_call(
+    tmp_path: Path,
+) -> None:
+    """Regression for the live 600-second timeout at decision sequence 2.
+
+    Once take_action is accepted, the worker must have no provider-dependent
+    work left before it can return the decision to the host.
+    """
+    llm = ToolsRecordingFakeLLMClient(
+        scripted_responses=[response("take_action", {"action": "UP"}, "act-1")]
+    )
+    agent = TychoNooaAgent(
+        llm=llm,
+        trigger_builder=False,
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+    )
+
+    assert await agent.act(turn(0)) == ActionDecision(action="UP")
+    assert len(llm.tools_per_call) == 1
+
+
+@pytest.mark.asyncio
 async def test_files_and_conversation_survive_the_action_boundary(
     tmp_path: Path,
 ) -> None:
@@ -142,7 +159,6 @@ async def test_files_and_conversation_survive_the_action_boundary(
                 "write-1",
             ),
             response("take_action", {"action": "UP"}, "act-1"),
-            prose_response("actor checkpoint after turn 0"),
             response("read_file", {"path": "notes/world_model.md"}, "read-2"),
             response("take_action", {"action": "DOWN"}, "act-2"),
         ]
@@ -199,15 +215,9 @@ async def test_files_and_conversation_survive_the_action_boundary(
 async def test_actor_beliefs_checkpoint_is_forced_when_turn_leaves_it_stale(
     tmp_path: Path,
 ) -> None:
-    """Adaptation beyond Tycho: real Tycho never forces notes/actor_beliefs.md
-    (see PROVENANCE.md), but a turn that leaves it untouched must not be
-    allowed to end quietly here, since the goal is a fresher hand-off to the
-    builder than Tycho's own design guarantees."""
-    llm = FakeLLMClient(
-        scripted_responses=[
-            response("take_action", {"action": "UP"}, "act-1"),
-            prose_response("nothing to add yet"),
-        ]
+    """A stale hand-off gets a factual local breadcrumb after the action."""
+    llm = ToolsRecordingFakeLLMClient(
+        scripted_responses=[response("take_action", {"action": "UP"}, "act-1")]
     )
     agent = TychoNooaAgent(
         llm=llm,
@@ -224,30 +234,32 @@ async def test_actor_beliefs_checkpoint_is_forced_when_turn_leaves_it_stale(
 
     updated = notes_path.read_text()
     assert updated.startswith("turn 0: UP moved the marker")
-    assert "[checkpoint: turn ended with no model-authored update]" in updated
+    assert (
+        "[checkpoint: model committed UP with no model-authored beliefs update]"
+        in updated
+    )
 
     tasks = [event for event in agent.event_manager.values() if isinstance(event, Task)]
-    assert any("checkpoint your current hypotheses" in task.prompt for task in tasks)
+    assert not any("checkpoint your current hypotheses" in task.prompt for task in tasks)
+    assert len(llm.tools_per_call) == 1
 
 
 @pytest.mark.asyncio
-async def test_actor_beliefs_checkpoint_executes_a_genuine_model_edit(
+async def test_actor_beliefs_written_before_action_is_preserved_without_fallback(
     tmp_path: Path,
 ) -> None:
-    """Unlike the fallback breadcrumb, the checkpoint call's tool calls are
-    real: the model gets one genuine chance to write before the fallback
-    would apply, and that write must actually land verbatim."""
+    """The normal tool loop remains the model's chance to author hypotheses."""
     llm = FakeLLMClient(
         scripted_responses=[
-            response("take_action", {"action": "UP"}, "act-1"),
             response(
                 "write_file",
                 {
                     "path": "notes/actor_beliefs.md",
                     "content": "genuine hypothesis: UP moves the marker up",
                 },
-                "checkpoint-write",
+                "beliefs-write",
             ),
+            response("take_action", {"action": "UP"}, "act-1"),
         ]
     )
     agent = TychoNooaAgent(
@@ -262,35 +274,7 @@ async def test_actor_beliefs_checkpoint_executes_a_genuine_model_edit(
 
     content = (agent.workspace_dir / "notes/actor_beliefs.md").read_text()
     assert content == "genuine hypothesis: UP moves the marker up"
-    assert "[checkpoint: turn ended" not in content
-
-
-@pytest.mark.asyncio
-async def test_actor_beliefs_checkpoint_withholds_take_action_from_offered_tools(
-    tmp_path: Path,
-) -> None:
-    llm = ToolsRecordingFakeLLMClient(
-        scripted_responses=[
-            response("take_action", {"action": "UP"}, "act-1"),
-            prose_response("nothing to add yet"),
-        ]
-    )
-    agent = TychoNooaAgent(
-        llm=llm,
-        trigger_builder=False,
-        game_id="test-game",
-        workspace_root=tmp_path,
-        available_actions=["UP", "DOWN"],
-    )
-
-    assert await agent.act(turn(0)) == ActionDecision(action="UP")
-
-    checkpoint_call_tools = llm.tools_per_call[1]
-    assert checkpoint_call_tools, "checkpoint call must offer tools too"
-    assert "take_action" not in checkpoint_call_tools
-    assert "submit_action" not in checkpoint_call_tools
-    assert "write_file" in checkpoint_call_tools
-    assert "edit_file" in checkpoint_call_tools
+    assert "[checkpoint: model committed" not in content
 
 
 @pytest.mark.asyncio
@@ -426,7 +410,6 @@ async def test_validated_plan_hint_is_injected_and_traced(tmp_path: Path) -> Non
     llm = FakeLLMClient(
         scripted_responses=[
             response("take_action", {"action": "UP"}, "act-1"),
-            prose_response("actor checkpoint after turn 0"),
             response("take_action", {"action": "DOWN"}, "act-2"),
         ]
     )
@@ -468,11 +451,9 @@ async def test_validated_plan_hint_is_injected_and_traced(tmp_path: Path) -> Non
     )
 
     tasks = [event for event in agent.event_manager.values() if isinstance(event, Task)]
-    # index 1 is the actor_beliefs.md checkpoint task inserted after turn 0's
-    # decision; turn 1's own task is index 2, not 1.
     assert "validated planner feedback:" in tasks[0].prompt
     assert "next action is UP" in tasks[0].prompt
-    assert "observed frame diverged" in tasks[2].prompt
+    assert "observed frame diverged" in tasks[1].prompt
     planner_trace = [
         json.loads(line)
         for line in (tmp_path / "planner-trace.jsonl").read_text().splitlines()
@@ -750,7 +731,6 @@ async def test_verbosity_changes_the_next_observation_payload(tmp_path: Path) ->
                 "verbosity-1",
             ),
             response("take_action", {"action": "UP"}, "act-1"),
-            prose_response("actor checkpoint after turn 0"),
             response("take_action", {"action": "DOWN"}, "act-2"),
         ]
     )
@@ -765,14 +745,12 @@ async def test_verbosity_changes_the_next_observation_payload(tmp_path: Path) ->
     await agent.act(turn(0))
     await agent.act(turn(1, previous_action="UP"))
 
-    # Each turn now also inserts an actor_beliefs.md checkpoint task right
-    # after its decision: [turn0, checkpoint0, turn1, checkpoint1].
     tasks = [event for event in agent.event_manager.values() if isinstance(event, Task)]
-    assert len(tasks) == 4
+    assert len(tasks) == 2
     assert "grid (row labels at left" in tasks[0].prompt
-    assert "grid (row labels at left" not in tasks[2].prompt
-    assert "1 cells changed; region [rows 0-0, cols 1-1]" in tasks[2].prompt
-    assert "  0->1" not in tasks[2].prompt
+    assert "grid (row labels at left" not in tasks[1].prompt
+    assert "1 cells changed; region [rows 0-0, cols 1-1]" in tasks[1].prompt
+    assert "  0->1" not in tasks[1].prompt
 
 
 @pytest.mark.asyncio
@@ -788,13 +766,9 @@ async def test_only_the_last_three_observations_keep_their_inlined_grid(
     llm = FakeLLMClient(
         scripted_responses=[
             response("take_action", {"action": "UP"}, "act-1"),
-            prose_response("actor checkpoint after turn 0"),
             response("take_action", {"action": "DOWN"}, "act-2"),
-            prose_response("actor checkpoint after turn 1"),
             response("take_action", {"action": "UP"}, "act-3"),
-            prose_response("actor checkpoint after turn 2"),
             response("take_action", {"action": "DOWN"}, "act-4"),
-            prose_response("actor checkpoint after turn 3"),
         ]
     )
     agent = TychoNooaAgent(
@@ -810,9 +784,9 @@ async def test_only_the_last_three_observations_keep_their_inlined_grid(
     for number in range(4):
         await agent.act(turn(number, previous_action="UP" if number else ""))
 
-    # [turn0, checkpoint0, turn1, checkpoint1, ...]; observations are even.
-    tasks = [event for event in agent.event_manager.values() if isinstance(event, Task)]
-    observations = tasks[::2]
+    observations = [
+        event for event in agent.event_manager.values() if isinstance(event, Task)
+    ]
     assert len(observations) == 4
     assert "grid (row labels at left" not in observations[0].prompt
     assert all(
@@ -857,11 +831,8 @@ async def test_the_actor_sees_its_own_prose_and_reasoning_on_the_next_turn(
                 content="The blue cell moved with me, so it is the player.",
                 reasoning="cell (0,1) tracks every UP",
             ),
-            prose_response("actor checkpoint after turn 0"),
             response("take_action", {"action": "DOWN"}, "act-2"),
-            prose_response("actor checkpoint after turn 1"),
             response("take_action", {"action": "UP"}, "act-3"),
-            prose_response("actor checkpoint after turn 2"),
         ]
     )
     agent = TychoNooaAgent(
@@ -876,10 +847,9 @@ async def test_the_actor_sees_its_own_prose_and_reasoning_on_the_next_turn(
     await agent.act(turn(1, previous_action="UP"))
     await agent.act(turn(2, previous_action="DOWN"))
 
-    # [turn0, checkpoint0, turn1, checkpoint1, turn2, ...]: turn 1 is call index 2.
     narrated = [
         message
-        for message in llm.messages_per_call[2]
+        for message in llm.messages_per_call[1]
         if message.get("role") == "assistant"
         and "it is the player" in str(message.get("content") or "")
     ]
@@ -889,7 +859,7 @@ async def test_the_actor_sees_its_own_prose_and_reasoning_on_the_next_turn(
     # A tool call the model did not narrate must not add an empty assistant turn.
     silent = [
         message
-        for message in llm.messages_per_call[4]
+        for message in llm.messages_per_call[2]
         if message.get("role") == "assistant"
         and not message.get("content")
         and not message.get("tool_calls")
@@ -909,10 +879,9 @@ async def test_the_llm_trace_records_the_counters_for_every_round_trip(
     can, and it is emitted to handlers even though `record=False` keeps it out
     of the stored history (`runtime/event_manager.py::add`).
     """
-    # litellm's import calls load_dotenv(), so the repo's own .env decides this
-    # flag unless the test takes it away — and then the assertion below would
-    # pass or fail on whether the developer happens to be capturing text today.
-    monkeypatch.delenv(CAPTURE_REASONING_ENV, raising=False)
+    # Absence now means capture is on; a research run must explicitly fail rather
+    # than silently discard the only provider-visible account of its reasoning.
+    monkeypatch.delenv(CAPTURE_RESPONSE_TEXT_ENV, raising=False)
     trace_path = tmp_path / "run" / "tool-trace.jsonl"
     llm = ToolsRecordingFakeLLMClient(
         scripted_responses=[
@@ -923,7 +892,6 @@ async def test_the_llm_trace_records_the_counters_for_every_round_trip(
                 content="The blue cell moved with me.",
                 reasoning="cell (0,1) tracks every UP",
             ),
-            prose_response("actor checkpoint after turn 0"),
         ]
     )
     agent = TychoNooaAgent(
@@ -939,7 +907,7 @@ async def test_the_llm_trace_records_the_counters_for_every_round_trip(
 
     lines = (trace_path.parent / "llm-trace.jsonl").read_text().splitlines()
     records = [json.loads(line) for line in lines]
-    assert [record["call_index"] for record in records] == [1, 2]
+    assert [record["call_index"] for record in records] == [1]
     assert {record["source"] for record in records} == {"actor"}
     assert records[0]["tool_calls"] == ["take_action"]
     assert records[0]["tool_call_ids"] == ["act-1"]
@@ -947,22 +915,21 @@ async def test_the_llm_trace_records_the_counters_for_every_round_trip(
     assert tool_record["tool_call_id"] == "act-1"
     assert records[0]["prompt_tokens"] == 1
     assert "reasoning_tokens" in records[0]
-    # Text costs two orders of magnitude more, so it stays behind the flag.
-    assert "reasoning" not in records[0]
-    assert "content" not in records[0]
+    assert records[0]["reasoning"] == "cell (0,1) tracks every UP"
+    assert records[0]["content"] == "The blue cell moved with me."
 
 
 @pytest.mark.asyncio
-async def test_the_llm_trace_records_the_raw_response_when_asked(
+async def test_the_llm_trace_records_the_raw_response_when_explicitly_enabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Under the capture flag the trace carries both response channels.
+    """An explicit enabled value preserves both response channels.
 
     `LLMComplete` carries the reasoning but not `response.content`; the prose is
     on the `LLMOutput` NOOA adds immediately afterwards in the same return path.
     Both have to land on one record for the retention decision to be judgeable.
     """
-    monkeypatch.setenv(CAPTURE_REASONING_ENV, "1")
+    monkeypatch.setenv(CAPTURE_RESPONSE_TEXT_ENV, "1")
     trace_path = tmp_path / "run" / "tool-trace.jsonl"
     llm = ToolsRecordingFakeLLMClient(
         scripted_responses=[
@@ -973,7 +940,6 @@ async def test_the_llm_trace_records_the_raw_response_when_asked(
                 content="The blue cell moved with me.",
                 reasoning="cell (0,1) tracks every UP",
             ),
-            prose_response("actor checkpoint after turn 0"),
         ]
     )
     agent = TychoNooaAgent(
@@ -1035,7 +1001,6 @@ async def test_a_spent_tool_budget_demands_the_action_instead_of_ending_the_epis
             response("ls", {"path": "."}, "look-1"),
             response("ls", {"path": "notes"}, "look-2"),
             response("take_action", {"action": "UP"}, "act-1"),
-            prose_response("nothing to add yet"),
         ]
     )
     agent = TychoNooaAgent(
@@ -1051,9 +1016,7 @@ async def test_a_spent_tool_budget_demands_the_action_instead_of_ending_the_epis
 
     demand_call_tools = llm.tools_per_call[2]
     assert demand_call_tools == ["take_action"]
-    # And the beliefs checkpoint still runs after the demanded action.
-    assert llm.tools_per_call[3]
-    assert "take_action" not in llm.tools_per_call[3]
+    assert len(llm.tools_per_call) == 3
 
 
 @pytest.mark.asyncio

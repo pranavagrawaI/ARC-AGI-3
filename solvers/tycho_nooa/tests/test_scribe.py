@@ -79,7 +79,6 @@ async def test_scribe_blocks_world_model_edit(tmp_path: Path) -> None:
     llm = FakeLLMClient(
         scripted_responses=[
             tool_response("take_action", {"action": "UP"}, "actor-0"),
-            prose_response("actor checkpoint after turn 0"),
             tool_response(
                 "write_file",
                 {"path": "world_model.py", "content": "sneaky"},
@@ -113,12 +112,10 @@ async def test_scribe_blocks_world_model_edit(tmp_path: Path) -> None:
 async def test_scribe_withholds_take_action_from_offered_tools(tmp_path: Path) -> None:
     """The scribe consolidates a just-finished level; it must never be able to
     commit an environment action. Tycho offers take_action then intercepts its
-    execution — tycho_nooa withholds it structurally instead, matching
-    strategy.py's _enforce_actor_beliefs_checkpoint precedent."""
+    execution — tycho_nooa withholds it structurally instead."""
     llm = RecordingFakeLLMClient(
         scripted_responses=[
             tool_response("take_action", {"action": "UP"}, "actor-0"),
-            prose_response("actor checkpoint after turn 0"),
             prose_response("done"),
         ]
     )
@@ -127,7 +124,7 @@ async def test_scribe_withholds_take_action_from_offered_tools(tmp_path: Path) -
     await agent.act(turn(0))
     await agent._summarize_level(0)
 
-    scribe_call_tools = llm.tools_per_call[2]
+    scribe_call_tools = llm.tools_per_call[1]
     assert scribe_call_tools, "scribe call must still offer non-action tools"
     assert "take_action" not in scribe_call_tools
     assert "submit_action" not in scribe_call_tools
@@ -141,7 +138,6 @@ async def test_scribe_fallback_writes_deterministic_note_when_model_writes_nothi
     llm = FakeLLMClient(
         scripted_responses=[
             tool_response("take_action", {"action": "UP"}, "actor-0"),
-            prose_response("actor checkpoint after turn 0"),
             prose_response("done"),
         ]
     )
@@ -166,7 +162,6 @@ async def test_scribe_genuine_note_is_not_overwritten_by_fallback(tmp_path: Path
     llm = FakeLLMClient(
         scripted_responses=[
             tool_response("take_action", {"action": "UP"}, "actor-0"),
-            prose_response("actor checkpoint after turn 0"),
             tool_response(
                 "write_file",
                 {"path": "notes/level_0_insights.md", "content": genuine},

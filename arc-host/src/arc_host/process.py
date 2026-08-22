@@ -22,7 +22,7 @@ from arc_host.types import (
 
 HOST_PREFIX = "ARC_HOST\t"
 WORKER_PREFIX = "ARC_AGENT\t"
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 3
 WORKER_ENVIRONMENT_KEYS = frozenset(
     {
         "ARC_LLM_API_KEY",
@@ -41,7 +41,10 @@ WORKER_ENVIRONMENT_KEYS = frozenset(
         "REQUESTS_CA_BUNDLE",
         "SSL_CERT_FILE",
         "TYCHO_MODE",
-        "TYCHO_NOOA_CAPTURE_REASONING",
+        "TYCHO_NOOA_TREATMENT",
+        "TYCHO_NOOA_REQUEST_REASONING",
+        "TYCHO_NOOA_CAPTURE_RESPONSE_TEXT",
+        "TYCHO_SANDBOX_RUNTIME",
         "TZ",
     }
 )
@@ -114,7 +117,12 @@ class JsonlWorker:
         return WorkerReady(worker_id=worker_id, metadata=metadata)
 
     def decide(self, turn: Turn) -> ActionDecision:
-        self._send("turn", turn.to_json())
+        payload = turn.to_json()
+        # The worker cannot allocate a deadline it cannot see. Send the exact
+        # wait enforced by this transport rather than duplicating a solver-side
+        # guess that can drift from --worker-timeout.
+        payload["decision_timeout_seconds"] = self.timeout_seconds
+        self._send("turn", payload)
         payload = self._receive("decision", sequence=turn.sequence)
         return ActionDecision.from_json(payload.get("decision"))
 

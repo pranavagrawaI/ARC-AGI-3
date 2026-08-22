@@ -1,0 +1,213 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from tycho_nooa.epistemic import (
+    CandidateGoalStatus,
+    GoalLedger,
+    GoalToolSurface,
+    ObjectiveAssessment,
+    RequestBuilderArguments,
+)
+from tycho_nooa.models import GameTurn
+
+
+def test_candidate_goal_is_durable_but_never_canonicalizes_itself(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "game"
+    evidence = workspace / "level_0" / "turn_003.txt"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text("host-authored frame")
+    world_model = workspace / "world_model.py"
+    world_model.write_text('def outcome(state):\n    return "ongoing"\n')
+    before = world_model.read_bytes()
+
+    ledger = GoalLedger(workspace)
+    ledger.register_authoritative_evidence("level_0/turn_003.txt")
+    proposed = ledger.propose_goal(
+        predicate="body colour 4 overlaps target colour 11",
+        evidence_refs=["level_0/turn_003.txt"],
+        falsifier="overlap occurs without levels_completed increasing",
+        level=0,
+        turn_in_level=3,
+    )
+    selected = ledger.update_goal(
+        proposed.id,
+        status=CandidateGoalStatus.SELECTED,
+        evidence_refs=["level_0/turn_003.txt"],
+        note="worth asking the builder to encode and test",
+        level=0,
+        turn_in_level=3,
+    )
+
+    assert selected.status is CandidateGoalStatus.SELECTED
+    assert world_model.read_bytes() == before
+    assert GoalLedger(workspace).get(proposed.id) == selected
+    events = [
+        json.loads(line)
+        for line in (workspace / "epistemic" / "candidate-goal-events.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    assert [event["event"] for event in events] == ["goal_proposed", "goal_updated"]
+
+
+def test_candidate_goal_rejects_model_authored_or_missing_evidence(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "game"
+    notes = workspace / "notes" / "actor_beliefs.md"
+    notes.parent.mkdir(parents=True)
+    notes.write_text("I think blue is a target")
+    ledger = GoalLedger(workspace)
+    with pytest.raises(ValueError, match="authoritative public evidence"):
+        ledger.register_authoritative_evidence("notes/actor_beliefs.md")
+
+    for ref in ["notes/actor_beliefs.md", "level_0/turn_999.txt", "../outside"]:
+        with pytest.raises(ValueError, match="authoritative public evidence"):
+            ledger.propose_goal(
+                predicate="reach blue",
+                evidence_refs=[ref],
+                falsifier="reaching blue does not complete the level",
+                level=0,
+                turn_in_level=0,
+            )
+
+
+def test_objective_builder_request_requires_a_candidate_goal(tmp_path: Path) -> None:
+    workspace = tmp_path / "game"
+    evidence = workspace / "level_0" / "turn_000.txt"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text("host-authored frame")
+    ledger = GoalLedger(workspace)
+    ledger.register_authoritative_evidence("level_0/turn_000.txt")
+    surface = GoalToolSurface(ledger)
+
+    with pytest.raises(ValueError, match="candidate_goal_id"):
+        surface.builder_request(
+            RequestBuilderArguments(
+                focus="objective",
+                evidence_refs=["level_0/turn_000.txt"],
+            )
+        )
+
+
+def test_objective_review_closes_the_required_goal_resolution_loop(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "game"
+    evidence = workspace / "level_0" / "turn_000.txt"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text("host-authored frame")
+    ledger = GoalLedger(workspace)
+    ledger.register_authoritative_evidence("level_0/turn_000.txt")
+    surface = GoalToolSurface(ledger)
+    surface.begin_turn(
+        GameTurn(
+            grid=[[0]],
+            available_actions=["UP"],
+            level=0,
+            turn_in_level=0,
+        )
+    )
+    proposed = json.loads(
+        surface.propose_goal(
+            predicate="colour 4 must overlap colour 11",
+            evidence_refs=["level_0/turn_000.txt"],
+            falsifier="overlap occurs without completing the level",
+        )
+    )
+
+    assert "request_builder" in surface.required_before_action()
+    with pytest.raises(ValueError, match="request_builder"):
+        surface.update_goal(
+            proposed["id"],
+            CandidateGoalStatus.SELECTED,
+            ["level_0/turn_000.txt"],
+            "premature selection",
+        )
+
+    request = RequestBuilderArguments(
+        focus="objective",
+        evidence_refs=["level_0/turn_000.txt"],
+        candidate_goal_id=proposed["id"],
+    )
+    surface.builder_request(request)
+    review = surface.record_builder_review(
+        request,
+        report=(
+            "candidate_goal_assessment: supported\n"
+            "candidate_goal_reason: shapes are congruent\n"
+            "candidate_goal_route: DOWN x11, LEFT x6\n"
+            "recommended_action: DOWN\n"
+        ),
+    )
+
+    assert review.assessment is ObjectiveAssessment.SUPPORTED
+    assert review.recommended_route == "DOWN x11, LEFT x6"
+    assert "update_goal" in surface.required_before_action()
+
+    selected = json.loads(
+        surface.update_goal(
+            proposed["id"],
+            CandidateGoalStatus.SELECTED,
+            ["level_0/turn_000.txt"],
+            "builder evidence supports testing this objective",
+        )
+    )
+    assert selected["resolved_review_id"] == review.id
+    assert surface.required_before_action() is None
+    assert GoalLedger(workspace).get(proposed["id"]).status is (
+        CandidateGoalStatus.SELECTED
+    )
+
+
+def test_unavailable_builder_review_can_be_acknowledged_without_false_selection(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "game"
+    evidence = workspace / "level_0" / "turn_000.txt"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text("host-authored frame")
+    ledger = GoalLedger(workspace)
+    ledger.register_authoritative_evidence("level_0/turn_000.txt")
+    surface = GoalToolSurface(ledger)
+    surface.begin_turn(
+        GameTurn(
+            grid=[[0]],
+            available_actions=["UP"],
+            level=0,
+            turn_in_level=0,
+        )
+    )
+    proposed = json.loads(
+        surface.propose_goal(
+            predicate="reach the target",
+            evidence_refs=["level_0/turn_000.txt"],
+            falsifier="target contact is nonterminal",
+        )
+    )
+    request = RequestBuilderArguments(
+        focus="objective",
+        evidence_refs=["level_0/turn_000.txt"],
+        candidate_goal_id=proposed["id"],
+    )
+
+    review = surface.record_builder_review(
+        request,
+        report="BuilderDeadlineExceeded: no objective allocation remained",
+        unavailable=True,
+    )
+    surface.update_goal(
+        proposed["id"],
+        CandidateGoalStatus.PROPOSED,
+        ["level_0/turn_000.txt"],
+        "review unavailable; retain as an unselected hypothesis",
+    )
+
+    assert review.assessment is ObjectiveAssessment.UNAVAILABLE
+    assert surface.required_before_action() is None

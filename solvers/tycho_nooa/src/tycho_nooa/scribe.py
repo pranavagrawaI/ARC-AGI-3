@@ -67,10 +67,8 @@ class ScribeStrategy(GenerationStrategy):
         if not isinstance(level, int):
             raise TypeError("ScribeStrategy requires an int argument named 'level'")
 
-        # take_action is withheld rather than offered-then-intercepted, matching
-        # strategy.py's _enforce_actor_beliefs_checkpoint precedent — Tycho itself
-        # offers take_action here and replaces its execution with a skip message;
-        # tycho_nooa withholds it structurally instead.
+        # Tycho itself offers take_action here and replaces its execution with a
+        # skip message; tycho_nooa withholds it structurally instead.
         tools = [
             tool
             for tool in surface.native_tools()

@@ -13,7 +13,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from tycho.workspace.agent_tools import ToolExecutor, canonical, tool_specs
 from tycho.workspace.workspace import diff_text, grid_text
 
+from tycho_nooa.epistemic import GoalToolSurface
 from tycho_nooa.models import ActionDecision, GameTurn
+from tycho_nooa.modes import ModePolicy
 from tycho_nooa.planner import PlannerIntegration, planner_command
 from tycho_nooa.symmetry_notice import TOOL_NOTE
 
@@ -57,6 +59,10 @@ class _VerbosityArguments(_Arguments):
     diff: Literal["on", "summary", "off"] | None = None
 
 
+class _InvokeBuilderArguments(_Arguments):
+    reason: str = ""
+
+
 class _ActionArguments(_Arguments):
     action: str
     row: int | None = Field(default=None, ge=0, le=63)
@@ -71,6 +77,7 @@ _ARGUMENT_MODELS: dict[str, type[BaseModel]] = {
     "edit_function": _EditFunctionArguments,
     "run_python": _RunPythonArguments,
     "set_verbosity": _VerbosityArguments,
+    "invoke_builder": _InvokeBuilderArguments,
     "take_action": _ActionArguments,
 }
 
@@ -80,6 +87,7 @@ class ToolProfile:
     """Select one Tycho-owned tool surface without duplicating its schemas."""
 
     include_edit_function: bool = False
+    include_builder: bool = False
     include_take_action: bool = True
     include_set_verbosity: bool = True
 
@@ -106,6 +114,14 @@ BUILDER_TOOL_PROFILE = ToolProfile(
 )
 
 
+def actor_tool_profile(policy: ModePolicy) -> ToolProfile:
+    """Expose function-level model editing only when the actor owns the model."""
+    return ToolProfile(
+        include_edit_function=policy.actor_writes_wm,
+        include_builder=policy.include_builder,
+    )
+
+
 # What replaces the two heavy payloads once newer turns have arrived. The frame
 # and its diff stay on disk, so this is a pointer, not a loss of evidence.
 _ELIDED_PAYLOAD = [
@@ -126,11 +142,15 @@ class WorkspaceToolSurface:
         executor: ToolExecutor,
         *,
         profile: ToolProfile = ACTOR_TOOL_PROFILE,
+        mode_policy: ModePolicy | None = None,
+        goal_tools: GoalToolSurface | None = None,
         trace_path: Path | None = None,
         planner_trace_path: Path | None = None,
     ):
         self._executor = executor
         self._profile = profile
+        self._mode_policy = mode_policy
+        self._goal_tools = goal_tools
         self._trace_path = trace_path
         if planner_trace_path is None and trace_path is not None:
             planner_trace_path = trace_path.with_name("planner-trace.jsonl")
@@ -157,6 +177,8 @@ class WorkspaceToolSurface:
         self._builder_report = None
         self._executor.cur_grid = turn.grid
         self._executor.available = turn.available_actions
+        if self._goal_tools is not None:
+            self._goal_tools.begin_turn(turn)
 
     def set_builder_report(self, report: str | None) -> None:
         """Expose a just-built advisory report in the actor's next task message."""
@@ -258,10 +280,16 @@ class WorkspaceToolSurface:
             "edit_function": self.edit_function,
             "run_python": self.run_python,
             "set_verbosity": self.set_verbosity,
+            "invoke_builder": self.invoke_builder,
             "take_action": self.take_action,
         }
         for spec in tool_specs(
             "generic",
+            # The named typed-goal treatment replaces the untyped actor request;
+            # leaving both visible lets the model bypass evidence validation.
+            include_builder=(
+                self._profile.include_builder and self._goal_tools is None
+            ),
             include_edit_func=self._profile.include_edit_function,
             include_take_action=self._profile.include_take_action,
             include_set_verbosity=self._profile.include_set_verbosity,
@@ -275,6 +303,8 @@ class WorkspaceToolSurface:
                     parameters_model=_ARGUMENT_MODELS[name],
                 )
             )
+        if self._goal_tools is not None:
+            tools.extend(self._goal_tools.native_tools())
         return tools
 
     def dispatch(
@@ -288,7 +318,10 @@ class WorkspaceToolSurface:
         assert model is not None
         try:
             validated = model.model_validate(arguments)
-            result = tool.callable(**validated.model_dump(exclude_none=True))
+            if self._goal_tools is not None and tool.name in self._goal_tools.TOOL_NAMES:
+                result = self._goal_tools.dispatch(tool, arguments)
+            else:
+                result = tool.callable(**validated.model_dump(exclude_none=True))
         except Exception as error:
             self._record_tool_call(
                 tool.name,
@@ -323,6 +356,31 @@ class WorkspaceToolSurface:
             result=message,
             tool_call_id=tool_call_id,
         )
+
+    def record_external_result(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        result: str,
+        *,
+        tool_call_id: str | None = None,
+    ) -> None:
+        """Record an async tool whose implementation lives above this surface."""
+        self._record_tool_call(
+            name,
+            arguments,
+            status="complete",
+            result=result,
+            tool_call_id=tool_call_id,
+        )
+
+    def current_turn(self) -> GameTurn:
+        """Expose the active public turn to higher-level async tool adapters."""
+        return self._require_turn()
+
+    @property
+    def goal_tools(self) -> GoalToolSurface | None:
+        return self._goal_tools
 
     def _record_tool_call(
         self,
@@ -361,17 +419,24 @@ class WorkspaceToolSurface:
         return self._executor.execute("read_file", {"path": path})
 
     def write_file(self, path: str, content: str) -> str:
+        self._authorize_actor_write(path)
         return self._executor.execute("write_file", {"path": path, "content": content})
 
     def edit_file(self, path: str, old: str, new: str) -> str:
+        self._authorize_actor_write(path)
         return self._executor.execute(
             "edit_file", {"path": path, "old": old, "new": new}
         )
 
     def edit_function(self, path: str, name: str, code: str) -> str:
+        self._authorize_actor_write(path)
         return self._executor.execute(
             "edit_function", {"path": path, "name": name, "code": code}
         )
+
+    def _authorize_actor_write(self, path: str) -> None:
+        if self._mode_policy is not None:
+            self._mode_policy.authorize_actor_write(path)
 
     def run_python(self, code: str, timeout_s: int = 15) -> str:
         invocation = self._planner.begin_invocation(code)
@@ -409,6 +474,13 @@ class WorkspaceToolSurface:
             f"verbosity updated ({', '.join(changed)}). Now: full grid inlined="
             f"{self.grid_verbosity == 'on'}, diff mode={self.diff_verbosity}. "
             "The full grid and exact diff remain available through run_python."
+        )
+
+    @staticmethod
+    def invoke_builder(reason: str = "") -> str:
+        """Marker callable; NativeToolStrategy performs this async handoff."""
+        raise RuntimeError(
+            "invoke_builder must be dispatched by NativeToolStrategy"
         )
 
     def take_action(

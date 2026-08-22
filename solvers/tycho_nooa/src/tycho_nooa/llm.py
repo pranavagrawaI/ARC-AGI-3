@@ -10,7 +10,7 @@ from typing import Any
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall, UnifiedLLM
 from nooa.unifiedllm.registry import get_llm_client
 
-from tycho_nooa.llm_trace import capture_reasoning
+from tycho_nooa.llm_trace import request_reasoning
 
 SCRIPTED_TOOL_CALLS_ENV = "TYCHO_NOOA_SCRIPTED_TOOL_CALLS"
 MAX_TOKENS_ENV = "ARC_LLM_MAX_TOKENS"
@@ -84,7 +84,7 @@ def _apply_optional_overrides(
     # prompt). So this asks for more thinking, it does not switch capture on --
     # and it changes the run, because the reasoning that comes back is replayed
     # on the next tool call.
-    if capture_reasoning(env):
+    if request_reasoning(env):
         overrides["reasoning"] = {"enabled": True}
 
 

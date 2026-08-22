@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -31,7 +32,16 @@ def observation(
     levels: int = 0,
 ) -> ObservationPayload:
     return ObservationPayload(
-        grid=[[value, value + 1], [value + 2, value + 3]],
+        decision_frame=[[value, value + 1], [value + 2, value + 3]],
+        terminal_frame=None,
+        event_frames=[],
+        provenance={
+            "raw_frame_count": 1,
+            "decision_frame_index": 0,
+            "terminal_frame_index": None,
+            "event_frame_indices": [],
+            "terminal_reason": None,
+        },
         available_actions=actions if actions is not None else ["UP", "DOWN"],
         levels_completed=levels,
         state="NOT_FINISHED",
@@ -50,6 +60,52 @@ def test_protocol_rejects_unknown_fields() -> None:
         parse_host_message(json.dumps(payload))
 
 
+def test_protocol_preserves_the_complete_frame_evidence_envelope() -> None:
+    evidence = ObservationPayload(
+        decision_frame=[[3]],
+        terminal_frame=[[1]],
+        event_frames=[{"kind": "animation", "source_index": 1, "frame": [[2]]}],
+        provenance={
+            "raw_frame_count": 3,
+            "decision_frame_index": 2,
+            "terminal_frame_index": 0,
+            "event_frame_indices": [1],
+            "terminal_reason": "level_advanced",
+        },
+        available_actions=["UP"],
+        levels_completed=1,
+        state="NOT_FINISHED",
+        full_reset=False,
+    )
+
+    assert evidence.grid == [[3]]
+    assert evidence.terminal_frame == [[1]]
+    assert evidence.event_frames[0].frame == [[2]]
+    assert evidence.provenance.terminal_reason == "level_advanced"
+
+
+@pytest.mark.asyncio
+async def test_worker_passes_the_host_decision_timeout_to_the_agent() -> None:
+    act = AsyncMock(return_value=ActionDecision(action="UP"))
+    session = WorkerSession()
+    session.agent = SimpleNamespace(act=act)
+
+    await session.decide(
+        TurnMessage(
+            protocol_version=PROTOCOL_VERSION,
+            type="turn",
+            sequence=0,
+            level=0,
+            turn_in_level=0,
+            decision_timeout_seconds=600,
+            observation=observation(0),
+            previous_decision=None,
+        )
+    )
+
+    assert act.await_args.kwargs == {"decision_timeout_seconds": 600.0}
+
+
 @pytest.mark.parametrize(
     ("grid", "message"),
     [
@@ -62,7 +118,16 @@ def test_protocol_rejects_unknown_fields() -> None:
 def test_observation_rejects_invalid_grids(grid: list[list[int]], message: str) -> None:
     with pytest.raises(ValidationError, match=message):
         ObservationPayload(
-            grid=grid,
+            decision_frame=grid,
+            terminal_frame=None,
+            event_frames=[],
+            provenance={
+                "raw_frame_count": 1,
+                "decision_frame_index": 0,
+                "terminal_frame_index": None,
+                "event_frame_indices": [],
+                "terminal_reason": None,
+            },
             available_actions=[],
             levels_completed=0,
             state="NOT_FINISHED",
@@ -74,6 +139,7 @@ def test_observation_rejects_invalid_grids(grid: list[list[int]], message: str) 
 async def test_worker_keeps_one_agent_and_observes_level_boundary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("TYCHO_SANDBOX_RUNTIME", "host")
     monkeypatch.setenv(
         SCRIPTED_TOOL_CALLS_ENV,
         json.dumps(
@@ -106,6 +172,28 @@ async def test_worker_keeps_one_agent_and_observes_level_boundary(
     assert agent._trigger_builder is not None
     completion_checkpoint = AsyncMock(return_value=None)
     agent._trigger_builder.after_level_complete = completion_checkpoint
+    after = ObservationPayload(
+        decision_frame=[[4, 5], [6, 7]],
+        terminal_frame=[[9, 9], [9, 9]],
+        event_frames=[
+            {
+                "kind": "animation",
+                "source_index": 1,
+                "frame": [[8, 8], [8, 8]],
+            }
+        ],
+        provenance={
+            "raw_frame_count": 3,
+            "decision_frame_index": 2,
+            "terminal_frame_index": 0,
+            "event_frame_indices": [1],
+            "terminal_reason": "level_advanced",
+        },
+        available_actions=[],
+        levels_completed=1,
+        state="NOT_FINISHED",
+        full_reset=False,
+    )
 
     response = await session.decide(
         TurnMessage(
@@ -114,6 +202,7 @@ async def test_worker_keeps_one_agent_and_observes_level_boundary(
             sequence=0,
             level=0,
             turn_in_level=0,
+            decision_timeout_seconds=600,
             observation=observation(0),
             previous_decision=None,
         )
@@ -128,7 +217,7 @@ async def test_worker_keeps_one_agent_and_observes_level_boundary(
             turn_in_level=0,
             decision=decision,
             before=observation(0),
-            after=observation(4, actions=[], levels=1),
+            after=after,
         )
     )
     completion_checkpoint.assert_awaited_once()
@@ -144,7 +233,7 @@ async def test_worker_keeps_one_agent_and_observes_level_boundary(
             stop_reason="level_limit",
             actions=1,
             levels_completed=1,
-            final_observation=observation(4, actions=[], levels=1),
+            final_observation=after,
         )
     )
 
@@ -155,6 +244,9 @@ async def test_worker_keeps_one_agent_and_observes_level_boundary(
     assert agent._trigger_builder._builder_config is not None
     assert agent._trigger_builder._builder_config.max_tokens == 8_000
     assert ready["metadata"]["client_kind"] == "scripted"
+    assert ready["metadata"]["mode"] == "trigger"
+    assert ready["metadata"]["treatment"] == "control"
+    assert ready["metadata"]["sandbox_runtime"] == "host"
     assert (agent.workspace_dir / "notes/first-contact.md").read_text() == (
         "UP changed the public grid."
     )
@@ -168,6 +260,15 @@ async def test_worker_keeps_one_agent_and_observes_level_boundary(
         "row": None,
         "col": None,
     }
+    terminal = json.loads(
+        (agent.workspace_dir / "level_0/terminal.json").read_text()
+    )
+    assert terminal["terminal_grid"] == [[9, 9], [9, 9]]
+    animation = next((agent.workspace_dir / "level_0").glob("animation_*/frame_000.txt"))
+    assert animation.read_text().strip().splitlines()[-2:] == [
+        "y00: 8 8",
+        "y01: 8 8",
+    ]
     assert json.loads(
         (agent.workspace_dir / "level_0/level_complete.json").read_text()
     ) == {
@@ -228,6 +329,7 @@ async def test_worker_protocol_routes_a_complete_game_and_reports_bad_input(
             sequence=0,
             level=0,
             turn_in_level=0,
+            decision_timeout_seconds=600,
             observation=before,
             previous_decision=None,
         ).model_dump_json()

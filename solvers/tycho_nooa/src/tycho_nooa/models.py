@@ -12,6 +12,7 @@ class GameTurn(BaseModel):
 
     grid: list[list[int]]
     available_actions: list[str]
+    sequence: int | None = Field(default=None, ge=0)
     level: int
     turn_in_level: int
     levels_completed: int = 0

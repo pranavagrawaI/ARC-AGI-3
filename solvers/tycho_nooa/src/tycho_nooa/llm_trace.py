@@ -21,30 +21,41 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-# Asks the provider for reasoning text and writes prose plus reasoning into the
-# trace. Counters are always written; text is not, because it is two orders of
-# magnitude larger and because asking OpenRouter for reasoning changes the run
-# (retained history included), not only what we observe about it.
-CAPTURE_REASONING_ENV = "TYCHO_NOOA_CAPTURE_REASONING"
+# Requesting reasoning changes the model call. Capturing response text only
+# changes the durable trace. Keep these controls separate so observation does
+# not silently become an intervention.
+REQUEST_REASONING_ENV = "TYCHO_NOOA_REQUEST_REASONING"
+CAPTURE_RESPONSE_TEXT_ENV = "TYCHO_NOOA_CAPTURE_RESPONSE_TEXT"
 
 
-def capture_reasoning(environment: Mapping[str, str] | None = None) -> bool:
-    """Whether this run asks for, and records, the model's reasoning text.
-
-    One reader for both halves: `build_llm` must ask the provider for reasoning,
-    and `LLMTrace` must write it; a run where only one of those is true records
-    a misleading blank.
-    """
+def request_reasoning(environment: Mapping[str, str] | None = None) -> bool:
+    """Require provider reasoning for every live research run."""
     env = os.environ if environment is None else environment
-    return env.get(CAPTURE_REASONING_ENV) == "1"
+    value = env.get(REQUEST_REASONING_ENV)
+    if value in (None, "1"):
+        return True
+    if value == "0":
+        raise RuntimeError("reasoning must remain enabled")
+    raise ValueError(f"{REQUEST_REASONING_ENV} must be 1 when set")
+
+
+def capture_response_text(environment: Mapping[str, str] | None = None) -> bool:
+    """Require durable capture of returned prose and reasoning."""
+    env = os.environ if environment is None else environment
+    value = env.get(CAPTURE_RESPONSE_TEXT_ENV)
+    if value in (None, "1"):
+        return True
+    if value == "0":
+        raise RuntimeError("response capture must remain enabled")
+    raise ValueError(f"{CAPTURE_RESPONSE_TEXT_ENV} must be 1 when set")
 
 
 class LLMTrace:
     """One JSONL line per LLM round-trip, across every agent that shares a client."""
 
-    def __init__(self, path: Path | None, *, capture_text: bool = False) -> None:
+    def __init__(self, path: Path | None) -> None:
+        capture_response_text()
         self._path = path
-        self._capture_text = capture_text
         self._call_index = 0
         self._pending: dict[str, Any] | None = None
 
@@ -72,8 +83,7 @@ class LLMTrace:
             "tool_calls": [call["function_name"] for call in event.tool_calls],
             "tool_call_ids": [call["tool_call_id"] for call in event.tool_calls],
         }
-        if self._capture_text:
-            record["reasoning"] = event.reasoning_content
+        record["reasoning"] = event.reasoning_content
         self._pending = record
 
     def _finish(self, event: Any) -> None:
@@ -88,8 +98,7 @@ class LLMTrace:
         self._pending = None
         if record is None:
             return
-        if self._capture_text:
-            record["content"] = event.content
+        record["content"] = event.content
         self._write(record)
 
     def _write(self, record: dict[str, Any]) -> None:

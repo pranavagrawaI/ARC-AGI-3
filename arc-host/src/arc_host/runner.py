@@ -92,7 +92,10 @@ def run_episode(
         next_frame = environment.step(action, data=data)
         if next_frame is None:
             raise RuntimeError("ARC environment step returned no public frame")
-        following = public_observation(next_frame)
+        following = public_observation(
+            next_frame,
+            previous_levels_completed=current.levels_completed,
+        )
         transition = Transition(turn=turn, decision=decision, after=following)
         solver.observe(transition)
         transitions.append(transition)

@@ -76,23 +76,79 @@ class ActionDecision:
 
 
 @dataclass(frozen=True)
-class Observation:
-    """The complete public information made visible to a solver."""
+class EvidenceFrame:
+    """One non-decision frame retained from the public response sequence."""
 
-    grid: Grid
+    kind: str
+    source_index: int
+    frame: Grid
+
+    def to_json(self) -> dict[str, JsonValue]:
+        return {
+            "kind": self.kind,
+            "source_index": self.source_index,
+            "frame": [list(row) for row in self.frame],
+        }
+
+
+@dataclass(frozen=True)
+class FrameSelectionProvenance:
+    """Why each raw public frame was assigned its evidence role."""
+
+    raw_frame_count: int
+    decision_frame_index: int
+    terminal_frame_index: int | None
+    event_frame_indices: tuple[int, ...]
+    terminal_reason: str | None
+
+    def to_json(self) -> dict[str, JsonValue]:
+        return {
+            "raw_frame_count": self.raw_frame_count,
+            "decision_frame_index": self.decision_frame_index,
+            "terminal_frame_index": self.terminal_frame_index,
+            "event_frame_indices": list(self.event_frame_indices),
+            "terminal_reason": self.terminal_reason,
+        }
+
+
+@dataclass(frozen=True)
+class EvidenceEnvelope:
+    """Complete public evidence, separated from the frame used for decisions."""
+
+    decision_frame: Grid
+    terminal_frame: Grid | None
+    event_frames: tuple[EvidenceFrame, ...]
+    provenance: FrameSelectionProvenance
     available_actions: tuple[str, ...]
     levels_completed: int
     state: str
     full_reset: bool
 
+    @property
+    def grid(self) -> Grid:
+        """The settled frame retained for decision-making compatibility."""
+        return self.decision_frame
+
     def to_json(self) -> dict[str, JsonValue]:
         return {
-            "grid": [list(row) for row in self.grid],
+            "decision_frame": [list(row) for row in self.decision_frame],
+            "terminal_frame": (
+                [list(row) for row in self.terminal_frame]
+                if self.terminal_frame is not None
+                else None
+            ),
+            "event_frames": [event.to_json() for event in self.event_frames],
+            "provenance": self.provenance.to_json(),
             "available_actions": list(self.available_actions),
             "levels_completed": self.levels_completed,
             "state": self.state,
             "full_reset": self.full_reset,
         }
+
+
+# The host internals historically called the envelope Observation. Retain the
+# name as a compatibility alias while the protocol uses the semantic name.
+Observation = EvidenceEnvelope
 
 
 @dataclass(frozen=True)

@@ -5,7 +5,12 @@ from typing import Any
 import pytest
 
 from tycho_nooa.llm import build_llm, generation_max_tokens
-from tycho_nooa.llm_trace import CAPTURE_REASONING_ENV
+from tycho_nooa.llm_trace import (
+    CAPTURE_RESPONSE_TEXT_ENV,
+    REQUEST_REASONING_ENV,
+    capture_response_text,
+    request_reasoning,
+)
 
 
 def test_live_llm_requires_a_model() -> None:
@@ -55,7 +60,7 @@ def test_live_llm_normalizes_gateway_and_optional_provider_settings(
             "ARC_LLM_BASE_URL": "https://gateway",
             "ARC_LLM_API_KEY": "secret",
             "ARC_LLM_CONTEXT_WINDOW": "131072",
-            CAPTURE_REASONING_ENV: "1",
+            REQUEST_REASONING_ENV: "1",
         }
     )
 
@@ -70,6 +75,33 @@ def test_live_llm_normalizes_gateway_and_optional_provider_settings(
         "context_window": 131072,
         "reasoning": {"enabled": True},
     }
+
+
+def test_live_llm_always_requests_reasoning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_client(model: str, **kwargs: Any) -> object:
+        captured.update(model=model, **kwargs)
+        return object()
+
+    monkeypatch.setattr("tycho_nooa.llm.get_llm_client", fake_client)
+    build_llm({"ARC_LLM_MODEL": "openai/custom"})
+
+    assert captured["reasoning"] == {"enabled": True}
+
+
+def test_reasoning_and_response_capture_cannot_be_disabled() -> None:
+    assert request_reasoning({}) is True
+    assert capture_response_text({}) is True
+    assert request_reasoning({REQUEST_REASONING_ENV: "1"}) is True
+    assert capture_response_text({CAPTURE_RESPONSE_TEXT_ENV: "1"}) is True
+
+    with pytest.raises(RuntimeError, match="reasoning must remain enabled"):
+        request_reasoning({REQUEST_REASONING_ENV: "0"})
+    with pytest.raises(RuntimeError, match="response capture must remain enabled"):
+        capture_response_text({CAPTURE_RESPONSE_TEXT_ENV: "0"})
 
 
 def test_live_llm_keeps_direct_completion_configuration(
@@ -92,4 +124,5 @@ def test_live_llm_keeps_direct_completion_configuration(
         "model": "openai/custom",
         "client_type": "completion",
         "timeout": 180.0,
+        "reasoning": {"enabled": True},
     }

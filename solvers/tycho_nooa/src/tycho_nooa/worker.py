@@ -51,6 +51,9 @@ class WorkerSession:
                 "agent": "tycho_nooa.TychoNooaAgent",
                 "client_kind": self.client_kind,
                 "workspace": str(self.agent.workspace_dir),
+                "mode": self.agent.mode_name,
+                "treatment": self.agent.treatment_name,
+                "sandbox_runtime": os.environ.get("TYCHO_SANDBOX_RUNTIME", "auto"),
             },
         }
 
@@ -68,6 +71,7 @@ class WorkerSession:
             GameTurn(
                 grid=observation.grid,
                 available_actions=observation.available_actions,
+                sequence=message.sequence,
                 level=message.level,
                 turn_in_level=message.turn_in_level,
                 levels_completed=observation.levels_completed,
@@ -75,7 +79,8 @@ class WorkerSession:
                 previous_action=previous.action if previous else "",
                 previous_row=previous.row if previous else None,
                 previous_col=previous.col if previous else None,
-            )
+            ),
+            decision_timeout_seconds=message.decision_timeout_seconds,
         )
         self.pending = (message.sequence, decision)
         return {"sequence": message.sequence, "decision": decision.model_dump()}

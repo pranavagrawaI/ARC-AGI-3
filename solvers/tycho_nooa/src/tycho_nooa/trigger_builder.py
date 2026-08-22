@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 from nooa.unifiedllm import UnifiedLLM
@@ -19,8 +22,11 @@ from tycho_nooa.builder import (
     BuilderResult,
     FocusedBuilder,
 )
+from tycho_nooa.deadlines import DecisionDeadline
+from tycho_nooa.decision_checkpoints import DecisionCheckpointRecorder
 from tycho_nooa.llm_trace import LLMTrace
 from tycho_nooa.models import ActionDecision, GameTurn
+from tycho_nooa.wm_probe import AST_UNCHANGED_NOTICE
 
 
 @dataclass(frozen=True)
@@ -37,10 +43,410 @@ class BuilderExposure:
     recommendation_parse_error: str | None = None
 
 
+class BuilderDeadlineError(RuntimeError):
+    """A bounded builder request did not produce a completed advisory result."""
+
+
+class BuilderDeadlineUnavailable(BuilderDeadlineError):
+    """The actor spent the builder allocation before making its request."""
+
+
+class BuilderDeadlineExceeded(BuilderDeadlineError):
+    """The builder was cancelled and its partial workspace transaction rolled back."""
+
+
 @dataclass(frozen=True)
 class RecommendationParse:
     action: ActionDecision | None
     error: str | None
+
+
+@dataclass(frozen=True)
+class RetainedCandidate:
+    """One noncanonical model body preserved across transaction rollback."""
+
+    record_id: str
+    model_sha256: str
+    model_path: str
+    record_path: str
+    contemporaneous_score: dict[str, Any]
+
+
+def _snapshot_workspace(workspace_dir: Path) -> dict[str, bytes]:
+    """Capture the builder transaction without duplicating volatile bytecode."""
+    return {
+        path.relative_to(workspace_dir).as_posix(): path.read_bytes()
+        for path in workspace_dir.rglob("*")
+        if path.is_file()
+        and "__pycache__" not in path.relative_to(workspace_dir).parts
+    }
+
+
+def _restore_workspace(
+    workspace_dir: Path,
+    before: dict[str, bytes],
+) -> list[str]:
+    """Roll back every builder-visible file and report exactly what changed."""
+    current = _snapshot_workspace(workspace_dir)
+    changed = sorted(
+        path
+        for path in before.keys() | current.keys()
+        if before.get(path) != current.get(path)
+    )
+    for relative in current.keys() - before.keys():
+        (workspace_dir / relative).unlink()
+    for relative, content in before.items():
+        path = workspace_dir / relative
+        if not path.is_file() or path.read_bytes() != content:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+    return changed
+
+
+def _rollback_with_candidate_retention(
+    workspace_dir: Path,
+    before: dict[str, bytes],
+    partial_tool_calls: list[dict[str, Any]],
+    *,
+    turn: GameTurn,
+    reason: str,
+    focus: str | None,
+) -> tuple[list[str], RetainedCandidate | None, str | None]:
+    """Restore canonical state, then publish a noncanonical copy of changed theory.
+
+    Staging happens before rollback because the candidate is otherwise destroyed.
+    Publication happens after rollback so the candidate path cannot accidentally
+    become canonical or be removed as part of the transaction.
+    """
+    staged = None
+    retention_error = None
+    try:
+        staged = _stage_candidate(
+            workspace_dir,
+            before,
+            partial_tool_calls,
+            turn=turn,
+            reason=reason,
+            focus=focus,
+        )
+    except Exception as error:  # noqa: BLE001 - rollback must still complete
+        retention_error = f"{type(error).__name__}: {error}"
+    changed = _restore_workspace(workspace_dir, before)
+    retained = None
+    if staged is not None and retention_error is None:
+        try:
+            retained = _publish_candidate(workspace_dir, staged)
+        except Exception as error:  # noqa: BLE001 - canonical rollback already won
+            retention_error = f"{type(error).__name__}: {error}"
+    return changed, retained, retention_error
+
+
+def _stage_candidate(
+    workspace_dir: Path,
+    before: dict[str, bytes],
+    partial_tool_calls: list[dict[str, Any]],
+    *,
+    turn: GameTurn,
+    reason: str,
+    focus: str | None,
+) -> tuple[bytes, dict[str, Any]] | None:
+    model_path = workspace_dir / "world_model.py"
+    if not model_path.is_file():
+        return None
+    body = model_path.read_bytes()
+    canonical_before = before.get("world_model.py")
+    if canonical_before == body:
+        return None
+
+    model_sha = hashlib.sha256(body).hexdigest()
+    frontier = _evidence_frontier(workspace_dir)
+    frontier_sha = hashlib.sha256(
+        json.dumps(frontier, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
+    canonical_before_sha = (
+        hashlib.sha256(canonical_before).hexdigest()
+        if canonical_before is not None
+        else None
+    )
+    score = _contemporaneous_score(partial_tool_calls)
+    source_context = {
+        "source_event": "builder_deadline_exceeded",
+        "level": turn.level,
+        "turn_in_level": turn.turn_in_level,
+        "builder_reason": reason,
+        "builder_focus": focus,
+        "model_sha256": model_sha,
+        "canonical_before_sha256": canonical_before_sha,
+        "evidence_frontier_sha256": frontier_sha,
+        "contemporaneous_score": score,
+    }
+    source_context_sha = hashlib.sha256(
+        json.dumps(source_context, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
+    record_id = f"{model_sha[:16]}-{source_context_sha[:16]}"
+    metadata = {
+        "schema_version": 1,
+        "record_id": record_id,
+        "authority": "retained_noncanonical_candidate",
+        "publication_allowed": False,
+        "planner_eligible": False,
+        **source_context,
+        "source_context_sha256": source_context_sha,
+        "evidence_frontier": frontier,
+    }
+    return body, metadata
+
+
+def _publish_candidate(
+    workspace_dir: Path,
+    staged: tuple[bytes, dict[str, Any]],
+) -> RetainedCandidate:
+    body, metadata = staged
+    root = workspace_dir / "candidates" / "world_model"
+    model_path = root / "blobs" / f"{metadata['model_sha256']}.py"
+    record_path = root / "records" / f"{metadata['record_id']}.json"
+    index_path = root / "index.json"
+
+    _write_immutable(model_path, body)
+    rendered = (json.dumps(metadata, indent=2, sort_keys=True) + "\n").encode()
+    _write_immutable(record_path, rendered)
+    index = _read_candidate_index(index_path)
+    relative_record = record_path.relative_to(workspace_dir).as_posix()
+    if not any(row.get("record_path") == relative_record for row in index["records"]):
+        index["records"].append(
+            {
+                "record_id": metadata["record_id"],
+                "model_sha256": metadata["model_sha256"],
+                "model_path": model_path.relative_to(workspace_dir).as_posix(),
+                "record_path": relative_record,
+                "level": metadata["level"],
+                "turn_in_level": metadata["turn_in_level"],
+                "score": metadata["contemporaneous_score"],
+                "publication_allowed": False,
+                "planner_eligible": False,
+            }
+        )
+        _write_json_atomic(index_path, index)
+
+    return RetainedCandidate(
+        record_id=metadata["record_id"],
+        model_sha256=metadata["model_sha256"],
+        model_path=model_path.relative_to(workspace_dir).as_posix(),
+        record_path=relative_record,
+        contemporaneous_score=metadata["contemporaneous_score"],
+    )
+
+
+def _write_immutable(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        if path.read_bytes() != content:
+            raise RuntimeError(f"immutable candidate path changed content: {path}")
+        return
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_bytes(content)
+    temporary.replace(path)
+
+
+def _read_candidate_index(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {"schema_version": 1, "records": []}
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if value.get("schema_version") != 1 or not isinstance(value.get("records"), list):
+        raise RuntimeError(f"invalid retained-candidate index: {path}")
+    return value
+
+
+def _write_json_atomic(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(
+        json.dumps(value, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def _evidence_frontier(workspace_dir: Path) -> list[dict[str, Any]]:
+    evidence = []
+    # Include archived attempts as well as the current attempt. A candidate's
+    # score is only interpretable against the full transition history visible
+    # to the builder when it made the edit.
+    for path in sorted(workspace_dir.rglob("turn_*.json")):
+        if not path.is_file():
+            continue
+        evidence.append(
+            {
+                "path": path.relative_to(workspace_dir).as_posix(),
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+        )
+    return evidence
+
+
+_EDIT_TOOLS = frozenset({"write_file", "edit_file", "edit_function"})
+_MODEL_FILES = frozenset({"world_model.py", "worldmodel.py"})
+
+_FEEDBACK_MARKER = "[auto world-model feedback]"
+
+_SIMULATION_ACCURACY = re.compile(
+    r"(?:accepted|exact)_transition_accuracy \(simulation_accuracy\) = ([0-9.]+)"
+)
+_TRANSITION_REPLAY = re.compile(
+    r"transition_replay = matched (\d+) / evaluated (\d+) / observed (\d+)"
+)
+_FIRST_DIVERGENCE = re.compile(r"^  first divergence: (.+)$", re.MULTILINE)
+_LEVEL_START_ACCURACY = re.compile(r"accepted_level_start_accuracy = ([0-9.]+)")
+_MODEL_LOAD_FAILURE = re.compile(r"^world_model\.py does not load: (.+)$", re.MULTILINE)
+_VERIFY_CRASH = re.compile(r"^verify crashed: (.+)$", re.MULTILINE)
+
+# The obligations the verifier prints as named statuses. A publication gate has to
+# order candidates on all of them at once -- a body can hold its transition score
+# while breaking level-start reconstruction, a confirmed terminal, or the planner
+# contract -- so they are read together rather than per branch.
+_STATUS_FIELDS = (
+    "CURRENT_LEVEL_INITIAL_RENDER_STATUS",
+    "ALL_LEVELS_INITIAL_RENDER_STATUS",
+    "CURRENT_LEVEL_DYNAMICS_STATUS",
+    "ALL_LEVELS_DYNAMICS_STATUS",
+    "CURRENT_LEVEL_OUTCOME_STATUS",
+    "CURRENT_LEVEL_TERMINAL_RENDER_STATUS",
+    "PLANNER_STATUS",
+)
+
+
+def _verifier_status(result: str, field: str) -> str | None:
+    match = re.search(rf"^  {re.escape(field)}: (.+)$", result, re.MULTILINE)
+    return match.group(1) if match is not None else None
+
+
+def _verifier_reading(result: str) -> dict[str, Any]:
+    """Every typed obligation the host verifier printed for one graded body."""
+    accuracy = _SIMULATION_ACCURACY.search(result)
+    replay = _TRANSITION_REPLAY.search(result)
+    divergence = _FIRST_DIVERGENCE.search(result)
+    level_start = _LEVEL_START_ACCURACY.search(result)
+    reading: dict[str, Any] = {
+        "accepted_transition_accuracy": (
+            float(accuracy.group(1)) if accuracy is not None else None
+        ),
+        "matched_transitions": int(replay.group(1)) if replay is not None else None,
+        "evaluated_transitions": int(replay.group(2)) if replay is not None else None,
+        "observed_transitions": int(replay.group(3)) if replay is not None else None,
+        "first_divergence": divergence.group(1) if divergence is not None else None,
+        "accepted_level_start_accuracy": (
+            float(level_start.group(1)) if level_start is not None else None
+        ),
+    }
+    reading.update(
+        {field.lower(): _verifier_status(result, field) for field in _STATUS_FIELDS}
+    )
+    return reading
+
+
+def _load_status(result: str) -> tuple[str, str | None]:
+    """Whether the graded body was executable at all, and why not when it was not."""
+    load_failure = _MODEL_LOAD_FAILURE.search(result)
+    if load_failure is not None:
+        return "load_failed", load_failure.group(1)
+    crash = _VERIFY_CRASH.search(result)
+    if crash is not None:
+        return "verify_crashed", crash.group(1)
+    return "loaded", None
+
+
+def _contemporaneous_score(
+    partial_tool_calls: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Score the body this pass is about to leave behind, from the evidence it saw.
+
+    The score belongs to the last edit the verifier actually graded, which is not
+    always the last edit made: the host skips the verifier when an edit leaves the
+    syntax tree intact, so a pass that ends on a comment or formatting change would
+    otherwise retain a candidate with no score at all. Every skipped edit between
+    the graded one and the retained body is AST-preserving by construction, so that
+    grade still describes this body -- and the count is reported, because the bytes
+    the record commits to are not the bytes that were graded.
+    """
+    edits = [row for row in partial_tool_calls if _is_model_changing(row)]
+    if not edits:
+        return {
+            "status": "unavailable",
+            "reason": "no completed model-changing tool result",
+        }
+    call, ast_preserving_edits = _last_graded_edit(edits)
+    if call is None:
+        return {
+            "status": "unavailable",
+            "reason": (
+                "every model-changing edit left the syntax tree unchanged, so this "
+                "pass never graded the body it is about to retain"
+            ),
+            "ast_preserving_edits_since_grade": ast_preserving_edits,
+        }
+    provenance: dict[str, Any] = {"tool_call_index": call.get("call_index")}
+    if ast_preserving_edits:
+        provenance["ast_preserving_edits_since_grade"] = ast_preserving_edits
+    result = str(call.get("result", ""))
+    if _FEEDBACK_MARKER not in result:
+        return {
+            "status": "unavailable",
+            "reason": "completed model-changing tool result had no verifier metrics",
+            **provenance,
+        }
+    load_status, load_error = _load_status(result)
+    reading = _verifier_reading(result)
+    if load_status != "loaded":
+        return {
+            "status": "not_evaluable",
+            "reason": f"{load_status}: {load_error}",
+            "source": "host auto world-model feedback",
+            "load_status": load_status,
+            **provenance,
+            **reading,
+        }
+    if reading["evaluated_transitions"] is None and (
+        reading["accepted_transition_accuracy"] is None
+    ):
+        return {
+            "status": "assessed_without_transition_score",
+            "reason": (
+                "host verifier ran but no graded transition score was available"
+            ),
+            "source": "host auto world-model feedback",
+            "load_status": load_status,
+            **provenance,
+            **reading,
+        }
+    return {
+        "status": "measured",
+        "source": "host auto world-model feedback",
+        "load_status": load_status,
+        **provenance,
+        **reading,
+    }
+
+
+def _is_model_changing(row: dict[str, Any]) -> bool:
+    if row.get("status") != "complete":
+        return False
+    if canonical(str(row.get("name", ""))) not in _EDIT_TOOLS:
+        return False
+    path = str((row.get("arguments") or {}).get("path", ""))
+    return path.replace("\\", "/").rsplit("/", 1)[-1].lower() in _MODEL_FILES
+
+
+def _last_graded_edit(
+    edits: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, int]:
+    """The most recent edit the verifier graded, and how many it skipped after it."""
+    skipped = 0
+    for row in reversed(edits):
+        if AST_UNCHANGED_NOTICE in str(row.get("result", "")):
+            skipped += 1
+            continue
+        return row, skipped
+    return None, skipped
 
 
 class TychoTransitionTrigger:
@@ -79,6 +485,7 @@ class TriggerBuilderLoop:
         builder_tool_trace_path: Path | None,
         builder_config: BuilderConfig | None = None,
         llm_trace: LLMTrace | None = None,
+        decision_checkpoints: DecisionCheckpointRecorder | None = None,
     ) -> None:
         self._llm = llm
         self._executor = executor
@@ -86,6 +493,7 @@ class TriggerBuilderLoop:
         self._builder_tool_trace_path = builder_tool_trace_path
         self._builder_config = builder_config
         self._llm_trace = llm_trace
+        self._decision_checkpoints = decision_checkpoints
         self._trigger = TychoTransitionTrigger()
         self.builder: FocusedBuilder | None = None
         # -1 never equals a real level, so a genuine level-start check at level 0
@@ -95,7 +503,12 @@ class TriggerBuilderLoop:
         self._pending_outcome_level: int | None = None
         self._resolved_outcome_levels: set[int] = set()
 
-    async def before_actor(self, turn: GameTurn) -> BuilderExposure | None:
+    async def before_actor(
+        self,
+        turn: GameTurn,
+        *,
+        deadline: DecisionDeadline | None = None,
+    ) -> BuilderExposure | None:
         """Evaluate the recorded transition into this turn, then build if signaled.
 
         arc-host's `full_reset` resets `turn_in_level` to 0 WITHOUT changing
@@ -127,7 +540,130 @@ class TriggerBuilderLoop:
             return None
 
         self._capture_outcome_evidence(turn, decision)
-        return await self._invoke_builder(turn, decision.reason or "")
+        try:
+            return await self._invoke_builder_before_actor(
+                turn,
+                decision.reason or "",
+                deadline,
+            )
+        except BuilderDeadlineError:
+            # Automatic construction is advisory. Its trace remains evidence, but
+            # exhausting its allocation must not consume the actor's reserved turn.
+            return None
+
+    async def actor_requested(
+        self,
+        turn: GameTurn,
+        reason: str,
+        *,
+        deadline: DecisionDeadline | None = None,
+        focus: str | None = None,
+    ) -> BuilderExposure:
+        """Run the same fresh builder because the actor identified a need."""
+        self._write_trace(
+            {
+                "event": "actor_request",
+                "mechanism": "tycho orchestrator invoke_builder",
+                "level": turn.level,
+                "turn_in_level": turn.turn_in_level,
+                "reason": reason,
+                "focus": focus,
+            }
+        )
+        return await self._invoke_builder_before_actor(
+            turn,
+            reason,
+            deadline,
+            focus=focus,
+        )
+
+    async def _invoke_builder_before_actor(
+        self,
+        turn: GameTurn,
+        reason: str,
+        deadline: DecisionDeadline | None,
+        *,
+        focus: str | None = None,
+    ) -> BuilderExposure:
+        if deadline is None:
+            return await self._invoke_builder(turn, reason, focus=focus)
+
+        builder_seconds = deadline.builder_seconds_remaining(
+            objective=focus == "objective"
+        )
+        trace = {
+            "level": turn.level,
+            "turn_in_level": turn.turn_in_level,
+            "builder_budget_seconds": builder_seconds,
+            "builder_focus": focus,
+            **deadline.trace_fields(),
+        }
+        if builder_seconds <= 0:
+            self._write_trace({"event": "builder_deadline_skipped", **trace})
+            raise BuilderDeadlineUnavailable(
+                "builder request not started: no allocated builder time remained"
+            )
+        workspace_before = _snapshot_workspace(self._executor.ws.dir)
+        builder_deadline_at = monotonic() + builder_seconds
+        try:
+            async with asyncio.timeout(builder_seconds):
+                return await self._invoke_builder(
+                    turn,
+                    reason,
+                    focus=focus,
+                    deadline_at=builder_deadline_at,
+                )
+        except TimeoutError as error:
+            partial_tool_calls = (
+                self.builder.completed_tool_calls() if self.builder is not None else []
+            )
+            (
+                rolled_back_paths,
+                retained_candidate,
+                candidate_retention_error,
+            ) = _rollback_with_candidate_retention(
+                self._executor.ws.dir,
+                workspace_before,
+                partial_tool_calls,
+                turn=turn,
+                reason=reason,
+                focus=focus,
+            )
+            self._write_trace(
+                {
+                    "event": "builder_deadline_exceeded",
+                    "partial_tool_calls": len(partial_tool_calls),
+                    "rolled_back_paths": rolled_back_paths,
+                    "retained_candidate": (
+                        {
+                            "record_id": retained_candidate.record_id,
+                            "model_sha256": retained_candidate.model_sha256,
+                            "model_path": retained_candidate.model_path,
+                            "record_path": retained_candidate.record_path,
+                            "contemporaneous_score": (
+                                retained_candidate.contemporaneous_score
+                            ),
+                            "publication_allowed": False,
+                            "planner_eligible": False,
+                        }
+                        if retained_candidate is not None
+                        else None
+                    ),
+                    "candidate_retention_error": candidate_retention_error,
+                    **trace,
+                }
+            )
+            noun = "call" if len(partial_tool_calls) == 1 else "calls"
+            retention = (
+                f"; retained noncanonical candidate {retained_candidate.record_id}"
+                if retained_candidate is not None
+                else ""
+            )
+            raise BuilderDeadlineExceeded(
+                "builder deadline exceeded after "
+                f"{len(partial_tool_calls)} completed tool {noun}; partial workspace "
+                f"changes were rolled back and no builder report is valid{retention}"
+            ) from error
 
     async def after_level_complete(
         self, turn: GameTurn, outcome_evidence: str
@@ -164,7 +700,12 @@ class TriggerBuilderLoop:
             return None
 
     async def _invoke_builder(
-        self, turn: GameTurn, reason: str
+        self,
+        turn: GameTurn,
+        reason: str,
+        *,
+        focus: str | None = None,
+        deadline_at: float | None = None,
     ) -> BuilderExposure:
         self.builder = self._new_builder()
         try:
@@ -173,6 +714,8 @@ class TriggerBuilderLoop:
                     turn=turn,
                     reason=reason,
                     outcome_evidence=self._pending_outcome_evidence,
+                    focus=focus,
+                    deadline_at=deadline_at,
                 )
             )
         except Exception as error:
@@ -245,6 +788,11 @@ class TriggerBuilderLoop:
         # Each fresh agent has a fresh event stream; attach the run-wide trace now.
         if self._llm_trace is not None:
             self._llm_trace.attach(builder.event_manager, source="builder")
+        if (
+            self._decision_checkpoints is not None
+            and builder.event_manager is not None
+        ):
+            self._decision_checkpoints.attach(builder.event_manager, source="builder")
         return builder
 
     def _record_builder_error(self, turn: GameTurn, error: Exception) -> None:

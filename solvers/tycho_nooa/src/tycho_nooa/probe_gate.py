@@ -10,10 +10,10 @@ ends up in the middle of one.
 
 Two questions, in this order:
 
-1. Can `outcome()` return "level_complete" at all? If not, no search over this
-   model can succeed -- not with a different `actions()`, `planner_key()`,
-   heuristic, or node budget -- and a planner result would report a goal defect
-   as a search defect. This is the only hard gate here.
+1. Is `outcome()` proven unable to return "level_complete" by the narrow case
+   of one unconditional non-goal string return? If so, no search over this model
+   can succeed. Every less decisive case stays unknown or candidate-present and
+   cannot block search.
 2. What kind of operator is each entry of `actions()`, and does the state graph
    close under them? Reported, never enforced: which operators belong in a
    search alphabet is the builder's call against game evidence, not ours.
@@ -30,6 +30,9 @@ import textwrap
 import time
 
 GOAL_LITERAL = "level_complete"
+GOAL_PROVEN_UNSATISFIABLE = "proven_unsatisfiable"
+GOAL_UNKNOWN = "unknown"
+GOAL_CANDIDATE_PRESENT = "candidate_present"
 
 _CHAIN_DEPTH = 3  # forward states sampled for the per-operator audit
 _REPEAT_DEPTH = 8  # repeated applications used to look for a key repeat
@@ -45,6 +48,7 @@ def wmgate_report(world_model, wmlib, *, source=None, budget_s=0.75):
     """
     report = {
         "goal_satisfiable": True,
+        "goal_status": GOAL_UNKNOWN,
         "goal": {},
         "operators": [],
         "closure": None,
@@ -53,7 +57,10 @@ def wmgate_report(world_model, wmlib, *, source=None, budget_s=0.75):
     }
     try:
         report["goal"] = _goal_facts(world_model, wmlib, source)
-        report["goal_satisfiable"] = bool(report["goal"].get("satisfiable", True))
+        report["goal_status"] = report["goal"].get("status", GOAL_UNKNOWN)
+        report["goal_satisfiable"] = (
+            report["goal_status"] != GOAL_PROVEN_UNSATISFIABLE
+        )
         start = wmlib.current_state(world_model)
         if start is None:
             return report
@@ -85,6 +92,7 @@ def wmgate_blocked_lines(report):
     lines = [
         "PLANNER_PROBE:",
         "  PLANNER_STATUS: not_run_goal_unsatisfiable",
+        f"  GOAL_STATUS: {GOAL_PROVEN_UNSATISFIABLE}",
         '  GOAL_PREDICATE: is_level_complete(s) is outcome(s) == "level_complete"',
     ]
     constant = goal.get("constant_return")
@@ -95,7 +103,7 @@ def wmgate_blocked_lines(report):
         )
     if goal.get("literal_in_module") is False:
         lines.append(
-            f'  GOAL_EVIDENCE: the literal "{GOAL_LITERAL}" appears in no '
+            f'  GOAL_DIAGNOSTIC: the literal "{GOAL_LITERAL}" appears in no '
             "executable string in world_model.py"
         )
     observed = goal.get("observed_values")
@@ -137,7 +145,8 @@ def wmgate_audit_lines(report):
     if report.get("error"):
         return ["PLANNER_CONTRACT:", "  PROBE_ERROR: " + str(report["error"])]
     operators = report.get("operators") or []
-    lines = _operator_lines(operators) + _closure_lines(report)
+    lines = [f"  GOAL_STATUS: {report.get('goal_status', GOAL_UNKNOWN)}"]
+    lines += _operator_lines(operators) + _closure_lines(report)
     lines += _open_graph_warning(report)
     return ["PLANNER_CONTRACT:"] + lines if lines else []
 
@@ -232,28 +241,17 @@ def _closures(report):
 
 
 def _goal_facts(world_model, wmlib, source):
-    """Decide whether `outcome()` can return "level_complete" at all.
+    """Classify goal readiness without turning absence into a proof.
 
-    Two independently sufficient static conditions, either of which settles it:
-
-    - `outcome()` is one unconditional `return <string>` that is not the goal
-      literal. Nothing else in the module can change what it returns.
-    - the goal literal appears in no executable string anywhere in the module,
-      so no function can return it short of assembling it at runtime.
-
-    The second alone is not enough, and a live run proved it: pinned Tycho's
-    seeded world_model.py already spends the literal in `subgoals()` --
-    `return [lambda s: outcome(s) == "level_complete"]` -- while `outcome()` is
-    still `return "ongoing"`. The module-wide search sees the literal and clears
-    a model that provably has no goal state, which is the exact model this gate
-    exists to catch. See tests/test_probe_gate.py::test_the_seed_world_model_is_blocked.
-
-    The dynamic half is corroboration only: sampling states can exhibit a goal
-    but can never prove there is none.
+    Only a syntactically restricted unconditional non-goal return proves this
+    model unsatisfiable. A goal returned by a sampled state or explicitly named
+    inside outcome() establishes a candidate. Everything else is unknown:
+    runtime string construction, helpers, and unsampled branches remain live.
     """
     facts = {
-        "satisfiable": True,
+        "status": GOAL_UNKNOWN,
         "literal_in_module": None,
+        "literal_in_outcome": None,
         "constant_return": None,
         "observed_values": [],
         "sampled_states": 0,
@@ -262,12 +260,10 @@ def _goal_facts(world_model, wmlib, source):
     if text is not None:
         tree = ast.parse(text)
         facts["literal_in_module"] = GOAL_LITERAL in _executable_strings(tree)
-        facts["constant_return"] = _constant_return(tree, "outcome")
-        constant = facts["constant_return"]
-        facts["satisfiable"] = not (
-            (constant is not None and constant != GOAL_LITERAL)
-            or facts["literal_in_module"] is False
+        facts["literal_in_outcome"] = GOAL_LITERAL in _function_strings(
+            tree, "outcome"
         )
+        facts["constant_return"] = _constant_return(tree, "outcome")
     try:
         states = _sample_states(world_model, wmlib)
         facts["sampled_states"] = len(states)
@@ -276,6 +272,15 @@ def _goal_facts(world_model, wmlib, source):
         )
     except Exception:  # noqa: BLE001, S110 - corroboration only, never the verdict
         pass
+    constant = facts["constant_return"]
+    if constant is not None and constant != GOAL_LITERAL:
+        facts["status"] = GOAL_PROVEN_UNSATISFIABLE
+    elif (
+        constant == GOAL_LITERAL
+        or GOAL_LITERAL in facts["observed_values"]
+        or facts["literal_in_outcome"] is True
+    ):
+        facts["status"] = GOAL_CANDIDATE_PRESENT
     return facts
 
 
@@ -313,6 +318,13 @@ def _constant_return(tree, name):
         if isinstance(node, ast.FunctionDef) and node.name == name:
             return _unconditional_string_return(node)
     return None
+
+
+def _function_strings(tree, name):
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return _executable_strings(node)
+    return set()
 
 
 def _unconditional_string_return(function):

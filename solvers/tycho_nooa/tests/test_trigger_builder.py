@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -14,13 +17,20 @@ from tycho.prompts.render import render_prompt
 from tycho_nooa import ActionDecision, GameTurn, TychoNooaAgent
 from tycho_nooa.builder import (
     FALLBACK_REPORT,
+    RETAINED_CANDIDATE_BRIEF,
     BuilderConfig,
     BuilderRequest,
     BuilderResult,
     FocusedBuilder,
 )
+from tycho_nooa.deadlines import DecisionDeadlineConfig
 from tycho_nooa.symmetry_notice import PROMPT_BRIEF
-from tycho_nooa.trigger_builder import BuilderExposure, TriggerDecision
+from tycho_nooa.trigger_builder import (
+    BuilderExposure,
+    TriggerDecision,
+    _contemporaneous_score,
+)
+from tycho_nooa.wm_probe import AST_UNCHANGED_NOTICE
 
 
 def tool_response(tool: str, arguments: dict, call_id: str) -> LLMResponse:
@@ -96,6 +106,538 @@ def turn(number: int, previous_action: str = "") -> GameTurn:
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_actor_pulls_a_fresh_builder_before_committing_action(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The builder report must be available before the actor's one commitment."""
+    monkeypatch.setenv("TYCHO_MODE", "orchestrator")
+    monkeypatch.setattr(
+        "tycho_nooa.builder.verify_state",
+        lambda executor: ("[verify state] no recorded transitions yet", None),
+    )
+    llm = MessageRecordingFakeLLMClient(
+        scripted_responses=[
+            tool_batch_response(
+                [
+                    (
+                        "invoke_builder",
+                        {"reason": "infer the objective from level_0/turn_000.txt"},
+                        "actor-build",
+                    ),
+                    ("take_action", {"action": "UP"}, "stale-action"),
+                ]
+            ),
+            tool_response(
+                "write_file",
+                {
+                    "path": "notes/world_model.md",
+                    "content": "Objective may be contact with blue.",
+                },
+                "builder-notes",
+            ),
+            tool_response(
+                "write_file",
+                {
+                    "path": "notes/world_model_report.md",
+                    "content": "recommended_action: DOWN\nnote: test contact",
+                },
+                "builder-report",
+            ),
+            prose_response("builder complete"),
+            tool_response("take_action", {"action": "DOWN"}, "fresh-action"),
+        ]
+    )
+    agent = TychoNooaAgent(
+        llm=llm,
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+        tool_trace_path=tmp_path / "tool-trace.jsonl",
+    )
+
+    decision = await agent.act(turn(0))
+
+    assert decision == ActionDecision(action="DOWN")
+    assert agent._trigger_builder is not None
+    assert agent._trigger_builder.builder is not None
+    trace = [
+        json.loads(line)
+        for line in (tmp_path / "trigger-builder-trace.jsonl").read_text().splitlines()
+    ]
+    request = next(record for record in trace if record["event"] == "actor_request")
+    assert request["reason"] == "infer the objective from level_0/turn_000.txt"
+    assert any(
+        "recommended_action: DOWN" in str(message)
+        for message in llm.messages_per_call[-1]
+    )
+
+
+@pytest.mark.asyncio
+async def test_typed_goal_request_preserves_hypothesis_and_builder_ownership(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TYCHO_MODE", "orchestrator")
+    monkeypatch.setenv("TYCHO_NOOA_TREATMENT", "typed_candidate_goals")
+    monkeypatch.setattr(
+        "tycho_nooa.builder.verify_state",
+        lambda executor: ("[verify state] no recorded transitions yet", None),
+    )
+    llm = MessageRecordingFakeLLMClient(
+        scripted_responses=[
+            tool_response(
+                "propose_goal",
+                {
+                    "predicate": "contact between colours 4 and 11 completes the level",
+                    "evidence_refs": ["level_0/turn_000.txt"],
+                    "falsifier": "contact occurs while the level remains incomplete",
+                },
+                "goal-proposal",
+            ),
+            tool_response(
+                "take_action",
+                {"action": "UP"},
+                "blocked-before-review",
+            ),
+            tool_batch_response(
+                [
+                    (
+                        "request_builder",
+                        {
+                            "focus": "objective",
+                            "evidence_refs": ["level_0/turn_000.txt"],
+                            "candidate_goal_id": "goal-0001",
+                        },
+                        "typed-build",
+                    ),
+                    (
+                        "update_goal",
+                        {
+                            "goal_id": "goal-0001",
+                            "status": "selected",
+                            "evidence_refs": ["level_0/turn_000.txt"],
+                            "note": "premature batched resolution",
+                        },
+                        "blocked-batched-resolution",
+                    ),
+                ]
+            ),
+            tool_response(
+                "write_file",
+                {
+                    "path": "world_model.py",
+                    "content": "# premature objective promotion\n",
+                },
+                "blocked-objective-promotion",
+            ),
+            tool_response(
+                "write_file",
+                {
+                    "path": "notes/world_model.md",
+                    "content": "Candidate goal is plausible but not yet verified.",
+                },
+                "builder-notes",
+            ),
+            tool_response(
+                "write_file",
+                {
+                    "path": "notes/world_model_report.md",
+                    "content": (
+                        "candidate_goal_assessment: supported\n"
+                        "candidate_goal_reason: contact is the only congruent target\n"
+                        "candidate_goal_route: DOWN x2\n"
+                        "recommended_action: DOWN\n"
+                    ),
+                },
+                "builder-report",
+            ),
+            prose_response("builder complete"),
+            tool_response(
+                "take_action",
+                {"action": "UP"},
+                "blocked-before-resolution",
+            ),
+            tool_response(
+                "update_goal",
+                {
+                    "goal_id": "goal-0001",
+                    "status": "selected",
+                    "evidence_refs": ["level_0/turn_000.txt"],
+                    "note": "builder evidence supports a direct contact test",
+                },
+                "goal-selection",
+            ),
+            tool_response("take_action", {"action": "DOWN"}, "fresh-action"),
+        ]
+    )
+    agent = TychoNooaAgent(
+        llm=llm,
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+        tool_trace_path=tmp_path / "tool-trace.jsonl",
+    )
+    world_model_before = (agent.workspace_dir / "world_model.py").read_bytes()
+
+    decision = await agent.act(turn(0))
+
+    assert decision == ActionDecision(action="DOWN")
+    assert (agent.workspace_dir / "world_model.py").read_bytes() == world_model_before
+    assert agent._goal_ledger is not None
+    goal = agent._goal_ledger.get("goal-0001")
+    assert goal.status.value == "selected"
+    assert goal.resolved_review_id == "review-0001"
+    request = next(
+        json.loads(line)
+        for line in (tmp_path / "trigger-builder-trace.jsonl").read_text().splitlines()
+        if json.loads(line)["event"] == "actor_request"
+    )
+    payload = json.loads(request["reason"])
+    assert payload["focus"] == "objective"
+    assert payload["candidate_goal"]["id"] == "goal-0001"
+    assert payload["evidence_refs"] == ["level_0/turn_000.txt"]
+    assert request["focus"] == "objective"
+    tool_records = [
+        json.loads(line)
+        for line in (tmp_path / "tool-trace.jsonl").read_text().splitlines()
+    ]
+    blocked = [
+        record
+        for record in tool_records
+        if record["name"] == "take_action" and record["status"] == "error"
+    ]
+    assert len(blocked) == 2
+    assert "request_builder" in blocked[0]["result"]
+    assert "update_goal" in blocked[1]["result"]
+    batched_resolution = next(
+        record
+        for record in tool_records
+        if record["tool_call_id"] == "blocked-batched-resolution"
+    )
+    assert batched_resolution["status"] == "error"
+    assert "cannot share a tool batch" in batched_resolution["result"]
+    review = json.loads(
+        (
+            agent.workspace_dir
+            / "epistemic"
+            / "objective-builder-reviews.jsonl"
+        ).read_text()
+    )
+    assert review["assessment"] == "supported"
+    assert review["recommended_route"] == "DOWN x2"
+    builder_records = [
+        json.loads(line)
+        for line in (tmp_path / "builder-tool-trace.jsonl").read_text().splitlines()
+    ]
+    rejected_promotion = next(
+        record
+        for record in builder_records
+        if record["tool_call_id"] == "blocked-objective-promotion"
+    )
+    assert rejected_promotion["status"] == "error"
+    assert "cannot edit world_model.py" in rejected_promotion["result"]
+
+
+@pytest.mark.asyncio
+async def test_typed_objective_timeout_returns_a_resolvable_unavailable_review(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BlockingObjectiveBuilderLLM(FakeLLMClient):
+        def __init__(self) -> None:
+            super().__init__(
+                scripted_responses=[
+                    tool_response(
+                        "propose_goal",
+                        {
+                            "predicate": "contact completes the level",
+                            "evidence_refs": ["level_0/turn_000.txt"],
+                            "falsifier": "contact is nonterminal",
+                        },
+                        "goal-proposal",
+                    ),
+                    tool_response(
+                        "request_builder",
+                        {
+                            "focus": "objective",
+                            "evidence_refs": ["level_0/turn_000.txt"],
+                            "candidate_goal_id": "goal-0001",
+                        },
+                        "typed-build",
+                    ),
+                    tool_response(
+                        "update_goal",
+                        {
+                            "goal_id": "goal-0001",
+                            "status": "proposed",
+                            "evidence_refs": ["level_0/turn_000.txt"],
+                            "note": "builder unavailable; retain without selecting",
+                        },
+                        "acknowledge-unavailable",
+                    ),
+                    tool_response("take_action", {"action": "UP"}, "fresh-action"),
+                ]
+            )
+            self.calls = 0
+
+        async def acall(self, messages, tools=None, output_model=None, **kwargs):
+            self.calls += 1
+            if self.calls == 3:
+                await asyncio.Event().wait()
+            return await super().acall(
+                messages, tools=tools, output_model=output_model, **kwargs
+            )
+
+    monkeypatch.setenv("TYCHO_MODE", "orchestrator")
+    monkeypatch.setenv("TYCHO_NOOA_TREATMENT", "typed_candidate_goals")
+    monkeypatch.setattr(
+        "tycho_nooa.builder.verify_state",
+        lambda executor: ("[verify state] objective timeout fixture", None),
+    )
+    agent = TychoNooaAgent(
+        llm=BlockingObjectiveBuilderLLM(),
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+        tool_trace_path=tmp_path / "tool-trace.jsonl",
+        deadline_config=DecisionDeadlineConfig(
+            builder_cap_seconds=0.01,
+            actor_reserve_seconds=0.02,
+            objective_builder_cap_seconds=0.01,
+            objective_actor_reserve_seconds=0.02,
+            host_return_reserve_seconds=0.005,
+        ),
+    )
+
+    decision = await agent.act(turn(0), decision_timeout_seconds=0.1)
+
+    assert decision == ActionDecision(action="UP")
+    assert agent._goal_ledger is not None
+    goal = agent._goal_ledger.get("goal-0001")
+    assert goal.status.value == "proposed"
+    assert goal.resolved_review_id == "review-0001"
+    review = json.loads(
+        (
+            agent.workspace_dir
+            / "epistemic"
+            / "objective-builder-reviews.jsonl"
+        ).read_text()
+    )
+    assert review["assessment"] == "unavailable"
+    request = next(
+        record
+        for record in (
+            json.loads(line)
+            for line in (tmp_path / "tool-trace.jsonl").read_text().splitlines()
+        )
+        if record["name"] == "request_builder"
+    )
+    result = json.loads(request["result"])
+    assert result["builder"]["status"] == "unavailable"
+    assert "update_goal" in result["required_next_step"]
+
+
+@pytest.mark.asyncio
+async def test_builder_deadline_preserves_the_actor_reserve(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An advisory builder must yield while the host can still receive an action."""
+    cancelled = asyncio.Event()
+
+    class BlockingBuilderLLM(FakeLLMClient):
+        def __init__(self) -> None:
+            super().__init__(
+                scripted_responses=[
+                    tool_response("take_action", {"action": "UP"}, "actor-0"),
+                    tool_response("take_action", {"action": "DOWN"}, "actor-1"),
+                ]
+            )
+            self.calls = 0
+
+        async def acall(self, messages, tools=None, output_model=None, **kwargs):
+            self.calls += 1
+            if self.calls == 2:
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.set()
+            return await super().acall(
+                messages, tools=tools, output_model=output_model, **kwargs
+            )
+
+    monkeypatch.setattr(
+        "tycho_nooa.trigger_builder.TychoTransitionTrigger.evaluate",
+        lambda self, level, executor: TriggerDecision(
+            fired=True, cause="dynamics", reason="exact trigger reason"
+        ),
+    )
+    monkeypatch.setattr(
+        "tycho_nooa.builder.verify_state",
+        lambda executor: ("[verify state] deadline fixture", None),
+    )
+    llm = BlockingBuilderLLM()
+    agent = TychoNooaAgent(
+        llm=llm,
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+        tool_trace_path=tmp_path / "tool-trace.jsonl",
+        deadline_config=DecisionDeadlineConfig(
+            builder_cap_seconds=0.01,
+            actor_reserve_seconds=0.02,
+            host_return_reserve_seconds=0.005,
+        ),
+    )
+
+    await agent.act(turn(0), decision_timeout_seconds=0.1)
+    decision = await agent.act(
+        turn(1, previous_action="UP"), decision_timeout_seconds=0.1
+    )
+
+    assert decision == ActionDecision(action="DOWN")
+    assert cancelled.is_set()
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "trigger-builder-trace.jsonl").read_text().splitlines()
+    ]
+    exhausted = next(
+        record for record in records if record["event"] == "builder_deadline_exceeded"
+    )
+    assert exhausted["actor_reserve_seconds"] == 0.02
+    assert exhausted["host_return_reserve_seconds"] == 0.005
+
+
+@pytest.mark.asyncio
+async def test_actor_requested_builder_timeout_is_truthful_and_transactional(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancelled advisory pass must not leave an unverified model current."""
+
+    class PartiallyWritingBuilderLLM(FakeLLMClient):
+        def __init__(self) -> None:
+            super().__init__(
+                scripted_responses=[
+                    tool_response(
+                        "invoke_builder", {"reason": "model movement"}, "request"
+                    ),
+                    tool_response(
+                        "write_file",
+                        {
+                            "path": "world_model.py",
+                            "content": "# incomplete timed-out model\n",
+                        },
+                        "partial-write",
+                    ),
+                    tool_response("take_action", {"action": "UP"}, "commit"),
+                ]
+            )
+            self.calls = 0
+
+        async def acall(self, messages, tools=None, output_model=None, **kwargs):
+            self.calls += 1
+            if self.calls == 3:
+                await asyncio.Event().wait()
+            return await super().acall(
+                messages, tools=tools, output_model=output_model, **kwargs
+            )
+
+    monkeypatch.setenv("TYCHO_MODE", "orchestrator")
+    llm = PartiallyWritingBuilderLLM()
+    agent = TychoNooaAgent(
+        llm=llm,
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+        tool_trace_path=tmp_path / "tool-trace.jsonl",
+        deadline_config=DecisionDeadlineConfig(
+            builder_cap_seconds=0.02,
+            actor_reserve_seconds=0.02,
+            host_return_reserve_seconds=0.005,
+        ),
+    )
+    world_model_before = (agent.workspace_dir / "world_model.py").read_bytes()
+
+    decision = await agent.act(turn(0), decision_timeout_seconds=0.1)
+
+    assert decision == ActionDecision(action="UP")
+    assert (agent.workspace_dir / "world_model.py").read_bytes() == world_model_before
+    tool_records = [
+        json.loads(line)
+        for line in (tmp_path / "tool-trace.jsonl").read_text().splitlines()
+    ]
+    request = next(record for record in tool_records if record["name"] == "invoke_builder")
+    assert request["status"] == "error"
+    assert "deadline exceeded after 1 completed tool call" in request["result"]
+    assert "rolled back" in request["result"]
+    assert "skipped" not in request["result"]
+    trace_records = [
+        json.loads(line)
+        for line in (tmp_path / "trigger-builder-trace.jsonl").read_text().splitlines()
+    ]
+    timeout = next(
+        record for record in trace_records
+        if record["event"] == "builder_deadline_exceeded"
+    )
+    assert timeout["partial_tool_calls"] == 1
+    assert "world_model.py" in timeout["rolled_back_paths"]
+    assert timeout["candidate_retention_error"] is None
+    retained = timeout["retained_candidate"]
+    assert retained is not None
+    assert retained["publication_allowed"] is False
+    assert retained["planner_eligible"] is False
+    assert retained["contemporaneous_score"] == {
+        "status": "assessed_without_transition_score",
+        "reason": "host verifier ran but no graded transition score was available",
+        "source": "host auto world-model feedback",
+        "load_status": "loaded",
+        "tool_call_index": 1,
+        "accepted_transition_accuracy": None,
+        "matched_transitions": None,
+        "evaluated_transitions": None,
+        "observed_transitions": None,
+        "first_divergence": None,
+        "accepted_level_start_accuracy": 0.0,
+        "current_level_initial_render_status": "error",
+        "all_levels_initial_render_status": "error",
+        "current_level_dynamics_status": "error",
+        "all_levels_dynamics_status": "error",
+        "current_level_outcome_status": "unobserved",
+        "current_level_terminal_render_status": "unobserved",
+        "planner_status": "not_run_current_level_initial_render_failed",
+    }
+
+    candidate_index = json.loads(
+        (agent.workspace_dir / "candidates/world_model/index.json").read_text()
+    )
+    assert candidate_index["schema_version"] == 1
+    assert len(candidate_index["records"]) == 1
+    indexed = candidate_index["records"][0]
+    assert indexed["record_id"] == retained["record_id"]
+    assert indexed["publication_allowed"] is False
+    assert indexed["planner_eligible"] is False
+    assert (agent.workspace_dir / indexed["model_path"]).read_text() == (
+        "# incomplete timed-out model\n"
+    )
+
+    candidate_record = json.loads(
+        (agent.workspace_dir / indexed["record_path"]).read_text()
+    )
+    assert candidate_record["authority"] == "retained_noncanonical_candidate"
+    assert candidate_record["model_sha256"] == indexed["model_sha256"]
+    assert candidate_record["evidence_frontier"] == [
+        {
+            "path": "level_0/turn_000.json",
+            "sha256": hashlib.sha256(
+                (agent.workspace_dir / "level_0/turn_000.json").read_bytes()
+            ).hexdigest(),
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_the_llm_trace_covers_the_builder_as_well_as_the_actor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -109,7 +651,6 @@ async def test_the_llm_trace_covers_the_builder_as_well_as_the_actor(
     llm = FakeLLMClient(
         scripted_responses=[
             tool_response("take_action", {"action": "UP"}, "actor-0"),
-            prose_response("actor checkpoint after turn 0"),
             tool_response(
                 "write_file",
                 {"path": "notes/world_model.md", "content": "Observed: UP moves it."},
@@ -156,6 +697,12 @@ async def test_the_llm_trace_covers_the_builder_as_well_as_the_actor(
     assert [record["call_index"] for record in records] == list(
         range(1, len(records) + 1)
     )
+    checkpoints = sorted((tmp_path / "decision-checkpoints" / "calls").iterdir())
+    checkpoint_sources = {
+        json.loads((checkpoint / "request.json").read_text())["source"]
+        for checkpoint in checkpoints
+    }
+    assert checkpoint_sources == {"actor", "builder"}
 
 
 @pytest.mark.asyncio
@@ -176,7 +723,6 @@ async def test_trigger_builds_fresh_report_before_actor_and_traces_uptake(
     llm = FakeLLMClient(
         scripted_responses=[
             tool_response("take_action", {"action": "UP"}, "actor-0"),
-            prose_response("actor checkpoint after turn 0"),
             tool_response(
                 "write_file",
                 {
@@ -232,8 +778,8 @@ async def test_trigger_builds_fresh_report_before_actor_and_traces_uptake(
     assert "take_action" not in {tool.name for tool in builder_tools}
     assert "edit_function" in {tool.name for tool in builder_tools}
     assert agent._trigger_builder.builder.agent_id != agent.agent_id
-    # Upstream's prompt, unchanged, plus our appended `symmetry` brief -- upstream's own
-    # preload enumeration predates that module and would otherwise deny it exists.
+    # Upstream's prompt, unchanged, plus our local capability briefs. The retained
+    # candidate notice makes rolled-back work discoverable without granting it authority.
     assert agent._trigger_builder.builder._resolve_system_prompt() == (
         render_prompt(
             "builder.system",
@@ -241,7 +787,7 @@ async def test_trigger_builds_fresh_report_before_actor_and_traces_uptake(
             report_file=REPORT_FILE,
             meta_reflect=False,
         )
-        + f"\n\n{PROMPT_BRIEF}"
+        + f"\n\n{RETAINED_CANDIDATE_BRIEF}\n\n{PROMPT_BRIEF}"
     )
     builder_events = agent._trigger_builder.builder.event_manager.values()
     builder_tasks = [event for event in builder_events if isinstance(event, Task)]
@@ -264,9 +810,7 @@ async def test_trigger_builds_fresh_report_before_actor_and_traces_uptake(
     actor_tasks = [
         event for event in agent.event_manager.values() if isinstance(event, Task)
     ]
-    # The last task is turn 1's own actor_beliefs.md checkpoint prompt, inserted
-    # after the decision; the turn's observation (carrying the report) is -2.
-    assert report in actor_tasks[-2].prompt
+    assert report in actor_tasks[-1].prompt
 
     builder_trace = [
         json.loads(line)
@@ -311,7 +855,6 @@ async def test_malformed_builder_click_recommendation_does_not_end_episode(
     llm = FakeLLMClient(
         scripted_responses=[
             tool_response("take_action", {"action": "UP"}, "actor-0"),
-            prose_response("actor checkpoint after turn 0"),
             tool_response(
                 "write_file",
                 {"path": "notes/world_model.md", "content": "UP changed the grid."},
@@ -374,7 +917,6 @@ async def test_stale_or_missing_report_is_replaced_by_tool_free_final_report(
     llm = FakeLLMClient(
         scripted_responses=[
             tool_response("take_action", {"action": "UP"}, "actor-0"),
-            prose_response("actor checkpoint after turn 0"),
             prose_response("done"),
             prose_response("nothing new yet"),
             prose_response(fallback),
@@ -432,7 +974,6 @@ async def test_forced_report_identical_to_prior_report_is_not_fresh(
     llm = FakeLLMClient(
         scripted_responses=[
             tool_response("take_action", {"action": "UP"}, "actor-0"),
-            prose_response("actor checkpoint after turn 0"),
             prose_response("done"),
             prose_response("nothing new yet"),
             prose_response("done"),
@@ -487,14 +1028,13 @@ async def test_forced_report_call_offers_tools_but_ignores_attempted_tool_calls(
     """Matches Tycho's builder.py forced-report fallback: the final generate
     call still offers tools (it is not hard-blocked via tools=[]/tool_choice=
     "none"), but Tycho's handling of that reply only reads reply["text"] and
-    never inspects reply["tool_calls"] — a tool-call attempt there is silently
-    unexecuted, not structurally disallowed. If the model tries to call a tool
-    anyway instead of replying in prose, the forced pass must fall back to the
-    fixed report template rather than executing that tool call."""
+    never executes reply["tool_calls"] — a tool-call attempt there is rejected
+    rather than structurally disallowed. If the model tries to call a tool anyway
+    instead of replying in prose, the forced pass must fall back to the fixed
+    report template while retaining a terminal error row for the attempt."""
     llm = RecordingFakeLLMClient(
         scripted_responses=[
             tool_response("take_action", {"action": "UP"}, "actor-0"),
-            prose_response("actor checkpoint after turn 0"),
             prose_response("still exploring"),
             prose_response("nothing new yet"),
             tool_response(
@@ -530,14 +1070,13 @@ async def test_forced_report_call_offers_tools_but_ignores_attempted_tool_calls(
         action="DOWN"
     )
 
-    # Call order: actor turn 0, actor's own actor_beliefs.md checkpoint (filler),
-    # builder main loop (breaks on the prose reply), builder world-model
+    # Call order: actor turn 0, builder main loop, builder world-model
     # checkpoint enforcement, builder forced final call, actor turn 1.
-    checkpoint_call_tools = llm.tools_per_call[3]
+    checkpoint_call_tools = llm.tools_per_call[2]
     assert checkpoint_call_tools, "checkpoint call must offer tools too"
     assert "take_action" not in checkpoint_call_tools
 
-    forced_call_tools = llm.tools_per_call[4]
+    forced_call_tools = llm.tools_per_call[3]
     assert forced_call_tools, "forced call must still offer tools, like Tycho does"
     assert "take_action" not in forced_call_tools
 
@@ -550,9 +1089,28 @@ async def test_forced_report_call_offers_tools_but_ignores_attempted_tool_calls(
     world_model_notes = agent.workspace_dir / "notes/world_model.md"
     assert world_model_notes.read_text() != "sneaky"
 
-    builder_trace_path = tmp_path / "builder-tool-trace.jsonl"
-    if builder_trace_path.exists():
-        assert builder_trace_path.read_text().strip() == ""
+    builder_trace = [
+        json.loads(line)
+        for line in (tmp_path / "builder-tool-trace.jsonl").read_text().splitlines()
+    ]
+    assert builder_trace == [
+        {
+            "call_index": 1,
+            "tool_call_id": "forced-attempt",
+            "level": 0,
+            "turn_in_level": 1,
+            "name": "write_file",
+            "arguments": {
+                "path": "notes/world_model_report.md",
+                "content": "sneaky",
+            },
+            "status": "error",
+            "result": (
+                "Builder final-report phase accepts prose only; tool call was not "
+                "executed"
+            ),
+        }
+    ]
 
     trace = [
         json.loads(line)
@@ -581,7 +1139,6 @@ async def test_world_model_checkpoint_is_forced_when_pass_leaves_it_stale(
     llm = FakeLLMClient(
         scripted_responses=[
             tool_response("take_action", {"action": "UP"}, "actor-0"),
-            prose_response("actor checkpoint after turn 0"),
             prose_response("done"),
             prose_response("nothing new yet"),
             prose_response(fallback_report),
@@ -647,7 +1204,6 @@ async def test_world_model_checkpoint_executes_a_genuine_model_edit(
     llm = FakeLLMClient(
         scripted_responses=[
             tool_response("take_action", {"action": "UP"}, "actor-0"),
-            prose_response("actor checkpoint after turn 0"),
             prose_response("done"),
             tool_response(
                 "write_file",
@@ -983,11 +1539,148 @@ async def test_unresolved_completion_is_the_latest_builder_priority(
     ]
     assert "HOST-CONFIRMED OUTCOME CHECKPOINT" in first_prompts[-1]
     assert "Do not investigate current-level dynamics first" in first_prompts[-1]
+    assert all(
+        "BUILDER BUDGET" not in str(message.get("content"))
+        for messages in llm.messages_per_call
+        for message in messages
+    )
     # A prose refusal cannot silently end a mandatory repair prefix; both
     # configured construction rounds must be spent before fallback handling.
     assert len(llm.messages_per_call) == 4
     assert result.outcome_checkpoint_required is True
     assert result.outcome_checkpoint_resolved is False
+
+
+@pytest.mark.asyncio
+async def test_builder_sees_fresh_time_and_call_budget_before_every_repair_round(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    llm = MessageRecordingFakeLLMClient(
+        scripted_responses=[
+            tool_response(
+                "edit_function",
+                {
+                    "path": "world_model.py",
+                    "name": "transition",
+                    "code": "def transition(state, action):\n    return state\n",
+                },
+                "minimal-edit",
+            ),
+            tool_response("run_python", {"code": "print('probe 2')"}, "probe-2"),
+            tool_response("run_python", {"code": "print('probe 3')"}, "probe-3"),
+            tool_response("run_python", {"code": "print('probe 4')"}, "probe-4"),
+            prose_response("recommended_action: none"),
+        ]
+    )
+    monotonic = iter([100.0, 120.0, 150.0, 180.0])
+    monkeypatch.setattr("tycho_nooa.builder.monotonic", lambda: next(monotonic))
+    monkeypatch.setattr(
+        "tycho_nooa.builder.verify_state",
+        lambda executor: ("[verify state] first divergence remains", None),
+    )
+    agent = TychoNooaAgent(
+        llm=llm,
+        trigger_builder=False,
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+    )
+    builder = FocusedBuilder(
+        llm=llm,
+        executor=agent._tool_executor,
+        trace_path=tmp_path / "builder-tool-trace.jsonl",
+        config=BuilderConfig(max_tool_steps=4, show_budget_telemetry=True),
+    )
+
+    await builder.build(
+        BuilderRequest(
+            turn=turn(0),
+            reason="repair the first divergence",
+            deadline_at=240.0,
+        )
+    )
+
+    notices = []
+    for messages in llm.messages_per_call[:4]:
+        matching = [
+            message["content"]
+            for message in messages
+            if message.get("role") == "user"
+            and "BUILDER BUDGET" in str(message.get("content"))
+        ]
+        notices.append(matching[-1])
+
+    assert "Time remaining: 140 seconds" in notices[0]
+    assert "Repair model calls remaining (including this call): 4" in notices[0]
+    assert "Mode: investigate" in notices[0]
+    assert "Time remaining: 120 seconds" in notices[1]
+    assert "Repair model calls remaining (including this call): 3" in notices[1]
+    assert "Mode: commit" in notices[1]
+    assert "Make the smallest reversible edit now" in notices[1]
+    assert "Time remaining: 60 seconds" in notices[3]
+    assert "Repair model calls remaining (including this call): 1" in notices[3]
+
+
+@pytest.mark.asyncio
+async def test_host_builder_allocation_reaches_the_model_visible_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[BuilderRequest] = []
+
+    class CapturingBuilder:
+        agent_id = "budget-capturing-builder"
+
+        def __init__(self, **kwargs):
+            self.event_manager = None
+
+        async def build(self, request: BuilderRequest) -> BuilderResult:
+            captured.append(request)
+            return BuilderResult(
+                report="recommended_action: none",
+                report_fresh=True,
+                report_forced=False,
+                world_model_checkpoint_forced=False,
+                outcome_checkpoint_required=False,
+                outcome_checkpoint_resolved=True,
+                artifact_hashes={},
+                tool_calls=[],
+            )
+
+    monkeypatch.setattr("tycho_nooa.trigger_builder.FocusedBuilder", CapturingBuilder)
+    monkeypatch.setattr(
+        "tycho_nooa.trigger_builder.TychoTransitionTrigger.evaluate",
+        lambda self, level, executor: TriggerDecision(
+            fired=True,
+            cause="dynamics",
+            reason="repair the first divergence",
+        ),
+    )
+    agent = TychoNooaAgent(
+        llm=FakeLLMClient(
+            scripted_responses=[
+                tool_response("take_action", {"action": "UP"}, "commit")
+            ]
+        ),
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+        deadline_config=DecisionDeadlineConfig(
+            builder_cap_seconds=0.2,
+            actor_reserve_seconds=0.2,
+            host_return_reserve_seconds=0.01,
+        ),
+    )
+    assert agent._trigger_builder is not None
+    agent._trigger_builder._llm_trace = None
+    started = time.monotonic()
+
+    await agent.act(turn(1, previous_action="UP"), decision_timeout_seconds=1.0)
+
+    assert len(captured) == 1
+    assert captured[0].deadline_at is not None
+    assert started < captured[0].deadline_at <= started + 0.25
 
 
 @pytest.mark.asyncio
@@ -1124,7 +1817,6 @@ async def test_unavailable_sandbox_degrades_the_trigger_instead_of_ending_the_ep
     llm = FakeLLMClient(
         scripted_responses=[
             tool_response("take_action", {"action": "UP"}, "actor-0"),
-            prose_response("actor checkpoint after turn 0"),
             tool_response("take_action", {"action": "DOWN"}, "actor-1"),
             prose_response("actor checkpoint after turn 1"),
         ]
@@ -1161,7 +1853,6 @@ async def test_clean_signal_does_not_dispatch_builder(
     llm = FakeLLMClient(
         scripted_responses=[
             tool_response("take_action", {"action": "UP"}, "actor-0"),
-            prose_response("actor checkpoint after turn 0"),
             tool_response("take_action", {"action": "DOWN"}, "actor-1"),
         ]
     )
@@ -1202,3 +1893,65 @@ async def test_clean_signal_does_not_dispatch_builder(
             "reason": None,
         }
     ]
+
+
+def _edit(call_index: int, result: str) -> dict:
+    return {
+        "call_index": call_index,
+        "status": "complete",
+        "name": "edit_function",
+        "arguments": {"path": "world_model.py", "name": "transition"},
+        "result": result,
+    }
+
+
+GRADED_FEEDBACK = (
+    "edit_function: replaced `transition` in world_model.py (lines 62-87).\n\n"
+    "[auto world-model feedback]\n"
+    "DYNAMICS_METRICS:\n"
+    "  exact_transition_accuracy (simulation_accuracy) = 0.50 <- exact match rate\n"
+    "  transition_replay = matched 8 / evaluated 16 / observed 18 transitions\n"
+    "  first divergence: L0 turn 4 RIGHT\n"
+)
+
+SKIPPED_FEEDBACK = (
+    "edit_function: replaced `transition` in world_model.py (lines 62-86).\n\n"
+    "[auto world-model feedback]\n"
+    f"{AST_UNCHANGED_NOTICE} (comments/formatting only)"
+)
+
+
+def test_a_cosmetic_final_edit_does_not_erase_the_candidate_score() -> None:
+    """The verifier is skipped on an AST-preserving edit, not run and found empty.
+
+    Reading the score off the last edit rather than the last *graded* edit lost the
+    only positive score in a preserved pass, which is exactly the selection
+    inversion candidate retention exists to prevent.
+    """
+    score = _contemporaneous_score(
+        [_edit(1, GRADED_FEEDBACK), _edit(2, SKIPPED_FEEDBACK)]
+    )
+
+    assert score["status"] == "measured"
+    assert score["matched_transitions"] == 8
+    assert score["evaluated_transitions"] == 16
+    assert score["first_divergence"] == "L0 turn 4 RIGHT"
+    # The retained bytes are not the graded bytes; the record has to say so.
+    assert score["tool_call_index"] == 1
+    assert score["ast_preserving_edits_since_grade"] == 1
+
+
+def test_a_graded_final_edit_claims_no_ast_preserving_gap() -> None:
+    score = _contemporaneous_score([_edit(1, SKIPPED_FEEDBACK), _edit(2, GRADED_FEEDBACK)])
+
+    assert score["status"] == "measured"
+    assert score["tool_call_index"] == 2
+    assert "ast_preserving_edits_since_grade" not in score
+
+
+def test_an_entirely_cosmetic_pass_reports_an_ungraded_body() -> None:
+    score = _contemporaneous_score([_edit(1, SKIPPED_FEEDBACK), _edit(2, SKIPPED_FEEDBACK)])
+
+    assert score["status"] == "unavailable"
+    assert "never graded" in score["reason"]
+    assert score["ast_preserving_edits_since_grade"] == 2

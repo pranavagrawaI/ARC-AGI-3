@@ -62,8 +62,7 @@
   `TriggerBuilderLoop.before_actor` on the following turn once `turn.level`
   itself has advanced. `take_action`/`submit_action` are
   withheld from the scribe's offered tools rather than offered-then-
-  intercepted (Tycho's own approach), matching `strategy.py`'s
-  `_enforce_actor_beliefs_checkpoint` precedent. `_is_world_model_edit` and
+  intercepted (Tycho's own approach). `_is_world_model_edit` and
   `_write_level_insight_fallback` are byte-exact ports of
   `agent.py`'s equivalents, adapted only for tycho_nooa's always-
   `actor_writes_wm=False` mode (so the builder-owned check needs no mode
@@ -165,18 +164,18 @@
   `DIAGNOSIS.md`'s first live run found `notes/actor_beliefs.md` written once
   at turn 1 and never refreshed despite two later probing bursts, and our goal
   — reliable level solving — benefits from the builder seeing the actor's
-  current thinking rather than its turn-1 draft. `NativeToolStrategy.execute`
-  now runs `_enforce_actor_beliefs_checkpoint` after every turn's action is
-  committed, mirroring `_enforce_world_model_checkpoint`'s shape: one real
-  chance for the model to write a genuine update (with `take_action` and
-  `submit_action` withheld from the offered tools, since the turn's action is
-  already committed), and only if the file is still byte-identical afterward
-  does it force a deterministic breadcrumb
-  (`_fallback_actor_beliefs_checkpoint`). See
+  current thinking rather than its turn-1 draft. The model can update the file
+  during its normal pre-action tool loop. After an action is committed,
+  `NativeToolStrategy.execute` performs no provider call: if the file remains
+  byte-identical it appends a deterministic, provenance-marked breadcrumb that
+  records the committed action (`_fallback_actor_beliefs_checkpoint`). This
+  replaces the earlier mandatory model-authored post-action checkpoint. In
+  `runs/tycho-nooa-gemma4-31b-reasoning-capture-20260821T081012Z`, that extra
+  call withheld an accepted `DOWN` for 29.9 seconds and crossed the host's
+  600-second deadline by 2.3 seconds. See
   `tests/test_native_flow.py::test_actor_beliefs_checkpoint_is_forced_when_turn_leaves_it_stale`,
-  `tests/test_native_flow.py::test_actor_beliefs_checkpoint_executes_a_genuine_model_edit`,
-  and
-  `tests/test_native_flow.py::test_actor_beliefs_checkpoint_withholds_take_action_from_offered_tools`.
+  `tests/test_native_flow.py::test_actor_beliefs_written_before_action_is_preserved_without_fallback`,
+  and `tests/test_native_flow.py::test_accepted_action_does_not_wait_for_post_action_llm_call`.
 
 - adaptation: `TriggerBuilderLoop.before_actor` catches any exception raised by
   the divergence probe (`TychoTransitionTrigger.evaluate` ->
@@ -222,19 +221,22 @@
   naming the state field that blocks closure is the whole diagnosis and the
   builder decides.
 
-  The verdict is a disjunction of two independently sufficient static
-  conditions: `outcome()` is one unconditional `return <string>` that is not
-  `"level_complete"`, or the literal appears in no executable string in the
-  module. The second alone was the first implementation and it failed in vivo.
-  Pinned Tycho's `seed_world_model.py.tmpl` already spends the literal in
-  `subgoals()` — `return [lambda s: outcome(s) == "level_complete"]` — while
-  `outcome()` is still `return "ongoing"`, so a module-wide literal search
-  clears the exact model the gate exists to catch. Every replay had been run
-  against `runs/tycho-nooa-level-start-ar25-20260818T175557Z`'s
-  builder-edited model, which had rewritten `subgoals()` and removed the
-  literal, masking the interaction; only the live
-  `runs/tycho-nooa-goal-gate-ar25-20260819T120904Z` exposed it. See
-  `tests/test_probe_gate.py`, whose regression reads the real pinned template.
+  The goal verdict is now tri-valued:
+  `proven_unsatisfiable | unknown | candidate_present`. Only a syntactically
+  restricted unconditional non-goal return is permitted to block planning.
+  A goal literal, a sampled goal result, or a constant goal return establishes
+  only `candidate_present`; literal absence and non-goal samples remain
+  diagnostics and produce `unknown`. This deliberately narrows Gate 0 from a
+  heuristic rejection into a sound special-case proof. See
+  `tests/test_probe_gate.py`, including the dynamically constructed
+  `"level_" + "complete"` regression.
+
+- adaptation: protocol v3 carries a complete public `EvidenceEnvelope` rather
+  than only `frames[-1]`: the settled `decision_frame`, the exact terminal
+  frame when the transition completes or ends a game, typed transient event
+  frames, and explicit selection provenance. The actor still chooses from the
+  settled frame, while Tycho's evidence store receives terminal and animation
+  evidence before lifecycle mutation or scribing.
 
 - adaptation: `NativeToolStrategy.execute` spends one final generate with
   `take_action` as the only offered tool before raising on an exhausted
@@ -246,8 +248,8 @@
   `ProtocolError` at action 0. An ARC episode has no "no action" branch, so a
   silent turn throws the run either way; a model that still declines when
   `take_action` is the only tool left is a real refusal and still raises. Shape
-  mirrors `_enforce_actor_beliefs_checkpoint` (restrict the offered tools, then
-  let the failure stand), and `tool_choice` stays `"auto"` because `"required"`
+  restricts the offered tools, then lets the failure stand. `tool_choice` stays
+  `"auto"` because `"required"`
   draws 500s from some gateways — nooa's own `codeact.py` says so. See
   `tests/test_native_flow.py::test_a_spent_tool_budget_demands_the_action_instead_of_ending_the_episode`
   and
@@ -298,10 +300,14 @@
   and unconditional in one return path), writing `llm-trace.jsonl`. It attaches
   to the actor's event manager and to each per-fire builder as the trigger loop
   creates it, since a builder is a separate agent with a separate stream.
-  Counters are always written; text only under `TYCHO_NOOA_CAPTURE_REASONING=1`,
-  because OpenRouter returns no reasoning unless asked and asking changes the run
+  Counters and returned text are always written, and live calls always request
+  provider reasoning. Explicit zero values for either control are rejected so a
+  research run cannot silently discard its model-visible rationale. This is a
+  protocol change from the historical runs below: asking can change the run
   (`unifiedllm.py`: `if reasoning := self.config.get("reasoning")`), not merely
-  what we observe of it. Separately, `ARC_LLM_CONTEXT_WINDOW` now reaches the
+  what we observe of it, so those older results remain evidence for their frozen
+  configuration rather than reasoning-on controls. Separately,
+  `ARC_LLM_CONTEXT_WINDOW` now reaches the
   client. Measured: `client.context_window` resolved to `None` for
   `openai/meta/muse-glimmer-30b`, and every layer of NOOA's defence is gated on
   it — the proactive budget in `_build_messages`, `_archive_on_context_error`
@@ -316,30 +322,76 @@
   `tests/test_native_flow.py::test_the_llm_trace_records_the_counters_for_every_round_trip`
   and `tests/test_trigger_builder.py::test_the_llm_trace_covers_the_builder_as_well_as_the_actor`.
 
-- mode reuse: `TYCHO_MODE` now selects the orchestration topology, and the
-  registry is imported rather than restated — `tycho_nooa.modes` calls upstream's
-  own `tycho.agent.modes.resolve_mode`, so a mode name means here exactly what it
-  means there and an upstream change to a `ModeSpec` is inherited, not mirrored.
-  Two of the four are wired. `trigger` stays the default, so every run recorded
-  before this entry names the arm it actually ran. `no_world_model` is served by
-  the two switches upstream derives from one predicate
-  (`agent/agent.py:288`: `wm_variant != "none"`): `GameWorkspace(seed_world_model=)`
-  and `ToolExecutor(wm_feedback_enabled=)`. Keeping them together is what makes
-  the arm coherent — a workspace that seeds no `world_model.py` but still runs the
-  automatic feedback probe (and its goal gate) on every edit would report a
-  missing model as a defect on every turn. `single` and `orchestrator` raise
-  `NotImplementedError` naming the unwired `ModeSpec` field rather than falling
-  back, because the dangerous failure for a comparison is silence: an unwired arm
-  running as `trigger` is secretly a second control. `single` needs
-  `actor_writes_wm` (the actor is never told it owns `world_model.py`);
-  `orchestrator` needs `include_builder` (no `invoke_builder` tool exists on the
-  actor's surface). The actor's baseline paragraph is `wm_none.j2` rendered
-  byte-exact and alone: `actor.system.j2:29` gates its `actor_beliefs.md`
-  paragraph on `orch`/`trigger`, and `wm_none.j2` names the same file in its own
-  words, so the baseline is upstream's `none` mode and not the trigger prompt
-  minus a sentence. `arc-host`'s worker allowlist carries `TYCHO_MODE` for the
-  same reason it carries `TYCHO_NOOA_CAPTURE_REASONING`: dropped, the run looks
-  valid and measures the wrong arm. See `tests/test_modes.py`.
+- mode reuse: Tycho defines four canonical actor modes in
+  `tycho/configs/base.yaml` and enforces their behavior across harness
+  construction, actor prompting, tool ownership, seeding, and builder
+  activation. The hybrid imports that registry and centralizes those same
+  dimensions in `ModePolicy`. All four pinned modes are executable. Actor
+  writes to `world_model.py` are mechanically rejected in `trigger`,
+  `orchestrator`, and `no_world_model`; `single` gives the actor the upstream
+  single-mode prompt and the additional `edit_function` tool. The local audited
+  mode names are frozen independently from the imported registry so a future
+  upstream addition fails closed until its whole ownership contract is reviewed.
+  `arc-host`'s worker allowlist carries `TYCHO_MODE` so a dropped setting cannot
+  silently execute the wrong arm. See `tests/test_modes.py`.
+
+- orchestrator reuse: the exact actor paragraph is rendered from pinned
+  `tycho/prompts/partials/wm_orch.j2`, and the actor-facing
+  `invoke_builder` schema preserves pinned `agent_tools.py`'s single optional
+  `reason` string. The local native-tool strategy intercepts that call before
+  ordinary synchronous dispatch, waits for the same fresh `FocusedBuilder`
+  used by the trigger arm, publishes its report as the tool result, and prevents
+  a builder request and `take_action` from sharing one tool-call batch. This is
+  a runtime adaptation from Tycho's synchronous actor loop into NOOA's async
+  strategy, not a new source policy. Harness-triggered firing remains disabled
+  in orchestrator. Separate trace events record `actor_request`,
+  `builder_result`, and subsequent `actor_uptake`. See
+  `tests/test_trigger_builder.py::test_orchestrator_actor_pulls_a_fresh_builder_before_committing_action`.
+
+- local treatment, not Tycho mode reuse: `TYCHO_NOOA_TREATMENT=
+  typed_candidate_goals` is accepted only beside `TYCHO_MODE=orchestrator`.
+  `epistemic.py` exposes Pydantic-validated native tools for proposing, updating,
+  and listing `CandidateGoal` records and for requesting a builder with a typed
+  focus. Each candidate carries a predicate, host-authoritative evidence
+  references, a falsifier, status, revision metadata, and the objective-review ID
+  the actor has acknowledged. The ledger validates references against the
+  immutable evidence index and persists its own snapshot, candidate event stream,
+  and structured Builder reviews under `epistemic/`; it has no method that writes
+  `world_model.py`. The native strategy rejects `take_action` after a proposal
+  until an objective request returns and the actor calls `update_goal`. It also
+  rejects a request and resolution in the same tool batch, preserving a real
+  model boundary at which the Builder result becomes visible. The treatment
+  replaces the source control's untyped
+  `invoke_builder` surface; objective-focused `request_builder` calls require a
+  candidate ID and send that candidate as a hypothesis plus an explicit
+  independent-inspection constraint. Objective passes must return assessment,
+  reason, route, and recommended-action fields; missing fields force the compact
+  report path and parse as `inconclusive`, never as support. They skip the
+  mechanics scratchpad checkpoint and mechanically reject `world_model.py` edits,
+  so a provisional hypothesis cannot contaminate canonical `outcome()`. Its
+  ten-step Builder budget and fresh up-to-240-second slice (with 120 seconds
+  preserved for post-review Actor work) are named live deadline adaptations; the
+  exact orchestrator control retains 40 steps and its ordinary 300-second Actor
+  reserve. Builder deadline or availability failures become durable `unavailable`
+  reviews that the actor can acknowledge without falsely selecting the candidate.
+  Canonical promotion after selection remains a separate, unimplemented edge.
+  This is a model-visible epistemic adapter inspired by NOOA's typed object/method
+  paradigm, not a claim of copying NOOA's memory or CodeAct system. See
+  `tests/test_epistemic.py` and the treatment assertions in
+  `tests/test_trigger_builder.py`.
+
+- local evaluation harness: `matched_replay.py` packages the final public
+  transition and durable workspace of a legacy run, commits the workspace tree,
+  transition, and replay turn, and revalidates those bytes before every arm.
+  The frozen arms are `trigger/control`, `orchestrator/control`, and
+  `orchestrator/typed_candidate_goals`; every arm gets a fresh actor and exactly
+  one decision, and no returned action is executed. This is deliberately named
+  a matched fresh-actor warm restart. The legacy ar25 run predates model-call
+  checkpoints and retained actor history, so exact continuation is impossible;
+  the manifest records that lifetime limit as its claim ceiling. Injected LLM
+  clients keep provider/cost authorization outside the harness. Scripted replay
+  tests control flow and metric capture only, never objective-inference
+  capability. See `tests/test_matched_replay.py`.
 
 Added beside upstream, not into it: `symmetry_template.py` is ours, seeded to the
 workspace as `symmetry.py` by `TychoNooaAgent.__init__`. It is a separate file because
@@ -405,9 +457,23 @@ No source is imported from a numbered ARC experiment.
 
 ## ARC host protocol
 
-- protocol owner: `/arc-host`, version 1
+- protocol owner: `/arc-host`, version 2
 - solver-side mirror: `tycho_nooa.protocol`, required because the host runtime
   is Python 3.14 while NOOA is Python 3.12
+- version-2 addition: every `turn` carries the exact timeout enforced by
+  `JsonlWorker`. `DecisionDeadlineConfig` caps the advisory pre-actor builder at
+  240 seconds while reserving 300 seconds for the action-producing actor and 5
+  seconds for host return. Exhaustion cancels that builder pass, records
+  `builder_deadline_exceeded`, transactionally restores the pre-builder workspace,
+  and continues to the actor; an actor-pulled request receives a typed tool error
+  naming its completed partial calls and rollback, while a deadline with no
+  builder allocation records `builder_deadline_skipped`. Decision checkpoints
+  retain the cancelled call and partial workspace version. This is a local
+  safety/cost adaptation, not a mechanism inherited from Tycho or NOOA. The
+  allocation addresses the 453.2-second builder share preserved in
+  `runs/tycho-nooa-gemma4-31b-reasoning-capture-20260821T081012Z/TIMEOUT-FORENSICS.md`.
+  The host also preserves the effective value as `worker_timeout_seconds` in
+  both successful and failed run summaries.
 - parity evidence: strict payload tests plus
   `integration/smoke_host_worker.py`, which crosses both interpreters and the
   real subprocess transport

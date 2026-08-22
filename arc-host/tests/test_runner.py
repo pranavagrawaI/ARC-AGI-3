@@ -172,6 +172,28 @@ def test_public_observation_rejects_out_of_palette_cells():
         public_observation(frame(15))
 
 
+def test_completing_frame_sequence_preserves_terminal_transient_and_settled_frames():
+    completing = SimpleNamespace(
+        frame=np.asarray([[[1]], [[2]], [[3]]]),
+        available_actions=(1,),
+        levels_completed=1,
+        state="NOT_FINISHED",
+        full_reset=False,
+    )
+
+    evidence = public_observation(completing, previous_levels_completed=0)
+
+    assert evidence.decision_frame == ((3,),)
+    assert evidence.terminal_frame == ((1,),)
+    assert [event.kind for event in evidence.event_frames] == ["animation"]
+    assert [event.source_index for event in evidence.event_frames] == [1]
+    assert [event.frame for event in evidence.event_frames] == [((2,),)]
+    assert evidence.provenance.raw_frame_count == 3
+    assert evidence.provenance.decision_frame_index == 2
+    assert evidence.provenance.terminal_frame_index == 0
+    assert evidence.provenance.terminal_reason == "level_advanced"
+
+
 def test_reset_is_always_exposed_and_starts_a_fresh_attempt_turn(tmp_path: Path):
     environment = FakeEnvironment(
         [

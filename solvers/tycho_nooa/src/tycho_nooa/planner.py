@@ -47,6 +47,10 @@ def actor_world_model_paragraph(wm_variant: str) -> str:
     """
     if wm_variant == "trigger":
         return trigger_actor_world_model_paragraph()
+    if wm_variant == "single":
+        return render_prompt("wm_single").strip()
+    if wm_variant == "orch":
+        return render_prompt("wm_orch").strip()
     if wm_variant == "none":
         return render_prompt("wm_none").strip()
     raise NotImplementedError(

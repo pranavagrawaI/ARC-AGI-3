@@ -78,6 +78,8 @@ def test_primary_run_error_is_preserved_and_summarized_without_environment_close
             "fake-game",
             "--run-dir",
             str(run_dir),
+            "--worker-timeout",
+            "600",
             "--",
             "fake-worker",
         ],
@@ -91,6 +93,7 @@ def test_primary_run_error_is_preserved_and_summarized_without_environment_close
     assert summary["stop_reason"] == "exception"
     assert summary["actions"] == 21
     assert summary["levels_completed"] == 0
+    assert summary["worker_timeout_seconds"] == 600.0
     assert summary["error"] == {
         "type": "ProtocolError",
         "message": "primary",

@@ -39,6 +39,11 @@ def outcome(state):
     return "ongoing"
 """
 
+DYNAMIC_GOAL_OUTCOME = """
+def outcome(state):
+    return "level_" + "complete"
+"""
+
 # A sliding model shaped like the one a live ar25 builder wrote: a move counter
 # that only ever rises, an UNDO that restores positions but not the counter, a
 # CLICK that does nothing, and a RESET back to the level's first frame.
@@ -178,6 +183,15 @@ def test_a_reachable_goal_leaves_the_search_alone(gate) -> None:
 
     assert report["goal_satisfiable"] is True
     assert "PLANNER_STATUS" not in "\n".join(wmgate_audit_lines(report))
+
+
+def test_a_dynamically_constructed_goal_cannot_be_statically_blocked(gate) -> None:
+    report = gate(DYNAMIC_GOAL_OUTCOME)
+
+    assert report["goal_status"] == "candidate_present"
+    assert report["goal_satisfiable"] is True
+    assert report["goal"]["literal_in_module"] is False
+    assert report["goal"]["observed_values"] == ["level_complete"]
 
 
 def test_the_seed_world_model_is_blocked(gate) -> None:

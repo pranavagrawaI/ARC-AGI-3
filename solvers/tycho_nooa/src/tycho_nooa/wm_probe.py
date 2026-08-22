@@ -11,9 +11,9 @@ and on such a model neither is true.
 
 The splice adds one precondition and one audit:
 
-- `not_run_goal_unsatisfiable` replaces the search when no state can satisfy the
-  goal. That is decided statically, so it costs nothing and cannot be wrong about
-  a model it does block.
+- `not_run_goal_unsatisfiable` replaces the search only for the restricted proof
+  that `outcome()` is one unconditional non-goal string return. Literal absence
+  and sampled non-goal outcomes remain diagnostics, never blockers.
 - `PLANNER_CONTRACT` reports what each entry of `actions()` does to the planner's
   own key, and whether the key ever merges two paths. Reported, never enforced.
 
@@ -45,7 +45,7 @@ _SEARCH_ANCHOR = """    if planner_ready:
         pr = _planner_probe()
 """
 
-_GATED_SEARCH = """    if planner_ready and not _wmgate()["goal_satisfiable"]:
+_GATED_SEARCH = """    if planner_ready and _wmgate()["goal_status"] == "proven_unsatisfiable":
         for _line in wmgate_blocked_lines(_wmgate()):
             print(_line)
     elif planner_ready:
@@ -69,6 +69,12 @@ def _wmgate():
 
 
 '''
+
+# Upstream's reply when an edit leaves the syntax tree intact: the verifier is
+# skipped, so the tool result carries no metrics. A reader downstream cannot tell
+# that from a verifier that ran and found nothing unless it matches this text, so
+# the notice is named here rather than re-spelled at each use.
+AST_UNCHANGED_NOTICE = "skipped: Python syntax tree is unchanged"
 
 # Upstream `ToolExecutor._wm_feedback`, which GatedToolExecutor reimplements. A
 # change to it is a change to the behaviour being duplicated, so it must be read
@@ -123,7 +129,7 @@ class GatedToolExecutor(ToolExecutor):
         if before_ast and before_ast[0] and after_ast[0] and before_ast[1] == after_ast[1]:
             return (
                 "\n\n[auto world-model feedback]\n"
-                "skipped: Python syntax tree is unchanged (comments/formatting only)"
+                f"{AST_UNCHANGED_NOTICE} (comments/formatting only)"
             )
         out = self._run_python(gated_probe_source(), timeout=20)
         return "\n\n[auto world-model feedback]\n" + out.strip()

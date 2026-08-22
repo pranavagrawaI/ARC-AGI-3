@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic
 from typing import TYPE_CHECKING, Annotated, Any
 
 from nooa import strategy
@@ -43,6 +45,15 @@ WORLD_MODEL_CHECKPOINT_REQUEST = (
     "remains open, so the next builder invocation is not reading the same stale "
     "notes it started from."
 )
+RETAINED_CANDIDATE_BRIEF = """RETAINED NONCANONICAL CANDIDATES
+
+If candidates/world_model/index.json exists, it indexes model bodies preserved from
+builder passes that exceeded their deadline. Inspect a candidate when it is relevant to
+the present discrepancy instead of reconstructing it from memory. These files are
+evidence, not authority: they are never canonical, publication-approved, or
+planner-eligible. Only a completed, verified edit to world_model.py changes the current
+model.
+"""
 FINAL_REPORT_REQUEST = (
     "Step budget reached. Do NOT call any more tools. Right now, in your reply, give "
     "the compact report in the required format (confidence/model/dynamics/outcome/"
@@ -51,6 +62,24 @@ FINAL_REPORT_REQUEST = (
     "not yet coded'. Be concrete about what you DID figure out — especially any open "
     "outcome hypotheses and the action that would disambiguate them — so the actor can "
     "use it."
+)
+OBJECTIVE_REVIEW_REQUEST = """OBJECTIVE REVIEW (candidate remains provisional)
+
+Independently inspect the cited public evidence and evaluate the candidate objective in
+the request. Do not promote it into world_model.py outcome() during this review. Report
+the strongest discriminating evidence, a falsifying probe, and any route the actor could
+execute one action at a time. Your report must include these exact fields:
+
+candidate_goal_assessment: supported | contradicted | inconclusive
+candidate_goal_reason: concise evidence-based reason
+candidate_goal_route: route text, or none
+recommended_action: one currently legal action, or none
+"""
+OBJECTIVE_FINAL_REPORT_REQUEST = (
+    "Step budget reached. Do NOT call more tools. Return the compact objective review "
+    "now. Include candidate_goal_assessment, candidate_goal_reason, "
+    "candidate_goal_route, and recommended_action exactly as requested, even when the "
+    "assessment is inconclusive."
 )
 FALLBACK_REPORT = (
     "confidence: none\n"
@@ -76,6 +105,8 @@ OUTCOME_CHECKPOINT_REFUSAL = (
     "The host-confirmed outcome checkpoint is unresolved. A workspace tool call is "
     "required; prose cannot end this repair prefix."
 )
+COMMIT_CALLS_REMAINING = 3
+COMMIT_SECONDS_REMAINING = 90
 
 
 @dataclass(frozen=True)
@@ -83,6 +114,7 @@ class BuilderConfig:
     max_tool_steps: int = 40
     max_tokens: int = 16_000
     temperature: float | None = None
+    show_budget_telemetry: bool = False
 
 
 @dataclass(frozen=True)
@@ -90,6 +122,50 @@ class BuilderRequest:
     turn: GameTurn
     reason: str
     outcome_evidence: str | None = None
+    focus: str | None = None
+    deadline_at: float | None = None
+
+
+def _builder_budget_notice(
+    request: BuilderRequest,
+    *,
+    repair_calls_remaining: int,
+) -> str:
+    seconds_remaining = (
+        None
+        if request.deadline_at is None
+        else max(0, math.floor(request.deadline_at - monotonic()))
+    )
+    commit = repair_calls_remaining <= COMMIT_CALLS_REMAINING or (
+        seconds_remaining is not None
+        and seconds_remaining <= COMMIT_SECONDS_REMAINING
+    )
+    time_text = (
+        "unavailable"
+        if seconds_remaining is None
+        else f"{seconds_remaining} seconds"
+    )
+    if commit:
+        mode = "commit"
+        instruction = (
+            "Make the smallest reversible edit now and predict its verifier effect. "
+            "If no falsifiable edit is possible, state the exact missing evidence."
+        )
+    else:
+        mode = "investigate"
+        instruction = (
+            "Investigate the named divergence, but externalize one falsifiable "
+            "hypothesis before commitment mode."
+        )
+    return (
+        "BUILDER BUDGET (host-authoritative; supersedes earlier notices)\n"
+        f"Time remaining: {time_text}\n"
+        "Repair model calls remaining (including this call): "
+        f"{repair_calls_remaining}\n"
+        "Finishing model calls reserved: up to 2\n"
+        f"Mode: {mode}\n"
+        f"{instruction}"
+    )
 
 
 @dataclass(frozen=True)
@@ -187,11 +263,28 @@ class BuilderStrategy(GenerationStrategy):
         )
         verifier_text, _ = verify_state(builder._executor)
         runtime.event_manager.add(Task(prompt=kickoff))
-        runtime.event_manager.add(Task(prompt=verifier_text))
+        objective_review = request.focus == "objective"
+        runtime.event_manager.add(
+            Task(prompt=OBJECTIVE_REVIEW_REQUEST if objective_review else verifier_text)
+        )
         checkpoint = OutcomeCheckpoint.begin(request.outcome_evidence, verifier_text)
         checkpoint.request_repair(runtime)
 
-        for _ in range(config.max_tool_steps):
+        for round_index in range(config.max_tool_steps):
+            if config.show_budget_telemetry:
+                runtime.event_manager.add(
+                    Task(
+                        prompt=_builder_budget_notice(
+                            request,
+                            repair_calls_remaining=config.max_tool_steps - round_index,
+                        )
+                    )
+                )
+                # Keep telemetry fresh without displacing the assignment as the
+                # final, highest-priority instruction visible to the model.
+                if objective_review:
+                    runtime.event_manager.add(Task(prompt=OBJECTIVE_REVIEW_REQUEST))
+                checkpoint.request_repair(runtime)
             response, event_id = await runtime.generate(
                 tools=tools,
                 max_tokens=config.max_tokens,
@@ -210,14 +303,25 @@ class BuilderStrategy(GenerationStrategy):
                     tools_by_name,
                     tool_call,
                     reasoning=replayed_reasoning(response) if index == 0 else None,
+                    allow_world_model_edit=not objective_review,
                 )
             checkpoint.inspect_edits(runtime, builder._executor, response.tool_calls)
 
-        checkpoint_forced = await self._enforce_world_model_checkpoint(
-            runtime, builder, surface, tools_by_name, tools, config
+        checkpoint_forced = (
+            False
+            if objective_review
+            else await self._enforce_world_model_checkpoint(
+                runtime, builder, surface, tools_by_name, tools, config
+            )
         )
         return await self._finish_report(
-            runtime, builder, tools, config, checkpoint_forced, checkpoint
+            runtime,
+            builder,
+            tools,
+            config,
+            checkpoint_forced,
+            checkpoint,
+            objective_review=objective_review,
         )
 
     async def _finish_report(
@@ -228,9 +332,14 @@ class BuilderStrategy(GenerationStrategy):
         config: BuilderConfig,
         checkpoint_forced: bool,
         checkpoint: OutcomeCheckpoint,
+        *,
+        objective_review: bool,
     ) -> tuple[str, bool, bool, bool, bool]:
         report = _read_report(builder._executor.ws.dir)
-        if report is not None and report != builder._report_before:
+        report_ready = report is not None and report != builder._report_before
+        if report_ready and (
+            not objective_review or _objective_report_complete(report)
+        ):
             return (
                 report,
                 False,
@@ -239,20 +348,39 @@ class BuilderStrategy(GenerationStrategy):
                 checkpoint.resolved,
             )
 
-        runtime.event_manager.add(Task(prompt=FINAL_REPORT_REQUEST))
+        runtime.event_manager.add(
+            Task(
+                prompt=(
+                    OBJECTIVE_FINAL_REPORT_REQUEST
+                    if objective_review
+                    else FINAL_REPORT_REQUEST
+                )
+            )
+        )
         # Tycho's own forced-report call (builder.py's post-loop fallback) still
         # passes its tools_spec — it never hard-blocks the API from offering
         # tools — but its handling of that final reply only reads reply["text"]
         # and never inspects reply["tool_calls"]. Match both halves: keep tools
         # nominally available, and still only read `content` below, so any
-        # tool-call attempt on this turn is silently unexecuted rather than
-        # structurally disallowed.
+        # tool-call attempt on this turn is not executed. Record the rejection
+        # explicitly so the durable request/result graph remains total.
         response, _ = await runtime.generate(
             tools=tools,
             max_tokens=config.max_tokens,
             temperature=config.temperature,
             tool_choice="auto",
         )
+        for tool_call in response.tool_calls:
+            try:
+                arguments = json.loads(tool_call.arguments)
+            except json.JSONDecodeError:
+                arguments = {"raw_arguments": tool_call.arguments}
+            builder._tool_surface.record_rejected_call(
+                tool_call.name,
+                arguments,
+                "Builder final-report phase accepts prose only; tool call was not executed",
+                tool_call_id=tool_call.id,
+            )
         text = str(response.content or "").strip() or FALLBACK_REPORT
         builder._executor.ws.write_file(REPORT_FILE, text)
         if _read_report(builder._executor.ws.dir) != text:
@@ -320,6 +448,7 @@ class BuilderStrategy(GenerationStrategy):
         tool_call: Any,
         *,
         reasoning: str | None = None,
+        allow_world_model_edit: bool = True,
     ) -> None:
         try:
             arguments = json.loads(tool_call.arguments)
@@ -354,6 +483,26 @@ class BuilderStrategy(GenerationStrategy):
                 reasoning=reasoning,
             )
         )
+        if not allow_world_model_edit and _edits_world_model_file(tool_call):
+            message = (
+                "Objective review cannot edit world_model.py before the actor resolves "
+                "the candidate goal"
+            )
+            surface.record_rejected_call(
+                tool_call.name,
+                arguments,
+                message,
+                tool_call_id=tool_call.id,
+            )
+            runtime.event_manager.update(
+                event_id,
+                result=ToolResult(
+                    tool_call_id=tool_call.id,
+                    content=message,
+                    result_status=ResultStatus.ERROR,
+                ),
+            )
+            return
         try:
             result = surface.dispatch(tool, arguments, tool_call_id=tool_call.id)
         except Exception as error:  # noqa: BLE001 - tool failures are builder feedback
@@ -414,7 +563,9 @@ class FocusedBuilder(Agent, context={"self": None, "state": None}):
         # `wmlib`, `frames`/`transitions` -- written before `symmetry` existed. Appending is not
         # optional politeness: an authoritative list that excludes a preload actively tells the
         # builder it is not there.
-        self._builder_system_prompt = f"{system_prompt}\n\n{PROMPT_BRIEF}"
+        self._builder_system_prompt = (
+            f"{system_prompt}\n\n{RETAINED_CANDIDATE_BRIEF}\n\n{PROMPT_BRIEF}"
+        )
         self._executor = executor
         self._tool_surface = WorkspaceToolSurface(
             executor,
@@ -431,8 +582,12 @@ class FocusedBuilder(Agent, context={"self": None, "state": None}):
         self._world_model_before = None
 
     def _resolve_system_prompt(self) -> str:
-        """Tycho's rendered builder.system prompt, plus our `symmetry` brief appended."""
+        """Tycho's prompt plus local candidate and `symmetry` capability briefs."""
         return self._builder_system_prompt
+
+    def completed_tool_calls(self) -> list[dict[str, Any]]:
+        """Expose durable partial-work evidence if the enclosing deadline cancels us."""
+        return self._tool_surface.turn_tool_calls()
 
     async def build(self, request: BuilderRequest) -> BuilderResult:
         """Construct against the shared workspace and return fresh artifact evidence."""
@@ -490,6 +645,17 @@ def _misses_completed_level(verifier_text: str) -> bool:
         "post-winning-action missed terminal" in verifier_text
         or "misses observed level_complete terminal" in verifier_text
     )
+
+
+def _objective_report_complete(report: str) -> bool:
+    required = (
+        "candidate_goal_assessment:",
+        "candidate_goal_reason:",
+        "candidate_goal_route:",
+        "recommended_action:",
+    )
+    lines = tuple(line.strip().lower() for line in report.splitlines())
+    return all(any(line.startswith(field) for line in lines) for field in required)
 
 
 def _edits_world_model(tool_calls: list[Any]) -> bool:

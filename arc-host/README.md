@@ -7,7 +7,7 @@ experiment numbers.
 ```text
 ARC SDK                  arc-host                    solver process
 --------                 --------                    --------------
-raw frame     -> settled public Observation -> prefixed JSONL `turn`
+raw frames    -> complete EvidenceEnvelope -> prefixed JSONL `turn`
 GameAction    <- validated human ActionDecision <- prefixed JSONL `decision`
 next frame    -> immutable Transition ---------> prefixed JSONL `action_result`
 ```
@@ -17,7 +17,9 @@ next frame    -> immutable Transition ---------> prefixed JSONL `action_result`
 The host owns:
 
 - ARC environment creation, reset, stepping, and lifecycle;
-- the final settled grid from each public frame sequence;
+- every public frame from each response sequence, separated into the settled
+  `decision_frame`, exact level/GAME_OVER `terminal_frame`, and typed transient
+  `event_frames`, with frame-selection provenance;
 - translation between SDK IDs and `RESET`, `UP`, `DOWN`, `LEFT`, `RIGHT`,
   `SPACEBAR`, `CLICK`, and `UNDO`;
 - legal-action and click-coordinate validation;

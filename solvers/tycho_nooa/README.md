@@ -21,13 +21,15 @@ ARC host -> GameTurn -> TychoNooaAgent
              +------> validated planner
                        (guarded hint)
 
-After a recorded transition only:
+Builder authority depends on the frozen Tycho mode:
 
-  exact Tycho wm_signal -> fresh NOOA FocusedBuilder -> fresh report -> actor
-                                  |
-                         same Tycho workspace
-                         no take_action tool
-                         independent history
+  trigger:       exact Tycho wm_signal -> fresh FocusedBuilder -> actor
+  orchestrator:  actor invoke_builder  -> fresh FocusedBuilder -> actor
+  single:        actor owns world_model.py; no builder
+  no_world_model: no executable model and no builder
+
+Every builder receives the same Tycho workspace, has independent bounded
+history, and cannot call take_action.
 ```
 
 There is one persistent NOOA agent per game and one growing NOOA event history.
@@ -37,13 +39,13 @@ adapted into an experiment folder. The model sees ordinary native tools named
 `set_verbosity`, and `take_action`. `take_action` returns the sole decision for
 the turn; the next observation is passed to the same agent instance.
 
-Tycho seeds `world_model.py`, `verify.py`, and `plan.py` in the workspace. The
-actor may inspect or revise them with the same file and Python tools it uses for
-notes. The system prompt includes Tycho's pinned single-agent planner
-instructions. A successful planner call writes `notes/validated_plan.json`;
-subsequent observations expose Tycho's guarded continuation only while the
-model hash, observed trajectory, and action availability still agree. The actor
-continues to commit one action at a time.
+Except in `no_world_model`, Tycho seeds `world_model.py`, `verify.py`, and
+`plan.py` in the workspace. The actor can revise the executable model only in
+`single`; writes are mechanically rejected in the builder-owned modes. Each
+mode receives its pinned Tycho world-model paragraph. A successful planner call
+writes `notes/validated_plan.json`; subsequent observations expose Tycho's
+guarded continuation only while the model hash, observed trajectory, and action
+availability still agree. The actor continues to commit one action at a time.
 
 Run evidence is separate from the ordinary tool trace:
 
@@ -58,10 +60,154 @@ Run evidence is separate from the ordinary tool trace:
 - `builder-tool-trace.jsonl`: only the focused builder's workspace tool calls.
 - `llm-trace.jsonl`: one line per model round-trip, across the actor, the scribe
   and every per-fire builder — model, token counts (prompt, completion, cached,
-  reasoning), cost, and the tool names the call produced. Set
-  `TYCHO_NOOA_CAPTURE_REASONING=1` to add the response's own prose and reasoning
-  text. Capture is not why the flag exists on the wire: this provider returns
-  reasoning unasked. The flag raises reasoning effort, so it changes the run.
+  reasoning), cost, tool names, returned prose, and returned reasoning. Live
+  research runs always request provider reasoning and retain the response text.
+  `TYCHO_NOOA_REQUEST_REASONING=0` and
+  `TYCHO_NOOA_CAPTURE_RESPONSE_TEXT=0` are rejected rather than silently
+  producing an evidence-poor run. A provider may still return no exposed
+  reasoning; `reasoning_tokens=0` plus an empty `reasoning` field records that
+  provider limitation rather than manufacturing an explanation.
+- `decision-checkpoints/`: one ordered actor/builder directory per model call,
+  containing the exact credential-free request at NOOA's `llm_call` boundary,
+  its SHA-256 commitment, the standardized response, and a pre-call workspace
+  manifest. Workspace bytes live in a shared content-addressed blob store, so
+  unchanged files are not copied hundreds of times. Each request also records
+  its host sequence, level, turn, and whether the call occurred while deciding
+  or after the action result; offline packet mining only admits decision-phase
+  calls into a pre-decision packet.
+
+Decision checkpoints support matched shadow requests and historical workspace
+restoration. They deliberately claim identity only at NOOA's model-call
+boundary: provider formatters subsequently translate that request into Chat
+Completions or Responses wire syntax. Restore into a new directory with:
+
+```python
+from pathlib import Path
+
+from tycho_nooa.decision_checkpoints import restore_workspace
+
+restore_workspace(
+    Path("run/decision-checkpoints"),
+    call_index=1,
+    destination=Path("restored/call-000001"),
+)
+```
+
+### Frozen decision-point shadows
+
+`tycho_nooa.shadow_eval` compares an exact checkpoint request with one
+precommitted message-content perturbation. It never executes a returned tool or
+contacts the game, so it measures only immediate response dependence.
+
+First inspect the checkpoint without spending model budget:
+
+```bash
+(cd solvers/tycho_nooa && uv run --frozen python -m tycho_nooa.shadow_eval \
+  inspect ../../runs/<run-id>/decision-checkpoints --call-index 1)
+```
+
+The output gives the source request commitment and JSON pointers, exact values,
+and commitments for every string under `messages`. Use them to write a
+perturbation before sampling either arm:
+
+```json
+{
+  "schema": "tycho-nooa-shadow-perturbation-v1",
+  "id": "remove-builder-report",
+  "question": "Does the immediate actor choice depend on this builder report?",
+  "hypothesis": "Removing the report changes the first take_action call.",
+  "expected_effect": "take_action",
+  "invalid_if": "Any request leaf besides the declared message changes.",
+  "source_request_payload_commitment": "sha256:<from inspect>",
+  "operation": {
+    "type": "replace_exact_text",
+    "pointer": "/messages/17/content",
+    "target_value_commitment": "sha256:<from inspect>",
+    "old": "<exact report text including delimiters>",
+    "new": ""
+  }
+}
+```
+
+Prepare a self-contained packet. This rechecks the source request/workspace
+commitments, copies referenced workspace blobs, applies the treatment, and
+proves that exactly one message leaf changed:
+
+```bash
+(cd solvers/tycho_nooa && uv run --frozen python -m tycho_nooa.shadow_eval \
+  prepare ../../runs/<run-id>/decision-checkpoints \
+  ../../analysis/shadows/<shadow-id>/packet \
+  --call-index 1 --perturbation ../../analysis/shadows/<shadow-id>/perturbation.json)
+```
+
+`run` without `--execute` prints the plan and refuses model calls. Paid
+execution requires both a call cap and a cumulative observed-cost limit. The
+per-call reserve must fit before a request starts; two repeats per arm require
+exactly four logical calls, with randomized arm order and provider retries
+disabled:
+
+```bash
+# Zero-cost preflight; exits 2 because --execute is absent.
+(cd solvers/tycho_nooa && uv run --frozen python -m tycho_nooa.shadow_eval \
+  run ../../analysis/shadows/<shadow-id>/packet \
+  ../../analysis/shadows/<shadow-id>/result --repeats 2 --max-calls 4 \
+  --max-cost-usd 0.05 --cost-reserve-per-call-usd 0.0125)
+
+# Model-only execution after reviewing the packet and plan.
+(cd solvers/tycho_nooa && uv run --frozen python -m tycho_nooa.shadow_eval \
+  run ../../analysis/shadows/<shadow-id>/packet \
+  ../../analysis/shadows/<shadow-id>/result --repeats 2 --max-calls 4 \
+  --max-cost-usd 0.05 --cost-reserve-per-call-usd 0.0125 --execute)
+```
+
+The evaluator verifies the model, client class, credential-free provider
+configuration, cache settings, and original request bytes before the first
+call. The reserve is a client-side stop rule, not a provider-side billing
+guarantee: one already-started response can cost more than its reserve. In that
+case the evaluator records `observed_cost_exceeded` and withholds every later
+call; missing response cost records also stop execution. Every exposed
+non-secret provider-route field is retained. Route drift makes the comparison
+`inconclusive`; absent route metadata is reported as unverifiable rather than
+invented. The evaluator journals every call immediately and reports
+`supported` only when both arms are complete and internally stable and their
+precommitted effect signatures differ; stable equality is `contradicted`, while
+single pairs, provider errors, route drift, cost stops, or within-arm
+variability are `inconclusive`. Even `supported` permits only a short
+closed-loop promotion. It is not evidence of gameplay benefit or transfer.
+
+### P1 matched warm restart
+
+`tycho_nooa.matched_replay` freezes one legacy run's durable workspace and last
+public transition, checks content commitments before every arm, and executes
+exactly one fresh-actor decision under three named policies:
+
+```text
+trigger / control
+orchestrator / control
+orchestrator / typed_candidate_goals
+```
+
+The third arm is explicitly a local treatment. It gives the actor typed,
+durable `CandidateGoal` records with evidence references, a falsifier, and a
+status, then lets `request_builder(focus="objective", ...)` carry that hypothesis
+to the same actor-pulled builder. A proposal mechanically blocks `take_action`
+until that request returns a durable structured review and the actor explicitly
+selects, rejects, or retains the candidate with `update_goal`. A Builder request
+and its resolution cannot share one tool batch, so the actor must first receive
+the review. Objective review reports preserve the assessment, reason, proposed
+route, recommended action, cited evidence, and the full Builder report under
+`epistemic/`. The ledger never promotes a hypothesis into canonical `outcome()`;
+objective-review passes are mechanically prevented from editing `world_model.py`.
+In this treatment the untyped `invoke_builder` tool is replaced, not supplemented,
+and an objective request requires a candidate-goal ID so evidence validation
+cannot be bypassed.
+
+A packet prepared from a legacy run is a **matched fresh-actor warm restart**,
+not an exact continuation: runs that predate decision checkpoints do not retain
+the original NOOA event history or model-call request. The packet manifest
+records this claim ceiling. `execute_matched_replay` accepts injected LLM clients
+but intentionally owns no provider or spending policy; callers must authorize
+and cap live calls separately.
 
 Planner recognition covers Tycho's direct `python plan.py ...` form and bounded
 standard-library Python wrappers such as `subprocess.run`. The planner's own
@@ -78,6 +224,22 @@ Implemented and hermetically tested:
   persistent, versioned process boundary;
 - a Python 3.12 `tycho-nooa-worker` entry point implementing that protocol;
 - persistent NOOA actor identity;
+- a mechanically enforced Tycho `ModePolicy`: `trigger` and `no_world_model`
+  actors cannot edit `world_model.py`, while `single` receives the exact source
+  prompt, function-editing tool, workspace seeding, verifier, and write ownership;
+- Tycho's exact `orchestrator` actor prompt and `invoke_builder(reason)` schema,
+  with every request creating a fresh bounded builder and returning its advisory
+  report before the actor can commit an action;
+- a separately named `typed_candidate_goals` treatment with durable typed goal
+  hypotheses, authoritative evidence-reference validation, mandatory
+  objective-review acknowledgement before action, and focused builder requests
+  that do not silently alter the exact orchestrator control; the treatment uses
+  a ten-step objective-review loop, structured assessment/route results, and a
+  fresh protected Builder slice while the exact control keeps its 40-step and
+  ordinary deadline policy;
+- a content-committed three-arm legacy warm-restart harness that measures goal
+  events, builder exposure/result/uptake, verifier output, planner invocation,
+  world-model change, and the unexecuted action at one matched decision point;
 - native tool calls rather than `self.*` calls inside generated CodeAct;
 - exact Tycho workspace and tool-executor reuse;
 - exact Tycho single-agent planner instructions at the host action-vocabulary
@@ -96,11 +258,26 @@ Implemented and hermetically tested:
   reported operator/key contract audit (see `PROVENANCE.md`);
 - separate evidence for harness invocation, builder construction, artifact
   hashes, and subsequent actor follow/test behavior;
+- content-addressed, byte-restorable decision checkpoints for every actor and
+  builder model call;
+- capped, one-factor frozen decision-point shadow packets and immediate-effect
+  evaluation;
 - durable files readable on a later turn;
 - one legal action as the end-of-turn result;
+- protocol-visible decision deadlines: the pre-actor builder is capped at 240
+  seconds and yields early enough to reserve 300 seconds for the actor plus 5
+  seconds for returning the decision to the host; a typed objective request gets
+  a fresh slice of up to 240 seconds while preserving 120 seconds for post-review
+  Actor resolution plus the same 5-second host-return reserve;
+- an opt-in `BuilderConfig(show_budget_telemetry=True)` treatment derived from that
+  host-authoritative monotonic deadline before every repair call: whole seconds,
+  remaining repair calls, finishing-call reserve, and investigate/commit mode. It
+  is intentionally off by default: the first matched reasoning-on replay induced
+  an edit but degraded the retained model from 8/16 to 0/16 after the Builder
+  ignored negative verifier feedback instead of rolling back;
 - one growing tool/event history across turns;
-- successor acknowledgement, including solved-level and terminal evidence that
-  arrives after the final decision turn;
+- protocol-v3 successor acknowledgement carrying the settled decision frame,
+  exact terminal frame, typed transient frames, and selection provenance;
 - bounded old-grid eviction with durable frame breadcrumbs;
 - host-authored `level_<N>/level_complete.json` evidence and a mandatory
   action-result outcome-repair checkpoint, with a level-start retry while it
@@ -113,8 +290,16 @@ Not yet implemented:
 
 - image attachment, bounded reasoning retention, and emergency context
   compaction (old grid payload eviction is implemented);
-- Tycho's reflection cadence, context compaction, and broader orchestrator
-  modes (the scribe and the LEVEL_START trigger landed in `712f892`);
+- Tycho's reflection cadence and context compaction (the scribe and the
+  LEVEL_START trigger landed in `712f892`);
+- live use of the now-mandatory `request_builder` review loop and promotion of a
+  selected candidate into canonical `outcome()` remain unobserved. In the earlier
+  ten-action Gemma 4 31B run ending
+  `20260821T135858Z`, the legacy builder tool was absent at every model boundary
+  and the actor proposed one falsifiable candidate from six authoritative frames,
+  but did not select it or request construction before the cap; the current
+  treatment would reject that premature environment action rather than silently
+  leave the proposal inert;
 - replication across another seed or game.
 
 Those omissions are explicit. The two live runs replicate this one seed's
@@ -125,11 +310,18 @@ gameplay success and symmetry uptake; they do not establish a general capability
 The nested runtime targets Python 3.12 because NOOA is `<3.14`:
 
 ```bash
-(cd solvers/tycho_nooa && uv run --frozen pytest -s)
+(cd solvers/tycho_nooa && TYCHO_SANDBOX_RUNTIME=host uv run --frozen pytest -s)
 ```
 
 `-s` avoids a WSL/Windows temporary-file capture failure in this workspace; it
 does not change the tests.
+
+`TYCHO_SANDBOX_RUNTIME=host` is required wherever no container runtime is
+reachable. Without it the sandbox refuses to start, the Builder never runs, and
+the deadline tests that stall a scripted Builder call instead stall the Actor --
+which is deliberately unbounded, because it owns the protected remainder of the
+decision and only the host wall clock ends it. The suite then hangs rather than
+failing, so the missing runtime does not name itself.
 
 ### CRAP analysis
 
@@ -205,3 +397,15 @@ The host invocation is:
   --run-dir /absolute/path/to/run -- \
   uv run --frozen --project ../solvers/tycho_nooa tycho-nooa-worker)
 ```
+
+`--worker-timeout` is transmitted to the worker on every turn; it is not a
+duplicated solver-side guess. With the 600-second setting used in the diagnosed
+Gemma run, the builder receives at most 240 seconds, leaving 360 seconds before
+the host timeout. If the configured timeout cannot cover the 300-second actor
+reserve and 5-second return reserve, the advisory builder is skipped. A builder
+timeout is recorded in `trigger-builder-trace.jsonl`, every partial workspace
+change is rolled back, and an actor-requested tool receives an explicit error
+rather than a false “skipped” result. Partial calls and bytes remain recoverable
+from the tool trace and content-addressed decision checkpoints.
+The effective value is also retained as `worker_timeout_seconds` in the run's
+`summary.json`, including failed runs.

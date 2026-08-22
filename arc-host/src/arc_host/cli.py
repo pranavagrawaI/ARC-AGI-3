@@ -139,6 +139,7 @@ def main() -> None:
             "levels_completed": result.levels_completed,
             "success": result.levels_completed > result.initial.levels_completed,
             "worker_command": worker_command,
+            "worker_timeout_seconds": args.worker_timeout,
         }
     else:
         assert run_error is not None
@@ -151,6 +152,7 @@ def main() -> None:
             "levels_completed": solver.latest_levels_completed,
             "success": False,
             "worker_command": worker_command,
+            "worker_timeout_seconds": args.worker_timeout,
             "error": {
                 "type": type(run_error).__name__,
                 "message": str(run_error),

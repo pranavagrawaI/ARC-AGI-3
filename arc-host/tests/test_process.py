@@ -22,7 +22,7 @@ HOST = "ARC_HOST\\t"
 AGENT = "ARC_AGENT\\t"
 
 def send(kind, **fields):
-    payload = {"protocol_version": 1, "type": kind, "pid": os.getpid(), **fields}
+    payload = {"protocol_version": 3, "type": kind, "pid": os.getpid(), **fields}
     print(AGENT + json.dumps(payload), flush=True)
 
 for line in sys.stdin:
@@ -34,6 +34,7 @@ for line in sys.stdin:
         print("incidental worker output", flush=True)
         send("ready", worker_id=str(os.getpid()), metadata={"kind": "fake"})
     elif kind == "turn":
+        assert message["decision_timeout_seconds"] == 2
         send(
             "decision",
             sequence=message["sequence"],
@@ -117,20 +118,22 @@ def test_worker_environment_does_not_receive_arc_environment_key():
 def test_worker_environment_forwards_solver_context_and_capture_settings():
     """An allowlist silently drops what it does not name.
 
-    Both of these change what a run does, not just what it reports:
-    ARC_LLM_CONTEXT_WINDOW arms the model client's context-limit defence, and
-    TYCHO_NOOA_CAPTURE_REASONING makes the run ask the provider for reasoning.
-    TYCHO_MODE selects which orchestration topology the solver runs; dropped, a
-    comparison arm silently becomes the default `trigger` control and the whole
-    run measures nothing. Dropped, they leave a run that looks valid and answers
-    nothing.
+    ARC_LLM_CONTEXT_WINDOW and TYCHO_NOOA_REQUEST_REASONING change what a run
+    does. TYCHO_NOOA_CAPTURE_RESPONSE_TEXT changes only retained evidence.
+    TYCHO_MODE selects which orchestration topology the solver runs, while
+    TYCHO_NOOA_TREATMENT selects a named local adaptation. TYCHO_SANDBOX_RUNTIME
+    selects the executor required by the solver's tools. Dropped, any of these
+    can silently leave a run that looks valid while answering the wrong question.
     """
     result = worker_environment(
         {
             "ARC_LLM_CONTEXT_WINDOW": "131072",
             "ARC_LLM_MAX_TOKENS": "8000",
             "TYCHO_MODE": "no_world_model",
-            "TYCHO_NOOA_CAPTURE_REASONING": "1",
+            "TYCHO_NOOA_TREATMENT": "control",
+            "TYCHO_NOOA_REQUEST_REASONING": "1",
+            "TYCHO_NOOA_CAPTURE_RESPONSE_TEXT": "1",
+            "TYCHO_SANDBOX_RUNTIME": "host",
         }
     )
 
@@ -138,5 +141,8 @@ def test_worker_environment_forwards_solver_context_and_capture_settings():
         "ARC_LLM_CONTEXT_WINDOW": "131072",
         "ARC_LLM_MAX_TOKENS": "8000",
         "TYCHO_MODE": "no_world_model",
-        "TYCHO_NOOA_CAPTURE_REASONING": "1",
+        "TYCHO_NOOA_TREATMENT": "control",
+        "TYCHO_NOOA_REQUEST_REASONING": "1",
+        "TYCHO_NOOA_CAPTURE_RESPONSE_TEXT": "1",
+        "TYCHO_SANDBOX_RUNTIME": "host",
     }

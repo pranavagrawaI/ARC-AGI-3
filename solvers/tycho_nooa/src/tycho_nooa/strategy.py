@@ -10,8 +10,10 @@ from nooa.context_blocks import ResultStatus, ToolCallEvent, ToolResult
 from nooa.errors import GenerationError
 from nooa.events import Error, Task
 from nooa.strategies.base import GenerationStrategy, RuntimeServices
+from tycho.workspace.agent_tools import canonical
 from tycho.workspace.workspace import GameWorkspace
 
+from tycho_nooa.epistemic import RequestBuilderArguments
 from tycho_nooa.history import (
     ELIDED_OBSERVATION,
     evict_old_grids,
@@ -28,20 +30,12 @@ if TYPE_CHECKING:
 
 
 ACTOR_BELIEFS_NOTES = "notes/actor_beliefs.md"
-ACTOR_BELIEFS_CHECKPOINT_REQUEST = (
-    f"Before this turn ends, checkpoint your current hypotheses into "
-    f"{ACTOR_BELIEFS_NOTES} with write_file or edit_file. Do this even if you have "
-    "no confirmed change: record what you tried, what you ruled out, and what "
-    "remains open, so the builder is not reading the same stale hypotheses the "
-    "next time it fires."
-)
 ACTION_DEMAND_REQUEST = (
     "Your workspace tool budget for this turn is spent. take_action is the only "
     "tool left. Commit the single best action the evidence you already gathered "
     "can justify, by calling take_action exactly once now."
 )
-# The turn-ending tools: withheld from the beliefs checkpoint, which runs after
-# the action is already committed, and the only ones offered by the final demand.
+# The turn-ending tools are the only ones offered by the final demand.
 _ACTION_TOOL_NAMES = {"take_action", "submit_action"}
 
 
@@ -114,19 +108,19 @@ class NativeToolStrategy(GenerationStrategy):
                 continue
 
             retain_assistant_turn(runtime.event_manager, event_id, response)
-            planner_in_batch = self._planner_in_batch(response.tool_calls, surface)
+            feedback_in_batch = self._feedback_in_batch(response.tool_calls, surface)
             for index, tool_call in enumerate(response.tool_calls):
-                decision = self._execute_tool_call(
+                decision = await self._execute_tool_call(
                     runtime,
                     surface,
                     tools_by_name,
                     tool_call,
                     reasoning=replayed_reasoning(response) if index == 0 else None,
-                    block_action=planner_in_batch,
+                    block_action=feedback_in_batch,
                 )
                 if decision is not None:
-                    await self._enforce_actor_beliefs_checkpoint(
-                        runtime, surface, tools, config, workspace, actor_beliefs_before
+                    self._checkpoint_actor_beliefs_after_action(
+                        workspace, actor_beliefs_before, decision
                     )
                     return decision
 
@@ -137,8 +131,8 @@ class NativeToolStrategy(GenerationStrategy):
                 "tool steps, and none was committed when take_action was the only "
                 "tool left"
             )
-        await self._enforce_actor_beliefs_checkpoint(
-            runtime, surface, tools, config, workspace, actor_beliefs_before
+        self._checkpoint_actor_beliefs_after_action(
+            workspace, actor_beliefs_before, decision
         )
         return decision
 
@@ -156,14 +150,14 @@ class NativeToolStrategy(GenerationStrategy):
         action 0 with all 25 steps spent reading the grid and never a
         `take_action`; the episode's remaining 19 actions went with it. An ARC
         episode has no "no action" branch, so a turn that ends in silence throws
-        the run either way. Mirrors _enforce_actor_beliefs_checkpoint: restrict
-        the offered tools to the one that must be called, then let the raise
-        stand if the model still declines. `tool_choice` stays "auto" because
+        the run either way. Restrict the offered tools to the one that must be
+        called, then let the raise stand if the model still declines.
+        `tool_choice` stays "auto" because
         "required" draws 500s from some gateways (nooa's own codeact says so).
         """
         action_tools = [tool for tool in tools if tool.name in _ACTION_TOOL_NAMES]
         if not action_tools:
-            return None
+            return
 
         runtime.event_manager.add(Task(prompt=ACTION_DEMAND_REQUEST))
         response, event_id = await runtime.generate(
@@ -173,11 +167,11 @@ class NativeToolStrategy(GenerationStrategy):
             tool_choice="auto",
         )
         if not response.tool_calls:
-            return None
+            return
 
         retain_assistant_turn(runtime.event_manager, event_id, response)
         for index, tool_call in enumerate(response.tool_calls):
-            decision = self._execute_tool_call(
+            decision = await self._execute_tool_call(
                 runtime,
                 surface,
                 tool_by_name(action_tools),
@@ -186,61 +180,29 @@ class NativeToolStrategy(GenerationStrategy):
             )
             if decision is not None:
                 return decision
-        return None
+        return
 
-    async def _enforce_actor_beliefs_checkpoint(
-        self,
-        runtime: RuntimeServices,
-        surface: WorkspaceToolSurface,
-        tools: list[Any],
-        config: NativeToolConfig,
+    @staticmethod
+    def _checkpoint_actor_beliefs_after_action(
         workspace: GameWorkspace,
         before: str | None,
+        decision: ActionDecision,
     ) -> bool:
-        """Guarantee notes/actor_beliefs.md advances before this turn can end.
+        """Advance the hand-off without delaying an accepted environment action.
 
         Real Tycho never forces this file: it is a voluntary actor scratchpad
-        that the builder treats as a disposable starting hypothesis, not
-        ground truth, so a stale copy costs Tycho nothing there. This is a
-        deliberate adaptation beyond Tycho's design, not a fidelity fix:
-        DIAGNOSIS.md's first live run found actor_beliefs.md written once at
-        turn 1 and never refreshed despite two later probing bursts, and our
-        goal is reliable level solving, which benefits from the builder
-        seeing the actor's current thinking rather than its turn-1 draft.
-        Mirrors _enforce_world_model_checkpoint's shape: one real chance to
-        write a genuine update, then a forced breadcrumb only if the model
-        still leaves the file untouched. take_action is withheld from the
-        offered tools here — the turn's action was already committed.
+        that the builder treats as a disposable starting hypothesis. We retain
+        the local invariant introduced after DIAGNOSIS.md found stale notes, but
+        never buy it with another provider call after `take_action`: the live
+        reasoning-capture run had an accepted action with 27.6 seconds left and
+        lost it while this post-action call took 29.9 seconds. A factual,
+        provenance-marked breadcrumb is bounded local I/O and keeps stale model
+        prose distinguishable from the action the model actually committed.
         """
         if _read_optional(workspace.dir, ACTOR_BELIEFS_NOTES) != before:
             return False
 
-        checkpoint_tools = [
-            tool for tool in tools if tool.name not in _ACTION_TOOL_NAMES
-        ]
-        checkpoint_tools_by_name = tool_by_name(checkpoint_tools)
-        runtime.event_manager.add(Task(prompt=ACTOR_BELIEFS_CHECKPOINT_REQUEST))
-        response, event_id = await runtime.generate(
-            tools=checkpoint_tools,
-            max_tokens=config.max_tokens,
-            temperature=config.temperature,
-            tool_choice="auto",
-        )
-        if response.tool_calls:
-            retain_assistant_turn(runtime.event_manager, event_id, response)
-            for index, tool_call in enumerate(response.tool_calls):
-                self._execute_tool_call(
-                    runtime,
-                    surface,
-                    checkpoint_tools_by_name,
-                    tool_call,
-                    reasoning=replayed_reasoning(response) if index == 0 else None,
-                )
-
-        if _read_optional(workspace.dir, ACTOR_BELIEFS_NOTES) != before:
-            return True
-
-        fallback = _fallback_actor_beliefs_checkpoint(before)
+        fallback = _fallback_actor_beliefs_checkpoint(before, decision)
         workspace.write_file(ACTOR_BELIEFS_NOTES, fallback)
         if _read_optional(workspace.dir, ACTOR_BELIEFS_NOTES) != fallback:
             raise RuntimeError(
@@ -260,7 +222,7 @@ class NativeToolStrategy(GenerationStrategy):
             )
         return surface.observation(turn)
 
-    def _execute_tool_call(
+    async def _execute_tool_call(
         self,
         runtime: RuntimeServices,
         surface: WorkspaceToolSurface,
@@ -303,10 +265,35 @@ class NativeToolStrategy(GenerationStrategy):
                 reasoning=reasoning,
             )
         )
-        if block_action and tool_call.name in {"take_action", "submit_action"}:
+        if tool_call.name in {"take_action", "submit_action"}:
+            goal_tools = surface.goal_tools
+            required = (
+                goal_tools.required_before_action()
+                if goal_tools is not None
+                else None
+            )
+            if required is not None:
+                message = f"Typed objective lifecycle incomplete: {required}"
+                surface.record_rejected_call(
+                    tool_call.name,
+                    arguments,
+                    message,
+                    tool_call_id=tool_call.id,
+                )
+                runtime.event_manager.update(
+                    event_id,
+                    result=ToolResult(
+                        tool_call_id=tool_call.id,
+                        content=message,
+                        result_status=ResultStatus.ERROR,
+                    ),
+                )
+                return None
+        if block_action and tool_call.name == "update_goal":
             message = (
-                "A planner call and take_action cannot share one tool batch. "
-                "Inspect the planner result, then choose an action in the next step."
+                "update_goal cannot share a tool batch with request_builder. Inspect "
+                "the returned objective review, then resolve the candidate in the next "
+                "model step."
             )
             surface.record_rejected_call(
                 tool_call.name,
@@ -323,6 +310,36 @@ class NativeToolStrategy(GenerationStrategy):
                 ),
             )
             return None
+        if block_action and tool_call.name in {"take_action", "submit_action"}:
+            message = (
+                "A builder request, world-model edit, or planner call cannot share "
+                "one tool batch with take_action. Inspect that feedback, then choose "
+                "an action in the next step."
+            )
+            surface.record_rejected_call(
+                tool_call.name,
+                arguments,
+                message,
+                tool_call_id=tool_call.id,
+            )
+            runtime.event_manager.update(
+                event_id,
+                result=ToolResult(
+                    tool_call_id=tool_call.id,
+                    content=message,
+                    result_status=ResultStatus.ERROR,
+                ),
+            )
+            return None
+        if tool_call.name in {"invoke_builder", "request_builder"}:
+            return await self._invoke_builder(
+                runtime,
+                surface,
+                tool,
+                arguments,
+                tool_call_id=tool_call.id,
+                event_id=event_id,
+            )
         try:
             result = surface.dispatch(tool, arguments, tool_call_id=tool_call.id)
         except Exception as error:  # noqa: BLE001 - a model tool error is recoverable feedback
@@ -348,17 +365,77 @@ class NativeToolStrategy(GenerationStrategy):
         )
         return action
 
+    async def _invoke_builder(
+        self,
+        runtime: RuntimeServices,
+        surface: WorkspaceToolSurface,
+        tool: Any,
+        arguments: dict[str, Any],
+        *,
+        tool_call_id: str,
+        event_id: Any,
+    ) -> None:
+        model = tool.parameters_model
+        assert model is not None
+        try:
+            validated = model.model_validate(arguments)
+            turn = surface.current_turn()
+            if tool.name == "request_builder":
+                if not isinstance(validated, RequestBuilderArguments):
+                    raise TypeError("request_builder has the wrong argument contract")
+                result = await runtime.agent.request_builder(turn, validated)
+            else:
+                result = await runtime.agent.invoke_builder(turn, validated.reason)
+            surface.record_external_result(
+                tool.name,
+                arguments,
+                result,
+                tool_call_id=tool_call_id,
+            )
+        except Exception as error:  # noqa: BLE001 - model receives builder failure
+            message = f"{type(error).__name__}: {error}"
+            surface.record_rejected_call(
+                tool.name,
+                arguments,
+                message,
+                tool_call_id=tool_call_id,
+            )
+            runtime.event_manager.update(
+                event_id,
+                result=ToolResult(
+                    tool_call_id=tool_call_id,
+                    content=message,
+                    result_status=ResultStatus.ERROR,
+                ),
+            )
+            return
+        runtime.event_manager.update(
+            event_id,
+            result=ToolResult(
+                tool_call_id=tool_call_id,
+                content=result,
+                result_status=ResultStatus.COMPLETE,
+            ),
+        )
+        return
+
     @staticmethod
-    def _planner_in_batch(
+    def _feedback_in_batch(
         tool_calls: list[Any],
         surface: WorkspaceToolSurface,
     ) -> bool:
         for tool_call in tool_calls:
+            if tool_call.name in {"invoke_builder", "request_builder"}:
+                return True
             try:
                 arguments = json.loads(tool_call.arguments)
             except json.JSONDecodeError:
                 continue
-            if surface.is_planner_call(tool_call.name, arguments):
+            if surface.is_planner_call(tool_call.name, arguments) or (
+                canonical(tool_call.name) in {"write_file", "edit_file", "edit_function"}
+                and str(arguments.get("path", "")).replace("\\", "/").split("/")[-1]
+                in {"world_model.py", "worldmodel.py"}
+            ):
                 return True
         return False
 
@@ -387,14 +464,19 @@ def _read_optional(workspace_dir: Any, relative_path: str) -> str | None:
     return path.read_text(encoding="utf-8")
 
 
-def _fallback_actor_beliefs_checkpoint(previous: str | None) -> str:
+def _fallback_actor_beliefs_checkpoint(
+    previous: str | None, decision: ActionDecision
+) -> str:
     """A guaranteed-to-advance checkpoint entry, used when the model left no edit.
 
     Mirrors builder.py's _fallback_world_model_checkpoint: rather than trust the
     model to always leave a real edit, force the invariant "this turn changed the
     durable hypotheses file" to hold unconditionally.
     """
-    marker = "[checkpoint: turn ended with no model-authored update]"
+    marker = (
+        "[checkpoint: model committed "
+        f"{decision.action} with no model-authored beliefs update]"
+    )
     if previous is None:
         return f"{marker}\n(no prior notes/actor_beliefs.md content)\n"
     return f"{previous.rstrip('\n')}\n\n{marker}\n"

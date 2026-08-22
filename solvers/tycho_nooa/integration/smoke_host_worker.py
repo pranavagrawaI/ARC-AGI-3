@@ -50,6 +50,10 @@ def main() -> None:
         environment["TYCHO_NOOA_SCRIPTED_TOOL_CALLS"] = json.dumps(
             [
                 {
+                    "tool": "run_python",
+                    "arguments": {"code": "print('sandbox ready')"},
+                },
+                {
                     "tool": "write_file",
                     "arguments": {
                         "path": "notes/ipc.md",
@@ -59,6 +63,7 @@ def main() -> None:
                 {"tool": "take_action", "arguments": {"action": "UP"}},
             ]
         )
+        environment["TYCHO_SANDBOX_RUNTIME"] = "host"
         with JsonlWorker(
             [
                 "uv",
@@ -84,11 +89,19 @@ def main() -> None:
             )
 
         note = root / "workspace/fake/notes/ipc.md"
+        tool_trace = [
+            json.loads(line)
+            for line in (root / "tool-trace.jsonl").read_text().splitlines()
+        ]
         assert result.stop_reason == "level_limit"
         assert result.actions == 1
+        assert tool_trace[0]["name"] == "run_python"
+        assert tool_trace[0]["result"].strip() == "sandbox ready"
         assert note.read_text() == "This crossed the Python 3.14/3.12 boundary."
         assert not (root / "worker-stderr.log").read_text()
-        print("host-worker IPC smoke passed: 1 action, persistent note preserved")
+        print(
+            "host-worker IPC smoke passed: executor, action, and persistent note preserved"
+        )
 
 
 if __name__ == "__main__":
