@@ -1,0 +1,41 @@
+# World Model for the "Gap-Filling" Game
+- The player has a move budget represented by color 11 in column 63.
+- Every movement action (UP, DOWN, LEFT, RIGHT) consumes one unit of this budget (11 -> 5).
+- There are "blocks" of colors 5 and 4.
+- Color 5 (C5) has a complex shape and a budget-like bar at the bottom (row 63).
+- In L0, C5 doesn't move during RIGHT/LEFT actions, but it does move during DOWN/UP actions.
+- Wait, looking at T6 (DOWN): C5 min moves [15, 0] -> [18, 0].
+- Color 4 (C4) is a block that moves when the player acts.
+- C4 Movement:
+    - Initial: (15, 36)
+    - T3 (RIGHT): (15, 33) - delta (0, -3)
+    - T4 (RIGHT): (15, 33), but shape changes (count 45 -> 18). Rows 18-23 disappear.
+    - T5 (RIGHT): (18, 27) - delta (3, -6). Rows 15-17 disappear, Rows 18-23 appear.
+    - This is extremely strange. Let's re-examine T3-T5.
+    - T3: RIGHT -> delta (0, -3)
+    - T4: RIGHT -> count changes, but min stays (15, 33).
+    - T5: RIGHT -> min becomes (18, 27).
+- Let's re-examine the C4 coordinates in T3, T4, T5.
+- T3 C4: Rows 15-17 (9 cols), Rows 18-23 (3 cols)
+- T4 C4: Rows 15-17 (6 cols)
+- T5 C4: Rows 18-23 (3 cols)
+- This looks like the 4-block is being "consumed" or "transformed" as it moves.
+- Or maybe the 4-block is actually a set of blocks?
+- Let's look at the C4 movement again:
+    - T3 (RIGHT): x4 -= 3.
+    - T4 (RIGHT): x4 stays 33, but the bottom part (Rows 18-23) disappears.
+    - T5 (RIGHT): y4 += 3, x4 -= 6? No, 27 is 33-6.
+- Actually, let's look at the 4-block in T6 (DOWN):
+    - T5 C4 min: (18, 27)
+    - T6 C4 min: (21, 27) - delta (3, 0)
+- This suggests DOWN moves C4 down by 3.
+- Let's re-verify C5 in T6:
+    - T5 C5 min: (15, 0)
+    - T6 C5 min: (18, 0) - delta (3, 0)
+- So DOWN moves both C4 and C5 down by 3.
+- Now let's re-examine RIGHT:
+    - T3: C4 min (15, 36) -> (15, 33).
+    - T4: C4 min (15, 33) -> (15, 33) but count 45 -> 18.
+    - T5: C4 min (15, 33) -> (18, 27).
+- This is not a simple translation.
+- Let's look at the budget: it always decreases by 1 on any movement.
