@@ -360,6 +360,7 @@ class BuilderStrategy(GenerationStrategy):
                 if commit_mode
                 else tools
             )
+            available_tools_by_name = tool_by_name(available_tools)
             response, event_id = await runtime.generate(
                 tools=available_tools,
                 max_tokens=config.max_tokens,
@@ -386,7 +387,7 @@ class BuilderStrategy(GenerationStrategy):
                 self._execute_tool_call(
                     runtime,
                     surface,
-                    tools_by_name,
+                    available_tools_by_name,
                     tool_call,
                     reasoning=replayed_reasoning(response) if index == 0 else None,
                     allow_world_model_edit=not objective_review,
