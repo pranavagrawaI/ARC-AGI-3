@@ -24,8 +24,10 @@ ExecutionEventType = Literal[
     "ProviderTurnRejected",
     "CellDispatched",
     "CapabilityRequested",
+    "CapabilityNormalized",
     "CapabilityReturned",
     "CapabilityRejected",
+    "CapabilityDisclosed",
     "CellCompleted",
     "CellFailed",
     "CellTimedOut",
@@ -173,6 +175,7 @@ class _CellState(BaseModel):
     outcome_event_id: str | None = None
     requests: dict[int, str] = Field(default_factory=dict)
     resolved_requests: set[int] = Field(default_factory=set)
+    resolution_event_ids: dict[int, str] = Field(default_factory=dict)
     proposal_event_id: str | None = None
     proposal_resolved: bool = False
 
@@ -279,7 +282,7 @@ class InvocationProvenance:
             raise RuntimeError(f"capability request {request_id} is not open")
         rejected = exception is not None
         payload = {"result": result} if not rejected else {"exception": exception}
-        self.log.append(
+        event = self.log.append(
             "CapabilityRejected" if rejected else "CapabilityReturned",
             invocation_id=self.invocation_id,
             cell_seq=cell_seq,
@@ -288,6 +291,44 @@ class InvocationProvenance:
             payload=payload,
         )
         cell.resolved_requests.add(request_id)
+        cell.resolution_event_ids[request_id] = event.event_id
+
+    def capability_normalized(
+        self,
+        cell_seq: int,
+        request_id: int,
+        semantic_query: dict[str, Any],
+        semantic_sha256: str,
+    ) -> None:
+        cell = self._open_cell(cell_seq)
+        parent = cell.requests.get(request_id)
+        if parent is None or request_id in cell.resolved_requests:
+            raise RuntimeError(f"capability request {request_id} is not open")
+        self.log.append(
+            "CapabilityNormalized",
+            invocation_id=self.invocation_id,
+            cell_seq=cell_seq,
+            request_id=request_id,
+            parent_event_id=parent,
+            payload={
+                "semantic_query": semantic_query,
+                "semantic_sha256": semantic_sha256,
+            },
+        )
+
+    def capability_disclosed(self, cell_seq: int, request_id: int) -> None:
+        cell = self._closed_cell_or_running(cell_seq)
+        parent = cell.resolution_event_ids.get(request_id)
+        if parent is None:
+            raise RuntimeError(f"capability request {request_id} has no resolution")
+        self.log.append(
+            "CapabilityDisclosed",
+            invocation_id=self.invocation_id,
+            cell_seq=cell_seq,
+            request_id=request_id,
+            parent_event_id=parent,
+            payload={},
+        )
 
     def cell_finished(
         self,
@@ -426,6 +467,13 @@ class InvocationProvenance:
         cell = self._cells.get(cell_seq)
         if cell is None or cell.outcome_event_id is None:
             raise RuntimeError(f"cell {cell_seq} has not completed")
+        return cell
+
+    def _closed_cell_or_running(self, cell_seq: int) -> _CellState:
+        self._require_running()
+        cell = self._cells.get(cell_seq)
+        if cell is None:
+            raise RuntimeError(f"cell {cell_seq} does not exist")
         return cell
 
     def _open_proposal(self, cell_seq: int) -> _CellState:
@@ -594,32 +642,57 @@ def _project_cell(events: list[ExecutionProvenanceEvent]) -> list[EventBase]:
 def _capability_summaries(
     events: list[ExecutionProvenanceEvent],
 ) -> list[dict[str, Any]]:
-    requests = {
-        event.request_id: event
-        for event in events
-        if event.event_type == "CapabilityRequested"
-    }
-    resolutions = {
-        event.request_id: event
-        for event in events
-        if event.event_type in {"CapabilityReturned", "CapabilityRejected"}
-    }
+    requests = _events_by_request(events, {"CapabilityRequested"})
+    resolutions = _events_by_request(
+        events, {"CapabilityReturned", "CapabilityRejected"}
+    )
+    normalizations = _events_by_request(events, {"CapabilityNormalized"})
+    disclosed = _events_by_request(events, {"CapabilityDisclosed"})
     return [
-        _capability_summary(request_id, request, resolutions.get(request_id))
+        _capability_summary(
+            request_id,
+            request,
+            resolutions.get(request_id),
+            normalizations.get(request_id),
+            request_id in disclosed,
+        )
         for request_id, request in requests.items()
     ]
+
+
+def _events_by_request(
+    events: list[ExecutionProvenanceEvent], event_types: set[ExecutionEventType]
+) -> dict[int | None, ExecutionProvenanceEvent]:
+    return {
+        event.request_id: event
+        for event in events
+        if event.event_type in event_types
+    }
 
 
 def _capability_summary(
     request_id: int | None,
     request: ExecutionProvenanceEvent,
     resolution: ExecutionProvenanceEvent | None,
+    normalization: ExecutionProvenanceEvent | None,
+    disclosed: bool,
 ) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "request_id": request_id,
         "name": request.payload.get("name"),
         "arguments": request.payload.get("arguments"),
         "status": resolution.event_type if resolution is not None else "unresolved",
+        "semantic_query": (
+            normalization.payload.get("semantic_query")
+            if normalization is not None
+            else None
+        ),
+        "semantic_sha256": (
+            normalization.payload.get("semantic_sha256")
+            if normalization is not None
+            else None
+        ),
+        "disclosed": disclosed,
     }
     if resolution is None:
         return summary

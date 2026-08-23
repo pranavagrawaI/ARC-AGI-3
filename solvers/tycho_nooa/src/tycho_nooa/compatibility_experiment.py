@@ -46,6 +46,7 @@ class CompatibilityMetrics(BaseModel):
     input_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
     evidence_queries: int = Field(ge=0)
+    query_attempts: int = Field(default=0, ge=0)
     python_cells: int = Field(ge=0)
     invalid_interactions: int = Field(ge=0)
     transport_adherence: dict[str, int] = Field(default_factory=dict)
@@ -154,6 +155,7 @@ async def _run_native(
     metrics = _metrics(
         usage=[turn.usage for turn in controller.provider_turns],
         evidence_queries=controller.evidence_queries,
+        query_attempts=(0 if evidence is None else evidence.query_attempts),
         python_cells=0,
         invalid_interactions=controller.invalid_returns,
         transport_adherence={},
@@ -205,6 +207,7 @@ async def _run_codeact(
     metrics = _metrics(
         usage=[turn.usage for turn in controller.provider_turns],
         evidence_queries=evidence_queries,
+        query_attempts=(0 if evidence is None else evidence.query_attempts),
         python_cells=python_cells,
         invalid_interactions=(
             counts["ReturnRejected"]
@@ -274,6 +277,7 @@ def _metrics(
     *,
     usage: list[dict[str, int] | None],
     evidence_queries: int,
+    query_attempts: int,
     python_cells: int,
     invalid_interactions: int,
     transport_adherence: dict[str, int],
@@ -288,6 +292,7 @@ def _metrics(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         evidence_queries=evidence_queries,
+        query_attempts=query_attempts,
         python_cells=python_cells,
         invalid_interactions=invalid_interactions,
         transport_adherence=transport_adherence,

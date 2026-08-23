@@ -108,24 +108,9 @@ class CompatibilityExperimentManifest(BaseModel):
 
     @model_validator(mode="after")
     def authorized_manifest_is_fully_bound(self) -> CompatibilityExperimentManifest:
-        if self.schema_version == 2 and not _schema_v2_is_fully_bound(self):
-            raise ValueError("schema v2 must bind both controllers and return schema")
-        if self.schema_version == 3 and not _schema_v3_is_fully_bound(self):
-            raise ValueError(
-                "schema v3 must bind controllers, return schema, projection, and executor"
-            )
-        if not self.execution_authorized:
-            return self
-        route = self.model_route
-        if (
-            not route.model
-            or not route.reported_model
-            or not route.provider
-            or not route.reasoning_effort
-        ):
-            raise ValueError("authorized execution requires a complete model route")
-        if self.caps.max_cost_usd is None:
-            raise ValueError("authorized execution requires an explicit cost cap")
+        _validate_schema_bindings(self)
+        if self.execution_authorized:
+            _validate_authorized_manifest(self)
         return self
 
     def require_execution_authorized(self) -> None:
@@ -215,6 +200,27 @@ def _schema_v3_is_fully_bound(manifest: CompatibilityExperimentManifest) -> bool
         value is not None
         for value in (manifest.execution_projection, manifest.sterile_executor)
     )
+
+
+def _validate_schema_bindings(manifest: CompatibilityExperimentManifest) -> None:
+    if manifest.schema_version == 2 and not _schema_v2_is_fully_bound(manifest):
+        raise ValueError("schema v2 must bind both controllers and return schema")
+    if manifest.schema_version == 3 and not _schema_v3_is_fully_bound(manifest):
+        raise ValueError(
+            "schema v3 must bind controllers, return schema, projection, and executor"
+        )
+
+
+def _validate_authorized_manifest(
+    manifest: CompatibilityExperimentManifest,
+) -> None:
+    route = manifest.model_route
+    if not all(
+        (route.model, route.reported_model, route.provider, route.reasoning_effort)
+    ):
+        raise ValueError("authorized execution requires a complete model route")
+    if manifest.caps.max_cost_usd is None:
+        raise ValueError("authorized execution requires an explicit cost cap")
 
 
 def sha256_file(path: Path) -> str:

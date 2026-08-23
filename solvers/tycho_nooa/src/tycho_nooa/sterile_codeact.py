@@ -90,53 +90,68 @@ class SterileCodeActController:
         return dict(self._transport_adherence)
 
     async def run(self) -> CognitiveAnswer:
-        manifest = ExecutionManifest(
+        async with SterileExecutor(
+            self._execution_manifest(),
+            return_type=CognitiveAnswer,
+            capability_handlers=self._capability_handlers(),
+            capability_auditors=self._capability_auditors(),
+            provenance=self._provenance,
+        ) as executor:
+            for _ in range(self._max_llm_calls):
+                answer = await self._run_provider_turn(executor)
+                if answer is not None:
+                    return answer
+        raise RuntimeError("sterile CodeAct exhausted its LLM-call budget")
+
+    def _execution_manifest(self) -> ExecutionManifest:
+        return ExecutionManifest(
             invocation_id=self._provenance.invocation_id,
             role="actor",
             capabilities=("evidence.query",) if self._evidence is not None else (),
             input_values={"task": self._packet.treatment_payload()},
             wall_time_seconds=self._cell_timeout_seconds,
         )
-        handlers = (
+
+    def _capability_handlers(self) -> dict[str, Any]:
+        return (
             {"evidence.query": self._model_evidence_query}
             if self._evidence is not None
             else {}
         )
-        async with SterileExecutor(
-            manifest,
-            return_type=CognitiveAnswer,
-            capability_handlers=handlers,
-            provenance=self._provenance,
-        ) as executor:
-            for _ in range(self._max_llm_calls):
-                response = await self._call_provider()
-                try:
-                    tool_call = _one_tool_call(response.tool_calls)
-                    code, arguments = _tool_call_execution(
-                        tool_call, response.content
-                    )
-                except (RuntimeError, ValueError, TypeError) as error:
-                    self._transport_adherence[
-                        _rejected_transport_class(response.tool_calls, response.content)
-                    ] += 1
-                    self._provenance.provider_turn_rejected(str(error))
-                    continue
-                self._transport_adherence[f"valid_{tool_call.name}"] += 1
-                try:
-                    result = await executor.run_cell(
-                        code,
-                        tool_call_id=tool_call.id,
-                        tool_name=tool_call.name,
-                        tool_arguments=arguments,
-                        tool_reasoning=(
-                            None if response.content is None else str(response.content)
-                        ),
-                    )
-                except SterileReturnValidationError:
-                    continue
-                if result.return_value is not None:
-                    return result.return_value
-        raise RuntimeError("sterile CodeAct exhausted its LLM-call budget")
+
+    def _capability_auditors(self) -> dict[str, Any]:
+        if self._evidence is None or not hasattr(self._evidence, "pop_audit"):
+            return {}
+        return {"evidence.query": self._evidence.pop_audit}
+
+    async def _run_provider_turn(
+        self, executor: SterileExecutor[CognitiveAnswer]
+    ) -> CognitiveAnswer | None:
+        response = await self._call_provider()
+        try:
+            tool_call = _one_tool_call(response.tool_calls)
+            code, arguments = _tool_call_execution(tool_call, response.content)
+        except (RuntimeError, ValueError, TypeError) as error:
+            category = _rejected_transport_class(
+                response.tool_calls, response.content
+            )
+            self._transport_adherence[category] += 1
+            self._provenance.provider_turn_rejected(str(error))
+            return None
+        self._transport_adherence[f"valid_{tool_call.name}"] += 1
+        try:
+            result = await executor.run_cell(
+                code,
+                tool_call_id=tool_call.id,
+                tool_name=tool_call.name,
+                tool_arguments=arguments,
+                tool_reasoning=(
+                    None if response.content is None else str(response.content)
+                ),
+            )
+        except SterileReturnValidationError:
+            return None
+        return result.return_value
 
     def _model_evidence_query(self, raw_query: dict[str, Any]) -> dict[str, Any]:
         if self._evidence is None:

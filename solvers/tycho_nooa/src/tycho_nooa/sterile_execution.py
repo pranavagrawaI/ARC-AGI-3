@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 ReturnT = TypeVar("ReturnT")
 CapabilityHandler = Callable[[dict[str, JsonValue]], JsonValue]
+CapabilityAuditor = Callable[[], dict[str, Any] | None]
 
 _PROTOCOL_VERSION = 1
 _MAX_PROTOCOL_BYTES = 1_048_576
@@ -123,11 +124,13 @@ class SterileExecutor[ReturnT]:
         *,
         return_type: type[ReturnT],
         capability_handlers: dict[str, CapabilityHandler] | None = None,
+        capability_auditors: dict[str, CapabilityAuditor] | None = None,
         provenance: InvocationProvenance | None = None,
     ):
         self._manifest = manifest
         self._return_adapter = TypeAdapter(return_type)
         self._capability_handlers = dict(capability_handlers or {})
+        self._capability_auditors = dict(capability_auditors or {})
         self._provenance = provenance
         if (
             provenance is not None
@@ -138,6 +141,8 @@ class SterileExecutor[ReturnT]:
             raise ValueError(
                 "manifest capabilities must exactly match capability_handlers"
             )
+        if not set(self._capability_auditors).issubset(self._capability_handlers):
+            raise ValueError("capability_auditors must correspond to handlers")
         self._process: asyncio.subprocess.Process | None = None
         self._scratch: tempfile.TemporaryDirectory[str] | None = None
         self._request_id = 0
@@ -285,6 +290,10 @@ class SterileExecutor[ReturnT]:
             handler = self._capability_handlers[name]
             result = _json_copy(handler(arguments))
         except Exception as error:  # noqa: BLE001 - errors become data for T2
+            audit = self._take_capability_audit(name)
+            self._record_capability_normalization(
+                cell_seq, provenance_request_id, audit
+            )
             exception = ExecutionException(
                 type=type(error).__name__, message=str(error)[:2_000]
             )
@@ -304,6 +313,8 @@ class SterileExecutor[ReturnT]:
                 status="error",
                 exception=exception,
             )
+        audit = self._take_capability_audit(name)
+        self._record_capability_normalization(cell_seq, provenance_request_id, audit)
         await self._send_capability_result(request_id, result=result)
         if self._provenance is not None:
             self._provenance.capability_resolved(
@@ -311,11 +322,42 @@ class SterileExecutor[ReturnT]:
                 provenance_request_id,
                 result=result,
             )
+            if audit is not None and audit.get("disclosed") is True:
+                self._provenance.capability_disclosed(
+                    cell_seq, provenance_request_id
+                )
         return CapabilityRecord(
             name=name,
             arguments=arguments,
             status="complete",
             result=result,
+        )
+
+    def _take_capability_audit(self, name: str) -> dict[str, Any] | None:
+        auditor = self._capability_auditors.get(name)
+        return None if auditor is None else auditor()
+
+    def _record_capability_normalization(
+        self,
+        cell_seq: int,
+        request_id: int,
+        audit: dict[str, Any] | None,
+    ) -> None:
+        if self._provenance is None or audit is None:
+            return
+        semantic_query = audit.get("semantic_query")
+        semantic_sha256 = audit.get("semantic_sha256")
+        if semantic_query is None or semantic_sha256 is None:
+            return
+        if not isinstance(semantic_query, dict) or not isinstance(
+            semantic_sha256, str
+        ):
+            raise TypeError("capability audit semantic record is malformed")
+        self._provenance.capability_normalized(
+            cell_seq,
+            request_id,
+            semantic_query,
+            semantic_sha256,
         )
 
     def _validate_capability_request(

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 from typing import Any, Literal
 
@@ -41,6 +43,7 @@ class CompatibilityEvidencePolicy(BaseModel):
     projection: Literal["full", "metadata"] | None = None
     grid_encoding: Literal["raw", "rle"] | None = None
     max_queries: int = Field(default=1, ge=0, le=3)
+    max_query_attempts: int | None = Field(default=None, ge=0, le=6)
 
     @model_validator(mode="after")
     def enabled_policy_is_complete(self) -> CompatibilityEvidencePolicy:
@@ -65,6 +68,34 @@ class CompatibilityEvidencePolicy(BaseModel):
             "projection": self.projection,
             "grid_encoding": self.grid_encoding,
         }
+
+    @property
+    def query_attempt_cap(self) -> int:
+        """Use legacy disclosure-count semantics unless a repair cap is explicit."""
+        return self.max_queries if self.max_query_attempts is None else self.max_query_attempts
+
+
+class SemanticEvidenceQuery(BaseModel):
+    """Only query dimensions capable of changing the disclosed value."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["frames", "transitions"]
+    level: int = Field(ge=0)
+    limit: int = Field(ge=1, le=32)
+    projection: Literal["full", "metadata"]
+    grid_encoding: Literal["raw", "rle"] | None = None
+
+
+class EvidenceQueryAudit(BaseModel):
+    """One raw attempt and the semantic request, if normalization succeeded."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    raw_query: dict[str, Any]
+    semantic_query: SemanticEvidenceQuery | None = None
+    semantic_sha256: str | None = None
+    disclosed: bool = False
 
 
 class CompatibilityExpected(BaseModel):
@@ -102,9 +133,12 @@ class CompatibilityGate(BaseModel):
         return self
 
     def treatment_payload(self) -> dict[str, Any]:
+        evidence_contract = self.evidence.model_dump(mode="json")
+        if self.evidence.projection == "metadata":
+            evidence_contract.pop("grid_encoding")
         return {
             "task": self.task.model_dump(mode="json"),
-            "evidence_contract": self.evidence.model_dump(mode="json"),
+            "evidence_contract": evidence_contract,
         }
 
 
@@ -120,7 +154,7 @@ class CompatibilityEvaluation(BaseModel):
 
 
 class CompatibilityEvidenceCapability:
-    """Permit only the single predeclared query shape for one arm and gate."""
+    """Meter bounded attempts separately from successful evidence disclosures."""
 
     def __init__(
         self,
@@ -131,7 +165,10 @@ class CompatibilityEvidenceCapability:
             raise ValueError("disabled evidence policy has no capability adapter")
         self._capability = capability
         self._policy = policy
-        self._queries = 0
+        self._query_attempts = 0
+        self._successful_disclosures = 0
+        self._audits: list[EvidenceQueryAudit] = []
+        self._cache: dict[str, dict[str, Any]] = {}
 
     @classmethod
     def from_gate(
@@ -147,23 +184,90 @@ class CompatibilityEvidenceCapability:
 
     @property
     def queries(self) -> int:
-        return self._queries
+        """Backward-compatible name for successful evidence disclosures."""
+        return self._successful_disclosures
+
+    @property
+    def query_attempts(self) -> int:
+        return self._query_attempts
+
+    @property
+    def successful_disclosures(self) -> int:
+        return self._successful_disclosures
+
+    @property
+    def audits(self) -> tuple[EvidenceQueryAudit, ...]:
+        return tuple(self._audits)
+
+    def pop_audit(self) -> dict[str, Any] | None:
+        if not self._audits:
+            return None
+        return self._audits.pop(0).model_dump(mode="json")
 
     def query(self, raw_query: dict[str, Any] | EvidenceQuery) -> dict[str, Any]:
-        self._queries += 1
-        if self._queries > self._policy.max_queries:
-            raise ValueError("compatibility gate evidence-query cap exceeded")
         query = (
             raw_query.model_dump(exclude_none=True)
             if isinstance(raw_query, EvidenceQuery)
-            else raw_query
+            else dict(raw_query)
         )
-        expected = self._policy.query_value()
-        if query != expected:
-            raise ValueError(
-                f"compatibility gate requires exact evidence query {expected}"
-            )
-        return self._capability.query(query)
+        self._query_attempts += 1
+        if self._query_attempts > self._policy.query_attempt_cap:
+            self._audits.append(EvidenceQueryAudit(raw_query=query))
+            raise ValueError("compatibility gate query-attempt cap exceeded")
+        try:
+            semantic = canonicalize_evidence_query(query, self._policy)
+        except Exception:
+            self._audits.append(EvidenceQueryAudit(raw_query=query))
+            raise
+        semantic_sha256 = _semantic_query_sha256(semantic)
+        audit = EvidenceQueryAudit(
+            raw_query=query,
+            semantic_query=semantic,
+            semantic_sha256=semantic_sha256,
+        )
+        if self._successful_disclosures >= self._policy.max_queries:
+            self._audits.append(audit)
+            raise ValueError("compatibility gate evidence-disclosure cap exceeded")
+        result = self._cache.get(semantic_sha256)
+        if result is None:
+            result = self._capability.query(self._policy.query_value())
+            self._cache[semantic_sha256] = json.loads(json.dumps(result))
+        self._successful_disclosures += 1
+        self._audits.append(audit.model_copy(update={"disclosed": True}))
+        return json.loads(json.dumps(result))
+
+
+def canonicalize_evidence_query(
+    raw_query: dict[str, Any], policy: CompatibilityEvidencePolicy
+) -> SemanticEvidenceQuery:
+    """Erase representation spelling when it cannot affect metadata."""
+    expected = policy.query_value()
+    encoding = raw_query.get("grid_encoding")
+    if encoding is not None and encoding not in {"raw", "rle"}:
+        raise ValueError("grid_encoding must be raw or rle when provided")
+    relevant = {"kind", "level", "limit", "projection"}
+    if policy.projection != "metadata":
+        relevant.add("grid_encoding")
+    actual = {name: raw_query.get(name) for name in relevant}
+    required = {name: expected[name] for name in relevant}
+    forbidden = set(raw_query) - relevant - {"grid_encoding"}
+    if forbidden or actual != required:
+        raise ValueError(
+            f"compatibility gate requires semantic evidence query {required}"
+        )
+    semantic_value = dict(required)
+    if policy.projection == "metadata":
+        semantic_value["grid_encoding"] = None
+    return SemanticEvidenceQuery.model_validate(semantic_value)
+
+
+def _semantic_query_sha256(query: SemanticEvidenceQuery) -> str:
+    payload = json.dumps(
+        query.model_dump(mode="json", exclude_none=True),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return f"sha256:{hashlib.sha256(payload).hexdigest()}"
 
 
 def load_compatibility_gate(
@@ -222,6 +326,8 @@ def _validate_enabled_policy(policy: CompatibilityEvidencePolicy) -> None:
         raise ValueError("enabled evidence policy must fix the complete query shape")
     if policy.max_queries < 1:
         raise ValueError("enabled evidence policy requires a positive query cap")
+    if policy.query_attempt_cap < policy.max_queries:
+        raise ValueError("query-attempt cap cannot be below disclosure cap")
 
 
 def _validate_disabled_policy(policy: CompatibilityEvidencePolicy) -> None:
@@ -236,3 +342,5 @@ def _validate_disabled_policy(policy: CompatibilityEvidencePolicy) -> None:
         raise ValueError("disabled evidence policy cannot configure a query")
     if policy.max_queries != 0:
         raise ValueError("disabled evidence policy must allow zero queries")
+    if policy.query_attempt_cap != 0:
+        raise ValueError("disabled evidence policy must allow zero query attempts")

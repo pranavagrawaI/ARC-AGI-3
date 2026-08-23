@@ -14,6 +14,7 @@ from tycho_nooa.parity_compatibility import (
     CompatibilityExpected,
     CompatibilityGate,
     CompatibilityTask,
+    canonicalize_evidence_query,
     evaluate_compatibility_answer,
     load_compatibility_gate,
 )
@@ -41,6 +42,7 @@ def metadata_policy() -> CompatibilityEvidencePolicy:
         projection="metadata",
         grid_encoding="raw",
         max_queries=1,
+        max_query_attempts=2,
     )
 
 
@@ -53,6 +55,19 @@ def test_treatment_payload_excludes_checkpoint_and_answer_key() -> None:
     assert visible["evidence_contract"]["enabled"] is False
     assert "expected" not in visible
     assert "checkpoint_root" not in visible
+
+    metadata_gate = CompatibilityGate(
+        checkpoint_root="checkpoint",
+        checkpoint_sha256="sha256:" + "0" * 64,
+        task=CompatibilityTask(
+            gate_id="g1", gate_kind="metadata_query", instruction="Query metadata."
+        ),
+        evidence=metadata_policy(),
+        expected=CompatibilityExpected(conclusion="LEFT"),
+    )
+    assert "grid_encoding" not in metadata_gate.treatment_payload()[
+        "evidence_contract"
+    ]
 
 
 def test_gate_topology_requires_checkpoint_exactly_when_evidence_is_enabled() -> None:
@@ -136,7 +151,56 @@ def test_capability_allows_one_exact_metadata_query(tmp_path: Path) -> None:
         subject.query(metadata_policy().query_value())
 
 
-def test_capability_rejects_nonidentical_query_shape(tmp_path: Path) -> None:
+def test_metadata_normalization_erases_grid_encoding(tmp_path: Path) -> None:
+    policy = metadata_policy().model_copy(
+        update={"max_queries": 3, "max_query_attempts": 3}
+    )
+    workspace = GameWorkspace(
+        "compatibility", root=str(tmp_path), render=False, available_actions=["LEFT"]
+    )
+    workspace.record([[1]], level=0, turn_in_level=0)
+    subject = CompatibilityEvidenceCapability(
+        WorkspaceEvidenceCapability(workspace), policy
+    )
+    base = {"kind": "transitions", "level": 0, "limit": 4, "projection": "metadata"}
+
+    pages = [
+        subject.query(base),
+        subject.query({**base, "grid_encoding": "raw"}),
+        subject.query({**base, "grid_encoding": "rle"}),
+    ]
+
+    assert pages[0] == pages[1] == pages[2]
+    assert len({audit.semantic_sha256 for audit in subject.audits}) == 1
+    assert all(audit.semantic_query.grid_encoding is None for audit in subject.audits)
+
+
+def test_semantic_cache_uses_one_entry_for_metadata_spellings() -> None:
+    class CountingEvidence:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def query(self, query):
+            self.calls += 1
+            return {"frontier": {"level": 0, "turn": 0}, "query": query}
+
+    evidence = CountingEvidence()
+    policy = metadata_policy().model_copy(
+        update={"max_queries": 3, "max_query_attempts": 3}
+    )
+    subject = CompatibilityEvidenceCapability(evidence, policy)
+    base = {"kind": "transitions", "level": 0, "limit": 4, "projection": "metadata"}
+
+    subject.query(base)
+    subject.query({**base, "grid_encoding": "raw"})
+    subject.query({**base, "grid_encoding": "rle"})
+
+    assert evidence.calls == 1
+
+
+def test_rejected_attempt_can_be_corrected_without_another_disclosure(
+    tmp_path: Path,
+) -> None:
     workspace = GameWorkspace(
         "compatibility", root=str(tmp_path), render=False, available_actions=["LEFT"]
     )
@@ -145,8 +209,53 @@ def test_capability_rejects_nonidentical_query_shape(tmp_path: Path) -> None:
         WorkspaceEvidenceCapability(workspace), metadata_policy()
     )
 
-    with pytest.raises(ValueError, match="requires exact"):
+    with pytest.raises(ValueError, match="requires semantic"):
         subject.query({"kind": "transitions", "projection": "metadata"})
+
+    page = subject.query(metadata_policy().query_value())
+
+    assert page["projection"] == "metadata"
+    assert subject.query_attempts == 2
+    assert subject.successful_disclosures == 1
+    assert subject.audits[0].semantic_query is None
+    assert subject.audits[1].disclosed is True
+
+
+def test_second_successful_disclosure_is_blocked(tmp_path: Path) -> None:
+    workspace = GameWorkspace(
+        "compatibility", root=str(tmp_path), render=False, available_actions=["LEFT"]
+    )
+    workspace.record([[1]], level=0, turn_in_level=0)
+    subject = CompatibilityEvidenceCapability(
+        WorkspaceEvidenceCapability(workspace), metadata_policy()
+    )
+    query = metadata_policy().query_value()
+
+    subject.query(query)
+    with pytest.raises(ValueError, match="disclosure cap exceeded"):
+        subject.query(query)
+
+    assert subject.query_attempts == 2
+    assert subject.successful_disclosures == 1
+    assert subject.audits[-1].disclosed is False
+
+
+def test_full_projection_keeps_grid_encoding_semantic() -> None:
+    policy = metadata_policy().model_copy(
+        update={"projection": "full", "grid_encoding": "raw"}
+    )
+
+    with pytest.raises(ValueError, match="requires semantic"):
+        canonicalize_evidence_query(
+            {
+                "kind": "transitions",
+                "level": 0,
+                "limit": 4,
+                "projection": "full",
+                "grid_encoding": "rle",
+            },
+            policy,
+        )
 
 
 def test_loaded_gate_binds_checkpoint_and_constructs_capability(
