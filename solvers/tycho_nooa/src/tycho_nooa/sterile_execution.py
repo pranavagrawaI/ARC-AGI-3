@@ -13,7 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from pydantic import (
     BaseModel,
@@ -24,6 +24,9 @@ from pydantic import (
     ValidationError,
     field_validator,
 )
+
+if TYPE_CHECKING:
+    from tycho_nooa.execution_events import InvocationProvenance
 
 ReturnT = TypeVar("ReturnT")
 CapabilityHandler = Callable[[dict[str, JsonValue]], JsonValue]
@@ -94,6 +97,10 @@ class SterileCellTimeoutError(TimeoutError):
     """A model-generated cell exceeded its invocation wall-time bound."""
 
 
+class SterileWorkerLostError(RuntimeError):
+    """The disposable interpreter died, taking invocation-local state with it."""
+
+
 @dataclass(frozen=True)
 class SterileExecutionResult[ReturnT]:
     """Bounded observations of a cell; the child namespace never crosses T2."""
@@ -116,10 +123,17 @@ class SterileExecutor[ReturnT]:
         *,
         return_type: type[ReturnT],
         capability_handlers: dict[str, CapabilityHandler] | None = None,
+        provenance: InvocationProvenance | None = None,
     ):
         self._manifest = manifest
         self._return_adapter = TypeAdapter(return_type)
         self._capability_handlers = dict(capability_handlers or {})
+        self._provenance = provenance
+        if (
+            provenance is not None
+            and provenance.invocation_id != manifest.invocation_id
+        ):
+            raise ValueError("provenance invocation must match the execution manifest")
         if set(manifest.capabilities) != set(self._capability_handlers):
             raise ValueError(
                 "manifest capabilities must exactly match capability_handlers"
@@ -127,12 +141,15 @@ class SterileExecutor[ReturnT]:
         self._process: asyncio.subprocess.Process | None = None
         self._scratch: tempfile.TemporaryDirectory[str] | None = None
         self._request_id = 0
+        self._provenance_request_id = 0
         self._capability_request_ids: set[int] = set()
         self._returned = False
 
     async def __aenter__(self) -> SterileExecutor[ReturnT]:
         if self._process is not None:
             raise RuntimeError("sterile executor is already running")
+        if self._provenance is not None:
+            self._provenance.start(self._manifest.model_dump(mode="json"))
         self._scratch = tempfile.TemporaryDirectory(prefix="tycho-codeact-")
         worker = Path(__file__).with_name("_sterile_worker.py")
         environment = {
@@ -142,29 +159,36 @@ class SterileExecutor[ReturnT]:
             "PYTHONHASHSEED": "0",
             "TMPDIR": self._scratch.name,
         }
-        self._process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-I",
-            "-S",
-            str(worker),
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=self._scratch.name,
-            env=environment,
-            close_fds=True,
-        )
-        await self._send(
-            {
-                "protocol_version": _PROTOCOL_VERSION,
-                "type": "initialize",
-                "manifest": self._manifest.model_dump(mode="json"),
-            }
-        )
-        response = await self._receive()
-        if response.get("type") != "ready":
+        try:
+            self._process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-I",
+                "-S",
+                str(worker),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self._scratch.name,
+                env=environment,
+                close_fds=True,
+            )
+            await self._send(
+                {
+                    "protocol_version": _PROTOCOL_VERSION,
+                    "type": "initialize",
+                    "manifest": self._manifest.model_dump(mode="json"),
+                }
+            )
+            response = await self._receive()
+            if response.get("type") != "ready":
+                raise RuntimeError(
+                    f"sterile worker initialization failed: {response}"
+                )
+        except Exception:
+            if self._provenance is not None:
+                self._provenance.fail("worker_start_failed", locals_lost=True)
             await self.aclose()
-            raise RuntimeError(f"sterile worker initialization failed: {response}")
+            raise
         return self
 
     async def __aexit__(
@@ -182,6 +206,8 @@ class SterileExecutor[ReturnT]:
             raise RuntimeError("sterile invocation already returned a valid result")
         self._request_id += 1
         request_id = self._request_id
+        if self._provenance is not None:
+            self._provenance.cell_dispatched(request_id, code)
         response, records = await self._execute_request(code, request_id)
         return self._result_from_response(response, request_id, records)
 
@@ -204,19 +230,41 @@ class SterileExecutor[ReturnT]:
                     response = await self._receive()
                     if response.get("type") != "capability_request":
                         return response, tuple(records)
-                    records.append(await self._handle_capability_request(response))
+                    records.append(
+                        await self._handle_capability_request(response, request_id)
+                    )
         except TimeoutError as error:
             await self._kill_process()
+            if self._provenance is not None:
+                self._provenance.cell_timed_out(
+                    request_id, self._manifest.wall_time_seconds
+                )
             raise SterileCellTimeoutError(
                 f"cell exceeded {self._manifest.wall_time_seconds} seconds"
             ) from error
+        except (asyncio.IncompleteReadError, BrokenPipeError, ConnectionError) as error:
+            await self._kill_process()
+            if self._provenance is not None:
+                self._provenance.worker_lost(request_id, type(error).__name__)
+            raise SterileWorkerLostError(
+                "sterile worker was lost; invocation-local state did not survive"
+            ) from error
 
     async def _handle_capability_request(
-        self, request: dict[str, Any]
+        self, request: dict[str, Any], cell_seq: int
     ) -> CapabilityRecord:
         name = str(request.get("name", ""))
         arguments = request.get("arguments")
         request_id = request.get("capability_request_id")
+        self._provenance_request_id += 1
+        provenance_request_id = self._provenance_request_id
+        if self._provenance is not None:
+            self._provenance.capability_requested(
+                cell_seq,
+                provenance_request_id,
+                name,
+                arguments,
+            )
         try:
             self._validate_capability_request(request, name, arguments, request_id)
             handler = self._capability_handlers[name]
@@ -226,6 +274,15 @@ class SterileExecutor[ReturnT]:
                 type=type(error).__name__, message=str(error)[:2_000]
             )
             await self._send_capability_result(request_id, exception=exception)
+            if self._provenance is not None:
+                self._provenance.capability_resolved(
+                    cell_seq,
+                    provenance_request_id,
+                    exception={
+                        "type": exception.type,
+                        "message": exception.message,
+                    },
+                )
             return CapabilityRecord(
                 name=name,
                 arguments=arguments if isinstance(arguments, dict) else {},
@@ -233,6 +290,12 @@ class SterileExecutor[ReturnT]:
                 exception=exception,
             )
         await self._send_capability_result(request_id, result=result)
+        if self._provenance is not None:
+            self._provenance.capability_resolved(
+                cell_seq,
+                provenance_request_id,
+                result=result,
+            )
         return CapabilityRecord(
             name=name,
             arguments=arguments,
@@ -304,29 +367,55 @@ class SterileExecutor[ReturnT]:
         status = response.get("status")
         if status not in {"complete", "error", "returned"}:
             raise RuntimeError(f"invalid sterile worker status: {status!r}")
+        stdout = str(response.get("stdout", ""))
+        stderr = str(response.get("stderr", ""))
+        locals_preview = {
+            str(name): str(preview)
+            for name, preview in dict(response.get("locals_preview", {})).items()
+        }
+        exception = self._execution_exception(response.get("exception"))
+        if self._provenance is not None:
+            self._provenance.cell_finished(
+                request_id,
+                status=status,
+                stdout=stdout,
+                stderr=stderr,
+                locals_preview=locals_preview,
+                exception=(
+                    {"type": exception.type, "message": exception.message}
+                    if exception is not None
+                    else None
+                ),
+            )
+        return_value = self._validated_return(response, status, request_id)
         return SterileExecutionResult(
             status=status,
-            stdout=str(response.get("stdout", "")),
-            stderr=str(response.get("stderr", "")),
-            locals_preview={
-                str(name): str(preview)
-                for name, preview in dict(response.get("locals_preview", {})).items()
-            },
-            return_value=self._validated_return(response, status),
-            exception=self._execution_exception(response.get("exception")),
+            stdout=stdout,
+            stderr=stderr,
+            locals_preview=locals_preview,
+            return_value=return_value,
+            exception=exception,
             capability_records=records,
         )
 
     def _validated_return(
-        self, response: dict[str, Any], status: str
+        self, response: dict[str, Any], status: str, cell_seq: int
     ) -> ReturnT | None:
         if status != "returned":
             return None
+        proposed = response.get("return_payload")
+        if self._provenance is not None:
+            self._provenance.return_proposed(cell_seq, proposed)
         try:
-            value = self._return_adapter.validate_python(response.get("return_payload"))
+            value = self._return_adapter.validate_python(proposed)
         except ValidationError as error:
+            if self._provenance is not None:
+                self._provenance.return_rejected(cell_seq, str(error))
             raise SterileReturnValidationError(str(error)) from error
         self._returned = True
+        if self._provenance is not None:
+            accepted = self._return_adapter.dump_python(value, mode="json")
+            self._provenance.return_accepted(cell_seq, accepted)
         return value
 
     @staticmethod
@@ -347,6 +436,11 @@ class SterileExecutor[ReturnT]:
             if self._scratch is not None:
                 self._scratch.cleanup()
                 self._scratch = None
+            if self._provenance is not None and self._provenance.state == "running":
+                self._provenance.fail(
+                    "closed_without_terminal_return",
+                    locals_lost=True,
+                )
 
     async def _request_shutdown(self, process: asyncio.subprocess.Process) -> None:
         try:

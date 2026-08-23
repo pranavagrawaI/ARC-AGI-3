@@ -68,8 +68,8 @@ authoritative current-attempt frames or ordinary transitions into paginated,
 frontier-bound JSON DTOs; workspace paths and NumPy objects never cross. T2
 caches the serialized page for one invocation and returns a fresh value copy on
 each identical query, so generated-code mutation cannot poison the cache or the
-workspace. Archived attempts, death/terminal/animation channels, NOOA events,
-and CodeAct Actor integration remain later slices.
+workspace. Archived attempts, death/terminal/animation channels and CodeAct
+Actor integration remain later slices.
 
 Frozen-workspace parity is executable through
 `python -m tycho_nooa.evidence_parity`. The retained 2026-08-23 treatment in
@@ -78,6 +78,25 @@ Frozen-workspace parity is executable through
 worker. It covers the no-transition edge, an 18-transition CLICK trajectory,
 and multi-page synthetic retrieval; it does not claim parity for evidence
 channels that `evidence.query` does not yet expose.
+
+T1 now records each offline CodeAct invocation in an append-only provenance
+log. Core-assigned invocation, cell, event, and capability-request identities
+describe dispatch, capability mediation, execution outcome, terminal proposal,
+and invocation completion or failure. Payloads remain exact in that raw JSONL
+record and carry deterministic hashes; the disposable worker cannot choose
+event types, ancestry, or accepted-return status. Timeout and worker loss
+explicitly terminate the invocation with `locals_lost=true` rather than
+silently starting a new REPL.
+
+`NooaExecutionProjection` derives a separate model-visible `EventManager` from
+the raw record. Cell source, stdout, stderr, exceptions, and capability data are
+escaped before NOOA's XML-like renderer sees them, so text resembling a system
+or tool boundary stays data inside its projected event. NOOA collapse may
+replace a visible span with a summary without modifying the raw log, and the
+full projection can be reconstructed from that log. This remains offline
+infrastructure: no live Actor/provider context uses the projection yet, so the
+tests establish deterministic reconstruction of the context renderer's output,
+not parity with an already-deployed CodeAct Actor.
 
 Run evidence is separate from the ordinary tool trace:
 
