@@ -20,8 +20,12 @@ from tycho_nooa.compatibility_experiment import (
     execute_compatibility_gate,
 )
 from tycho_nooa.compatibility_ladder import (
+    CompatibilityAdvancement,
+    CompatibilityArmOutcomes,
+    CompatibilityIntegrity,
     CompatibilityLadder,
     CompatibilityLadderReport,
+    CompatibilityRunAssessment,
     run_compatibility_ladder,
 )
 from tycho_nooa.compatibility_manifest import (
@@ -209,6 +213,7 @@ async def execute_authorized_compatibility_ladder(
     except BaseException as error:
         if ledger.state.run_state == "armed":
             ledger.stop(f"launcher_failure:{type(error).__name__}")
+        _write_partial_assessment(destination, ledger)
         _write_json(
             destination / "launch-failure.json",
             {"error_type": type(error).__name__, "message": str(error)},
@@ -393,6 +398,83 @@ def _provider_failure(raw: Any) -> str | None:
             return f"provider error {code}: {message}"
         return f"provider error: {error}"
     return None
+
+
+def _write_partial_assessment(
+    destination: Path, ledger: DurableAuthorizationLedger
+) -> None:
+    gate = ledger.state.active_gate
+    if gate is None:
+        return
+    integrities = {
+        arm: _arm_integrity(destination, ledger, gate.gate_id, arm)
+        for arm in ("native", "codeact")
+    }
+    outcomes = {
+        arm: _arm_outcome(destination, gate.gate_id, arm)
+        for arm in ("native", "codeact")
+    }
+    assessment = CompatibilityRunAssessment(
+        integrity=CompatibilityIntegrity(
+            native=integrities["native"],
+            codeact=integrities["codeact"],
+            pair=(
+                "complete"
+                if set(integrities.values()) == {"valid"}
+                else "incomplete"
+            ),
+        ),
+        arm_outcomes=CompatibilityArmOutcomes(
+            native=outcomes["native"], codeact=outcomes["codeact"]
+        ),
+        advancement=_advancement(outcomes, pair_complete=False),
+    )
+    _write_json(
+        destination / "assessment.json", assessment.model_dump(mode="json")
+    )
+
+
+def _arm_integrity(
+    destination: Path,
+    ledger: DurableAuthorizationLedger,
+    gate_id: str,
+    arm: CompatibilityArm,
+) -> str:
+    if _arm_result_path(destination, gate_id, arm).is_file():
+        return "valid"
+    calls = [call for call in ledger.state.calls.values() if call.arm == arm]
+    if any(call.failure is not None for call in calls):
+        return "provider_censored"
+    return "execution_failed" if calls else "not_run"
+
+
+def _arm_outcome(destination: Path, gate_id: str, arm: CompatibilityArm) -> str:
+    path = _arm_result_path(destination, gate_id, arm)
+    if not path.is_file():
+        return "unknown" if path.parent.is_dir() else "not_run"
+    result = json.loads(path.read_text())
+    if result.get("passed") is True:
+        return "passed"
+    return "failed_termination" if gate_id == "g0-termination" else "failed_gate"
+
+
+def _advancement(outcomes: dict[str, str], *, pair_complete: bool):
+    if outcomes["native"] == "failed_termination":
+        reason = "native_prerequisite_failed"
+    elif outcomes["codeact"] == "failed_termination":
+        reason = "codeact_prerequisite_failed"
+    else:
+        reason = "all_prerequisites_passed" if pair_complete else "pair_incomplete"
+    return CompatibilityAdvancement(
+        eligible=pair_complete and set(outcomes.values()) == {"passed"},
+        reason=reason,
+    )
+
+
+def _arm_result_path(
+    destination: Path, gate_id: str, arm: CompatibilityArm
+) -> Path:
+    return destination / "ladder" / gate_id / arm / "result.json"
 
 
 def _raw_field(value: Any, name: str) -> Any:

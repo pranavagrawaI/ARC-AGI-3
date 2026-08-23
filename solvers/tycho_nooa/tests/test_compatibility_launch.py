@@ -140,7 +140,7 @@ async def test_one_arm_gate_failure_still_completes_the_matched_pair(
         codeact_llm=codeact,
     )
 
-    assert report.disposition == "rejected_model_protocol"
+    assert report.disposition == "not_eligible_termination"
     assert native.call_count == 1
     assert codeact.call_count == 1
     events = [
@@ -292,10 +292,10 @@ async def test_embedded_provider_failure_is_preserved_accounted_and_stops(
     tmp_path: Path,
 ) -> None:
     manifest, authorization = authorized_inputs(tmp_path)
-    native = configured_fake(provider_failure_response())
-    codeact = configured_fake(response("READY"))
+    native = configured_fake(response("WRONG"))
+    codeact = configured_fake(provider_failure_response())
 
-    with pytest.raises(RuntimeError, match="provider_failure:call-0001"):
+    with pytest.raises(RuntimeError, match="provider_failure:call-0002"):
         await execute_authorized_compatibility_ladder(
             manifest,
             authorization,
@@ -306,7 +306,7 @@ async def test_embedded_provider_failure_is_preserved_accounted_and_stops(
         )
 
     assert native.call_count == 1
-    assert codeact.call_count == 0
+    assert codeact.call_count == 1
     events = (tmp_path / "run/authorization-events.jsonl").read_text()
     assert '"event_type":"CallReceived"' in events
     assert '"event_type":"ProviderFailureObserved"' in events
@@ -314,6 +314,23 @@ async def test_embedded_provider_failure_is_preserved_accounted_and_stops(
     assert '"event_type":"RunStopped"' in events
     assert "generation ended before tool call completed" in events
     assert not (tmp_path / "run/ladder/ladder-report.json").exists()
+    assessment = json.loads((tmp_path / "run/assessment.json").read_text())
+    assert assessment == {
+        "advancement": {
+            "eligible": False,
+            "reason": "native_prerequisite_failed",
+        },
+        "arm_outcomes": {
+            "codeact": "unknown",
+            "native": "failed_termination",
+        },
+        "integrity": {
+            "codeact": "provider_censored",
+            "native": "valid",
+            "pair": "incomplete",
+        },
+        "schema_version": 1,
+    }
 
 
 async def test_completed_authorization_is_not_silently_replayed(

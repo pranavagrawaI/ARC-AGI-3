@@ -2,7 +2,15 @@
 
 ## Judgment
 
-**Invalid experiment — provider failure.** The paid run reached only `g0-termination`. The launcher recorded a Sail Research 502 embedded in `call-0005`, conservatively accounted for it, but continued the ladder and emitted the machine disposition `rejected_model_protocol`. Because provider failure was a hard-stop condition, that disposition is preserved as machine output but is not a valid eligibility result.
+**Partial experiment with a decisive advancement result.** Native received three clean responses and failed its frozen termination prerequisite. CodeAct is unresolved because `call-0005` contained a Sail Research 502. The pair is incomplete, but eligibility required both arms to pass, so DeepSeek did not establish eligibility for the matched cognitive experiment.
+
+The machine disposition `rejected_model_protocol` remains preserved as raw output. It must not be broadened into a claim that DeepSeek is generally incompatible with either protocol.
+
+| Dimension | Native | CodeAct | Pair / advancement |
+|---|---|---|---|
+| Integrity | Valid | Provider-censored | Incomplete |
+| Outcome | Failed termination | Unknown | Not eligible |
+| Reason | Three clean calls, no valid return | Upstream 502 censored the arm | Native prerequisite failed |
 
 ## What happened
 
@@ -11,7 +19,7 @@
 | Native | 3 | 3 | 0 | No required typed return was issued. |
 | CodeAct | 3 | 2 | 0 | One malformed typed return was rejected; the next call ended in an upstream 502; the final clean call did not terminate. |
 
-Later gates were not reached. No claim about evidence querying, RLE, representation, cognition, or Native-versus-CodeAct quality is supported.
+Later gates were not reached. No claim about CodeAct termination, evidence querying, RLE, representation, cognition, or Native-versus-CodeAct quality is supported.
 
 ## Route and cost
 
@@ -23,7 +31,7 @@ All six responses reported the authorized model and provider. There were no rout
 
 ## Next
 
-1. Commit this run unchanged as evidence.
-2. Add an explicit durable provider-failure transition after a received response is preserved and accounted.
-3. Test that embedded provider errors hard-stop the pair and cannot produce a ladder disposition.
-4. Do **not** rerun automatically. The completed authorization cannot be reused; a repaired treatment requires a new frozen manifest and fresh authorization.
+1. The embedded-provider-failure launcher defect was repaired in `78e0157`.
+2. Repair the trusted authorization/recovery quality gate before further paid work.
+3. Do **not** rerun this eligibility experiment to rescue DeepSeek: Native already failed the conjunctive prerequisite.
+4. If CodeAct compatibility itself is worth resolving, freeze a separate diagnostic and obtain fresh authorization.

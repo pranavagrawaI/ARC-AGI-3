@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from tycho_nooa.compatibility_experiment import (
 )
 from tycho_nooa.compatibility_ladder import (
     CompatibilityLadder,
+    CompatibilityRunAssessment,
     run_compatibility_ladder,
 )
 from tycho_nooa.parity_compatibility import (
@@ -19,6 +21,8 @@ from tycho_nooa.parity_compatibility import (
     CompatibilityGate,
     CompatibilityTask,
 )
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 
 
 def gate(
@@ -149,7 +153,7 @@ async def test_rle_failure_uses_raw_for_representation_and_cognition(
 @pytest.mark.parametrize(
     ("fail_gate", "disposition", "expected_run", "encoding"),
     [
-        ("g0", "rejected_model_protocol", ["g0"], None),
+        ("g0", "not_eligible_termination", ["g0"], None),
         ("g1", "rejected_capability_pairing", ["g0", "g1"], None),
         (
             "g2-raw",
@@ -196,3 +200,23 @@ def test_ladder_rejects_unmatched_representation_alternatives() -> None:
 
     with pytest.raises(ValueError, match="differ only"):
         CompatibilityLadder.model_validate(value)
+
+
+def test_paid_run_assessment_preserves_valid_partial_evidence() -> None:
+    path = (
+        REPOSITORY_ROOT
+        / "analysis/parity-compat-v2/runs"
+        / "20260823T150413Z-deepseek-v4-flash-sail/RESULTS.json"
+    )
+
+    assessment = CompatibilityRunAssessment.model_validate(
+        json.loads(path.read_text())["assessment"]
+    )
+
+    assert assessment.integrity.native == "valid"
+    assert assessment.integrity.codeact == "provider_censored"
+    assert assessment.integrity.pair == "incomplete"
+    assert assessment.arm_outcomes.native == "failed_termination"
+    assert assessment.arm_outcomes.codeact == "unknown"
+    assert assessment.advancement.eligible is False
+    assert assessment.advancement.reason == "native_prerequisite_failed"

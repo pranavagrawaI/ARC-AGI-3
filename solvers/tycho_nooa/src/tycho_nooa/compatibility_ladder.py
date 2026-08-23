@@ -17,7 +17,7 @@ from tycho_nooa.compatibility_experiment import (
 from tycho_nooa.parity_compatibility import CompatibilityGate
 
 CompatibilityDisposition = Literal[
-    "rejected_model_protocol",
+    "not_eligible_termination",
     "rejected_capability_pairing",
     "rejected_representation",
     "rejected_cognitive_eligibility",
@@ -25,6 +25,27 @@ CompatibilityDisposition = Literal[
     "eligible_raw",
 ]
 CompatibilityEncoding = Literal["rle", "raw"]
+ArmIntegrity = Literal[
+    "valid",
+    "provider_censored",
+    "execution_failed",
+    "not_run",
+]
+PairIntegrity = Literal["complete", "incomplete"]
+ArmOutcome = Literal[
+    "passed",
+    "failed_termination",
+    "failed_gate",
+    "unknown",
+    "not_run",
+]
+AdvancementReason = Literal[
+    "all_prerequisites_passed",
+    "native_prerequisite_failed",
+    "codeact_prerequisite_failed",
+    "pair_incomplete",
+    "later_gate_failed",
+]
 GateExecutor = Callable[
     [CompatibilityGate, Path], Awaitable[CompatibilityGateReport]
 ]
@@ -99,6 +120,45 @@ class CompatibilityLadderReport(BaseModel):
     codeact_llm_calls: int
 
 
+class CompatibilityIntegrity(BaseModel):
+    """Validity of each arm and of the matched pair as distinct facts."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    native: ArmIntegrity
+    codeact: ArmIntegrity
+    pair: PairIntegrity
+
+
+class CompatibilityArmOutcomes(BaseModel):
+    """Observed arm results without smuggling in pair-level conclusions."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    native: ArmOutcome
+    codeact: ArmOutcome
+
+
+class CompatibilityAdvancement(BaseModel):
+    """Whether the conjunctive eligibility rule permits advancement."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    eligible: bool
+    reason: AdvancementReason
+
+
+class CompatibilityRunAssessment(BaseModel):
+    """Scientific interpretation kept separate from raw machine disposition."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[1] = 1
+    integrity: CompatibilityIntegrity
+    arm_outcomes: CompatibilityArmOutcomes
+    advancement: CompatibilityAdvancement
+
+
 async def execute_compatibility_ladder(
     ladder: CompatibilityLadder,
     *,
@@ -149,7 +209,7 @@ async def run_compatibility_ladder(
             ladder,
             destination,
             reports,
-            "rejected_model_protocol",
+            "not_eligible_termination",
             None,
             observer,
         )
