@@ -88,7 +88,7 @@ def _apply_optional_overrides(
     if request_reasoning(env):
         overrides["reasoning"] = {"enabled": True}
     if endpoint := env.get(PROVIDER_ENDPOINT_ENV):
-        if endpoint != endpoint.strip() or "/" not in endpoint:
+        if endpoint != endpoint.strip():
             raise ValueError(
                 f"{PROVIDER_ENDPOINT_ENV} must be one exact provider endpoint"
             )

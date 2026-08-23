@@ -99,6 +99,28 @@ def test_live_llm_always_requests_reasoning(
     assert captured["reasoning"] == {"enabled": True}
 
 
+def test_live_llm_accepts_single_segment_provider_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_client(model: str, **kwargs: Any) -> object:
+        captured.update(model=model, **kwargs)
+        return object()
+
+    monkeypatch.setattr("tycho_nooa.llm.get_llm_client", fake_client)
+    build_llm(
+        {
+            "ARC_LLM_MODEL": "openai/gpt-5-test",
+            "ARC_LLM_PROVIDER_ENDPOINT": "openai",
+        }
+    )
+
+    assert captured["extra_body"] == {
+        "provider": {"order": ["openai"], "allow_fallbacks": False}
+    }
+
+
 def test_reasoning_and_response_capture_cannot_be_disabled() -> None:
     assert request_reasoning({}) is True
     assert capture_response_text({}) is True
