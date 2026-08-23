@@ -76,7 +76,7 @@ class CompatibilityExperimentManifest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[1, 2, 3] = 1
+    schema_version: Literal[1, 2, 3, 4] = 1
     experiment_id: str = Field(min_length=1)
     execution_authorized: bool
     runtime_commit: str = Field(pattern=r"^[0-9a-f]{7,40}$")
@@ -94,6 +94,7 @@ class CompatibilityExperimentManifest(BaseModel):
     codeact_controller: FileCommitment | None = None
     execution_projection: FileCommitment | None = None
     sterile_executor: FileCommitment | None = None
+    sterile_worker: FileCommitment | None = None
     return_schema_sha256: str | None = Field(
         default=None, pattern=r"^sha256:[0-9a-f]{64}$"
     )
@@ -154,6 +155,7 @@ def load_compatibility_experiment_manifest(
         manifest.codeact_controller,
         manifest.execution_projection,
         manifest.sterile_executor,
+        manifest.sterile_worker,
     ):
         if commitment is not None:
             _validate_file(commitment, repository_root)
@@ -202,6 +204,10 @@ def _schema_v3_is_fully_bound(manifest: CompatibilityExperimentManifest) -> bool
     )
 
 
+def _schema_v4_is_fully_bound(manifest: CompatibilityExperimentManifest) -> bool:
+    return _schema_v3_is_fully_bound(manifest) and manifest.sterile_worker is not None
+
+
 def _validate_schema_bindings(manifest: CompatibilityExperimentManifest) -> None:
     if manifest.schema_version == 2 and not _schema_v2_is_fully_bound(manifest):
         raise ValueError("schema v2 must bind both controllers and return schema")
@@ -209,6 +215,8 @@ def _validate_schema_bindings(manifest: CompatibilityExperimentManifest) -> None
         raise ValueError(
             "schema v3 must bind controllers, return schema, projection, and executor"
         )
+    if manifest.schema_version == 4 and not _schema_v4_is_fully_bound(manifest):
+        raise ValueError("schema v4 must also bind the sterile worker")
 
 
 def _validate_authorized_manifest(

@@ -152,3 +152,26 @@ def test_schema_v3_requires_projection_and_executor_commitments() -> None:
 
     with pytest.raises(ValidationError, match="projection, and executor"):
         CompatibilityExperimentManifest.model_validate(raw)
+
+
+def test_schema_v4_requires_the_exec_worker_commitment() -> None:
+    raw = json.loads(EXPERIMENT.read_text())
+    raw.update(
+        schema_version=4,
+        native_controller=raw["gate_executor"],
+        codeact_controller=raw["gate_executor"],
+        return_schema_sha256=cognitive_return_schema_sha256(),
+        execution_projection=raw["gate_executor"],
+        sterile_executor=raw["gate_executor"],
+    )
+
+    with pytest.raises(ValidationError, match="sterile worker"):
+        CompatibilityExperimentManifest.model_validate(raw)
+
+    raw["sterile_worker"] = {
+        "path": "solvers/tycho_nooa/src/tycho_nooa/_sterile_worker.py",
+        "sha256": "sha256:" + "0" * 64,
+    }
+    manifest = CompatibilityExperimentManifest.model_validate(raw)
+
+    assert manifest.sterile_worker is not None
