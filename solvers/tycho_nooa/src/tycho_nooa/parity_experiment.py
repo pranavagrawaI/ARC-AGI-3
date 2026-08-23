@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections import Counter
@@ -73,29 +74,32 @@ async def execute_matched_packet(
     codeact_llm: UnifiedLLM,
     max_llm_calls: int,
     max_output_tokens: int,
+    session_timeout_seconds: float,
     cell_timeout_seconds: float,
 ) -> MatchedParityReport:
     """Run both austere arms once and preserve every completed observation."""
     destination.mkdir(parents=True, exist_ok=False)
     evidence_root = repository_root / packet.checkpoint_root
     try:
-        native = await _run_native(
-            packet,
-            evidence_root=evidence_root,
-            destination=destination / "native",
-            llm=native_llm,
-            max_llm_calls=max_llm_calls,
-            max_output_tokens=max_output_tokens,
-        )
-        codeact = await _run_codeact(
-            packet,
-            evidence_root=evidence_root,
-            destination=destination / "codeact",
-            llm=codeact_llm,
-            max_llm_calls=max_llm_calls,
-            max_output_tokens=max_output_tokens,
-            cell_timeout_seconds=cell_timeout_seconds,
-        )
+        async with asyncio.timeout(session_timeout_seconds):
+            native = await _run_native(
+                packet,
+                evidence_root=evidence_root,
+                destination=destination / "native",
+                llm=native_llm,
+                max_llm_calls=max_llm_calls,
+                max_output_tokens=max_output_tokens,
+            )
+        async with asyncio.timeout(session_timeout_seconds):
+            codeact = await _run_codeact(
+                packet,
+                evidence_root=evidence_root,
+                destination=destination / "codeact",
+                llm=codeact_llm,
+                max_llm_calls=max_llm_calls,
+                max_output_tokens=max_output_tokens,
+                cell_timeout_seconds=cell_timeout_seconds,
+            )
     except BaseException as error:
         _write_json(
             destination / "failure.json",

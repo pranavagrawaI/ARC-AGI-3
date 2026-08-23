@@ -64,6 +64,7 @@ async def test_easy_positive_control_matches_with_no_additional_authority(
         ),
         max_llm_calls=8,
         max_output_tokens=4096,
+        session_timeout_seconds=120,
         cell_timeout_seconds=5,
     )
 
@@ -101,6 +102,7 @@ async def test_negative_control_preserves_insufficient_evidence_answer(
         ),
         max_llm_calls=8,
         max_output_tokens=4096,
+        session_timeout_seconds=120,
         cell_timeout_seconds=5,
     )
 
@@ -160,6 +162,7 @@ async def test_composition_control_requires_two_pages_in_both_arms(
         ),
         max_llm_calls=8,
         max_output_tokens=4096,
+        session_timeout_seconds=120,
         cell_timeout_seconds=5,
     )
 
