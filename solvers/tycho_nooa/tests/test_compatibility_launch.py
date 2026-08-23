@@ -13,6 +13,7 @@ from tycho_nooa.compatibility_authorization import (
 )
 from tycho_nooa.compatibility_launch import (
     execute_authorized_compatibility_ladder,
+    preflight_authorized_compatibility_ladder,
 )
 from tycho_nooa.compatibility_manifest import sha256_file
 
@@ -128,6 +129,28 @@ async def test_one_arm_gate_failure_still_completes_the_matched_pair(
     ]
     assert [event["event_type"] for event in events].count("CallAccounted") == 2
     assert events[-1]["event_type"] == "RunCompleted"
+
+
+def test_preflight_validates_without_creating_a_run_or_calling_provider(
+    tmp_path: Path,
+) -> None:
+    manifest, authorization = authorized_inputs(tmp_path)
+    native = configured_fake(response("READY"))
+    codeact = configured_fake(response("READY"))
+
+    loaded, ladder, _, _ = preflight_authorized_compatibility_ladder(
+        manifest,
+        authorization,
+        repository_root=REPOSITORY_ROOT,
+        native_llm=native,
+        codeact_llm=codeact,
+    )
+
+    assert loaded.execution_authorized is True
+    assert ladder.termination.task.gate_id == "g0-termination"
+    assert native.call_count == 0
+    assert codeact.call_count == 0
+    assert not (tmp_path / "run").exists()
 
 
 async def test_manifest_change_after_authorization_makes_zero_calls(

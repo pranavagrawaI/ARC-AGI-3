@@ -20,6 +20,7 @@ from tycho_nooa.compatibility_experiment import (
     execute_compatibility_gate,
 )
 from tycho_nooa.compatibility_ladder import (
+    CompatibilityLadder,
     CompatibilityLadderReport,
     run_compatibility_ladder,
 )
@@ -137,19 +138,15 @@ async def execute_authorized_compatibility_ladder(
     codeact_llm: UnifiedLLM,
 ) -> CompatibilityLadderReport:
     """Validate every authority input before creating a run or calling a provider."""
-    manifest, ladder = load_compatibility_experiment_manifest(
-        manifest_path, repository_root=repository_root
+    manifest, ladder, authorization, authorization_hash = (
+        preflight_authorized_compatibility_ladder(
+            manifest_path,
+            authorization_path,
+            repository_root=repository_root,
+            native_llm=native_llm,
+            codeact_llm=codeact_llm,
+        )
     )
-    manifest.require_execution_authorized()
-    authorization = CompatibilityAuthorization.model_validate_json(
-        authorization_path.read_text()
-    )
-    authorization.require_current()
-    manifest_hash = sha256_file(manifest_path)
-    authorization_hash = sha256_file(authorization_path)
-    _validate_authorization(authorization, manifest, manifest_hash)
-    _validate_configured_llm(native_llm, authorization)
-    _validate_configured_llm(codeact_llm, authorization)
     if destination.exists():
         _reject_existing_run(
             destination,
@@ -211,6 +208,36 @@ async def execute_authorized_compatibility_ladder(
             {"error_type": type(error).__name__, "message": str(error)},
         )
         raise
+
+
+def preflight_authorized_compatibility_ladder(
+    manifest_path: Path,
+    authorization_path: Path,
+    *,
+    repository_root: Path,
+    native_llm: UnifiedLLM,
+    codeact_llm: UnifiedLLM,
+) -> tuple[
+    CompatibilityExperimentManifest,
+    CompatibilityLadder,
+    CompatibilityAuthorization,
+    str,
+]:
+    """Validate package, authority, route, expiry, and caps without side effects."""
+    manifest, ladder = load_compatibility_experiment_manifest(
+        manifest_path, repository_root=repository_root
+    )
+    manifest.require_execution_authorized()
+    authorization = CompatibilityAuthorization.model_validate_json(
+        authorization_path.read_text()
+    )
+    authorization.require_current()
+    manifest_hash = sha256_file(manifest_path)
+    authorization_hash = sha256_file(authorization_path)
+    _validate_authorization(authorization, manifest, manifest_hash)
+    _validate_configured_llm(native_llm, authorization)
+    _validate_configured_llm(codeact_llm, authorization)
+    return manifest, ladder, authorization, authorization_hash
 
 
 def _validate_authorization(
