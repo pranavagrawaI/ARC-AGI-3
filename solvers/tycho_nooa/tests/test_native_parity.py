@@ -152,6 +152,32 @@ async def test_missing_tool_call_is_feedback_not_terminal(tmp_path: Path) -> Non
     assert "PROVIDER_TURN_REJECTED" in json.dumps(llm.last_messages)
 
 
+async def test_invalid_evidence_query_is_feedback_not_terminal(
+    tmp_path: Path,
+) -> None:
+    llm = FakeLLMClient(
+        scripted_responses=[
+            response(
+                "evidence_query",
+                {"kind": "transitions", "frontier": {"turn": 59}, "limit": 100},
+            ),
+            response("return_result", {"result": answer()}),
+        ]
+    )
+    subject = NativeParityController(
+        llm=llm,
+        packet=packet(),
+        evidence=capability(tmp_path),
+    )
+
+    result = await subject.run()
+
+    assert result.conclusion == "Found it."
+    assert subject.evidence_queries == 0
+    assert subject.invalid_returns == 1
+    assert "EVIDENCE_QUERY_REJECTED" in json.dumps(llm.last_messages)
+
+
 async def test_parallel_read_calls_are_processed_before_next_turn(
     tmp_path: Path,
 ) -> None:

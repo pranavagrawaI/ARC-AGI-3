@@ -153,9 +153,20 @@ class NativeParityController:
         )
 
     def _handle_evidence_query(self, call: ToolCall) -> None:
-        raw = NativeEvidenceArguments.model_validate_json(call.arguments)
-        query = EvidenceQuery.model_validate(raw.model_dump(exclude_none=True))
-        result = self._evidence.query(query)
+        try:
+            raw = NativeEvidenceArguments.model_validate_json(call.arguments)
+            query = EvidenceQuery.model_validate(raw.model_dump(exclude_none=True))
+            result = self._evidence.query(query)
+        except (ValidationError, ValueError, TypeError) as error:
+            self._invalid_returns += 1
+            self._messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": f"EVIDENCE_QUERY_REJECTED: {error}",
+                }
+            )
+            return
         self._evidence_queries += 1
         self._messages.append(
             {
