@@ -134,6 +134,9 @@ class CompatibilityGate(BaseModel):
 
     def treatment_payload(self) -> dict[str, Any]:
         evidence_contract = self.evidence.model_dump(mode="json")
+        evidence_contract["max_successful_disclosures"] = evidence_contract.pop(
+            "max_queries"
+        )
         if self.evidence.projection == "metadata":
             evidence_contract.pop("grid_encoding")
         return {

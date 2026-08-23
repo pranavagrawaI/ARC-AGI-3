@@ -53,6 +53,8 @@ def test_treatment_payload_excludes_checkpoint_and_answer_key() -> None:
 
     assert visible["task"]["inputs"] == {"supplied_answer": "READY"}
     assert visible["evidence_contract"]["enabled"] is False
+    assert visible["evidence_contract"]["max_successful_disclosures"] == 0
+    assert "max_queries" not in visible["evidence_contract"]
     assert "expected" not in visible
     assert "checkpoint_root" not in visible
 
