@@ -207,3 +207,39 @@ async def test_timeout_terminates_without_another_provider_turn(tmp_path: Path) 
 
     assert len(subject.provider_turns) == 1
     assert subject._provenance.log.events[-1].event_type == "InvocationFailed"
+
+
+async def test_zero_tool_provider_turn_is_rejected_and_retried(
+    tmp_path: Path,
+) -> None:
+    malformed = LLMResponse(
+        raw_response=None,
+        content="",
+        reasoning="malformed provider reasoning",
+        tool_calls=[],
+        finish_reason="stop",
+        assistant_message={"role": "assistant", "content": ""},
+        usage={"prompt_tokens": 1, "completion_tokens": 1},
+    )
+    subject = controller(
+        tmp_path,
+        [
+            malformed,
+            response("return_result", {"result": retrieval_result()}),
+        ],
+    )
+
+    answer = await subject.run()
+
+    assert answer.conclusion == "The frame exists."
+    rejected = next(
+        event
+        for event in subject._provenance.log.events
+        if event.event_type == "ProviderTurnRejected"
+    )
+    assert rejected.payload["reason"] == (
+        "sterile CodeAct requires exactly one tool call per turn"
+    )
+    visible = json.dumps(subject.provider_turns[1].messages)
+    assert "ProviderTurnRejected" in visible
+    assert "exactly one execute_python or return_result" in visible

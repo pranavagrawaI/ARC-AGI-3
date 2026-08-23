@@ -193,7 +193,9 @@ async def _run_codeact(
         usage=[turn.usage for turn in controller.provider_turns],
         evidence_queries=evidence_queries,
         python_cells=python_cells,
-        invalid_returns=event_counts["ReturnRejected"],
+        invalid_returns=(
+            event_counts["ReturnRejected"] + event_counts["ProviderTurnRejected"]
+        ),
         wall_seconds=time.monotonic() - started,
         provenance_path="provenance.jsonl",
     )

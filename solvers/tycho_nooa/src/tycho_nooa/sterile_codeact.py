@@ -102,7 +102,11 @@ class SterileCodeActController:
         ) as executor:
             for _ in range(self._max_llm_calls):
                 response = await self._call_provider()
-                tool_call = _one_tool_call(response.tool_calls)
+                try:
+                    tool_call = _one_tool_call(response.tool_calls)
+                except RuntimeError as error:
+                    self._provenance.provider_turn_rejected(str(error))
+                    continue
                 code = _tool_call_code(tool_call, response.content)
                 try:
                     result = await executor.run_cell(code)

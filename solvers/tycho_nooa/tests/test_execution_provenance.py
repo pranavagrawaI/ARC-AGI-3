@@ -87,11 +87,14 @@ async def test_t1_records_complete_lifecycle_and_one_accepted_terminal_return(
         assert event.event_seq == sequence
         assert event.actor_session_id == "actor-session-7"
         assert event.invocation_id == "invocation-lifecycle"
-        assert event.payload_sha256 == hashlib.sha256(
-            json.dumps(
-                event.payload, sort_keys=True, separators=(",", ":")
-            ).encode()
-        ).hexdigest()
+        assert (
+            event.payload_sha256
+            == hashlib.sha256(
+                json.dumps(
+                    event.payload, sort_keys=True, separators=(",", ":")
+                ).encode()
+            ).hexdigest()
+        )
 
     reloaded = ExecutionProvenanceLog(
         recorder.log.path,
@@ -105,7 +108,7 @@ async def test_t1_records_complete_lifecycle_and_one_accepted_terminal_return(
         )
     )
     assert "CapabilityReturned" in visible
-    assert 'frontier-1' in visible
+    assert "frontier-1" in visible
     assert "&quot;records&quot;:1" in visible
     assert "raw-result-only" not in visible
     assert "ReturnRejected" in visible
@@ -124,6 +127,31 @@ def test_reload_rejects_tampered_payload(tmp_path: Path) -> None:
             recorder.log.path,
             actor_session_id="actor-session-7",
         )
+
+
+def test_provider_rejection_is_t1_authored_and_ordered_before_later_cells(
+    tmp_path: Path,
+) -> None:
+    recorder = provenance(tmp_path, "invocation-provider-rejection")
+    recorder.start({"role": "actor"})
+    recorder.provider_turn_rejected("no tool call")
+    recorder.cell_dispatched(1, "print('later')")
+    recorder.cell_finished(
+        1,
+        status="complete",
+        stdout="later\n",
+        stderr="",
+        locals_preview={},
+        exception=None,
+    )
+
+    rendered = json.dumps(
+        render_execution_context(
+            NooaExecutionProjection(recorder.log.events).event_manager()
+        )
+    )
+
+    assert rendered.index("ProviderTurnRejected") < rendered.index("later")
 
 
 async def test_capability_rejection_and_python_failure_are_distinct_events(

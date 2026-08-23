@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 ExecutionEventType = Literal[
     "InvocationStarted",
+    "ProviderTurnRejected",
     "CellDispatched",
     "CapabilityRequested",
     "CapabilityReturned",
@@ -212,6 +213,20 @@ class InvocationProvenance:
         )
         self._cells[cell_seq] = _CellState(dispatched_event_id=event.event_id)
 
+    def provider_turn_rejected(self, reason: str) -> None:
+        self._require_running()
+        self.log.append(
+            "ProviderTurnRejected",
+            invocation_id=self.invocation_id,
+            parent_event_id=self._root_event_id,
+            payload={
+                "reason": reason,
+                "instruction": (
+                    "Retry using exactly one execute_python or return_result tool call."
+                ),
+            },
+        )
+
     def capability_requested(
         self,
         cell_seq: int,
@@ -379,9 +394,7 @@ class InvocationProvenance:
 
     def _require_state(self, expected: str) -> None:
         if self._state != expected:
-            raise RuntimeError(
-                f"invocation is {self._state}, expected {expected}"
-            )
+            raise RuntimeError(f"invocation is {self._state}, expected {expected}")
 
     def _open_cell(self, cell_seq: int) -> _CellState:
         self._require_running()
@@ -458,8 +471,17 @@ class NooaExecutionProjection:
             [event for event in events if event.cell_seq is not None],
             lambda event: event.cell_seq,
         )
-        for cell_events in cells:
-            projected.extend(_project_cell(cell_events))
+        chunks = [
+            (cell_events[0].event_seq, _project_cell(cell_events))
+            for cell_events in cells
+        ]
+        chunks.extend(
+            (event.event_seq, [_project_provider_rejection(event)])
+            for event in events
+            if event.event_type == "ProviderTurnRejected"
+        )
+        for _, chunk in sorted(chunks, key=lambda item: item[0]):
+            projected.extend(chunk)
         terminal = next(
             (
                 event
@@ -481,6 +503,15 @@ class NooaExecutionProjection:
                 )
             )
         return projected
+
+
+def _project_provider_rejection(event: ExecutionProvenanceEvent) -> EventBase:
+    return _projection_event(
+        CodeActResultHistory,
+        event,
+        _safe_text("ProviderTurnRejected: " + _canonical_json(event.payload)),
+        [event],
+    )
 
 
 def _project_cell(events: list[ExecutionProvenanceEvent]) -> list[EventBase]:
