@@ -29,3 +29,13 @@ Native receives `evidence_query` when enabled plus `return_result`. CodeAct rece
 Run both arms for a reached gate even if one fails, then stop before the next gate unless both passed. Maximum path: five gates, two arms, three calls = 30 provider calls. Protocol success, exact conclusion/reference match, and required capability use are all necessary. Preserve reports, provenance, provider traces, and partial failures.
 
 No result from this ladder establishes CodeAct reasoning quality or action quality.
+
+## Authorization and durable launch
+
+Paid inference additionally requires a separate `CompatibilityAuthorization` whose exact manifest hash, provider, requested and reported model identifiers, reasoning mode, temperature, call cap, input/output token ceilings, dollar cap, expiry, and pricing schedule all validate before the run directory is created.
+
+The launcher reserves the frozen worst-case uncached-input plus output cost before every call. It then durably records `CallPlanned` with the request, `CallDispatched`, `CallReceived`, route validation or violation, and `CallAccounted`. Actual cost is recomputed from reported usage under the frozen pricing schedule; cached input is reconciled at its committed rate.
+
+A dispatched call with no durable response is never silently retried. A received response is recoverably accounted. Provider errors, partial responses, route violations, gate starts/completions, ladder disposition, and terminal run state remain in the append-only authorization journal. An existing completed or interrupted authorization cannot silently start a second run.
+
+Ordinary failure of either arm does not suppress its matched partner: both arms complete the reached gate when hard authorization, provider, or integrity conditions still permit execution.

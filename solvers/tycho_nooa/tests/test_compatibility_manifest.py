@@ -97,10 +97,11 @@ def test_experiment_is_fully_committed_but_paid_execution_is_disabled() -> None:
         EXPERIMENT, repository_root=REPOSITORY_ROOT
     )
 
-    assert manifest.runtime_commit == "698cbd1"
-    assert manifest.package_commit == "53583ed"
+    assert manifest.runtime_commit == "99e71f3"
+    assert manifest.package_commit == "99e71f3"
     assert manifest.caps.calls_per_arm_gate == 3
     assert manifest.caps.calls_total == 30
+    assert manifest.caps.input_tokens_per_call == 65536
     assert manifest.model_route.model is None
     assert ladder.termination.task.gate_id == "g0-termination"
     with pytest.raises(RuntimeError, match="execution is disabled"):
