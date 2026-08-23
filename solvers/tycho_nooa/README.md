@@ -71,6 +71,14 @@ each identical query, so generated-code mutation cannot poison the cache or the
 workspace. Archived attempts, death/terminal/animation channels, NOOA events,
 and CodeAct Actor integration remain later slices.
 
+Frozen-workspace parity is executable through
+`python -m tycho_nooa.evidence_parity`. The retained 2026-08-23 treatment in
+`analysis/codeact-evidence-parity/20260823/` compares legacy workspace-local
+`wmlib.py` values with values retrieved and analyzed inside a real sterile
+worker. It covers the no-transition edge, an 18-transition CLICK trajectory,
+and multi-page synthetic retrieval; it does not claim parity for evidence
+channels that `evidence.query` does not yet expose.
+
 Run evidence is separate from the ordinary tool trace:
 
 - `tool-trace.jsonl`: every attempted native tool call, including validation,

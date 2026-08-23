@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -76,7 +77,14 @@ class WorkspaceEvidenceCapability:
     """Translate a live GameWorkspace into bounded immutable evidence DTOs."""
 
     def __init__(self, workspace: GameWorkspace):
-        self._workspace = workspace
+        self._root = workspace.dir
+
+    @classmethod
+    def from_root(cls, root: Path) -> WorkspaceEvidenceCapability:
+        """Open an offline frozen workspace without constructing or mutating it."""
+        capability = cls.__new__(cls)
+        capability._root = Path(root)
+        return capability
 
     def query(self, raw_query: dict[str, Any] | EvidenceQuery) -> dict[str, Any]:
         query = (
@@ -84,7 +92,7 @@ class WorkspaceEvidenceCapability:
             if isinstance(raw_query, EvidenceQuery)
             else EvidenceQuery.model_validate(raw_query)
         )
-        root = str(self._workspace.dir)
+        root = str(self._root)
         frontier = _evidence_ref(wmlib_template.current_frame_key(root))
         if query.frontier is not None and query.frontier != frontier:
             raise EvidenceFrontierMismatchError(
