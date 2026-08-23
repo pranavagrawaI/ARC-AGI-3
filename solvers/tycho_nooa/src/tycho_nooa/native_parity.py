@@ -10,8 +10,9 @@ from typing import Any, Literal
 from nooa.unifiedllm import Tool, ToolCall, UnifiedLLM
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
-from tycho_nooa.cognitive_parity import CognitiveAnswer, CognitiveParityPacket
+from tycho_nooa.cognitive_parity import CognitiveAnswer
 from tycho_nooa.evidence import EvidenceQuery, WorkspaceEvidenceCapability
+from tycho_nooa.model_task import ModelTask
 
 ANSWER_ADAPTER = TypeAdapter(CognitiveAnswer)
 SYSTEM_PROMPT = (
@@ -54,10 +55,11 @@ class NativeParityController:
         self,
         *,
         llm: UnifiedLLM,
-        packet: CognitiveParityPacket,
-        evidence: WorkspaceEvidenceCapability,
+        packet: ModelTask,
+        evidence: WorkspaceEvidenceCapability | None,
         max_llm_calls: int = 8,
         max_output_tokens: int | None = None,
+        system_prompt: str = SYSTEM_PROMPT,
     ):
         if max_llm_calls < 1:
             raise ValueError("max_llm_calls must be positive")
@@ -66,7 +68,7 @@ class NativeParityController:
         self._evidence = evidence
         self._max_llm_calls = max_llm_calls
         self._max_output_tokens = max_output_tokens
-        self._messages = _base_messages(packet)
+        self._messages = _base_messages(packet, system_prompt)
         self._provider_turns: list[NativeProviderTurn] = []
         self._evidence_queries = 0
         self._invalid_returns = 0
@@ -87,7 +89,9 @@ class NativeParityController:
         for _ in range(self._max_llm_calls):
             response = await self._call_provider()
             try:
-                calls = _tool_calls(response.tool_calls)
+                calls = _tool_calls(
+                    response.tool_calls, evidence_enabled=self._evidence is not None
+                )
             except RuntimeError as error:
                 self._record_rejected_turn(response.content, str(error))
                 continue
@@ -111,19 +115,25 @@ class NativeParityController:
                 },
                 {
                     "role": "user",
-                    "content": (
-                        f"PROVIDER_TURN_REJECTED: {reason}. "
-                        "Call exactly one available tool, except that parallel "
-                        "evidence_query calls are allowed."
-                    ),
+                    "content": self._rejection_feedback(reason),
                 },
             ]
         )
 
+    def _rejection_feedback(self, reason: str) -> str:
+        if self._evidence is None:
+            instruction = "Call exactly one return_result tool."
+        else:
+            instruction = (
+                "Call exactly one available tool, except that parallel "
+                "evidence_query calls are allowed."
+            )
+        return f"PROVIDER_TURN_REJECTED: {reason}. {instruction}"
+
     async def _call_provider(self):
         response = await self._llm.acall(
             list(self._messages),
-            tools=_native_tools(),
+            tools=_native_tools(evidence_enabled=self._evidence is not None),
             output_model=None,
             **self._sampling_kwargs(),
         )
@@ -154,6 +164,8 @@ class NativeParityController:
         )
 
     def _handle_evidence_query(self, call: ToolCall) -> None:
+        if self._evidence is None:
+            raise RuntimeError("evidence capability is unavailable")
         try:
             raw = NativeEvidenceArguments.model_validate_json(call.arguments)
             query = EvidenceQuery.model_validate(raw.model_dump(exclude_none=True))
@@ -203,11 +215,11 @@ class NativeParityController:
         )
 
 
-def _base_messages(packet: CognitiveParityPacket) -> list[dict[str, Any]]:
+def _base_messages(packet: ModelTask, system_prompt: str) -> list[dict[str, Any]]:
     return [
         {
             "role": "system",
-            "content": SYSTEM_PROMPT,
+            "content": system_prompt,
         },
         {
             "role": "user",
@@ -218,7 +230,7 @@ def _base_messages(packet: CognitiveParityPacket) -> list[dict[str, Any]]:
     ]
 
 
-def _native_tools() -> list[Tool]:
+def _native_tools(*, evidence_enabled: bool = True) -> list[Tool]:
     def evidence_query(**kwargs: Any) -> dict[str, Any]:
         """Read evidence; exact RLE grids use comma-separated hex count:cell runs."""
         return kwargs
@@ -227,27 +239,37 @@ def _native_tools() -> list[Tool]:
         """Submit the final typed cognitive answer."""
         return result
 
-    return [
-        Tool(
-            name="evidence_query",
-            description=evidence_query.__doc__ or "Query evidence.",
-            callable=evidence_query,
-            parameters_model=NativeEvidenceArguments,
-        ),
+    tools = [
         Tool(
             name="return_result",
             description=return_result.__doc__ or "Return result.",
             callable=return_result,
             parameters_model=NativeReturnArguments,
-        ),
+        )
     ]
+    if evidence_enabled:
+        tools.insert(
+            0,
+            Tool(
+                name="evidence_query",
+                description=evidence_query.__doc__ or "Query evidence.",
+                callable=evidence_query,
+                parameters_model=NativeEvidenceArguments,
+            ),
+        )
+    return tools
 
 
-def _tool_calls(tool_calls: list[ToolCall]) -> list[ToolCall]:
+def _tool_calls(
+    tool_calls: list[ToolCall], *, evidence_enabled: bool = True
+) -> list[ToolCall]:
     if not tool_calls:
         raise RuntimeError("native parity requires at least one tool call per turn")
+    available = {"return_result"}
+    if evidence_enabled:
+        available.add("evidence_query")
     for call in tool_calls:
-        if call.name not in {"evidence_query", "return_result"}:
+        if call.name not in available:
             raise RuntimeError(f"unavailable native parity tool: {call.name!r}")
     returns = [call for call in tool_calls if call.name == "return_result"]
     if returns and len(tool_calls) != 1:

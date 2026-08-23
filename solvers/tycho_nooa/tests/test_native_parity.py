@@ -100,6 +100,24 @@ async def test_native_control_exposes_only_query_and_typed_return(
     assert "expected" not in json.dumps(llm.last_messages)
 
 
+async def test_return_only_control_exposes_no_evidence_capability() -> None:
+    llm = FakeLLMClient(
+        scripted_responses=[response("return_result", {"result": answer()})]
+    )
+    subject = NativeParityController(
+        llm=llm,
+        packet=packet(),
+        evidence=None,
+        system_prompt="Return the supplied answer.",
+    )
+
+    result = await subject.run()
+
+    assert result.conclusion == "Found it."
+    assert {tool.name for tool in llm.last_tools or []} == {"return_result"}
+    assert llm.last_messages[0]["content"] == "Return the supplied answer."
+
+
 async def test_invalid_return_is_feedback_not_terminal(tmp_path: Path) -> None:
     bad = {**answer(), "evidence_refs": "wrong"}
     llm = FakeLLMClient(

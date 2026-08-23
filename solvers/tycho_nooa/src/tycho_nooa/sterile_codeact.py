@@ -10,13 +10,14 @@ from typing import Any
 from nooa.unifiedllm import Tool, ToolCall, UnifiedLLM
 from pydantic import BaseModel, ConfigDict
 
-from tycho_nooa.cognitive_parity import CognitiveAnswer, CognitiveParityPacket
+from tycho_nooa.cognitive_parity import CognitiveAnswer
 from tycho_nooa.evidence import WorkspaceEvidenceCapability
 from tycho_nooa.execution_events import (
     InvocationProvenance,
     NooaExecutionProjection,
     render_execution_context,
 )
+from tycho_nooa.model_task import ModelTask
 from tycho_nooa.sterile_execution import (
     ExecutionManifest,
     SterileExecutor,
@@ -64,12 +65,13 @@ class SterileCodeActController:
         self,
         *,
         llm: UnifiedLLM,
-        packet: CognitiveParityPacket,
-        evidence: WorkspaceEvidenceCapability,
+        packet: ModelTask,
+        evidence: WorkspaceEvidenceCapability | None,
         provenance: InvocationProvenance,
         max_llm_calls: int = 8,
         max_output_tokens: int | None = None,
         cell_timeout_seconds: float = 5.0,
+        system_prompt: str = SYSTEM_PROMPT,
     ):
         if max_llm_calls < 1:
             raise ValueError("max_llm_calls must be positive")
@@ -80,6 +82,7 @@ class SterileCodeActController:
         self._max_llm_calls = max_llm_calls
         self._max_output_tokens = max_output_tokens
         self._cell_timeout_seconds = cell_timeout_seconds
+        self._system_prompt = system_prompt
         self._provider_turns: list[ProviderTurn] = []
 
     @property
@@ -90,14 +93,19 @@ class SterileCodeActController:
         manifest = ExecutionManifest(
             invocation_id=self._provenance.invocation_id,
             role="actor",
-            capabilities=("evidence.query",),
+            capabilities=("evidence.query",) if self._evidence is not None else (),
             input_values={"task": self._packet.treatment_payload()},
             wall_time_seconds=self._cell_timeout_seconds,
+        )
+        handlers = (
+            {"evidence.query": self._model_evidence_query}
+            if self._evidence is not None
+            else {}
         )
         async with SterileExecutor(
             manifest,
             return_type=CognitiveAnswer,
-            capability_handlers={"evidence.query": self._model_evidence_query},
+            capability_handlers=handlers,
             provenance=self._provenance,
         ) as executor:
             for _ in range(self._max_llm_calls):
@@ -117,6 +125,8 @@ class SterileCodeActController:
         raise RuntimeError("sterile CodeAct exhausted its LLM-call budget")
 
     def _model_evidence_query(self, raw_query: dict[str, Any]) -> dict[str, Any]:
+        if self._evidence is None:
+            raise RuntimeError("evidence capability is unavailable")
         query = {**raw_query}
         query.setdefault("grid_encoding", "rle")
         return self._evidence.query(query)
@@ -164,14 +174,14 @@ class SterileCodeActController:
             for message in projected
             if message.get("content") or message.get("role") != "system"
         ]
-        return [*_base_messages(self._packet), *visible_events]
+        return [*_base_messages(self._packet, self._system_prompt), *visible_events]
 
 
-def _base_messages(packet: CognitiveParityPacket) -> list[dict[str, str]]:
+def _base_messages(packet: ModelTask, system_prompt: str) -> list[dict[str, str]]:
     return [
         {
             "role": "system",
-            "content": SYSTEM_PROMPT,
+            "content": system_prompt,
         },
         {
             "role": "user",

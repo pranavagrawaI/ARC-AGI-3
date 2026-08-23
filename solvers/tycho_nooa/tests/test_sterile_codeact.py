@@ -137,6 +137,36 @@ async def test_evidence_cell_next_turn_and_context_reconstruct_from_raw_events(
     assert names == {"execute_python", "return_result"}
 
 
+async def test_return_only_control_has_no_evidence_namespace(tmp_path: Path) -> None:
+    log = ExecutionProvenanceLog(
+        tmp_path / "return-only.jsonl", actor_session_id="return-only"
+    )
+    llm = FakeLLMClient(
+        scripted_responses=[
+            response(
+                "execute_python",
+                {"code": "assert 'evidence' not in globals()"},
+            ),
+            response("return_result", {"result": retrieval_result()}),
+        ]
+    )
+    subject = SterileCodeActController(
+        llm=llm,
+        packet=task_packet(),
+        evidence=None,
+        provenance=InvocationProvenance(log, invocation_id="return-only"),
+        system_prompt="Return the supplied answer.",
+    )
+
+    answer = await subject.run()
+
+    assert answer.conclusion == "The frame exists."
+    assert subject.provider_turns[0].messages[0]["content"] == (
+        "Return the supplied answer."
+    )
+    assert not any(event.event_type.startswith("Capability") for event in log.events)
+
+
 async def test_syntax_error_is_visible_before_repaired_cell(tmp_path: Path) -> None:
     subject = controller(
         tmp_path,
