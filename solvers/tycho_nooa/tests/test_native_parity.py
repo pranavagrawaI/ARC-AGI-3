@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 from tycho.workspace.workspace import GameWorkspace
 
@@ -12,7 +13,11 @@ from tycho_nooa.cognitive_parity import (
     ExpectedAnswer,
 )
 from tycho_nooa.evidence import EvidenceRef, WorkspaceEvidenceCapability
-from tycho_nooa.native_parity import NativeParityController
+from tycho_nooa.native_parity import (
+    NativeEvidenceArguments,
+    NativeParityController,
+    _tool_calls,
+)
 
 
 def response(name: str, arguments: dict) -> LLMResponse:
@@ -64,7 +69,9 @@ def answer() -> dict:
     }
 
 
-async def test_native_control_exposes_only_query_and_typed_return(tmp_path: Path) -> None:
+async def test_native_control_exposes_only_query_and_typed_return(
+    tmp_path: Path,
+) -> None:
     llm = FakeLLMClient(
         scripted_responses=[
             response("evidence_query", {"kind": "frames"}),
@@ -82,9 +89,9 @@ async def test_native_control_exposes_only_query_and_typed_return(tmp_path: Path
     assert result.conclusion == "Found it."
     assert subject.evidence_queries == 1
     assert subject.invalid_returns == 0
-    assert [turn.tool_name for turn in subject.provider_turns] == [
-        "evidence_query",
-        "return_result",
+    assert [turn.tool_names for turn in subject.provider_turns] == [
+        ("evidence_query",),
+        ("return_result",),
     ]
     assert {tool.name for tool in llm.last_tools or []} == {
         "evidence_query",
@@ -111,3 +118,73 @@ async def test_invalid_return_is_feedback_not_terminal(tmp_path: Path) -> None:
 
     assert subject.invalid_returns == 1
     assert "RETURN_REJECTED" in json.dumps(llm.last_messages)
+
+
+async def test_parallel_read_calls_are_processed_before_next_turn(
+    tmp_path: Path,
+) -> None:
+    parallel = LLMResponse(
+        raw_response=None,
+        content="",
+        tool_calls=[
+            ToolCall(
+                id="frames",
+                name="evidence_query",
+                arguments=json.dumps({"kind": "frames"}),
+            ),
+            ToolCall(
+                id="transitions",
+                name="evidence_query",
+                arguments=json.dumps({"kind": "transitions"}),
+            ),
+        ],
+        finish_reason="tool_calls",
+        assistant_message={"role": "assistant", "content": ""},
+        usage={"prompt_tokens": 2, "completion_tokens": 1},
+    )
+    llm = FakeLLMClient(
+        scripted_responses=[
+            parallel,
+            response("return_result", {"result": answer()}),
+        ]
+    )
+    subject = NativeParityController(
+        llm=llm,
+        packet=packet(),
+        evidence=capability(tmp_path),
+    )
+
+    await subject.run()
+
+    assert subject.evidence_queries == 2
+    assert subject.provider_turns[0].tool_names == (
+        "evidence_query",
+        "evidence_query",
+    )
+    tool_messages = [
+        message for message in llm.last_messages if message["role"] == "tool"
+    ]
+    assert {message["tool_call_id"] for message in tool_messages} == {
+        "frames",
+        "transitions",
+    }
+
+
+def test_native_kind_schema_exposes_only_authoritative_plural_values() -> None:
+    schema = NativeEvidenceArguments.model_json_schema()
+
+    assert schema["properties"]["kind"]["enum"] == ["frames", "transitions"]
+
+
+def test_native_batch_rejects_empty_unknown_and_mixed_return_calls() -> None:
+    with pytest.raises(RuntimeError, match="at least one"):
+        _tool_calls([])
+    with pytest.raises(RuntimeError, match="unavailable"):
+        _tool_calls([ToolCall(id="x", name="unknown", arguments="{}")])
+    with pytest.raises(RuntimeError, match="cannot coexist"):
+        _tool_calls(
+            [
+                ToolCall(id="read", name="evidence_query", arguments="{}"),
+                ToolCall(id="done", name="return_result", arguments="{}"),
+            ]
+        )

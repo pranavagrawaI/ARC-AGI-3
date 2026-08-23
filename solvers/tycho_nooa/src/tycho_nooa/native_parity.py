@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from nooa.unifiedllm import Tool, ToolCall, UnifiedLLM
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
@@ -24,7 +24,7 @@ SYSTEM_PROMPT = (
 class NativeEvidenceArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    kind: str
+    kind: Literal["frames", "transitions"]
     level: int | None = None
     after: dict[str, int] | None = None
     frontier: dict[str, int] | None = None
@@ -42,7 +42,7 @@ class NativeProviderTurn:
     messages_sha256: str
     usage: dict[str, int] | None
     finish_reason: str
-    tool_name: str
+    tool_names: tuple[str, ...]
 
 
 class NativeParityController:
@@ -84,12 +84,13 @@ class NativeParityController:
     async def run(self) -> CognitiveAnswer:
         for _ in range(self._max_llm_calls):
             response = await self._call_provider()
-            call = _one_tool_call(response.tool_calls)
-            self._record_assistant_call(call, response.content)
-            if call.name == "evidence_query":
-                self._handle_evidence_query(call)
+            calls = _tool_calls(response.tool_calls)
+            self._record_assistant_calls(calls, response.content)
+            if all(call.name == "evidence_query" for call in calls):
+                for call in calls:
+                    self._handle_evidence_query(call)
                 continue
-            answer = self._handle_return(call)
+            answer = self._handle_return(calls[0])
             if answer is not None:
                 return answer
         raise RuntimeError("native parity exhausted its LLM-call budget")
@@ -101,18 +102,17 @@ class NativeParityController:
             output_model=None,
             **self._sampling_kwargs(),
         )
-        tool_name = response.tool_calls[0].name if len(response.tool_calls) == 1 else ""
         self._provider_turns.append(
             NativeProviderTurn(
                 messages_sha256=_commitment(self._messages),
                 usage=response.usage,
                 finish_reason=response.finish_reason,
-                tool_name=tool_name,
+                tool_names=tuple(call.name for call in response.tool_calls),
             )
         )
         return response
 
-    def _record_assistant_call(self, call: ToolCall, content: object) -> None:
+    def _record_assistant_calls(self, calls: list[ToolCall], content: object) -> None:
         self._messages.append(
             {
                 "role": "assistant",
@@ -123,6 +123,7 @@ class NativeParityController:
                         "type": "function",
                         "function": {"name": call.name, "arguments": call.arguments},
                     }
+                    for call in calls
                 ],
             }
         )
@@ -206,13 +207,16 @@ def _native_tools() -> list[Tool]:
     ]
 
 
-def _one_tool_call(tool_calls: list[ToolCall]) -> ToolCall:
-    if len(tool_calls) != 1:
-        raise RuntimeError("native parity requires exactly one tool call per turn")
-    call = tool_calls[0]
-    if call.name not in {"evidence_query", "return_result"}:
-        raise RuntimeError(f"unavailable native parity tool: {call.name!r}")
-    return call
+def _tool_calls(tool_calls: list[ToolCall]) -> list[ToolCall]:
+    if not tool_calls:
+        raise RuntimeError("native parity requires at least one tool call per turn")
+    for call in tool_calls:
+        if call.name not in {"evidence_query", "return_result"}:
+            raise RuntimeError(f"unavailable native parity tool: {call.name!r}")
+    returns = [call for call in tool_calls if call.name == "return_result"]
+    if returns and len(tool_calls) != 1:
+        raise RuntimeError("typed return cannot coexist with another tool call")
+    return tool_calls
 
 
 def _commitment(value: object) -> str:
