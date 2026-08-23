@@ -89,6 +89,7 @@ async def test_capped_client_records_matched_route_and_observed_cost(
 ) -> None:
     route = ModelRoute(
         model="fake-model",
+        reported_model="reported-fake-model",
         provider="provider-a",
         reasoning_effort="high",
         temperature=0,
@@ -97,7 +98,10 @@ async def test_capped_client_records_matched_route_and_observed_cost(
         scripted_responses=[
             _response(
                 {"prompt_tokens": 3, "completion_tokens": 2, "cost": 0.01},
-                raw_response={"provider": "provider-a", "model": "fake-model"},
+                raw_response={
+                    "provider": "provider-a",
+                    "model": "reported-fake-model",
+                },
             )
         ]
     )
@@ -126,6 +130,7 @@ async def test_capped_client_records_matched_route_and_observed_cost(
 async def test_capped_client_stops_after_observed_route_drift(tmp_path: Path) -> None:
     route = ModelRoute(
         model="fake-model",
+        reported_model="reported-fake-model",
         provider="provider-a",
         reasoning_effort="high",
     )
@@ -133,7 +138,10 @@ async def test_capped_client_stops_after_observed_route_drift(tmp_path: Path) ->
         scripted_responses=[
             _response(
                 {"cost": 0.01},
-                raw_response={"provider": "provider-b", "model": "fake-model"},
+                raw_response={
+                    "provider": "provider-b",
+                    "model": "reported-fake-model",
+                },
             )
         ]
     )
@@ -154,6 +162,7 @@ async def test_capped_client_stops_after_observed_route_drift(tmp_path: Path) ->
 def test_configured_and_observed_route_checks_are_factored() -> None:
     route = ModelRoute(
         model="fake-model",
+        reported_model="reported-fake-model",
         provider="provider-a",
         reasoning_effort="high",
         temperature=0,
@@ -161,7 +170,9 @@ def test_configured_and_observed_route_checks_are_factored() -> None:
     llm = FakeLLMClient()
     llm.config.update(reasoning={"effort": "high"}, temperature=0)
     _validate_configured_model(llm, route)
-    _validate_observed_route({"provider": "provider-a", "model": "fake-model"}, route)
+    _validate_observed_route(
+        {"provider": "provider-a", "model": "reported-fake-model"}, route
+    )
 
     llm.model = "wrong"
     with pytest.raises(ValueError, match="configured model"):
@@ -176,6 +187,19 @@ def test_configured_and_observed_route_checks_are_factored() -> None:
         _validate_configured_model(llm, route)
     with pytest.raises(RuntimeError, match="model route drift"):
         _validate_observed_route({"provider": "provider-a", "model": "wrong"}, route)
+
+
+def test_enabled_reasoning_configuration_matches_enabled_route() -> None:
+    route = ModelRoute(
+        model="fake-model",
+        reported_model="reported-fake-model",
+        provider="provider-a",
+        reasoning_effort="enabled",
+    )
+    llm = FakeLLMClient()
+    llm.config["reasoning"] = {"enabled": True}
+
+    _validate_configured_model(llm, route)
 
 
 def _budget(tmp_path: Path) -> BudgetState:

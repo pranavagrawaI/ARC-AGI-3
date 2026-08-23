@@ -22,6 +22,7 @@ def test_v1_manifest_is_committed_but_paid_execution_is_disabled() -> None:
     assert manifest.caps.sessions == 24
     assert manifest.caps.calls_total == 192
     assert manifest.model_route.model is None
+    assert manifest.model_route.reported_model is None
     with pytest.raises(RuntimeError, match="execution is disabled"):
         manifest.require_execution_authorized()
 

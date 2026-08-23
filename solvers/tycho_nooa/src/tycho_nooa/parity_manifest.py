@@ -24,6 +24,7 @@ class ModelRoute(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     model: str | None = None
+    reported_model: str | None = None
     provider: str | None = None
     reasoning_effort: str | None = None
     temperature: float | None = None
@@ -98,7 +99,12 @@ class ParityExperimentManifest(BaseModel):
         if not self.execution_authorized:
             return self
         route = self.model_route
-        if not route.model or not route.provider or not route.reasoning_effort:
+        if (
+            not route.model
+            or not route.reported_model
+            or not route.provider
+            or not route.reasoning_effort
+        ):
             raise ValueError("authorized execution requires a complete model route")
         if self.caps.max_cost_usd is None:
             raise ValueError("authorized execution requires an explicit cost cap")

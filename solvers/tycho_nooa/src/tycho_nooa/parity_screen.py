@@ -243,6 +243,8 @@ def _validate_configured_model(llm: UnifiedLLM, route: ModelRoute) -> None:
     reasoning = llm.config.get("reasoning")
     if effort is None and isinstance(reasoning, Mapping):
         effort = reasoning.get("effort")
+        if effort is None and reasoning.get("enabled") is True:
+            effort = "enabled"
     if effort != route.reasoning_effort:
         raise ValueError("configured reasoning effort does not match frozen route")
     if llm.config.get("temperature") != route.temperature:
@@ -252,7 +254,7 @@ def _validate_configured_model(llm: UnifiedLLM, route: ModelRoute) -> None:
 def _validate_observed_route(observed: dict[str, str], expected: ModelRoute) -> None:
     if observed.get("provider") != expected.provider:
         raise RuntimeError("observed provider route drift")
-    if observed.get("model") != expected.model:
+    if observed.get("model") != expected.reported_model:
         raise RuntimeError("observed model route drift")
 
 
