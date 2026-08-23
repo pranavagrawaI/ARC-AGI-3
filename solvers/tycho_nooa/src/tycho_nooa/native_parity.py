@@ -177,12 +177,12 @@ class NativeParityController:
         )
 
     def _handle_return(self, call: ToolCall) -> CognitiveAnswer | None:
-        raw = NativeReturnArguments.model_validate_json(call.arguments)
         try:
+            raw = NativeReturnArguments.model_validate_json(call.arguments)
             answer = ANSWER_ADAPTER.validate_python(raw.result)
             if answer.task_kind != self._packet.task.task_kind:
                 raise ValueError("answer task_kind does not match its packet")
-        except (ValidationError, ValueError) as error:
+        except (ValidationError, ValueError, TypeError) as error:
             self._invalid_returns += 1
             self._messages.append(
                 {
