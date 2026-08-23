@@ -167,6 +167,24 @@ async def test_return_only_control_has_no_evidence_namespace(tmp_path: Path) -> 
     assert not any(event.event_type.startswith("Capability") for event in log.events)
 
 
+async def test_return_tool_exposes_the_discriminated_answer_schema(
+    tmp_path: Path,
+) -> None:
+    subject = controller(
+        tmp_path,
+        [response("return_result", {"result": retrieval_result()})],
+    )
+
+    await subject.run()
+
+    tool = next(
+        tool for tool in subject._llm.last_tools or [] if tool.name == "return_result"
+    )
+    result = tool.parameters_model.model_json_schema()["properties"]["result"]
+    assert result["discriminator"]["propertyName"] == "task_kind"
+    assert len(result["oneOf"]) == 4
+
+
 async def test_syntax_error_is_visible_before_repaired_cell(tmp_path: Path) -> None:
     subject = controller(
         tmp_path,

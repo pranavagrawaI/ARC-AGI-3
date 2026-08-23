@@ -129,6 +129,24 @@ CognitiveAnswer = Annotated[
 COGNITIVE_ANSWER_ADAPTER = TypeAdapter(CognitiveAnswer)
 
 
+class CognitiveReturnArguments(BaseModel):
+    """The one model-visible terminal contract shared by both treatments."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    result: CognitiveAnswer
+
+
+def cognitive_return_schema_sha256() -> str:
+    """Commit the canonical model-visible terminal schema."""
+    encoded = json.dumps(
+        CognitiveReturnArguments.model_json_schema(),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
 def _require_discrimination_key(kind: TaskKind, expected: ExpectedAnswer) -> None:
     if kind == "discriminate" and not expected.accepted_verdicts:
         raise ValueError("discrimination packets require accepted_verdicts")

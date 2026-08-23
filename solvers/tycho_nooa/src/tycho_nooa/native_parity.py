@@ -10,7 +10,7 @@ from typing import Any, Literal
 from nooa.unifiedllm import Tool, ToolCall, UnifiedLLM
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
-from tycho_nooa.cognitive_parity import CognitiveAnswer
+from tycho_nooa.cognitive_parity import CognitiveAnswer, CognitiveReturnArguments
 from tycho_nooa.evidence import EvidenceCapability, EvidenceQuery
 from tycho_nooa.model_task import ModelTask
 
@@ -32,12 +32,6 @@ class NativeEvidenceArguments(BaseModel):
     limit: int = 16
     grid_encoding: Literal["raw", "rle"] = "rle"
     projection: Literal["full", "metadata"] = "full"
-
-
-class NativeReturnArguments(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    result: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -191,7 +185,7 @@ class NativeParityController:
 
     def _handle_return(self, call: ToolCall) -> CognitiveAnswer | None:
         try:
-            raw = NativeReturnArguments.model_validate_json(call.arguments)
+            raw = CognitiveReturnArguments.model_validate_json(call.arguments)
             answer = ANSWER_ADAPTER.validate_python(raw.result)
             if answer.task_kind != self._packet.task.task_kind:
                 raise ValueError("answer task_kind does not match its packet")
@@ -244,7 +238,7 @@ def _native_tools(*, evidence_enabled: bool = True) -> list[Tool]:
             name="return_result",
             description=return_result.__doc__ or "Return result.",
             callable=return_result,
-            parameters_model=NativeReturnArguments,
+            parameters_model=CognitiveReturnArguments,
         )
     ]
     if evidence_enabled:

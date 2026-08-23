@@ -8,6 +8,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from tycho_nooa.cognitive_parity import cognitive_return_schema_sha256
 from tycho_nooa.compatibility_experiment import (
     CODEACT_COMPATIBILITY_PROMPT,
     NATIVE_COMPATIBILITY_PROMPT,
@@ -75,7 +76,7 @@ class CompatibilityExperimentManifest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 1
     experiment_id: str = Field(min_length=1)
     execution_authorized: bool
     runtime_commit: str = Field(pattern=r"^[0-9a-f]{7,40}$")
@@ -89,6 +90,11 @@ class CompatibilityExperimentManifest(BaseModel):
     launch_wrapper: FileCommitment
     protocol: FileCommitment
     experiment_card: FileCommitment
+    native_controller: FileCommitment | None = None
+    codeact_controller: FileCommitment | None = None
+    return_schema_sha256: str | None = Field(
+        default=None, pattern=r"^sha256:[0-9a-f]{64}$"
+    )
     native_prompt_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     codeact_prompt_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     model_route: ModelRoute
@@ -100,6 +106,8 @@ class CompatibilityExperimentManifest(BaseModel):
 
     @model_validator(mode="after")
     def authorized_manifest_is_fully_bound(self) -> CompatibilityExperimentManifest:
+        if self.schema_version == 2 and not _schema_v2_is_fully_bound(self):
+            raise ValueError("schema v2 must bind both controllers and return schema")
         if not self.execution_authorized:
             return self
         route = self.model_route
@@ -150,6 +158,9 @@ def load_compatibility_experiment_manifest(
         manifest.experiment_card,
     ):
         _validate_file(commitment, repository_root)
+    for commitment in (manifest.native_controller, manifest.codeact_controller):
+        if commitment is not None:
+            _validate_file(commitment, repository_root)
     gate_manifest_path = _committed_path(
         manifest.gate_manifest.path, repository_root
     )
@@ -162,6 +173,11 @@ def load_compatibility_experiment_manifest(
     _validate_prompt_hash(
         manifest.codeact_prompt_sha256, CODEACT_COMPATIBILITY_PROMPT, "codeact"
     )
+    if (
+        manifest.return_schema_sha256 is not None
+        and manifest.return_schema_sha256 != cognitive_return_schema_sha256()
+    ):
+        raise ValueError("return schema commitment mismatch")
     card = _committed_path(manifest.experiment_card.path, repository_root)
     if len(card.read_bytes()) > 1024:
         raise ValueError("experiment card exceeds 1 KiB")
@@ -170,6 +186,17 @@ def load_compatibility_experiment_manifest(
 
 def sha256_text(value: str) -> str:
     return f"sha256:{hashlib.sha256(value.encode()).hexdigest()}"
+
+
+def _schema_v2_is_fully_bound(manifest: CompatibilityExperimentManifest) -> bool:
+    return all(
+        value is not None
+        for value in (
+            manifest.native_controller,
+            manifest.codeact_controller,
+            manifest.return_schema_sha256,
+        )
+    )
 
 
 def sha256_file(path: Path) -> str:

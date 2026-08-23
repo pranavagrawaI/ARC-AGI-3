@@ -16,8 +16,10 @@ from tycho_nooa.evidence import EvidenceRef, WorkspaceEvidenceCapability
 from tycho_nooa.native_parity import (
     NativeEvidenceArguments,
     NativeParityController,
+    _native_tools,
     _tool_calls,
 )
+from tycho_nooa.sterile_codeact import _codeact_tools
 
 
 def response(name: str, arguments: dict) -> LLMResponse:
@@ -116,6 +118,29 @@ async def test_return_only_control_exposes_no_evidence_capability() -> None:
     assert result.conclusion == "Found it."
     assert {tool.name for tool in llm.last_tools or []} == {"return_result"}
     assert llm.last_messages[0]["content"] == "Return the supplied answer."
+
+
+async def test_return_tool_exposes_the_discriminated_answer_schema() -> None:
+    llm = FakeLLMClient(
+        scripted_responses=[response("return_result", {"result": answer()})]
+    )
+    subject = NativeParityController(llm=llm, packet=packet(), evidence=None)
+
+    await subject.run()
+
+    tool = next(tool for tool in llm.last_tools or [] if tool.name == "return_result")
+    result = tool.parameters_model.model_json_schema()["properties"]["result"]
+    assert result["discriminator"]["propertyName"] == "task_kind"
+    assert len(result["oneOf"]) == 4
+
+
+def test_native_and_codeact_expose_identical_return_schemas() -> None:
+    native = next(tool for tool in _native_tools() if tool.name == "return_result")
+    codeact = next(tool for tool in _codeact_tools() if tool.name == "return_result")
+
+    assert native.parameters_model.model_json_schema() == (
+        codeact.parameters_model.model_json_schema()
+    )
 
 
 async def test_invalid_return_is_feedback_not_terminal(tmp_path: Path) -> None:

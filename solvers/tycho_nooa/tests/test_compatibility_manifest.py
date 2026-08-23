@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from tycho_nooa.cognitive_parity import cognitive_return_schema_sha256
 from tycho_nooa.compatibility_manifest import (
     CompatibilityExperimentManifest,
     load_compatibility_experiment_manifest,
@@ -126,3 +127,20 @@ def test_experiment_detects_runner_commitment_drift(tmp_path: Path) -> None:
         load_compatibility_experiment_manifest(
             forged, repository_root=REPOSITORY_ROOT
         )
+
+
+def test_schema_v2_requires_and_checks_the_shared_return_contract() -> None:
+    raw = json.loads(EXPERIMENT.read_text())
+    raw["schema_version"] = 2
+
+    with pytest.raises(ValidationError, match="bind both controllers"):
+        CompatibilityExperimentManifest.model_validate(raw)
+
+    raw.update(
+        native_controller=raw["gate_executor"],
+        codeact_controller=raw["gate_executor"],
+        return_schema_sha256=cognitive_return_schema_sha256(),
+    )
+    manifest = CompatibilityExperimentManifest.model_validate(raw)
+
+    assert manifest.return_schema_sha256 == cognitive_return_schema_sha256()

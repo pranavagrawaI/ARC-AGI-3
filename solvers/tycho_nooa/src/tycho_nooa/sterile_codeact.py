@@ -10,7 +10,7 @@ from typing import Any
 from nooa.unifiedllm import Tool, ToolCall, UnifiedLLM
 from pydantic import BaseModel, ConfigDict
 
-from tycho_nooa.cognitive_parity import CognitiveAnswer
+from tycho_nooa.cognitive_parity import CognitiveAnswer, CognitiveReturnArguments
 from tycho_nooa.evidence import EvidenceCapability
 from tycho_nooa.execution_events import (
     InvocationProvenance,
@@ -38,12 +38,6 @@ class ExecutePythonArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     code: str
-
-
-class ReturnResultArguments(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    result: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -212,7 +206,7 @@ def _codeact_tools() -> list[Tool]:
             name="return_result",
             description=return_result.__doc__ or "Return a result.",
             callable=return_result,
-            parameters_model=ReturnResultArguments,
+            parameters_model=CognitiveReturnArguments,
         ),
     ]
 
@@ -234,9 +228,16 @@ def _tool_call_code(tool_call: ToolCall, content: object) -> str:
     if tool_call.name == "execute_python":
         code = ExecutePythonArguments.model_validate(arguments).code
     else:
-        result = ReturnResultArguments.model_validate(arguments).result
+        result = _return_result_value(arguments)
         code = f"return_result({result!r})"
     return f"{prefix}\n{code}" if prefix else code
+
+
+def _return_result_value(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Preserve T2 return validation while T1 advertises the exact schema."""
+    if set(arguments) != {"result"} or not isinstance(arguments["result"], dict):
+        raise TypeError("return_result requires exactly one object-valued result")
+    return arguments["result"]
 
 
 def _comment(value: str) -> str:
