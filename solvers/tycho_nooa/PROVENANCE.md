@@ -24,6 +24,11 @@
   and OpenAI provider formatter. Escaping all T2-controlled text before that
   rendering is local boundary code; raw payloads remain unescaped in the
   provenance log. The projection is not yet wired into a live Actor strategy.
+- adaptation: `sterile_codeact.py` preserves NOOA CodeAct's model-visible
+  `execute_python`/`return_result` choice while rebuilding every provider
+  context from the T1-authored projection and sending cell execution through
+  `SterileExecutor`. It is an offline cognitive-parity controller, not the live
+  `TychoNooaAgent` strategy and not a port of NOOA's ambient `self` namespace.
 - adaptation: `FocusedBuilder` is a separate NOOA `Agent` created fresh for
   each fired trigger. It deliberately shares the actor's LLM client and Tycho
   executor/workspace while retaining an independent bounded NOOA event history.

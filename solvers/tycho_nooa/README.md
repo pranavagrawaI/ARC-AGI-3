@@ -98,6 +98,20 @@ infrastructure: no live Actor/provider context uses the projection yet, so the
 tests establish deterministic reconstruction of the context renderer's output,
 not parity with an already-deployed CodeAct Actor.
 
+`SterileCodeActController` is the next offline treatment seam. It preserves the
+two visible NOOA operations, `execute_python(code)` and
+`return_result(result)`, but converts both into cells executed by the same
+sterile invocation. Every provider call is built again from the static frozen
+task plus `NooaExecutionProjection`; there is no second mutable transcript.
+The controller records the exact request commitment, event prefix, token usage,
+finish reason, and selected tool for each call. Its first manifest contains
+only immutable task data and `evidence.query`: no goal, Builder, theory,
+planner, canonical-file, or environment mutation capability exists.
+
+This controller has passed scripted multi-turn control-flow tests only. Pure
+T2 `wmlib`/`symmetry` vocabulary, curated real cognitive packets, native-arm
+adaptation, paid model sampling, and any action-quality claim remain unearned.
+
 Run evidence is separate from the ordinary tool trace:
 
 - `tool-trace.jsonl`: every attempted native tool call, including validation,
