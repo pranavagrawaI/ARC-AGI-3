@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
@@ -78,10 +79,15 @@ class SterileCodeActController:
         self._cell_timeout_seconds = cell_timeout_seconds
         self._system_prompt = system_prompt
         self._provider_turns: list[ProviderTurn] = []
+        self._transport_adherence: Counter[str] = Counter()
 
     @property
     def provider_turns(self) -> tuple[ProviderTurn, ...]:
         return tuple(self._provider_turns)
+
+    @property
+    def transport_adherence(self) -> dict[str, int]:
+        return dict(self._transport_adherence)
 
     async def run(self) -> CognitiveAnswer:
         manifest = ExecutionManifest(
@@ -106,12 +112,26 @@ class SterileCodeActController:
                 response = await self._call_provider()
                 try:
                     tool_call = _one_tool_call(response.tool_calls)
-                    code = _tool_call_code(tool_call, response.content)
+                    code, arguments = _tool_call_execution(
+                        tool_call, response.content
+                    )
                 except (RuntimeError, ValueError, TypeError) as error:
+                    self._transport_adherence[
+                        _rejected_transport_class(response.tool_calls, response.content)
+                    ] += 1
                     self._provenance.provider_turn_rejected(str(error))
                     continue
+                self._transport_adherence[f"valid_{tool_call.name}"] += 1
                 try:
-                    result = await executor.run_cell(code)
+                    result = await executor.run_cell(
+                        code,
+                        tool_call_id=tool_call.id,
+                        tool_name=tool_call.name,
+                        tool_arguments=arguments,
+                        tool_reasoning=(
+                            None if response.content is None else str(response.content)
+                        ),
+                    )
                 except SterileReturnValidationError:
                     continue
                 if result.return_value is not None:
@@ -220,7 +240,9 @@ def _one_tool_call(tool_calls: list[ToolCall]) -> ToolCall:
     return call
 
 
-def _tool_call_code(tool_call: ToolCall, content: object) -> str:
+def _tool_call_execution(
+    tool_call: ToolCall, content: object
+) -> tuple[str, dict[str, Any]]:
     arguments = json.loads(tool_call.arguments)
     if not isinstance(arguments, dict):
         raise TypeError("tool arguments must be an object")
@@ -230,7 +252,20 @@ def _tool_call_code(tool_call: ToolCall, content: object) -> str:
     else:
         result = _return_result_value(arguments)
         code = f"return_result({result!r})"
-    return f"{prefix}\n{code}" if prefix else code
+    return (f"{prefix}\n{code}" if prefix else code), arguments
+
+
+def _rejected_transport_class(
+    tool_calls: list[ToolCall], content: object
+) -> str:
+    if not tool_calls and content:
+        return "plain_prose"
+    if len(tool_calls) == 1 and tool_calls[0].name not in {
+        "execute_python",
+        "return_result",
+    }:
+        return "wrong_tool"
+    return "malformed_tool_call"
 
 
 def _return_result_value(arguments: dict[str, Any]) -> dict[str, Any]:

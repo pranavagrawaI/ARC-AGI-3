@@ -48,6 +48,7 @@ class CompatibilityMetrics(BaseModel):
     evidence_queries: int = Field(ge=0)
     python_cells: int = Field(ge=0)
     invalid_interactions: int = Field(ge=0)
+    transport_adherence: dict[str, int] = Field(default_factory=dict)
     wall_seconds: float = Field(ge=0)
 
 
@@ -155,6 +156,7 @@ async def _run_native(
         evidence_queries=controller.evidence_queries,
         python_cells=0,
         invalid_interactions=controller.invalid_returns,
+        transport_adherence={},
         wall_seconds=time.monotonic() - started,
     )
     observation = _observation(gate, "native", answer, failure, metrics)
@@ -210,6 +212,7 @@ async def _run_codeact(
             + counts["CapabilityRejected"]
             + counts["CellFailed"]
         ),
+        transport_adherence=controller.transport_adherence,
         wall_seconds=time.monotonic() - started,
     )
     observation = _observation(
@@ -273,6 +276,7 @@ def _metrics(
     evidence_queries: int,
     python_cells: int,
     invalid_interactions: int,
+    transport_adherence: dict[str, int],
     wall_seconds: float,
 ) -> CompatibilityMetrics:
     input_tokens = sum(_usage_value(row, "prompt_tokens", "input_tokens") for row in usage)
@@ -286,6 +290,7 @@ def _metrics(
         evidence_queries=evidence_queries,
         python_cells=python_cells,
         invalid_interactions=invalid_interactions,
+        transport_adherence=transport_adherence,
         wall_seconds=wall_seconds,
     )
 

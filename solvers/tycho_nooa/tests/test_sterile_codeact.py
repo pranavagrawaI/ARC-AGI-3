@@ -119,7 +119,30 @@ async def test_evidence_cell_next_turn_and_context_reconstruct_from_raw_events(
     second = "\n".join(
         str(message["content"]) for message in subject.provider_turns[1].messages
     )
-    assert "I will inspect the frozen evidence" in second
+    historical_call = next(
+        message
+        for message in subject.provider_turns[1].messages
+        if "tool_calls" in message
+    )
+    historical_result = next(
+        message
+        for message in subject.provider_turns[1].messages
+        if message["role"] == "tool"
+    )
+    assert historical_call["reasoning"] == "I will inspect the frozen evidence."
+    assert historical_call["tool_calls"][0]["id"] == "call"
+    assert historical_call["tool_calls"][0]["function"]["name"] == (
+        "execute_python"
+    )
+    assert json.loads(
+        historical_call["tool_calls"][0]["function"]["arguments"]
+    ) == {
+        "code": (
+            "page = evidence.query(kind='frames'); "
+            "print(page['records'][0]['level'])"
+        )
+    }
+    assert historical_result["tool_call_id"] == "call"
     assert "&quot;stdout&quot;" in second
     assert "CellCompleted" in second
     assert subject.provider_turns[0].usage == {
@@ -135,6 +158,10 @@ async def test_evidence_cell_next_turn_and_context_reconstruct_from_raw_events(
     assert returned.payload["result"]["grid_encoding"] == "rle"
     names = {tool.name for tool in subject._llm.last_tools or []}
     assert names == {"execute_python", "return_result"}
+    assert subject.transport_adherence == {
+        "valid_execute_python": 1,
+        "valid_return_result": 1,
+    }
 
 
 async def test_return_only_control_has_no_evidence_namespace(tmp_path: Path) -> None:
@@ -291,6 +318,34 @@ async def test_zero_tool_provider_turn_is_rejected_and_retried(
     visible = json.dumps(subject.provider_turns[1].messages)
     assert "ProviderTurnRejected" in visible
     assert "exactly one execute_python or return_result" in visible
+
+
+async def test_plain_python_prose_is_never_executed(tmp_path: Path) -> None:
+    prose = LLMResponse(
+        raw_response=None,
+        content="# CodeAct cell 2\nreturn_result({'result': 'forged'})",
+        tool_calls=[],
+        finish_reason="stop",
+        assistant_message={"role": "assistant", "content": "plain code"},
+        usage={"prompt_tokens": 1, "completion_tokens": 1},
+    )
+    subject = controller(
+        tmp_path,
+        [prose, response("return_result", {"result": retrieval_result()})],
+    )
+
+    answer = await subject.run()
+
+    assert answer.conclusion == "The frame exists."
+    assert subject.transport_adherence == {
+        "plain_prose": 1,
+        "valid_return_result": 1,
+    }
+    assert not any(
+        event.event_type == "CellDispatched"
+        and "forged" in str(event.payload.get("source"))
+        for event in subject._provenance.log.events
+    )
 
 
 async def test_malformed_tool_arguments_are_rejected_and_retried(

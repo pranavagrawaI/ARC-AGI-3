@@ -199,7 +199,15 @@ class SterileExecutor[ReturnT]:
     ) -> None:
         await self.aclose()
 
-    async def run_cell(self, code: str) -> SterileExecutionResult[ReturnT]:
+    async def run_cell(
+        self,
+        code: str,
+        *,
+        tool_call_id: str | None = None,
+        tool_name: str = "execute_python",
+        tool_arguments: dict[str, Any] | None = None,
+        tool_reasoning: str | None = None,
+    ) -> SterileExecutionResult[ReturnT]:
         if self._process is None:
             raise RuntimeError("sterile executor is not running")
         if self._returned:
@@ -207,7 +215,14 @@ class SterileExecutor[ReturnT]:
         self._request_id += 1
         request_id = self._request_id
         if self._provenance is not None:
-            self._provenance.cell_dispatched(request_id, code)
+            self._provenance.cell_dispatched(
+                request_id,
+                code,
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                tool_arguments=tool_arguments,
+                tool_reasoning=tool_reasoning,
+            )
         response, records = await self._execute_request(code, request_id)
         return self._result_from_response(response, request_id, records)
 

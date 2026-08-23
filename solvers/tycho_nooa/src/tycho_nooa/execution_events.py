@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Literal
 from uuid import NAMESPACE_URL, uuid5
 
+from nooa.context_blocks.events import ResultStatus, ToolCallEvent, ToolResult
 from nooa.context_blocks.formatter import OpenAIProviderFormatter, XMLBlockFormatter
 from nooa.context_blocks.models import Role
 from nooa.context_blocks.renderer import render_context
@@ -200,7 +201,16 @@ class InvocationProvenance:
         self._root_event_id = event.event_id
         self._state = "running"
 
-    def cell_dispatched(self, cell_seq: int, source: str) -> None:
+    def cell_dispatched(
+        self,
+        cell_seq: int,
+        source: str,
+        *,
+        tool_call_id: str | None = None,
+        tool_name: str = "execute_python",
+        tool_arguments: dict[str, Any] | None = None,
+        tool_reasoning: str | None = None,
+    ) -> None:
         self._require_running()
         if cell_seq in self._cells:
             raise RuntimeError(f"cell {cell_seq} was already dispatched")
@@ -209,7 +219,15 @@ class InvocationProvenance:
             invocation_id=self.invocation_id,
             cell_seq=cell_seq,
             parent_event_id=self._root_event_id,
-            payload={"source": source, "source_sha256": _text_sha256(source)},
+            payload={
+                "source": source,
+                "source_sha256": _text_sha256(source),
+                "tool_call_id": tool_call_id
+                or f"{self.invocation_id}:cell:{cell_seq}",
+                "tool_name": tool_name,
+                "tool_arguments": tool_arguments or {"code": source},
+                "tool_reasoning": tool_reasoning,
+            },
         )
         self._cells[cell_seq] = _CellState(dispatched_event_id=event.event_id)
 
@@ -417,12 +435,6 @@ class InvocationProvenance:
         return cell
 
 
-class CodeActCellHistory(EventBase):
-    _role: ClassVar[Role] = Role.ASSISTANT
-
-    content: str
-
-
 class CodeActResultHistory(EventBase):
     _role: ClassVar[Role] = Role.USER
 
@@ -529,17 +541,6 @@ def _terminal_projection(
 
 def _project_cell(events: list[ExecutionProvenanceEvent]) -> list[EventBase]:
     dispatched = next(event for event in events if event.event_type == "CellDispatched")
-    source = str(dispatched.payload["source"])
-    cell_event = _projection_event(
-        CodeActCellHistory,
-        dispatched,
-        (
-            f"# CodeAct cell {dispatched.cell_seq}\n"
-            f"# source_sha256={dispatched.payload['source_sha256']}\n"
-            + _safe_text(source)
-        ),
-        [dispatched],
-    )
     outcome = next(
         (
             event
@@ -549,22 +550,45 @@ def _project_cell(events: list[ExecutionProvenanceEvent]) -> list[EventBase]:
         ),
         None,
     )
-    if outcome is None:
-        return [cell_event]
-    result_content = {
-        "cell_seq": dispatched.cell_seq,
-        "outcome": outcome.event_type,
-        "execution": outcome.payload,
-        "capabilities": _capability_summaries(events),
-        "return": _return_summary(events),
-    }
-    result_event = _projection_event(
-        CodeActResultHistory,
-        outcome,
-        _safe_text(_canonical_json(result_content)),
-        events,
+    tool_call_id = str(dispatched.payload["tool_call_id"])
+    tool_result = None
+    raw_events = [dispatched]
+    if outcome is not None:
+        raw_events = events
+        result_content = {
+            "cell_seq": dispatched.cell_seq,
+            "outcome": outcome.event_type,
+            "execution": outcome.payload,
+            "capabilities": _capability_summaries(events),
+            "return": _return_summary(events),
+        }
+        result_status = (
+            ResultStatus.ERROR
+            if outcome.event_type in {"CellFailed", "CellTimedOut", "WorkerLost"}
+            else ResultStatus.COMPLETE
+        )
+        tool_result = ToolResult(
+            tool_call_id=tool_call_id,
+            content=_safe_text(_canonical_json(result_content)),
+            result_status=result_status,
+        )
+    tool_event = ToolCallEvent(
+        id=f"{dispatched.event_id}:projection",
+        tool_call_id=tool_call_id,
+        name=str(dispatched.payload["tool_name"]),
+        arguments=dict(dispatched.payload["tool_arguments"]),
+        reasoning=(
+            None
+            if dispatched.payload.get("tool_reasoning") is None
+            else str(dispatched.payload["tool_reasoning"])
+        ),
+        result=tool_result,
+        metadata={
+            "invocation_id": dispatched.invocation_id,
+            "raw_event_ids": [event.event_id for event in raw_events],
+        },
     )
-    return [cell_event, result_event]
+    return [tool_event]
 
 
 def _capability_summaries(
