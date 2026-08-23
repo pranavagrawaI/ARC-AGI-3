@@ -85,7 +85,11 @@ class NativeParityController:
     async def run(self) -> CognitiveAnswer:
         for _ in range(self._max_llm_calls):
             response = await self._call_provider()
-            calls = _tool_calls(response.tool_calls)
+            try:
+                calls = _tool_calls(response.tool_calls)
+            except RuntimeError as error:
+                self._record_rejected_turn(response.content, str(error))
+                continue
             self._record_assistant_calls(calls, response.content)
             if all(call.name == "evidence_query" for call in calls):
                 for call in calls:
@@ -95,6 +99,25 @@ class NativeParityController:
             if answer is not None:
                 return answer
         raise RuntimeError("native parity exhausted its LLM-call budget")
+
+    def _record_rejected_turn(self, content: object, reason: str) -> None:
+        self._invalid_returns += 1
+        self._messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "content": str(content) if content else "",
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"PROVIDER_TURN_REJECTED: {reason}. "
+                        "Call exactly one available tool, except that parallel "
+                        "evidence_query calls are allowed."
+                    ),
+                },
+            ]
+        )
 
     async def _call_provider(self):
         response = await self._llm.acall(

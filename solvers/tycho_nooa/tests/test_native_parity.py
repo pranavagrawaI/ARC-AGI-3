@@ -120,6 +120,38 @@ async def test_invalid_return_is_feedback_not_terminal(tmp_path: Path) -> None:
     assert "RETURN_REJECTED" in json.dumps(llm.last_messages)
 
 
+async def test_missing_tool_call_is_feedback_not_terminal(tmp_path: Path) -> None:
+    malformed = LLMResponse(
+        raw_response=None,
+        content="I should use a tool.",
+        tool_calls=[],
+        finish_reason="stop",
+        assistant_message={"role": "assistant", "content": "I should use a tool."},
+        usage={"prompt_tokens": 2, "completion_tokens": 1},
+    )
+    llm = FakeLLMClient(
+        scripted_responses=[
+            malformed,
+            response("return_result", {"result": answer()}),
+        ]
+    )
+    subject = NativeParityController(
+        llm=llm,
+        packet=packet(),
+        evidence=capability(tmp_path),
+    )
+
+    result = await subject.run()
+
+    assert result.conclusion == "Found it."
+    assert subject.invalid_returns == 1
+    assert [turn.tool_names for turn in subject.provider_turns] == [
+        (),
+        ("return_result",),
+    ]
+    assert "PROVIDER_TURN_REJECTED" in json.dumps(llm.last_messages)
+
+
 async def test_parallel_read_calls_are_processed_before_next_turn(
     tmp_path: Path,
 ) -> None:
