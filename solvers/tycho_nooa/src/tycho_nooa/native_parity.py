@@ -30,6 +30,7 @@ class NativeEvidenceArguments(BaseModel):
     frontier: dict[str, int] | None = None
     limit: int = 16
     grid_encoding: Literal["raw", "rle"] = "rle"
+    projection: Literal["full", "metadata"] = "full"
 
 
 class NativeReturnArguments(BaseModel):

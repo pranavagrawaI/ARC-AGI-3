@@ -51,6 +51,38 @@ EvidenceRecord = Annotated[
 ]
 
 
+class FrameMetadataEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    type: Literal["frame_metadata"] = "frame_metadata"
+    level: int = Field(ge=0)
+    turn: int = Field(ge=0)
+
+
+class TransitionMetadataEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    type: Literal["transition_metadata"] = "transition_metadata"
+    level: int = Field(ge=0)
+    turn: int = Field(ge=1)
+    action: str | None
+    row: int | None
+    col: int | None
+
+
+EvidenceMetadataRecord = Annotated[
+    FrameMetadataEvidence | TransitionMetadataEvidence,
+    Field(discriminator="type"),
+]
+TransportEvidenceRecord = Annotated[
+    FrameEvidence
+    | TransitionEvidence
+    | FrameMetadataEvidence
+    | TransitionMetadataEvidence,
+    Field(discriminator="type"),
+]
+
+
 class EvidenceQuery(BaseModel):
     """A bounded page over current-attempt frames or ordinary transitions."""
 
@@ -62,6 +94,7 @@ class EvidenceQuery(BaseModel):
     frontier: EvidenceRef | None = None
     limit: int = Field(default=16, ge=1, le=32)
     grid_encoding: Literal["raw", "rle"] = "raw"
+    projection: Literal["full", "metadata"] = "full"
 
 
 class EvidenceQueryResult(BaseModel):
@@ -69,10 +102,11 @@ class EvidenceQueryResult(BaseModel):
 
     kind: Literal["frames", "transitions"]
     frontier: EvidenceRef | None
-    records: tuple[EvidenceRecord, ...]
+    records: tuple[TransportEvidenceRecord, ...]
     next_after: EvidenceRef | None
     truncated: bool
     grid_encoding: Literal["raw", "rle"]
+    projection: Literal["full", "metadata"]
     encoding_legend: str | None = None
 
 
@@ -102,23 +136,25 @@ class WorkspaceEvidenceCapability:
                 f"requested frontier {query.frontier} does not match current {frontier}"
             )
         records = self._records(query, root)
-        page = records[: query.limit]
-        truncated = len(records) > len(page)
+        selected_page = records[: query.limit]
+        page = tuple(_project_record(record, query.projection) for record in selected_page)
+        truncated = len(records) > len(selected_page)
         result = EvidenceQueryResult(
             kind=query.kind,
             frontier=frontier,
-            records=tuple(page),
+            records=page,
             next_after=_record_ref(page[-1]) if truncated else None,
             truncated=truncated,
             grid_encoding=query.grid_encoding,
+            projection=query.projection,
             encoding_legend=(
                 "Each grid row is comma-separated <hex count>:<hex cell> runs."
-                if query.grid_encoding == "rle"
+                if query.projection == "full" and query.grid_encoding == "rle"
                 else None
             ),
         )
         value = result.model_dump(mode="json")
-        if query.grid_encoding == "rle":
+        if query.projection == "full" and query.grid_encoding == "rle":
             _encode_record_grids(value["records"])
         return value
 
@@ -149,6 +185,22 @@ def _grid(value: Any) -> Grid:
     return tuple(tuple(int(cell) for cell in row) for row in value)
 
 
+def _project_record(
+    record: EvidenceRecord, projection: Literal["full", "metadata"]
+) -> EvidenceRecord | EvidenceMetadataRecord:
+    if projection == "full":
+        return record
+    if isinstance(record, FrameEvidence):
+        return FrameMetadataEvidence(level=record.level, turn=record.turn)
+    return TransitionMetadataEvidence(
+        level=record.level,
+        turn=record.turn,
+        action=record.action,
+        row=record.row,
+        col=record.col,
+    )
+
+
 def _encode_record_grids(records: list[dict[str, Any]]) -> None:
     for record in records:
         for field in ("grid", "prev", "next"):
@@ -176,7 +228,7 @@ def _evidence_ref(key: tuple[int, int] | None) -> EvidenceRef | None:
     return None if key is None else EvidenceRef(level=key[0], turn=key[1])
 
 
-def _record_ref(record: EvidenceRecord) -> EvidenceRef:
+def _record_ref(record: EvidenceRecord | EvidenceMetadataRecord) -> EvidenceRef:
     return EvidenceRef(level=record.level, turn=record.turn)
 
 

@@ -127,6 +127,38 @@ def test_rle_grid_encoding_is_exact_and_reversible(tmp_path: Path) -> None:
         assert _decode_grid(encoded_record["next"]) == raw_record["next"]
 
 
+def test_metadata_projection_preserves_identity_without_grid_payloads(
+    tmp_path: Path,
+) -> None:
+    capability = WorkspaceEvidenceCapability(recorded_workspace(tmp_path))
+
+    page = capability.query(
+        {"kind": "transitions", "level": 0, "projection": "metadata"}
+    )
+
+    assert page["projection"] == "metadata"
+    assert page["encoding_legend"] is None
+    assert page["records"] == [
+        {
+            "type": "transition_metadata",
+            "level": 0,
+            "turn": 1,
+            "action": "UP",
+            "row": None,
+            "col": None,
+        },
+        {
+            "type": "transition_metadata",
+            "level": 0,
+            "turn": 2,
+            "action": "DOWN",
+            "row": None,
+            "col": None,
+        },
+    ]
+    assert not ({"prev", "next", "grid"} & set(page["records"][0]))
+
+
 async def test_manifest_and_handlers_must_describe_the_same_capabilities() -> None:
     manifest = ExecutionManifest(
         invocation_id="actor-evidence-mismatch",
