@@ -9,6 +9,10 @@
 - adaptation: `NativeToolStrategy` is new integration code. It uses NOOA's
   public strategy/runtime interfaces but replaces CodeAct's two-tool surface
   with Tycho's workspace tools.
+- port: `_sterile_guards.py` takes NOOA's pinned raw-`ctypes` Landlock,
+  seccomp, and rlimit mechanisms from `nooa/runtime/sandbox/guards.py`, reduced
+  to one fixed exec-worker policy. The adaptation adds file-size/open-file/
+  process limits and deliberately omits NOOA's live-agent `self` broker.
 - adaptation: `FocusedBuilder` is a separate NOOA `Agent` created fresh for
   each fired trigger. It deliberately shares the actor's LLM client and Tycho
   executor/workspace while retaining an independent bounded NOOA event history.

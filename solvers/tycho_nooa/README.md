@@ -47,6 +47,24 @@ writes `notes/validated_plan.json`; subsequent observations expose Tycho's
 guarded continuation only while the model hash, observed trajectory, and action
 availability still agree. The actor continues to commit one action at a time.
 
+### Sterile CodeAct execution vertical slice
+
+`tycho_nooa.sterile_execution` is an offline capability build for a future
+CodeAct treatment. It does **not** replace `NativeToolStrategy` or participate
+in live decisions. One `SterileExecutor` starts a sanitized `python -I -S`
+process for one prospective CodeAct invocation, keeps REPL variables only in
+that child across cells, and validates `return_result(...)` against T1's
+Pydantic return type. The child receives JSON values rather than a live Agent:
+there is no `self`, canonical workspace descriptor, credential environment, or
+Python-object transport across the boundary.
+
+The v1 manifest intentionally exposes no solver capabilities. Its fixed OS
+policy gives the child one disposable writable scratch directory, read-only
+standard-library access, no sockets or subprocesses, bounded output, and
+CPU/memory/file/descriptor limits. Landlock, seccomp, and rlimit setup must all
+succeed before the worker reports ready. Immutable `evidence.query` DTOs and
+CodeAct Actor integration are later slices, not claims of this implementation.
+
 Run evidence is separate from the ordinary tool trace:
 
 - `tool-trace.jsonl`: every attempted native tool call, including validation,
