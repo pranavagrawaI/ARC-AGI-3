@@ -120,7 +120,13 @@ class AuthorizedCompatibilityLLM(UnifiedLLM):
             observed_model=route.get("model"),
             observed_reasoning_effort=route.get("reasoning_effort"),
         )
-        self._ledger.reconcile(call.call_id)
+        provider_failure = _provider_failure(response.raw_response)
+        if provider_failure is None:
+            self._ledger.reconcile(call.call_id)
+        else:
+            self._ledger.reconcile_provider_failure(
+                call.call_id, reason=provider_failure
+            )
         if self._ledger.state.run_state == "stopped":
             raise RuntimeError(
                 f"authorized provider call stopped: {self._ledger.state.stop_reason}"
@@ -364,6 +370,29 @@ def _provider_route(raw: Any) -> dict[str, str]:
         "reasoning_effort": _raw_field(raw, "reasoning_effort"),
     }
     return {key: value for key, value in fields.items() if isinstance(value, str)}
+
+
+def _provider_failure(raw: Any) -> str | None:
+    """Extract provider-declared failures without interpreting model content."""
+    candidates = [
+        _raw_field(raw, "error"),
+        _raw_field(_raw_field(raw, "provider_specific_fields"), "error"),
+    ]
+    choices = _raw_field(raw, "choices")
+    if isinstance(choices, (list, tuple)):
+        candidates.extend(
+            _raw_field(_raw_field(choice, "provider_specific_fields"), "error")
+            for choice in choices
+        )
+    for error in candidates:
+        if error is None:
+            continue
+        code = _raw_field(error, "code")
+        message = _raw_field(error, "message")
+        if code is not None or message is not None:
+            return f"provider error {code}: {message}"
+        return f"provider error: {error}"
+    return None
 
 
 def _raw_field(value: Any, name: str) -> Any:

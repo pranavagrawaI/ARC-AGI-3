@@ -256,7 +256,9 @@ class DurableAuthorizationLedger:
                 self._finish_received_call(call)
         latest = max(self.state.calls.values(), key=lambda row: row.call_index, default=None)
         if self.state.run_state == "armed" and latest is not None:
-            if latest.state == "failed":
+            if latest.state == "failed" or (
+                latest.state == "accounted" and latest.failure is not None
+            ):
                 self.stop(f"provider_failure:{latest.call_id}")
                 return self.state
             if latest.state == "accounted" and not _route_matches(
@@ -374,6 +376,21 @@ class DurableAuthorizationLedger:
         if call.state not in {"received", "route_validated", "route_violated"}:
             raise RuntimeError(f"cannot reconcile call in state {call.state}")
         return self._finish_received_call(call)
+
+    def reconcile_provider_failure(self, call_id: str, *, reason: str) -> Decimal:
+        """Preserve a provider-declared failure, account it, then stop the run."""
+        call = self._call(call_id)
+        if call.state != "received":
+            raise RuntimeError(
+                f"provider failure is invalid from call state {call.state}"
+            )
+        self._append(
+            "ProviderFailureObserved",
+            {"call_id": call_id, "failure": reason},
+        )
+        actual = self._finish_received_call(self._call(call_id))
+        self.stop(f"provider_failure:{call_id}")
+        return actual
 
     def fail(
         self, call_id: str, *, reason: str, response: dict[str, Any] | None = None
@@ -525,6 +542,7 @@ def _apply_event(
     elif event_type in {
         "CallDispatched",
         "CallReceived",
+        "ProviderFailureObserved",
         "RouteValidated",
         "RouteViolated",
         "CallAccounted",
@@ -580,6 +598,7 @@ def _replay_call_transition(
     transitions: dict[str, tuple[set[CallState], CallState]] = {
         "CallDispatched": ({"planned"}, "dispatched"),
         "CallReceived": ({"dispatched"}, "received"),
+        "ProviderFailureObserved": ({"received"}, "received"),
         "RouteValidated": ({"received"}, "route_validated"),
         "RouteViolated": ({"received"}, "route_violated"),
         "CallAccounted": ({"route_validated", "route_violated"}, "accounted"),
@@ -598,7 +617,11 @@ def _replay_call_transition(
         call.observed_reasoning_effort = payload.get("observed_reasoning_effort")
     elif event_type == "CallAccounted":
         call.actual_cost_usd = Decimal(payload["actual_cost_usd"])
-    elif event_type in {"CallCancelled", "CallFailed"}:
+    elif event_type in {
+        "ProviderFailureObserved",
+        "CallCancelled",
+        "CallFailed",
+    }:
         call.failure = str(payload["failure"])
         if event_type == "CallFailed":
             call.response = payload.get("response")

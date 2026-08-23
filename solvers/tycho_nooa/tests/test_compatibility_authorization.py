@@ -210,6 +210,64 @@ def test_failed_call_preserves_a_partial_provider_response(tmp_path: Path) -> No
     assert value.state.run_state == "stopped"
 
 
+def test_embedded_provider_failure_is_accounted_then_stops(tmp_path: Path) -> None:
+    auth = authorization()
+    value = ledger(tmp_path, auth)
+    call = value.plan_call(gate_id="g0", arm="native", request={})
+    value.dispatch(call.call_id)
+    value.receive(
+        call.call_id,
+        response={"content": "partial"},
+        usage={"prompt_tokens": 500, "completion_tokens": 50},
+        observed_provider="test-provider",
+        observed_model="test-model-snapshot",
+    )
+
+    actual = value.reconcile_provider_failure(
+        call.call_id, reason="provider error 502: partial stream"
+    )
+
+    failed = value.state.calls[call.call_id]
+    assert actual == Decimal("0.006")
+    assert failed.state == "accounted"
+    assert failed.failure == "provider error 502: partial stream"
+    assert value.state.run_state == "stopped"
+    assert value.state.stop_reason == f"provider_failure:{call.call_id}"
+
+
+def test_recovery_finishes_accounting_an_observed_provider_failure(
+    tmp_path: Path,
+) -> None:
+    auth = authorization()
+    value = ledger(tmp_path, auth)
+    call = value.plan_call(gate_id="g0", arm="native", request={})
+    value.dispatch(call.call_id)
+    value.receive(
+        call.call_id,
+        response={"content": "partial"},
+        usage={"prompt_tokens": 500, "completion_tokens": 50},
+        observed_provider="test-provider",
+        observed_model="test-model-snapshot",
+    )
+    value._append(
+        "ProviderFailureObserved",
+        {"call_id": call.call_id, "failure": "provider error 502: partial"},
+    )
+
+    reopened = DurableAuthorizationLedger(
+        value.path,
+        authorization=auth,
+        authorization_sha256=authorization_sha256(auth),
+    )
+    reopened.recover()
+
+    recovered = reopened.state.calls[call.call_id]
+    assert recovered.state == "accounted"
+    assert recovered.actual_cost_usd == Decimal("0.006")
+    assert recovered.failure == "provider error 502: partial"
+    assert reopened.state.stop_reason == f"provider_failure:{call.call_id}"
+
+
 def test_recovery_marks_an_interrupted_gate_without_replaying_it(
     tmp_path: Path,
 ) -> None:

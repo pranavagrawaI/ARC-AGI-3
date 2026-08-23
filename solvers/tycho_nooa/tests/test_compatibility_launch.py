@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
@@ -46,6 +47,25 @@ def response(
         assistant_message={"role": "assistant", "content": ""},
         usage={"prompt_tokens": 20, "completion_tokens": 10},
     )
+
+
+def provider_failure_response() -> LLMResponse:
+    value = response("READY")
+    value.raw_response = SimpleNamespace(
+        provider="provider-a",
+        model="reported-fake-model",
+        choices=[
+            SimpleNamespace(
+                provider_specific_fields={
+                    "error": {
+                        "code": 502,
+                        "message": "generation ended before tool call completed",
+                    }
+                },
+            )
+        ],
+    )
+    return value
 
 
 def configured_fake(*responses: LLMResponse) -> FakeLLMClient:
@@ -266,6 +286,34 @@ async def test_response_route_drift_is_preserved_and_accounted(
     assert '"event_type":"RouteViolated"' in events
     assert '"event_type":"CallAccounted"' in events
     assert '"provider-b"' in events
+
+
+async def test_embedded_provider_failure_is_preserved_accounted_and_stops(
+    tmp_path: Path,
+) -> None:
+    manifest, authorization = authorized_inputs(tmp_path)
+    native = configured_fake(provider_failure_response())
+    codeact = configured_fake(response("READY"))
+
+    with pytest.raises(RuntimeError, match="provider_failure:call-0001"):
+        await execute_authorized_compatibility_ladder(
+            manifest,
+            authorization,
+            repository_root=REPOSITORY_ROOT,
+            destination=tmp_path / "run",
+            native_llm=native,
+            codeact_llm=codeact,
+        )
+
+    assert native.call_count == 1
+    assert codeact.call_count == 0
+    events = (tmp_path / "run/authorization-events.jsonl").read_text()
+    assert '"event_type":"CallReceived"' in events
+    assert '"event_type":"ProviderFailureObserved"' in events
+    assert '"event_type":"CallAccounted"' in events
+    assert '"event_type":"RunStopped"' in events
+    assert "generation ended before tool call completed" in events
+    assert not (tmp_path / "run/ladder/ladder-report.json").exists()
 
 
 async def test_completed_authorization_is_not_silently_replayed(
