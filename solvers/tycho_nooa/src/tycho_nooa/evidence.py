@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 from tycho.workspace import wmlib_template
@@ -108,6 +108,10 @@ class EvidenceQueryResult(BaseModel):
     grid_encoding: Literal["raw", "rle"]
     projection: Literal["full", "metadata"]
     encoding_legend: str | None = None
+
+
+class EvidenceCapability(Protocol):
+    def query(self, raw_query: dict[str, Any] | EvidenceQuery) -> dict[str, Any]: ...
 
 
 class WorkspaceEvidenceCapability:

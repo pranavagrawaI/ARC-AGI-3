@@ -11,7 +11,7 @@ from nooa.unifiedllm import Tool, ToolCall, UnifiedLLM
 from pydantic import BaseModel, ConfigDict
 
 from tycho_nooa.cognitive_parity import CognitiveAnswer
-from tycho_nooa.evidence import WorkspaceEvidenceCapability
+from tycho_nooa.evidence import EvidenceCapability
 from tycho_nooa.execution_events import (
     InvocationProvenance,
     NooaExecutionProjection,
@@ -66,7 +66,7 @@ class SterileCodeActController:
         *,
         llm: UnifiedLLM,
         packet: ModelTask,
-        evidence: WorkspaceEvidenceCapability | None,
+        evidence: EvidenceCapability | None,
         provenance: InvocationProvenance,
         max_llm_calls: int = 8,
         max_output_tokens: int | None = None,

@@ -81,12 +81,14 @@ def test_evaluator_scores_exact_value_and_reference() -> None:
     accepted = evaluate_compatibility_answer(
         gate,
         RetrievalAnswer(evidence_refs=(), conclusion="READY"),
+        evidence_queries=0,
     )
     rejected = evaluate_compatibility_answer(
         gate,
         RetrievalAnswer(
             evidence_refs=(EvidenceRef(level=0, turn=1),), conclusion="ready"
         ),
+        evidence_queries=1,
     )
 
     assert accepted.passed is True
@@ -95,6 +97,7 @@ def test_evaluator_scores_exact_value_and_reference() -> None:
         "valid_typed_return": True,
         "conclusion_correct": False,
         "evidence_refs_correct": False,
+        "capability_use_correct": False,
         "passed": False,
     }
 

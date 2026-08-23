@@ -115,6 +115,7 @@ class CompatibilityEvaluation(BaseModel):
     valid_typed_return: Literal[True] = True
     conclusion_correct: bool
     evidence_refs_correct: bool
+    capability_use_correct: bool
     passed: bool
 
 
@@ -181,17 +182,21 @@ def load_compatibility_gate(
 
 
 def evaluate_compatibility_answer(
-    gate: CompatibilityGate, answer: RetrievalAnswer
+    gate: CompatibilityGate, answer: RetrievalAnswer, *, evidence_queries: int
 ) -> CompatibilityEvaluation:
     conclusion_correct = answer.conclusion == gate.expected.conclusion
     refs = {(ref.level, ref.turn) for ref in answer.evidence_refs}
     expected_refs = {(ref.level, ref.turn) for ref in gate.expected.evidence_refs}
     evidence_refs_correct = refs == expected_refs
+    capability_use_correct = evidence_queries == gate.evidence.max_queries
     return CompatibilityEvaluation(
         gate_id=gate.task.gate_id,
         conclusion_correct=conclusion_correct,
         evidence_refs_correct=evidence_refs_correct,
-        passed=conclusion_correct and evidence_refs_correct,
+        capability_use_correct=capability_use_correct,
+        passed=(
+            conclusion_correct and evidence_refs_correct and capability_use_correct
+        ),
     )
 
 

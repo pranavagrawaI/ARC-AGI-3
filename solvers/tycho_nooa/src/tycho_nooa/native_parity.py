@@ -11,7 +11,7 @@ from nooa.unifiedllm import Tool, ToolCall, UnifiedLLM
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from tycho_nooa.cognitive_parity import CognitiveAnswer
-from tycho_nooa.evidence import EvidenceQuery, WorkspaceEvidenceCapability
+from tycho_nooa.evidence import EvidenceCapability, EvidenceQuery
 from tycho_nooa.model_task import ModelTask
 
 ANSWER_ADAPTER = TypeAdapter(CognitiveAnswer)
@@ -56,7 +56,7 @@ class NativeParityController:
         *,
         llm: UnifiedLLM,
         packet: ModelTask,
-        evidence: WorkspaceEvidenceCapability | None,
+        evidence: EvidenceCapability | None,
         max_llm_calls: int = 8,
         max_output_tokens: int | None = None,
         system_prompt: str = SYSTEM_PROMPT,
