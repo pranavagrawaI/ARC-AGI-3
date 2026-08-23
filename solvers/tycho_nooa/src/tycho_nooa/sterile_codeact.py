@@ -104,10 +104,10 @@ class SterileCodeActController:
                 response = await self._call_provider()
                 try:
                     tool_call = _one_tool_call(response.tool_calls)
-                except RuntimeError as error:
+                    code = _tool_call_code(tool_call, response.content)
+                except (RuntimeError, ValueError, TypeError) as error:
                     self._provenance.provider_turn_rejected(str(error))
                     continue
-                code = _tool_call_code(tool_call, response.content)
                 try:
                     result = await executor.run_cell(code)
                 except SterileReturnValidationError:

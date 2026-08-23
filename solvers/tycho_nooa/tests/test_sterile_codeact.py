@@ -243,3 +243,40 @@ async def test_zero_tool_provider_turn_is_rejected_and_retried(
     visible = json.dumps(subject.provider_turns[1].messages)
     assert "ProviderTurnRejected" in visible
     assert "exactly one execute_python or return_result" in visible
+
+
+async def test_malformed_tool_arguments_are_rejected_and_retried(
+    tmp_path: Path,
+) -> None:
+    malformed = LLMResponse(
+        raw_response=None,
+        content="",
+        tool_calls=[
+            ToolCall(
+                id="broken",
+                name="execute_python",
+                arguments='{"code":"unterminated',
+            )
+        ],
+        finish_reason="tool_calls",
+        assistant_message={"role": "assistant", "content": ""},
+        usage={"prompt_tokens": 1, "completion_tokens": 1},
+    )
+    subject = controller(
+        tmp_path,
+        [
+            malformed,
+            response("return_result", {"result": retrieval_result()}),
+        ],
+    )
+
+    answer = await subject.run()
+
+    assert answer.conclusion == "The frame exists."
+    rejected = next(
+        event
+        for event in subject._provenance.log.events
+        if event.event_type == "ProviderTurnRejected"
+    )
+    assert "Unterminated string" in rejected.payload["reason"]
+    assert "ProviderTurnRejected" in json.dumps(subject.provider_turns[1].messages)
