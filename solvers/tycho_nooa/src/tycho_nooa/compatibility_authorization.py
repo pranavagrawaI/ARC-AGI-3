@@ -245,36 +245,43 @@ class DurableAuthorizationLedger:
 
     def recover(self) -> AuthorizationState:
         """Resolve only transitions whose consequence is knowable from the journal."""
-        call = self.state.active_call
-        if call is not None:
-            if call.state == "planned":
-                self.cancel_planned(call.call_id, reason="recovery_before_dispatch")
-            elif call.state == "dispatched":
-                self.stop("unknown_dispatched_call")
-                return self.state
-            elif call.state in {"received", "route_validated", "route_violated"}:
-                self._finish_received_call(call)
-        latest = max(self.state.calls.values(), key=lambda row: row.call_index, default=None)
-        if self.state.run_state == "armed" and latest is not None:
-            if latest.state == "failed" or (
-                latest.state == "accounted" and latest.failure is not None
-            ):
-                self.stop(f"provider_failure:{latest.call_id}")
-                return self.state
-            if latest.state == "accounted" and not _route_matches(
-                latest, self.authorization
-            ):
-                self.stop(f"route_violation:{latest.call_id}")
-                return self.state
-        if self.state.run_state == "armed" and self.state.active_gate is not None:
-            self.stop(f"interrupted_gate:{self.state.active_gate.gate_id}")
-        elif (
-            self.state.run_state == "armed"
-            and self.state.gates
-            and self.state.ladder_disposition is None
-        ):
-            self.stop("interrupted_ladder")
+        if self._recover_active_call():
+            return self.state
+        if self._recover_latest_call():
+            return self.state
+        self._recover_ladder()
         return self.state
+
+    def _recover_active_call(self) -> bool:
+        call = self.state.active_call
+        if call is None:
+            return False
+        if call.state == "planned":
+            self.cancel_planned(call.call_id, reason="recovery_before_dispatch")
+            return False
+        if call.state == "dispatched":
+            self.stop("unknown_dispatched_call")
+            return True
+        self._finish_received_call(call)
+        return self.state.run_state == "stopped"
+
+    def _recover_latest_call(self) -> bool:
+        if self.state.run_state != "armed":
+            return True
+        latest = max(self.state.calls.values(), key=lambda row: row.call_index, default=None)
+        reason = _recovery_call_stop_reason(latest, self.authorization)
+        if reason is None:
+            return False
+        self.stop(reason)
+        return True
+
+    def _recover_ladder(self) -> None:
+        gate = self.state.active_gate
+        if gate is not None:
+            self.stop(f"interrupted_gate:{gate.gate_id}")
+            return
+        if self.state.gates and self.state.ladder_disposition is None:
+            self.stop("interrupted_ladder")
 
     def start_gate(self, gate_id: str) -> None:
         self._require_armed()
@@ -521,51 +528,26 @@ def _apply_event(
     if not isinstance(payload, dict):
         raise TypeError("authorization journal payload must be an object")
     if event_type == "RunArmed":
-        if state is not None:
-            raise ValueError("authorization journal contains duplicate RunArmed")
-        return AuthorizationState(
-            authorization_id=payload["authorization_id"],
-            authorization_sha256=payload["authorization_sha256"],
-            experiment_manifest_sha256=payload["experiment_manifest_sha256"],
-            run_state="armed",
-        )
+        return _replay_run_armed(state, payload)
     if state is None:
         raise ValueError("authorization journal must begin with RunArmed")
-    if event_type == "CallPlanned":
-        _replay_plan(state, payload)
-    elif event_type in {
-        "GateStarted",
-        "GateCompleted",
-        "LadderCompleted",
-    }:
-        _replay_ladder_transition(state, event_type, payload)
-    elif event_type in {
-        "CallDispatched",
-        "CallReceived",
-        "ProviderFailureObserved",
-        "RouteValidated",
-        "RouteViolated",
-        "CallAccounted",
-        "CallCancelled",
-        "CallFailed",
-    }:
-        _replay_call_transition(state, event_type, payload)
-    elif event_type == "RunStopped":
-        if state.run_state != "armed":
-            raise ValueError("RunStopped requires an armed run")
-        state.run_state = "stopped"
-        state.stop_reason = str(payload["reason"])
-    elif event_type == "RunCompleted":
-        if (
-            state.run_state != "armed"
-            or state.active_call is not None
-            or state.active_gate is not None
-        ):
-            raise ValueError("RunCompleted requires an idle armed run")
-        state.run_state = "completed"
-    else:
+    if not isinstance(event_type, str) or event_type not in _EVENT_REPLAYERS:
         raise ValueError(f"unknown authorization journal event {event_type!r}")
+    _EVENT_REPLAYERS[event_type](state, event_type, payload)
     return state
+
+
+def _replay_run_armed(
+    state: AuthorizationState | None, payload: dict[str, Any]
+) -> AuthorizationState:
+    if state is not None:
+        raise ValueError("authorization journal contains duplicate RunArmed")
+    return AuthorizationState(
+        authorization_id=payload["authorization_id"],
+        authorization_sha256=payload["authorization_sha256"],
+        experiment_manifest_sha256=payload["experiment_manifest_sha256"],
+        run_state="armed",
+    )
 
 
 def _replay_plan(state: AuthorizationState, payload: dict[str, Any]) -> None:
@@ -632,25 +614,99 @@ def _replay_ladder_transition(
 ) -> None:
     if state.run_state != "armed":
         raise ValueError(f"{event_type} requires an armed run")
-    if event_type == "GateStarted":
-        gate_id = str(payload["gate_id"])
-        if state.active_gate is not None or gate_id in state.gates:
-            raise ValueError("GateStarted requires a new idle gate")
-        state.gates[gate_id] = GateRecord(gate_id=gate_id, state="started")
-        return
-    if event_type == "GateCompleted":
-        gate = state.active_gate
-        if gate is None or gate.gate_id != payload.get("gate_id"):
-            raise ValueError("GateCompleted does not match the active gate")
-        gate.state = "completed"
-        gate.passed = bool(payload["passed"])
-        gate.report_sha256 = str(payload["report_sha256"])
-        return
+    _LADDER_REPLAYERS[event_type](state, payload)
+
+
+def _replay_gate_started(
+    state: AuthorizationState, payload: dict[str, Any]
+) -> None:
+    gate_id = str(payload["gate_id"])
+    if state.active_gate is not None or gate_id in state.gates:
+        raise ValueError("GateStarted requires a new idle gate")
+    state.gates[gate_id] = GateRecord(gate_id=gate_id, state="started")
+
+
+def _replay_gate_completed(
+    state: AuthorizationState, payload: dict[str, Any]
+) -> None:
+    gate = state.active_gate
+    if gate is None or gate.gate_id != payload.get("gate_id"):
+        raise ValueError("GateCompleted does not match the active gate")
+    gate.state = "completed"
+    gate.passed = bool(payload["passed"])
+    gate.report_sha256 = str(payload["report_sha256"])
+
+
+def _replay_ladder_completed(
+    state: AuthorizationState, payload: dict[str, Any]
+) -> None:
     if state.active_gate is not None:
         raise ValueError("LadderCompleted requires no active gate")
     if state.ladder_disposition is not None:
         raise ValueError("authorization journal repeats LadderCompleted")
     state.ladder_disposition = str(payload["disposition"])
+
+
+def _replay_plan_event(
+    state: AuthorizationState, _: str, payload: dict[str, Any]
+) -> None:
+    _replay_plan(state, payload)
+
+
+def _replay_ladder_event(
+    state: AuthorizationState, event_type: str, payload: dict[str, Any]
+) -> None:
+    _replay_ladder_transition(state, event_type, payload)
+
+
+def _replay_call_event(
+    state: AuthorizationState, event_type: str, payload: dict[str, Any]
+) -> None:
+    _replay_call_transition(state, event_type, payload)
+
+
+def _replay_run_stopped(
+    state: AuthorizationState, _: str, payload: dict[str, Any]
+) -> None:
+    if state.run_state != "armed":
+        raise ValueError("RunStopped requires an armed run")
+    state.run_state = "stopped"
+    state.stop_reason = str(payload["reason"])
+
+
+def _replay_run_completed(
+    state: AuthorizationState, _: str, __: dict[str, Any]
+) -> None:
+    if (
+        state.run_state != "armed"
+        or state.active_call is not None
+        or state.active_gate is not None
+    ):
+        raise ValueError("RunCompleted requires an idle armed run")
+    state.run_state = "completed"
+
+
+_LADDER_REPLAYERS = {
+    "GateStarted": _replay_gate_started,
+    "GateCompleted": _replay_gate_completed,
+    "LadderCompleted": _replay_ladder_completed,
+}
+_EVENT_REPLAYERS = {
+    "CallPlanned": _replay_plan_event,
+    "GateStarted": _replay_ladder_event,
+    "GateCompleted": _replay_ladder_event,
+    "LadderCompleted": _replay_ladder_event,
+    "CallDispatched": _replay_call_event,
+    "CallReceived": _replay_call_event,
+    "ProviderFailureObserved": _replay_call_event,
+    "RouteValidated": _replay_call_event,
+    "RouteViolated": _replay_call_event,
+    "CallAccounted": _replay_call_event,
+    "CallCancelled": _replay_call_event,
+    "CallFailed": _replay_call_event,
+    "RunStopped": _replay_run_stopped,
+    "RunCompleted": _replay_run_completed,
+}
 
 
 def _validate_journal_identity(
@@ -693,6 +749,20 @@ def _route_matches(
             == authorization.allowed_reasoning_effort
         )
     )
+
+
+def _recovery_call_stop_reason(
+    call: CallRecord | None, authorization: CompatibilityAuthorization
+) -> str | None:
+    if call is None:
+        return None
+    if call.state == "failed" or (
+        call.state == "accounted" and call.failure is not None
+    ):
+        return f"provider_failure:{call.call_id}"
+    if call.state == "accounted" and not _route_matches(call, authorization):
+        return f"route_violation:{call.call_id}"
+    return None
 
 
 def _usage_integer(usage: dict[str, Any], *names: str) -> int:

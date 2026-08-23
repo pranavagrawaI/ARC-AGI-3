@@ -467,41 +467,9 @@ class NooaExecutionProjection:
                 [started],
             )
         ]
-        cells = _group_by(
-            [event for event in events if event.cell_seq is not None],
-            lambda event: event.cell_seq,
-        )
-        chunks = [
-            (cell_events[0].event_seq, _project_cell(cell_events))
-            for cell_events in cells
-        ]
-        chunks.extend(
-            (event.event_seq, [_project_provider_rejection(event)])
-            for event in events
-            if event.event_type == "ProviderTurnRejected"
-        )
-        for _, chunk in sorted(chunks, key=lambda item: item[0]):
+        for _, chunk in _projection_chunks(events):
             projected.extend(chunk)
-        terminal = next(
-            (
-                event
-                for event in reversed(events)
-                if event.event_type in {"InvocationCompleted", "InvocationFailed"}
-            ),
-            None,
-        )
-        if terminal is not None:
-            projected.append(
-                _projection_event(
-                    CodeActLifecycleHistory,
-                    terminal,
-                    _safe_text(
-                        f"CodeAct {terminal.event_type}: "
-                        + _canonical_json(terminal.payload)
-                    ),
-                    [terminal],
-                )
-            )
+        projected.extend(_terminal_projection(events))
         return projected
 
 
@@ -512,6 +480,51 @@ def _project_provider_rejection(event: ExecutionProvenanceEvent) -> EventBase:
         _safe_text("ProviderTurnRejected: " + _canonical_json(event.payload)),
         [event],
     )
+
+
+def _projection_chunks(
+    events: list[ExecutionProvenanceEvent],
+) -> list[tuple[int, list[EventBase]]]:
+    cells = _group_by(
+        [event for event in events if event.cell_seq is not None],
+        lambda event: event.cell_seq,
+    )
+    chunks = [
+        (cell_events[0].event_seq, _project_cell(cell_events))
+        for cell_events in cells
+    ]
+    chunks.extend(
+        (event.event_seq, [_project_provider_rejection(event)])
+        for event in events
+        if event.event_type == "ProviderTurnRejected"
+    )
+    return sorted(chunks, key=lambda item: item[0])
+
+
+def _terminal_projection(
+    events: list[ExecutionProvenanceEvent],
+) -> list[EventBase]:
+    terminal = next(
+        (
+            event
+            for event in reversed(events)
+            if event.event_type in {"InvocationCompleted", "InvocationFailed"}
+        ),
+        None,
+    )
+    if terminal is None:
+        return []
+    return [
+        _projection_event(
+            CodeActLifecycleHistory,
+            terminal,
+            _safe_text(
+                f"CodeAct {terminal.event_type}: "
+                + _canonical_json(terminal.payload)
+            ),
+            [terminal],
+        )
+    ]
 
 
 def _project_cell(events: list[ExecutionProvenanceEvent]) -> list[EventBase]:

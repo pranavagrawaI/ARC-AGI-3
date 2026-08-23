@@ -8,7 +8,7 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from nooa import strategy
 from nooa.agent import Agent
@@ -340,25 +340,14 @@ class BuilderStrategy(GenerationStrategy):
         objective_review: bool,
     ) -> None:
         for round_index in range(config.max_tool_steps):
-            commit_mode = False
-            if config.show_budget_telemetry:
-                notice, commit_mode = _builder_budget(
-                    request,
-                    repair_calls_remaining=config.max_tool_steps - round_index,
-                    commit_seconds_remaining=config.commit_seconds_remaining,
-                )
-                runtime.event_manager.add(
-                    Task(prompt=notice)
-                )
-                # Keep telemetry fresh without displacing the assignment as the
-                # final, highest-priority instruction visible to the model.
-                if objective_review:
-                    runtime.event_manager.add(Task(prompt=OBJECTIVE_REVIEW_REQUEST))
-                checkpoint.request_repair(runtime)
-            available_tools = (
-                [tool for tool in tools if canonical(tool.name) in COMMIT_TOOL_NAMES]
-                if commit_mode
-                else tools
+            available_tools, commit_mode = self._prepare_builder_round(
+                runtime,
+                request,
+                config,
+                tools,
+                checkpoint,
+                round_index=round_index,
+                objective_review=objective_review,
             )
             available_tools_by_name = tool_by_name(available_tools)
             response, event_id = await runtime.generate(
@@ -367,32 +356,100 @@ class BuilderStrategy(GenerationStrategy):
                 temperature=config.temperature,
                 tool_choice="required" if commit_mode else "auto",
             )
-            if not response.tool_calls:
-                if response.finish_reason == "length":
-                    runtime.event_manager.add(
-                        Error(
-                            content=(
-                                "Builder response was truncated before a tool call; "
-                                "construction is still active. Use the next call to "
-                                "externalize the smallest executable edit."
-                            )
-                        )
+            decision = self._construction_decision(runtime, checkpoint, response)
+            if decision == "continue":
+                continue
+            if decision == "stop":
+                return
+            self._execute_builder_turn(
+                runtime,
+                builder,
+                surface,
+                available_tools_by_name,
+                response,
+                event_id,
+                objective_review=objective_review,
+                checkpoint=checkpoint,
+            )
+
+    @staticmethod
+    def _prepare_builder_round(
+        runtime: RuntimeServices,
+        request: BuilderRequest,
+        config: BuilderConfig,
+        tools: list[Any],
+        checkpoint: OutcomeCheckpoint,
+        *,
+        round_index: int,
+        objective_review: bool,
+    ) -> tuple[list[Any], bool]:
+        if not config.show_budget_telemetry:
+            return tools, False
+        notice, commit_mode = _builder_budget(
+            request,
+            repair_calls_remaining=config.max_tool_steps - round_index,
+            commit_seconds_remaining=config.commit_seconds_remaining,
+        )
+        runtime.event_manager.add(Task(prompt=notice))
+        # Keep telemetry fresh without displacing the assignment as the final,
+        # highest-priority instruction visible to the model.
+        if objective_review:
+            runtime.event_manager.add(Task(prompt=OBJECTIVE_REVIEW_REQUEST))
+        checkpoint.request_repair(runtime)
+        if not commit_mode:
+            return tools, False
+        available = [
+            tool for tool in tools if canonical(tool.name) in COMMIT_TOOL_NAMES
+        ]
+        return available, True
+
+    @staticmethod
+    def _construction_decision(
+        runtime: RuntimeServices,
+        checkpoint: OutcomeCheckpoint,
+        response: Any,
+    ) -> Literal["execute", "continue", "stop"]:
+        if response.tool_calls:
+            return "execute"
+        if response.finish_reason == "length":
+            runtime.event_manager.add(
+                Error(
+                    content=(
+                        "Builder response was truncated before a tool call; "
+                        "construction is still active. Use the next call to "
+                        "externalize the smallest executable edit."
                     )
-                    continue
-                if checkpoint.reject_prose_exit(runtime):
-                    continue
-                break
-            retain_assistant_turn(runtime.event_manager, event_id, response)
-            for index, tool_call in enumerate(response.tool_calls):
-                self._execute_tool_call(
-                    runtime,
-                    surface,
-                    available_tools_by_name,
-                    tool_call,
-                    reasoning=replayed_reasoning(response) if index == 0 else None,
-                    allow_world_model_edit=not objective_review,
                 )
-            checkpoint.inspect_edits(runtime, builder._executor, response.tool_calls)
+            )
+            return "continue"
+        if checkpoint.reject_prose_exit(runtime):
+            return "continue"
+        return "stop"
+
+    def _execute_builder_turn(
+        self,
+        runtime: RuntimeServices,
+        builder: FocusedBuilder,
+        surface: WorkspaceToolSurface,
+        available_tools_by_name: dict[str, Any],
+        response: Any,
+        event_id: Any,
+        *,
+        objective_review: bool,
+        checkpoint: OutcomeCheckpoint,
+    ) -> None:
+        retain_assistant_turn(runtime.event_manager, event_id, response)
+        reasoning = replayed_reasoning(response)
+        for index, tool_call in enumerate(response.tool_calls):
+            self._execute_tool_call(
+                runtime,
+                surface,
+                available_tools_by_name,
+                tool_call,
+                reasoning=reasoning if index == 0 else None,
+                allow_world_model_edit=not objective_review,
+            )
+        checkpoint.inspect_edits(runtime, builder._executor, response.tool_calls)
 
     async def _finish_report(
         self,

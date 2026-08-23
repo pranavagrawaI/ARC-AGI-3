@@ -151,15 +151,10 @@ class WorkspaceEvidenceCapability:
             truncated=truncated,
             grid_encoding=query.grid_encoding,
             projection=query.projection,
-            encoding_legend=(
-                "Each grid row is comma-separated <hex count>:<hex cell> runs."
-                if query.projection == "full" and query.grid_encoding == "rle"
-                else None
-            ),
+            encoding_legend=_encoding_legend(query),
         )
         value = result.model_dump(mode="json")
-        if query.projection == "full" and query.grid_encoding == "rle":
-            _encode_record_grids(value["records"])
+        _encode_query_grids(value, query)
         return value
 
     @staticmethod
@@ -211,6 +206,21 @@ def _encode_record_grids(records: list[dict[str, Any]]) -> None:
             grid = record.get(field)
             if grid is not None:
                 record[field] = [_rle_row(row) for row in grid]
+
+
+def _encoding_legend(query: EvidenceQuery) -> str | None:
+    if not _uses_rle(query):
+        return None
+    return "Each grid row is comma-separated <hex count>:<hex cell> runs."
+
+
+def _encode_query_grids(value: dict[str, Any], query: EvidenceQuery) -> None:
+    if _uses_rle(query):
+        _encode_record_grids(value["records"])
+
+
+def _uses_rle(query: EvidenceQuery) -> bool:
+    return query.projection == "full" and query.grid_encoding == "rle"
 
 
 def _rle_row(row: list[int]) -> str:

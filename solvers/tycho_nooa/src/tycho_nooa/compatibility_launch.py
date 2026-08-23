@@ -258,16 +258,30 @@ def _validate_authorization(
 ) -> None:
     if authorization.experiment_manifest_sha256 != manifest_sha256:
         raise ValueError("authorization does not bind this experiment manifest")
+    _validate_authorized_route(authorization, manifest)
+    _validate_authorized_caps(authorization, manifest)
+
+
+def _validate_authorized_route(
+    authorization: CompatibilityAuthorization,
+    manifest: CompatibilityExperimentManifest,
+) -> None:
     route = manifest.model_route
-    exact_route = (
+    authorized = (
         authorization.requested_model == route.model
         and authorization.expected_reported_model == route.reported_model
         and authorization.allowed_provider == route.provider
         and authorization.allowed_reasoning_effort == route.reasoning_effort
         and authorization.allowed_temperature == route.temperature
     )
-    if not exact_route:
+    if not authorized:
         raise ValueError("authorization route does not match experiment route")
+
+
+def _validate_authorized_caps(
+    authorization: CompatibilityAuthorization,
+    manifest: CompatibilityExperimentManifest,
+) -> None:
     caps = manifest.caps
     if authorization.maximum_calls != caps.calls_total:
         raise ValueError("authorization call cap does not match experiment cap")
