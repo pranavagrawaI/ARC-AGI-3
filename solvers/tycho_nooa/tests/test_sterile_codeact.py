@@ -39,9 +39,12 @@ def task_packet() -> CognitiveParityPacket:
             checkpoint_sha256="sha256:" + "0" * 64,
             evidence_frontier=EvidenceRef(level=0, turn=0),
             task_kind="retrieve",
+            selection_stratum="remote_retrieval",
+            historical_outcome="success",
             instruction="Retrieve the only recorded frame.",
         ),
         expected=ExpectedAnswer(
+            rationale="The sole frame is L0:T0.",
             required_evidence_refs=(EvidenceRef(level=0, turn=0),)
         ),
     )

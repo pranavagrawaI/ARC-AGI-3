@@ -14,6 +14,16 @@ from tycho_nooa.models import ActionDecision
 
 TaskKind = Literal["retrieve", "discriminate", "recover_invariant", "propose_action"]
 Scope = Literal["transition", "level", "cross_level", "trajectory"]
+SelectionStratum = Literal[
+    "remote_retrieval",
+    "hypothesis_discrimination",
+    "cross_level_invariant",
+    "history_dependence",
+    "objective_inference",
+    "next_action",
+]
+HistoricalOutcome = Literal["success", "failure"]
+ControlKind = Literal["benchmark", "negative", "easy_positive", "composition"]
 
 
 class CognitiveTask(BaseModel):
@@ -25,6 +35,9 @@ class CognitiveTask(BaseModel):
     checkpoint_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     evidence_frontier: EvidenceRef
     task_kind: TaskKind
+    selection_stratum: SelectionStratum
+    historical_outcome: HistoricalOutcome
+    control_kind: ControlKind = "benchmark"
     instruction: str = Field(min_length=1)
     inputs: dict[str, str | int | float | bool | list[str]] = Field(
         default_factory=dict
@@ -36,10 +49,15 @@ class ExpectedAnswer(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    rationale: str = Field(min_length=1)
     required_evidence_refs: tuple[EvidenceRef, ...] = ()
+    acceptable_evidence_refs: tuple[EvidenceRef, ...] = ()
     accepted_verdicts: tuple[str, ...] = ()
+    falsified_hypotheses: tuple[str, ...] = ()
     accepted_invariant_ids: tuple[str, ...] = ()
+    invariant_atoms: dict[str, bool | int | float | str] = Field(default_factory=dict)
     accepted_scopes: tuple[Scope, ...] = ()
+    legal_actions: tuple[str, ...] = ()
     native_action: ActionDecision | None = None
 
 
@@ -89,6 +107,7 @@ class InvariantAnswer(BaseModel):
     task_kind: Literal["recover_invariant"] = "recover_invariant"
     invariant_id: str
     invariant: str
+    invariant_atoms: dict[str, bool | int | float | str] = Field(default_factory=dict)
     evidence_refs: tuple[EvidenceRef, ...]
     scope: Scope
 
@@ -135,7 +154,10 @@ class ParityEvaluation(BaseModel):
     evidence_precision: float = Field(ge=0, le=1)
     evidence_recall: float = Field(ge=0, le=1)
     verdict_correct: bool | None = None
+    falsification_correct: bool | None = None
     invariant_correct: bool | None = None
+    invariant_atom_precision: float | None = Field(default=None, ge=0, le=1)
+    invariant_atom_recall: float | None = Field(default=None, ge=0, le=1)
     scope_correct: bool | None = None
     action_legal: bool | None = None
     native_action_agreement: bool | None = None
@@ -162,7 +184,9 @@ def evaluate_answer(
     if answer.task_kind != packet.task.task_kind:
         raise ValueError("answer task_kind does not match its packet")
     precision, recall = _evidence_scores(
-        answer.evidence_refs, packet.expected.required_evidence_refs
+        answer.evidence_refs,
+        packet.expected.required_evidence_refs,
+        packet.expected.acceptable_evidence_refs,
     )
     facts: dict[str, object] = {
         "packet_id": packet.task.packet_id,
@@ -172,13 +196,21 @@ def evaluate_answer(
     }
     if isinstance(answer, HypothesisAnswer):
         facts["verdict_correct"] = answer.supported in packet.expected.accepted_verdicts
+        facts["falsification_correct"] = set(answer.falsified) == set(
+            packet.expected.falsified_hypotheses
+        )
     if isinstance(answer, InvariantAnswer):
         facts["invariant_correct"] = (
             answer.invariant_id in packet.expected.accepted_invariant_ids
         )
         facts["scope_correct"] = answer.scope in packet.expected.accepted_scopes
+        atom_precision, atom_recall = _atom_scores(
+            answer.invariant_atoms, packet.expected.invariant_atoms
+        )
+        facts["invariant_atom_precision"] = atom_precision
+        facts["invariant_atom_recall"] = atom_recall
     if isinstance(answer, ActionProposal):
-        facts["action_legal"] = True
+        facts["action_legal"] = answer.decision.action in packet.expected.legal_actions
         native = packet.expected.native_action
         facts["native_action_agreement"] = (
             None if native is None else answer.decision == native
@@ -212,13 +244,26 @@ def _checkpoint_path(
 
 
 def _evidence_scores(
-    proposed: tuple[EvidenceRef, ...], required: tuple[EvidenceRef, ...]
+    proposed: tuple[EvidenceRef, ...],
+    required: tuple[EvidenceRef, ...],
+    acceptable: tuple[EvidenceRef, ...],
 ) -> tuple[float, float]:
     proposed_set = {(ref.level, ref.turn) for ref in proposed}
     required_set = {(ref.level, ref.turn) for ref in required}
-    correct = len(proposed_set & required_set)
+    acceptable_set = {(ref.level, ref.turn) for ref in acceptable} | required_set
+    correct = len(proposed_set & acceptable_set)
     precision = correct / len(proposed_set) if proposed_set else float(not required_set)
-    recall = correct / len(required_set) if required_set else 1.0
+    required_found = len(proposed_set & required_set)
+    recall = required_found / len(required_set) if required_set else 1.0
+    return precision, recall
+
+
+def _atom_scores(
+    proposed: dict[str, object], required: dict[str, object]
+) -> tuple[float, float]:
+    correct = sum(proposed.get(key) == value for key, value in required.items())
+    precision = correct / len(proposed) if proposed else float(not required)
+    recall = correct / len(required) if required else 1.0
     return precision, recall
 
 

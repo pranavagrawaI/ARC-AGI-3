@@ -33,6 +33,8 @@ def packet(
         checkpoint_sha256=f"sha256:{tree_sha256(checkpoint)}",
         evidence_frontier=EvidenceRef(level=0, turn=18),
         task_kind=task_kind,
+        selection_stratum="hypothesis_discrimination",
+        historical_outcome="failure",
         instruction="Choose the hypothesis contradicted by recorded evidence.",
         inputs={"hypotheses": ["H1", "H2"]},
     )
@@ -41,8 +43,10 @@ def packet(
         task=task,
         expected=expected
         or ExpectedAnswer(
+            rationale="Transition L0:T4 falsifies H1.",
             required_evidence_refs=(EvidenceRef(level=0, turn=4),),
             accepted_verdicts=("H2",),
+            falsified_hypotheses=("H1",),
         ),
     )
 
@@ -92,6 +96,7 @@ def test_discrimination_separates_retrieval_from_verdict(tmp_path: Path) -> None
     assert result.evidence_precision == 1
     assert result.evidence_recall == 1
     assert result.verdict_correct is False
+    assert result.falsification_correct is False
 
 
 def test_invariant_scores_abstraction_and_scope_separately(tmp_path: Path) -> None:
@@ -101,14 +106,17 @@ def test_invariant_scores_abstraction_and_scope_separately(tmp_path: Path) -> No
         checkpoint,
         task_kind="recover_invariant",
         expected=ExpectedAnswer(
+            rationale="The trajectory supports a three-cell movement abstraction.",
             required_evidence_refs=(EvidenceRef(level=0, turn=3),),
             accepted_invariant_ids=("movement-step-3",),
+            invariant_atoms={"step": 3, "shape_preserved": True},
             accepted_scopes=("trajectory",),
         ),
     )
     answer = InvariantAnswer(
         invariant_id="movement-step-3",
         invariant="Movement advances by three cells.",
+        invariant_atoms={"step": 3, "shape_preserved": False},
         evidence_refs=(EvidenceRef(level=0, turn=3),),
         scope="level",
     )
@@ -117,6 +125,8 @@ def test_invariant_scores_abstraction_and_scope_separately(tmp_path: Path) -> No
 
     assert result.invariant_correct is True
     assert result.scope_correct is False
+    assert result.invariant_atom_precision == 0.5
+    assert result.invariant_atom_recall == 0.5
 
 
 def test_action_disagreement_is_parity_not_accuracy(tmp_path: Path) -> None:
@@ -126,8 +136,10 @@ def test_action_disagreement_is_parity_not_accuracy(tmp_path: Path) -> None:
         checkpoint,
         task_kind="propose_action",
         expected=ExpectedAnswer(
+            rationale="RIGHT is legal but differs from the historical UP action.",
             required_evidence_refs=(EvidenceRef(level=0, turn=18),),
             native_action=ActionDecision(action="UP"),
+            legal_actions=("UP", "RIGHT"),
         ),
     )
     answer = ActionProposal(
