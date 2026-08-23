@@ -27,6 +27,17 @@ def response(name: str, arguments: dict) -> LLMResponse:
     )
 
 
+def malformed_response() -> LLMResponse:
+    return LLMResponse(
+        raw_response=None,
+        content="",
+        tool_calls=[],
+        finish_reason="stop",
+        assistant_message={"role": "assistant", "content": ""},
+        usage={"prompt_tokens": 3, "completion_tokens": 2},
+    )
+
+
 async def test_easy_positive_control_matches_with_no_additional_authority(
     tmp_path: Path,
 ) -> None:
@@ -172,6 +183,66 @@ async def test_composition_control_requires_two_pages_in_both_arms(
     assert report.codeact.evaluation.evidence_recall == 1
     assert report.native.metrics.evidence_queries == 2
     assert report.codeact.metrics.evidence_queries == 2
+
+
+async def test_codeact_call_exhaustion_preserves_native_and_continues(
+    tmp_path: Path,
+) -> None:
+    packet = _packet("remote-success-old-up")
+    answer = {
+        "task_kind": "retrieve",
+        "evidence_refs": [{"level": 0, "turn": 1}],
+        "conclusion": "The earliest UP is L0:T1.",
+    }
+
+    report = await execute_matched_packet(
+        packet,
+        repository_root=REPOSITORY_ROOT,
+        destination=tmp_path / "codeact-exhausted",
+        native_llm=FakeLLMClient(
+            scripted_responses=[response("return_result", {"result": answer})]
+        ),
+        codeact_llm=FakeLLMClient(scripted_responses=[malformed_response()] * 2),
+        max_llm_calls=2,
+        max_output_tokens=4096,
+        session_timeout_seconds=120,
+        cell_timeout_seconds=5,
+    )
+
+    assert report is None
+    assert (tmp_path / "codeact-exhausted/native/result.json").is_file()
+    assert (tmp_path / "codeact-exhausted/codeact/failure.json").is_file()
+    failure = json.loads((tmp_path / "codeact-exhausted/failure.json").read_text())
+    assert set(failure["failed_arms"]) == {"codeact"}
+
+
+async def test_native_call_exhaustion_still_runs_codeact(tmp_path: Path) -> None:
+    packet = _packet("remote-success-old-up")
+    answer = {
+        "task_kind": "retrieve",
+        "evidence_refs": [{"level": 0, "turn": 1}],
+        "conclusion": "The earliest UP is L0:T1.",
+    }
+
+    report = await execute_matched_packet(
+        packet,
+        repository_root=REPOSITORY_ROOT,
+        destination=tmp_path / "native-exhausted",
+        native_llm=FakeLLMClient(scripted_responses=[malformed_response()] * 2),
+        codeact_llm=FakeLLMClient(
+            scripted_responses=[response("return_result", {"result": answer})]
+        ),
+        max_llm_calls=2,
+        max_output_tokens=4096,
+        session_timeout_seconds=120,
+        cell_timeout_seconds=5,
+    )
+
+    assert report is None
+    assert (tmp_path / "native-exhausted/native/failure.json").is_file()
+    assert (tmp_path / "native-exhausted/codeact/result.json").is_file()
+    failure = json.loads((tmp_path / "native-exhausted/failure.json").read_text())
+    assert set(failure["failed_arms"]) == {"native"}
 
 
 def _packet(packet_id: str):

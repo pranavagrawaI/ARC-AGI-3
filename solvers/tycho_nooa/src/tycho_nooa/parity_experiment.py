@@ -76,10 +76,11 @@ async def execute_matched_packet(
     max_output_tokens: int,
     session_timeout_seconds: float,
     cell_timeout_seconds: float,
-) -> MatchedParityReport:
+) -> MatchedParityReport | None:
     """Run both austere arms once and preserve every completed observation."""
     destination.mkdir(parents=True, exist_ok=False)
     evidence_root = repository_root / packet.checkpoint_root
+    failures: dict[TreatmentArm, dict[str, str]] = {}
     try:
         async with asyncio.timeout(session_timeout_seconds):
             native = await _run_native(
@@ -90,6 +91,13 @@ async def execute_matched_packet(
                 max_llm_calls=max_llm_calls,
                 max_output_tokens=max_output_tokens,
             )
+    except BaseException as error:
+        if not _is_call_budget_exhaustion(error):
+            _record_fatal_failure(destination, error)
+            raise
+        native = None
+        failures["native"] = _record_arm_failure(destination / "native", error)
+    try:
         async with asyncio.timeout(session_timeout_seconds):
             codeact = await _run_codeact(
                 packet,
@@ -101,11 +109,17 @@ async def execute_matched_packet(
                 cell_timeout_seconds=cell_timeout_seconds,
             )
     except BaseException as error:
+        if not _is_call_budget_exhaustion(error):
+            _record_fatal_failure(destination, error)
+            raise
+        codeact = None
+        failures["codeact"] = _record_arm_failure(destination / "codeact", error)
+    if native is None or codeact is None:
         _write_json(
             destination / "failure.json",
-            {"error_type": type(error).__name__, "message": str(error)},
+            {"status": "treatment_incomplete", "failed_arms": failures},
         )
-        raise
+        return None
     report = MatchedParityReport(
         packet_id=packet.task.packet_id,
         native=native,
@@ -113,6 +127,26 @@ async def execute_matched_packet(
     )
     _write_json(destination / "report.json", report.model_dump(mode="json"))
     return report
+
+
+def _is_call_budget_exhaustion(error: BaseException) -> bool:
+    return isinstance(error, RuntimeError) and str(error) in {
+        "native parity exhausted its LLM-call budget",
+        "sterile CodeAct exhausted its LLM-call budget",
+    }
+
+
+def _record_arm_failure(destination: Path, error: BaseException) -> dict[str, str]:
+    failure = {"error_type": type(error).__name__, "message": str(error)}
+    _write_json(destination / "failure.json", failure)
+    return failure
+
+
+def _record_fatal_failure(destination: Path, error: BaseException) -> None:
+    _write_json(
+        destination / "failure.json",
+        {"error_type": type(error).__name__, "message": str(error)},
+    )
 
 
 async def _run_native(
