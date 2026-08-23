@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 
 from nooa.unifiedllm import UnifiedLLM
 from pydantic import BaseModel, ConfigDict, model_validator
@@ -28,6 +28,16 @@ CompatibilityEncoding = Literal["rle", "raw"]
 GateExecutor = Callable[
     [CompatibilityGate, Path], Awaitable[CompatibilityGateReport]
 ]
+
+
+class CompatibilityLadderObserver(Protocol):
+    def gate_started(self, gate: CompatibilityGate) -> None: ...
+
+    def gate_completed(
+        self, gate: CompatibilityGate, report: CompatibilityGateReport
+    ) -> None: ...
+
+    def ladder_completed(self, report: CompatibilityLadderReport) -> None: ...
 
 
 class CompatibilityLadder(BaseModel):
@@ -125,41 +135,61 @@ async def run_compatibility_ladder(
     *,
     destination: Path,
     execute_gate: GateExecutor,
+    observer: CompatibilityLadderObserver | None = None,
 ) -> CompatibilityLadderReport:
     """Apply predeclared stop/branch rules to matched gate reports."""
     destination.mkdir(parents=True, exist_ok=False)
     reports: list[CompatibilityGateReport] = []
 
-    termination = await _run(ladder.termination, destination, execute_gate, reports)
+    termination = await _run(
+        ladder.termination, destination, execute_gate, reports, observer
+    )
     if not termination.passed:
         return _finish(
-            ladder, destination, reports, "rejected_model_protocol", None
+            ladder,
+            destination,
+            reports,
+            "rejected_model_protocol",
+            None,
+            observer,
         )
 
-    metadata = await _run(ladder.metadata_query, destination, execute_gate, reports)
+    metadata = await _run(
+        ladder.metadata_query, destination, execute_gate, reports, observer
+    )
     if not metadata.passed:
         return _finish(
-            ladder, destination, reports, "rejected_capability_pairing", None
+            ladder,
+            destination,
+            reports,
+            "rejected_capability_pairing",
+            None,
+            observer,
         )
 
     representation = await _run(
-        ladder.representation_rle, destination, execute_gate, reports
+        ladder.representation_rle, destination, execute_gate, reports, observer
     )
     if representation.passed:
         selected: CompatibilityEncoding = "rle"
         easy_gate = ladder.easy_positive_rle
     else:
         raw = await _run(
-            ladder.representation_raw, destination, execute_gate, reports
+            ladder.representation_raw, destination, execute_gate, reports, observer
         )
         if not raw.passed:
             return _finish(
-                ladder, destination, reports, "rejected_representation", None
+                ladder,
+                destination,
+                reports,
+                "rejected_representation",
+                None,
+                observer,
             )
         selected = "raw"
         easy_gate = ladder.easy_positive_raw
 
-    easy = await _run(easy_gate, destination, execute_gate, reports)
+    easy = await _run(easy_gate, destination, execute_gate, reports, observer)
     if not easy.passed:
         return _finish(
             ladder,
@@ -167,9 +197,10 @@ async def run_compatibility_ladder(
             reports,
             "rejected_cognitive_eligibility",
             selected,
+            observer,
         )
     disposition: CompatibilityDisposition = f"eligible_{selected}"
-    return _finish(ladder, destination, reports, disposition, selected)
+    return _finish(ladder, destination, reports, disposition, selected, observer)
 
 
 async def _run(
@@ -177,11 +208,16 @@ async def _run(
     destination: Path,
     execute_gate: GateExecutor,
     reports: list[CompatibilityGateReport],
+    observer: CompatibilityLadderObserver | None,
 ) -> CompatibilityGateReport:
+    if observer is not None:
+        observer.gate_started(gate)
     report = await execute_gate(gate, destination / gate.task.gate_id)
     if report.gate_id != gate.task.gate_id:
         raise ValueError("gate executor returned a report for a different gate")
     reports.append(report)
+    if observer is not None:
+        observer.gate_completed(gate, report)
     return report
 
 
@@ -191,6 +227,7 @@ def _finish(
     reports: list[CompatibilityGateReport],
     disposition: CompatibilityDisposition,
     selected_encoding: CompatibilityEncoding | None,
+    observer: CompatibilityLadderObserver | None,
 ) -> CompatibilityLadderReport:
     run_ids = {report.gate_id for report in reports}
     report = CompatibilityLadderReport(
@@ -207,6 +244,8 @@ def _finish(
         codeact_llm_calls=sum(row.codeact.metrics.llm_calls for row in reports),
     )
     _write_json(destination / "ladder-report.json", report.model_dump(mode="json"))
+    if observer is not None:
+        observer.ladder_completed(report)
     return report
 
 

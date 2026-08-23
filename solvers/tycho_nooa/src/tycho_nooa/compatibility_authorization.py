@@ -133,8 +133,18 @@ class CallRecord(BaseModel):
     usage: dict[str, Any] | None = None
     observed_provider: str | None = None
     observed_model: str | None = None
+    observed_reasoning_effort: str | None = None
     actual_cost_usd: Decimal | None = None
     failure: str | None = None
+
+
+class GateRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    gate_id: str
+    state: Literal["started", "completed"]
+    passed: bool | None = None
+    report_sha256: str | None = None
 
 
 class AuthorizationState(BaseModel):
@@ -146,6 +156,8 @@ class AuthorizationState(BaseModel):
     run_state: RunState
     stop_reason: str | None = None
     calls: dict[str, CallRecord] = Field(default_factory=dict)
+    gates: dict[str, GateRecord] = Field(default_factory=dict)
+    ladder_disposition: str | None = None
 
     @property
     def active_call(self) -> CallRecord | None:
@@ -174,6 +186,13 @@ class AuthorizationState(BaseModel):
             )
             for call in self.calls.values()
         )
+
+    @property
+    def active_gate(self) -> GateRecord | None:
+        active = [gate for gate in self.gates.values() if gate.state == "started"]
+        if len(active) > 1:
+            raise ValueError("journal contains concurrent ladder gates")
+        return active[0] if active else None
 
 
 class DurableAuthorizationLedger:
@@ -227,17 +246,67 @@ class DurableAuthorizationLedger:
     def recover(self) -> AuthorizationState:
         """Resolve only transitions whose consequence is knowable from the journal."""
         call = self.state.active_call
-        if call is None:
-            return self.state
-        if call.state == "planned":
-            self.cancel_planned(call.call_id, reason="recovery_before_dispatch")
-            return self.state
-        if call.state == "dispatched":
-            self.stop("unknown_dispatched_call")
-            return self.state
-        if call.state in {"received", "route_validated", "route_violated"}:
-            self._finish_received_call(call)
+        if call is not None:
+            if call.state == "planned":
+                self.cancel_planned(call.call_id, reason="recovery_before_dispatch")
+            elif call.state == "dispatched":
+                self.stop("unknown_dispatched_call")
+                return self.state
+            elif call.state in {"received", "route_validated", "route_violated"}:
+                self._finish_received_call(call)
+        latest = max(self.state.calls.values(), key=lambda row: row.call_index, default=None)
+        if self.state.run_state == "armed" and latest is not None:
+            if latest.state == "failed":
+                self.stop(f"provider_failure:{latest.call_id}")
+                return self.state
+            if latest.state == "accounted" and not _route_matches(
+                latest, self.authorization
+            ):
+                self.stop(f"route_violation:{latest.call_id}")
+                return self.state
+        if self.state.run_state == "armed" and self.state.active_gate is not None:
+            self.stop(f"interrupted_gate:{self.state.active_gate.gate_id}")
+        elif (
+            self.state.run_state == "armed"
+            and self.state.gates
+            and self.state.ladder_disposition is None
+        ):
+            self.stop("interrupted_ladder")
         return self.state
+
+    def start_gate(self, gate_id: str) -> None:
+        self._require_armed()
+        if self.state.active_call is not None or self.state.active_gate is not None:
+            raise RuntimeError("cannot start a gate while other work is active")
+        if gate_id in self.state.gates:
+            raise RuntimeError("compatibility gate was already started")
+        self._append("GateStarted", {"gate_id": gate_id})
+
+    def complete_gate(self, gate_id: str, *, passed: bool, report: object) -> None:
+        self._require_armed()
+        if self.state.active_call is not None:
+            raise RuntimeError("cannot complete a gate with an active provider call")
+        gate = self.state.active_gate
+        if gate is None or gate.gate_id != gate_id:
+            raise RuntimeError("gate completion does not match the active gate")
+        self._append(
+            "GateCompleted",
+            {
+                "gate_id": gate_id,
+                "passed": passed,
+                "report_sha256": sha256_json(report),
+            },
+        )
+
+    def finish_ladder(self, disposition: str, *, report: object) -> None:
+        self._require_armed()
+        if self.state.active_call is not None or self.state.active_gate is not None:
+            raise RuntimeError("cannot finish the ladder while work is active")
+        self._append(
+            "LadderCompleted",
+            {"disposition": disposition, "report_sha256": sha256_json(report)},
+        )
+        self.complete()
 
     def plan_call(
         self,
@@ -285,6 +354,7 @@ class DurableAuthorizationLedger:
         usage: dict[str, Any],
         observed_provider: str | None,
         observed_model: str | None,
+        observed_reasoning_effort: str | None = None,
     ) -> None:
         self._transition(
             call_id,
@@ -295,6 +365,7 @@ class DurableAuthorizationLedger:
                 "usage": usage,
                 "observed_provider": observed_provider,
                 "observed_model": observed_model,
+                "observed_reasoning_effort": observed_reasoning_effort,
             },
         )
 
@@ -304,12 +375,14 @@ class DurableAuthorizationLedger:
             raise RuntimeError(f"cannot reconcile call in state {call.state}")
         return self._finish_received_call(call)
 
-    def fail(self, call_id: str, *, reason: str) -> None:
+    def fail(
+        self, call_id: str, *, reason: str, response: dict[str, Any] | None = None
+    ) -> None:
         self._transition(
             call_id,
             {"dispatched"},
             "CallFailed",
-            {"failure": reason},
+            {"failure": reason, "response": response},
         )
         self.stop(f"provider_failure:{call_id}")
 
@@ -330,8 +403,8 @@ class DurableAuthorizationLedger:
 
     def complete(self) -> None:
         self._require_armed()
-        if self.state.active_call is not None:
-            raise RuntimeError("cannot complete with an active provider call")
+        if self.state.active_call is not None or self.state.active_gate is not None:
+            raise RuntimeError("cannot complete while work is active")
         self._append("RunCompleted", {})
 
     def _finish_received_call(self, call: CallRecord) -> Decimal:
@@ -339,11 +412,7 @@ class DurableAuthorizationLedger:
             self.stop(f"missing_usage:{call.call_id}")
             raise RuntimeError("received call lacks usage accounting")
         if call.state == "received":
-            route_ok = (
-                call.observed_provider == self.authorization.allowed_provider
-                and call.observed_model
-                == self.authorization.expected_reported_model
-            )
+            route_ok = _route_matches(call, self.authorization)
             event = "RouteValidated" if route_ok else "RouteViolated"
             self._transition(call.call_id, {"received"}, event, {})
             call = self._call(call.call_id)
@@ -448,6 +517,12 @@ def _apply_event(
     if event_type == "CallPlanned":
         _replay_plan(state, payload)
     elif event_type in {
+        "GateStarted",
+        "GateCompleted",
+        "LadderCompleted",
+    }:
+        _replay_ladder_transition(state, event_type, payload)
+    elif event_type in {
         "CallDispatched",
         "CallReceived",
         "RouteValidated",
@@ -463,7 +538,11 @@ def _apply_event(
         state.run_state = "stopped"
         state.stop_reason = str(payload["reason"])
     elif event_type == "RunCompleted":
-        if state.run_state != "armed" or state.active_call is not None:
+        if (
+            state.run_state != "armed"
+            or state.active_call is not None
+            or state.active_gate is not None
+        ):
             raise ValueError("RunCompleted requires an idle armed run")
         state.run_state = "completed"
     else:
@@ -516,10 +595,39 @@ def _replay_call_transition(
         call.usage = payload["usage"]
         call.observed_provider = payload.get("observed_provider")
         call.observed_model = payload.get("observed_model")
+        call.observed_reasoning_effort = payload.get("observed_reasoning_effort")
     elif event_type == "CallAccounted":
         call.actual_cost_usd = Decimal(payload["actual_cost_usd"])
     elif event_type in {"CallCancelled", "CallFailed"}:
         call.failure = str(payload["failure"])
+        if event_type == "CallFailed":
+            call.response = payload.get("response")
+
+
+def _replay_ladder_transition(
+    state: AuthorizationState, event_type: str, payload: dict[str, Any]
+) -> None:
+    if state.run_state != "armed":
+        raise ValueError(f"{event_type} requires an armed run")
+    if event_type == "GateStarted":
+        gate_id = str(payload["gate_id"])
+        if state.active_gate is not None or gate_id in state.gates:
+            raise ValueError("GateStarted requires a new idle gate")
+        state.gates[gate_id] = GateRecord(gate_id=gate_id, state="started")
+        return
+    if event_type == "GateCompleted":
+        gate = state.active_gate
+        if gate is None or gate.gate_id != payload.get("gate_id"):
+            raise ValueError("GateCompleted does not match the active gate")
+        gate.state = "completed"
+        gate.passed = bool(payload["passed"])
+        gate.report_sha256 = str(payload["report_sha256"])
+        return
+    if state.active_gate is not None:
+        raise ValueError("LadderCompleted requires no active gate")
+    if state.ladder_disposition is not None:
+        raise ValueError("authorization journal repeats LadderCompleted")
+    state.ladder_disposition = str(payload["disposition"])
 
 
 def _validate_journal_identity(
@@ -548,6 +656,20 @@ def _validate_usage_caps(
         raise ValueError("reported input tokens exceed authorized per-call cap")
     if output_tokens > authorization.max_output_tokens_per_call:
         raise ValueError("reported output tokens exceed authorized per-call cap")
+
+
+def _route_matches(
+    call: CallRecord, authorization: CompatibilityAuthorization
+) -> bool:
+    return (
+        call.observed_provider == authorization.allowed_provider
+        and call.observed_model == authorization.expected_reported_model
+        and (
+            call.observed_reasoning_effort is None
+            or call.observed_reasoning_effort
+            == authorization.allowed_reasoning_effort
+        )
+    )
 
 
 def _usage_integer(usage: dict[str, Any], *names: str) -> int:

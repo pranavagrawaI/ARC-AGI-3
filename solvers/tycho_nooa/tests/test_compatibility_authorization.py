@@ -107,6 +107,22 @@ def test_call_cap_blocks_before_an_additional_plan(tmp_path: Path) -> None:
     assert len(value.state.calls) == 1
 
 
+def test_thirty_first_call_is_blocked_by_the_frozen_global_cap(
+    tmp_path: Path,
+) -> None:
+    auth = authorization()
+    value = ledger(tmp_path, auth)
+    for index in range(30):
+        call = value.plan_call(gate_id=f"g{index}", arm="native", request={})
+        finish_call(value, call.call_id)
+
+    with pytest.raises(RuntimeError, match="call cap"):
+        value.plan_call(gate_id="g31", arm="native", request={})
+
+    assert value.state.committed_calls == 30
+    assert value.state.stop_reason == "call_cap"
+
+
 def test_worst_case_cost_blocks_before_dispatch(tmp_path: Path) -> None:
     auth = authorization(maximum_spend="0.011")
     value = ledger(tmp_path, auth)
@@ -174,6 +190,42 @@ def test_recovery_stops_on_a_call_that_may_have_escaped(tmp_path: Path) -> None:
     assert reopened.state.run_state == "stopped"
     assert reopened.state.stop_reason == "unknown_dispatched_call"
     assert reopened.state.committed_spend_usd == auth.maximum_call_cost_usd
+
+
+def test_failed_call_preserves_a_partial_provider_response(tmp_path: Path) -> None:
+    auth = authorization()
+    value = ledger(tmp_path, auth)
+    call = value.plan_call(gate_id="g0", arm="native", request={})
+    value.dispatch(call.call_id)
+
+    value.fail(
+        call.call_id,
+        reason="partial stream",
+        response={"partial_response": {"content": "half"}},
+    )
+
+    failed = value.state.calls[call.call_id]
+    assert failed.response == {"partial_response": {"content": "half"}}
+    assert failed.failure == "partial stream"
+    assert value.state.run_state == "stopped"
+
+
+def test_recovery_marks_an_interrupted_gate_without_replaying_it(
+    tmp_path: Path,
+) -> None:
+    auth = authorization()
+    value = ledger(tmp_path, auth)
+    value.start_gate("g0")
+
+    reopened = DurableAuthorizationLedger(
+        value.path,
+        authorization=auth,
+        authorization_sha256=authorization_sha256(auth),
+    )
+    reopened.recover()
+
+    assert reopened.state.run_state == "stopped"
+    assert reopened.state.stop_reason == "interrupted_gate:g0"
 
 
 def test_recovery_cancels_a_never_dispatched_plan(tmp_path: Path) -> None:

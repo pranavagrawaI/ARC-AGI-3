@@ -64,22 +64,10 @@ class CompatibilityCaps(BaseModel):
     max_gates: Literal[5] = 5
     calls_per_arm_gate: Literal[3] = 3
     calls_total: Literal[30] = 30
+    input_tokens_per_call: int = Field(ge=1)
     output_tokens_per_call: int = Field(ge=1)
     wall_seconds_per_arm_gate: float = Field(gt=0)
     max_cost_usd: float | None = Field(default=None, gt=0)
-    reserve_per_call_usd: float | None = Field(default=None, gt=0)
-
-    @model_validator(mode="after")
-    def cost_controls_are_joint(self) -> CompatibilityCaps:
-        if (self.max_cost_usd is None) != (self.reserve_per_call_usd is None):
-            raise ValueError("cost cap and per-call reserve must be supplied together")
-        if (
-            self.max_cost_usd is not None
-            and self.reserve_per_call_usd is not None
-            and self.reserve_per_call_usd > self.max_cost_usd
-        ):
-            raise ValueError("per-call cost reserve exceeds total cost cap")
-        return self
 
 
 class CompatibilityExperimentManifest(BaseModel):
@@ -97,6 +85,8 @@ class CompatibilityExperimentManifest(BaseModel):
     gate_executor: FileCommitment
     ladder_runner: FileCommitment
     authorization_gate: FileCommitment
+    authorization_schema: FileCommitment
+    launch_wrapper: FileCommitment
     protocol: FileCommitment
     experiment_card: FileCommitment
     native_prompt_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
@@ -154,6 +144,8 @@ def load_compatibility_experiment_manifest(
         manifest.gate_executor,
         manifest.ladder_runner,
         manifest.authorization_gate,
+        manifest.authorization_schema,
+        manifest.launch_wrapper,
         manifest.protocol,
         manifest.experiment_card,
     ):
