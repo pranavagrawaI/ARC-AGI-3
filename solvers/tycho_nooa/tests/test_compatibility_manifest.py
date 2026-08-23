@@ -4,12 +4,18 @@ import json
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
-from tycho_nooa.compatibility_manifest import load_gate_manifest
+from tycho_nooa.compatibility_manifest import (
+    CompatibilityExperimentManifest,
+    load_compatibility_experiment_manifest,
+    load_gate_manifest,
+)
 from tycho_nooa.parity_compatibility import CompatibilityEvidenceCapability
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 GATE_MANIFEST = REPOSITORY_ROOT / "analysis/parity-compat-v2/gate-manifest.json"
+EXPERIMENT = REPOSITORY_ROOT / "analysis/parity-compat-v2/experiment.json"
 
 
 def test_frozen_gate_manifest_loads_every_validated_ladder_role() -> None:
@@ -84,3 +90,38 @@ def test_gate_manifest_detects_packet_commitment_drift(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="file commitment mismatch"):
         load_gate_manifest(forged, repository_root=REPOSITORY_ROOT)
+
+
+def test_experiment_is_fully_committed_but_paid_execution_is_disabled() -> None:
+    manifest, ladder = load_compatibility_experiment_manifest(
+        EXPERIMENT, repository_root=REPOSITORY_ROOT
+    )
+
+    assert manifest.runtime_commit == "698cbd1"
+    assert manifest.package_commit == "53583ed"
+    assert manifest.caps.calls_per_arm_gate == 3
+    assert manifest.caps.calls_total == 30
+    assert manifest.model_route.model is None
+    assert ladder.termination.task.gate_id == "g0-termination"
+    with pytest.raises(RuntimeError, match="execution is disabled"):
+        manifest.require_execution_authorized()
+
+
+def test_authorization_requires_complete_route_and_cost_cap() -> None:
+    raw = json.loads(EXPERIMENT.read_text())
+    raw["execution_authorized"] = True
+
+    with pytest.raises(ValidationError, match="complete model route"):
+        CompatibilityExperimentManifest.model_validate(raw)
+
+
+def test_experiment_detects_runner_commitment_drift(tmp_path: Path) -> None:
+    raw = json.loads(EXPERIMENT.read_text())
+    raw["ladder_runner"]["sha256"] = "sha256:" + "0" * 64
+    forged = tmp_path / "experiment.json"
+    forged.write_text(json.dumps(raw))
+
+    with pytest.raises(ValueError, match="file commitment mismatch"):
+        load_compatibility_experiment_manifest(
+            forged, repository_root=REPOSITORY_ROOT
+        )

@@ -96,6 +96,7 @@ class CompatibilityExperimentManifest(BaseModel):
     gate_definitions: FileCommitment
     gate_executor: FileCommitment
     ladder_runner: FileCommitment
+    authorization_gate: FileCommitment
     protocol: FileCommitment
     experiment_card: FileCommitment
     native_prompt_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
@@ -152,6 +153,7 @@ def load_compatibility_experiment_manifest(
         manifest.gate_definitions,
         manifest.gate_executor,
         manifest.ladder_runner,
+        manifest.authorization_gate,
         manifest.protocol,
         manifest.experiment_card,
     ):
