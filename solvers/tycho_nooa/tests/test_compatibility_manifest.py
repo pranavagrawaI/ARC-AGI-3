@@ -144,3 +144,11 @@ def test_schema_v2_requires_and_checks_the_shared_return_contract() -> None:
     manifest = CompatibilityExperimentManifest.model_validate(raw)
 
     assert manifest.return_schema_sha256 == cognitive_return_schema_sha256()
+
+
+def test_schema_v3_requires_projection_and_executor_commitments() -> None:
+    raw = json.loads(EXPERIMENT.read_text())
+    raw["schema_version"] = 3
+
+    with pytest.raises(ValidationError, match="projection, and executor"):
+        CompatibilityExperimentManifest.model_validate(raw)

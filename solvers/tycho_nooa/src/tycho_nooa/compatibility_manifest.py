@@ -76,7 +76,7 @@ class CompatibilityExperimentManifest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[1, 2] = 1
+    schema_version: Literal[1, 2, 3] = 1
     experiment_id: str = Field(min_length=1)
     execution_authorized: bool
     runtime_commit: str = Field(pattern=r"^[0-9a-f]{7,40}$")
@@ -92,6 +92,8 @@ class CompatibilityExperimentManifest(BaseModel):
     experiment_card: FileCommitment
     native_controller: FileCommitment | None = None
     codeact_controller: FileCommitment | None = None
+    execution_projection: FileCommitment | None = None
+    sterile_executor: FileCommitment | None = None
     return_schema_sha256: str | None = Field(
         default=None, pattern=r"^sha256:[0-9a-f]{64}$"
     )
@@ -108,6 +110,10 @@ class CompatibilityExperimentManifest(BaseModel):
     def authorized_manifest_is_fully_bound(self) -> CompatibilityExperimentManifest:
         if self.schema_version == 2 and not _schema_v2_is_fully_bound(self):
             raise ValueError("schema v2 must bind both controllers and return schema")
+        if self.schema_version == 3 and not _schema_v3_is_fully_bound(self):
+            raise ValueError(
+                "schema v3 must bind controllers, return schema, projection, and executor"
+            )
         if not self.execution_authorized:
             return self
         route = self.model_route
@@ -158,7 +164,12 @@ def load_compatibility_experiment_manifest(
         manifest.experiment_card,
     ):
         _validate_file(commitment, repository_root)
-    for commitment in (manifest.native_controller, manifest.codeact_controller):
+    for commitment in (
+        manifest.native_controller,
+        manifest.codeact_controller,
+        manifest.execution_projection,
+        manifest.sterile_executor,
+    ):
         if commitment is not None:
             _validate_file(commitment, repository_root)
     gate_manifest_path = _committed_path(
@@ -196,6 +207,13 @@ def _schema_v2_is_fully_bound(manifest: CompatibilityExperimentManifest) -> bool
             manifest.codeact_controller,
             manifest.return_schema_sha256,
         )
+    )
+
+
+def _schema_v3_is_fully_bound(manifest: CompatibilityExperimentManifest) -> bool:
+    return _schema_v2_is_fully_bound(manifest) and all(
+        value is not None
+        for value in (manifest.execution_projection, manifest.sterile_executor)
     )
 
 
