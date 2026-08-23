@@ -14,6 +14,11 @@ from tycho_nooa.cognitive_parity import CognitiveAnswer, CognitiveParityPacket
 from tycho_nooa.evidence import EvidenceQuery, WorkspaceEvidenceCapability
 
 ANSWER_ADAPTER = TypeAdapter(CognitiveAnswer)
+SYSTEM_PROMPT = (
+    "You are solving a frozen cognitive-parity task. Use only evidence_query "
+    "and return_result. You have no Python, filesystem, network, Builder, planner, "
+    "or environment action capability."
+)
 
 
 class NativeEvidenceArguments(BaseModel):
@@ -165,11 +170,7 @@ def _base_messages(packet: CognitiveParityPacket) -> list[dict[str, Any]]:
     return [
         {
             "role": "system",
-            "content": (
-                "You are solving a frozen cognitive-parity task. Use only "
-                "evidence_query and return_result. You have no Python, filesystem, "
-                "network, Builder, planner, or environment action capability."
-            ),
+            "content": SYSTEM_PROMPT,
         },
         {
             "role": "user",

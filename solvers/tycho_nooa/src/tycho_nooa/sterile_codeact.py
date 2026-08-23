@@ -23,6 +23,14 @@ from tycho_nooa.sterile_execution import (
     SterileReturnValidationError,
 )
 
+SYSTEM_PROMPT = (
+    "You are solving a frozen cognitive-parity task. Use only "
+    "execute_python(code) and return_result(result). Python locals "
+    "persist across cells; evidence.query is available inside Python. "
+    "There is no self, filesystem authority, network, Builder, planner, "
+    "or environment action capability. Finish with the task's typed result."
+)
+
 
 class ExecutePythonArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -131,7 +139,9 @@ class SterileCodeActController:
             else {"max_tokens": self._max_output_tokens}
         )
 
-    def reconstructed_messages(self, *, event_seq: int | None = None) -> list[dict[str, Any]]:
+    def reconstructed_messages(
+        self, *, event_seq: int | None = None
+    ) -> list[dict[str, Any]]:
         """Build every turn from static task data plus a raw-event projection."""
         events = self._provenance.log.events
         if event_seq is not None:
@@ -151,13 +161,7 @@ def _base_messages(packet: CognitiveParityPacket) -> list[dict[str, str]]:
     return [
         {
             "role": "system",
-            "content": (
-                "You are solving a frozen cognitive-parity task. Use only "
-                "execute_python(code) and return_result(result). Python locals "
-                "persist across cells; evidence.query is available inside Python. "
-                "There is no self, filesystem authority, network, Builder, planner, "
-                "or environment action capability. Finish with the task's typed result."
-            ),
+            "content": SYSTEM_PROMPT,
         },
         {
             "role": "user",
