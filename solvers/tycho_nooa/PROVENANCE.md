@@ -13,6 +13,10 @@
   seccomp, and rlimit mechanisms from `nooa/runtime/sandbox/guards.py`, reduced
   to one fixed exec-worker policy. The adaptation adds file-size/open-file/
   process limits and deliberately omits NOOA's live-agent `self` broker.
+- adaptation: `evidence.py` reads Tycho's pinned `wmlib.frames()`,
+  `wmlib.transitions()`, and `wmlib.current_frame_key()` in T1, then replaces
+  their filesystem roots and NumPy arrays with bounded frozen DTOs before any
+  value crosses into the sterile worker.
 - adaptation: `FocusedBuilder` is a separate NOOA `Agent` created fresh for
   each fired trigger. It deliberately shares the actor's LLM client and Tycho
   executor/workspace while retaining an independent bounded NOOA event history.

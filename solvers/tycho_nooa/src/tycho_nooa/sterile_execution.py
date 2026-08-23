@@ -9,6 +9,7 @@ import os
 import struct
 import sys
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
@@ -25,6 +26,7 @@ from pydantic import (
 )
 
 ReturnT = TypeVar("ReturnT")
+CapabilityHandler = Callable[[dict[str, JsonValue]], JsonValue]
 
 _PROTOCOL_VERSION = 1
 _MAX_PROTOCOL_BYTES = 1_048_576
@@ -38,6 +40,7 @@ class ExecutionManifest(BaseModel):
     protocol_version: Literal[1] = _PROTOCOL_VERSION
     invocation_id: str = Field(min_length=1, max_length=128)
     role: Literal["actor", "builder"]
+    capabilities: tuple[Literal["evidence.query"], ...] = ()
     input_values: dict[str, JsonValue] = Field(default_factory=dict)
     wall_time_seconds: float = Field(default=5.0, gt=0, le=300)
     output_bytes: int = Field(default=65_536, ge=1_024, le=1_048_576)
@@ -52,17 +55,35 @@ class ExecutionManifest(BaseModel):
     def input_names_are_explicit_namespace_values(
         cls, values: dict[str, JsonValue]
     ) -> dict[str, JsonValue]:
-        reserved = {"self", "return_result", "__builtins__"}
+        reserved = {"self", "return_result", "evidence", "__builtins__"}
         for name in values:
             if name in reserved or not name.isidentifier() or keyword.iskeyword(name):
                 raise ValueError(f"input_values name is unavailable: {name!r}")
         return values
+
+    @field_validator("capabilities")
+    @classmethod
+    def capabilities_are_unique(
+        cls, capabilities: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        if len(capabilities) != len(set(capabilities)):
+            raise ValueError("capabilities must be unique")
+        return capabilities
 
 
 @dataclass(frozen=True)
 class ExecutionException:
     type: str
     message: str
+
+
+@dataclass(frozen=True)
+class CapabilityRecord:
+    name: str
+    arguments: dict[str, JsonValue]
+    status: Literal["complete", "error"]
+    result: JsonValue | None = None
+    exception: ExecutionException | None = None
 
 
 class SterileReturnValidationError(ValueError):
@@ -83,17 +104,30 @@ class SterileExecutionResult[ReturnT]:
     locals_preview: dict[str, str]
     return_value: ReturnT | None = None
     exception: ExecutionException | None = None
+    capability_records: tuple[CapabilityRecord, ...] = ()
 
 
 class SterileExecutor[ReturnT]:
     """Own one clean interpreter for the lifetime of a CodeAct invocation."""
 
-    def __init__(self, manifest: ExecutionManifest, *, return_type: type[ReturnT]):
+    def __init__(
+        self,
+        manifest: ExecutionManifest,
+        *,
+        return_type: type[ReturnT],
+        capability_handlers: dict[str, CapabilityHandler] | None = None,
+    ):
         self._manifest = manifest
         self._return_adapter = TypeAdapter(return_type)
+        self._capability_handlers = dict(capability_handlers or {})
+        if set(manifest.capabilities) != set(self._capability_handlers):
+            raise ValueError(
+                "manifest capabilities must exactly match capability_handlers"
+            )
         self._process: asyncio.subprocess.Process | None = None
         self._scratch: tempfile.TemporaryDirectory[str] | None = None
         self._request_id = 0
+        self._capability_request_ids: set[int] = set()
         self._returned = False
 
     async def __aenter__(self) -> SterileExecutor[ReturnT]:
@@ -148,33 +182,123 @@ class SterileExecutor[ReturnT]:
             raise RuntimeError("sterile invocation already returned a valid result")
         self._request_id += 1
         request_id = self._request_id
-        response = await self._execute_request(code, request_id)
-        return self._result_from_response(response, request_id)
+        response, records = await self._execute_request(code, request_id)
+        return self._result_from_response(response, request_id, records)
 
-    async def _execute_request(self, code: str, request_id: int) -> dict[str, Any]:
-        await self._send(
-            {
-                "protocol_version": _PROTOCOL_VERSION,
-                "type": "execute",
-                "invocation_id": self._manifest.invocation_id,
-                "request_id": request_id,
-                "code": code,
-            }
-        )
+    async def _execute_request(
+        self, code: str, request_id: int
+    ) -> tuple[dict[str, Any], tuple[CapabilityRecord, ...]]:
+        records: list[CapabilityRecord] = []
         try:
-            response = await asyncio.wait_for(
-                self._receive(), timeout=self._manifest.wall_time_seconds
-            )
+            async with asyncio.timeout(self._manifest.wall_time_seconds):
+                await self._send(
+                    {
+                        "protocol_version": _PROTOCOL_VERSION,
+                        "type": "execute",
+                        "invocation_id": self._manifest.invocation_id,
+                        "request_id": request_id,
+                        "code": code,
+                    }
+                )
+                while True:
+                    response = await self._receive()
+                    if response.get("type") != "capability_request":
+                        return response, tuple(records)
+                    records.append(await self._handle_capability_request(response))
         except TimeoutError as error:
             await self._kill_process()
             raise SterileCellTimeoutError(
                 f"cell exceeded {self._manifest.wall_time_seconds} seconds"
             ) from error
-        return response
+
+    async def _handle_capability_request(
+        self, request: dict[str, Any]
+    ) -> CapabilityRecord:
+        name = str(request.get("name", ""))
+        arguments = request.get("arguments")
+        request_id = request.get("capability_request_id")
+        try:
+            self._validate_capability_request(request, name, arguments, request_id)
+            handler = self._capability_handlers[name]
+            result = _json_copy(handler(arguments))
+        except Exception as error:  # noqa: BLE001 - errors become data for T2
+            exception = ExecutionException(
+                type=type(error).__name__, message=str(error)[:2_000]
+            )
+            await self._send_capability_result(request_id, exception=exception)
+            return CapabilityRecord(
+                name=name,
+                arguments=arguments if isinstance(arguments, dict) else {},
+                status="error",
+                exception=exception,
+            )
+        await self._send_capability_result(request_id, result=result)
+        return CapabilityRecord(
+            name=name,
+            arguments=arguments,
+            status="complete",
+            result=result,
+        )
+
+    def _validate_capability_request(
+        self,
+        request: dict[str, Any],
+        name: str,
+        arguments: Any,
+        request_id: Any,
+    ) -> None:
+        self._validate_capability_envelope(request)
+        self._validate_capability_request_id(request_id)
+        self._validate_capability_operation(name, arguments)
+
+    def _validate_capability_envelope(self, request: dict[str, Any]) -> None:
+        if request.get("protocol_version") != _PROTOCOL_VERSION:
+            raise ValueError("capability protocol version mismatch")
+        if request.get("invocation_id") != self._manifest.invocation_id:
+            raise PermissionError("capability invocation mismatch")
+
+    def _validate_capability_request_id(self, request_id: Any) -> None:
+        if request_id is None or type(request_id) is not int:
+            raise ValueError("capability_request_id must be an integer")
+        if request_id in self._capability_request_ids:
+            raise ValueError("capability_request_id was already used")
+        self._capability_request_ids.add(request_id)
+
+    def _validate_capability_operation(self, name: str, arguments: Any) -> None:
+        if name not in self._manifest.capabilities:
+            raise PermissionError(f"capability is not in the manifest: {name!r}")
+        if not isinstance(arguments, dict):
+            raise TypeError("capability arguments must be an object")
+
+    async def _send_capability_result(
+        self,
+        request_id: Any,
+        *,
+        result: JsonValue | None = None,
+        exception: ExecutionException | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "protocol_version": _PROTOCOL_VERSION,
+            "type": "capability_result",
+            "capability_request_id": request_id,
+        }
+        if exception is None:
+            payload.update(status="complete", result=result)
+        else:
+            payload.update(
+                status="error",
+                exception={"type": exception.type, "message": exception.message},
+            )
+        await self._send(payload)
 
     def _result_from_response(
-        self, response: dict[str, Any], request_id: int
+        self,
+        response: dict[str, Any],
+        request_id: int,
+        records: tuple[CapabilityRecord, ...],
     ) -> SterileExecutionResult[ReturnT]:
+        if response.get("type") != "execution_result":
+            raise RuntimeError("sterile worker did not return an execution result")
         if response.get("request_id") != request_id:
             raise RuntimeError("sterile worker response did not match its request")
         status = response.get("status")
@@ -190,6 +314,7 @@ class SterileExecutor[ReturnT]:
             },
             return_value=self._validated_return(response, status),
             exception=self._execution_exception(response.get("exception")),
+            capability_records=records,
         )
 
     def _validated_return(
@@ -284,3 +409,8 @@ class SterileExecutor[ReturnT]:
         if not isinstance(parsed, dict):
             raise TypeError("sterile protocol response must be an object")
         return parsed
+
+
+def _json_copy(value: Any) -> JsonValue:
+    """Collapse handler output to the only representation allowed across T1/T2."""
+    return json.loads(json.dumps(value, allow_nan=False, separators=(",", ":")))

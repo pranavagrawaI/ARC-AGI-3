@@ -19,6 +19,8 @@ from typing import Any
 
 _PROTOCOL_VERSION = 1
 _MAX_PROTOCOL_BYTES = 1_048_576
+_PROTOCOL_INPUT = sys.stdin.buffer
+_PROTOCOL_OUTPUT = sys.stdout.buffer
 
 
 class _ReturnResult(BaseException):
@@ -49,8 +51,66 @@ class _BoundedText(io.TextIOBase):
         return "".join(self._parts)
 
 
+class _CapabilityError(RuntimeError):
+    pass
+
+
+class _CapabilityClient:
+    def __init__(  # pragma: no cover - exec process seam
+        self, invocation_id: str
+    ) -> None:
+        self._invocation_id = invocation_id
+        self._request_id = 0
+
+    def call(  # pragma: no cover - exec process seam
+        self, name: str, arguments: dict[str, Any]
+    ) -> Any:
+        self._request_id += 1
+        request_id = self._request_id
+        _write(
+            {
+                "protocol_version": _PROTOCOL_VERSION,
+                "type": "capability_request",
+                "invocation_id": self._invocation_id,
+                "capability_request_id": request_id,
+                "name": name,
+                "arguments": _json_value(arguments),
+            }
+        )
+        response = _read()
+        if response is None or response.get("type") != "capability_result":
+            raise _CapabilityError("capability response is unavailable")
+        if response.get("protocol_version") != _PROTOCOL_VERSION:
+            raise _CapabilityError("capability protocol version mismatch")
+        if response.get("capability_request_id") != request_id:
+            raise _CapabilityError("capability response did not match its request")
+        if response.get("status") == "complete":
+            return response.get("result")
+        error = response.get("exception", {})
+        raise _CapabilityError(
+            f"{error.get('type', 'CapabilityError')}: {error.get('message', '')}"
+        )
+
+
+class _EvidenceProxy:
+    def __init__(  # pragma: no cover - exec process seam
+        self, client: _CapabilityClient
+    ) -> None:
+        self._client = client
+        self._cache: dict[str, str] = {}
+
+    def query(self, **arguments: Any) -> Any:  # pragma: no cover - exec process seam
+        key = json.dumps(arguments, allow_nan=False, sort_keys=True, separators=(",", ":"))
+        cached = self._cache.get(key)
+        if cached is None:
+            value = self._client.call("evidence.query", arguments)
+            cached = json.dumps(value, allow_nan=False, separators=(",", ":"))
+            self._cache[key] = cached
+        return json.loads(cached)
+
+
 def _read() -> dict[str, Any] | None:  # pragma: no cover - exec process seam
-    header = sys.stdin.buffer.read(4)
+    header = _PROTOCOL_INPUT.read(4)
     if not header:
         return None
     if len(header) != 4:
@@ -58,7 +118,7 @@ def _read() -> dict[str, Any] | None:  # pragma: no cover - exec process seam
     size = struct.unpack(">I", header)[0]
     if size > _MAX_PROTOCOL_BYTES:
         raise RuntimeError("sterile protocol request exceeds its byte limit")
-    payload = sys.stdin.buffer.read(size)
+    payload = _PROTOCOL_INPUT.read(size)
     if len(payload) != size:
         raise RuntimeError("truncated sterile protocol payload")
     parsed = json.loads(payload)
@@ -73,8 +133,8 @@ def _write(payload: dict[str, Any]) -> None:  # pragma: no cover - exec process 
     )
     if len(encoded) > _MAX_PROTOCOL_BYTES:
         raise RuntimeError("sterile protocol response exceeds its byte limit")
-    sys.stdout.buffer.write(struct.pack(">I", len(encoded)) + encoded)
-    sys.stdout.buffer.flush()
+    _PROTOCOL_OUTPUT.write(struct.pack(">I", len(encoded)) + encoded)
+    _PROTOCOL_OUTPUT.flush()
 
 
 def _json_value(value: Any) -> Any:  # pragma: no cover - exec process seam
@@ -142,10 +202,12 @@ def _install_guards(  # pragma: no cover - exercised only through the exec proce
 
 def main() -> None:  # pragma: no cover - exercised only through the exec process seam
     manifest, input_values = _initialization()
+    capability_values = _capability_namespace(manifest)
     namespace: dict[str, Any] = {
         "__builtins__": __builtins__,
         "return_result": _return_result,
         **input_values,
+        **capability_values,
     }
     _install_guards(manifest)
     _write({"protocol_version": _PROTOCOL_VERSION, "type": "ready"})
@@ -156,6 +218,19 @@ def main() -> None:  # pragma: no cover - exercised only through the exec proces
         output_bytes=int(manifest["output_bytes"]),
         locals_preview_items=int(manifest["locals_preview_items"]),
     )
+
+
+def _capability_namespace(  # pragma: no cover - exec process seam
+    manifest: dict[str, Any],
+) -> dict[str, Any]:
+    capabilities = manifest.get("capabilities", [])
+    if not isinstance(capabilities, list):
+        raise TypeError("sterile worker capabilities must be a list")
+    unknown = set(capabilities) - {"evidence.query"}
+    if unknown:
+        raise RuntimeError(f"unknown sterile capabilities: {sorted(unknown)!r}")
+    client = _CapabilityClient(str(manifest["invocation_id"]))
+    return {"evidence": _EvidenceProxy(client)} if capabilities else {}
 
 
 def _initialization(  # pragma: no cover - exec process seam

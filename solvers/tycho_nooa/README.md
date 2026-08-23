@@ -58,12 +58,18 @@ Pydantic return type. The child receives JSON values rather than a live Agent:
 there is no `self`, canonical workspace descriptor, credential environment, or
 Python-object transport across the boundary.
 
-The v1 manifest intentionally exposes no solver capabilities. Its fixed OS
-policy gives the child one disposable writable scratch directory, read-only
-standard-library access, no sockets or subprocesses, bounded output, and
-CPU/memory/file/descriptor limits. Landlock, seccomp, and rlimit setup must all
-succeed before the worker reports ready. Immutable `evidence.query` DTOs and
-CodeAct Actor integration are later slices, not claims of this implementation.
+The fixed OS policy gives the child one disposable writable scratch directory,
+read-only standard-library access, no sockets or subprocesses, bounded output,
+and CPU/memory/file/descriptor limits. Landlock, seccomp, and rlimit setup must
+all succeed before the worker reports ready.
+
+The first read-only capability is `evidence.query`. T1 translates the
+authoritative current-attempt frames or ordinary transitions into paginated,
+frontier-bound JSON DTOs; workspace paths and NumPy objects never cross. T2
+caches the serialized page for one invocation and returns a fresh value copy on
+each identical query, so generated-code mutation cannot poison the cache or the
+workspace. Archived attempts, death/terminal/animation channels, NOOA events,
+and CodeAct Actor integration remain later slices.
 
 Run evidence is separate from the ordinary tool trace:
 
