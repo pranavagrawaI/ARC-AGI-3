@@ -23,6 +23,7 @@ from pydantic import (
     TypeAdapter,
     ValidationError,
     field_validator,
+    model_validator,
 )
 
 if TYPE_CHECKING:
@@ -45,6 +46,9 @@ class ExecutionManifest(BaseModel):
     invocation_id: str = Field(min_length=1, max_length=128)
     role: Literal["actor", "builder"]
     capabilities: tuple[Literal["evidence.query"], ...] = ()
+    capability_contracts: dict[str, dict[str, JsonValue]] = Field(
+        default_factory=dict
+    )
     input_values: dict[str, JsonValue] = Field(default_factory=dict)
     wall_time_seconds: float = Field(default=5.0, gt=0, le=300)
     output_bytes: int = Field(default=65_536, ge=1_024, le=1_048_576)
@@ -59,7 +63,7 @@ class ExecutionManifest(BaseModel):
     def input_names_are_explicit_namespace_values(
         cls, values: dict[str, JsonValue]
     ) -> dict[str, JsonValue]:
-        reserved = {"self", "return_result", "evidence", "__builtins__"}
+        reserved = {"self", "help", "return_result", "evidence", "__builtins__"}
         for name in values:
             if name in reserved or not name.isidentifier() or keyword.iskeyword(name):
                 raise ValueError(f"input_values name is unavailable: {name!r}")
@@ -73,6 +77,15 @@ class ExecutionManifest(BaseModel):
         if len(capabilities) != len(set(capabilities)):
             raise ValueError("capabilities must be unique")
         return capabilities
+
+    @model_validator(mode="after")
+    def contracts_describe_only_granted_capabilities(self) -> ExecutionManifest:
+        unknown = set(self.capability_contracts) - set(self.capabilities)
+        if unknown:
+            raise ValueError(
+                f"capability_contracts describe ungranted capabilities: {sorted(unknown)!r}"
+            )
+        return self
 
 
 @dataclass(frozen=True)

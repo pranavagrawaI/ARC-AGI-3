@@ -227,3 +227,91 @@ async def test_both_arms_share_normalization_and_codeact_can_repair(
     assert provenance.count('"event_type":"CapabilityDisclosed"') == 1
     assert '"grid_encoding":"raw"' in provenance
     assert '"grid_encoding":null' in provenance
+
+
+async def test_codeact_contract_help_leads_to_the_admitted_metadata_query(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "checkpoint"
+    workspace = GameWorkspace(
+        "compatibility-help",
+        root=str(checkpoint),
+        render=False,
+        available_actions=["LEFT"],
+    )
+    workspace.record([[1]], level=0, turn_in_level=0)
+    workspace.record(
+        [[2]],
+        level=0,
+        turn_in_level=1,
+        action="LEFT",
+        state="NOT_FINISHED",
+        available=["LEFT"],
+    )
+    gate = CompatibilityGate(
+        checkpoint_root="checkpoint",
+        checkpoint_sha256="sha256:" + "0" * 64,
+        task=CompatibilityTask(
+            gate_id="g1-metadata-help",
+            gate_kind="metadata_query",
+            instruction="Inspect the contract, query metadata, and return LEFT.",
+        ),
+        evidence=CompatibilityEvidencePolicy(
+            enabled=True,
+            kind="transitions",
+            level=0,
+            limit=4,
+            projection="metadata",
+            grid_encoding="raw",
+            max_queries=1,
+            max_query_attempts=2,
+        ),
+        expected=CompatibilityExpected(conclusion="LEFT"),
+    )
+    exact = {
+        "kind": "transitions",
+        "level": 0,
+        "limit": 4,
+        "projection": "metadata",
+    }
+
+    report = await execute_compatibility_gate(
+        gate,
+        repository_root=tmp_path,
+        destination=tmp_path / "result",
+        native_llm=FakeLLMClient(
+            scripted_responses=[
+                response("evidence_query", exact),
+                response("return_result", {"result": answer("LEFT")}),
+            ]
+        ),
+        codeact_llm=FakeLLMClient(
+            scripted_responses=[
+                response(
+                    "execute_python",
+                    {
+                        "code": (
+                            "import inspect; print(inspect.signature(evidence.query)); "
+                            "print(evidence.query.__doc__)"
+                        )
+                    },
+                ),
+                response(
+                    "execute_python",
+                    {"code": f"page = evidence.query(**{exact!r})"},
+                ),
+                response("return_result", {"result": answer("LEFT")}),
+            ]
+        ),
+        max_llm_calls=3,
+    )
+
+    assert report.passed is True
+    assert report.codeact.metrics.python_cells == 2
+    assert report.codeact.metrics.query_attempts == 1
+    assert report.codeact.metrics.evidence_queries == 1
+    provenance = (
+        tmp_path / "result/codeact/provenance.jsonl"
+    ).read_text()
+    assert "kind='transitions'" in provenance
+    assert "grid_encoding is optional and semantically ignored" in provenance

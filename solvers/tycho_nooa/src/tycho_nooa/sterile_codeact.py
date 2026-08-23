@@ -104,11 +104,19 @@ class SterileCodeActController:
         raise RuntimeError("sterile CodeAct exhausted its LLM-call budget")
 
     def _execution_manifest(self) -> ExecutionManifest:
+        payload = self._packet.treatment_payload()
+        capabilities = ("evidence.query",) if self._evidence is not None else ()
+        evidence_contract = payload.get("evidence_contract")
         return ExecutionManifest(
             invocation_id=self._provenance.invocation_id,
             role="actor",
-            capabilities=("evidence.query",) if self._evidence is not None else (),
-            input_values={"task": self._packet.treatment_payload()},
+            capabilities=capabilities,
+            capability_contracts=(
+                {"evidence.query": evidence_contract}
+                if capabilities and isinstance(evidence_contract, dict)
+                else {}
+            ),
+            input_values={"task": payload},
             wall_time_seconds=self._cell_timeout_seconds,
         )
 

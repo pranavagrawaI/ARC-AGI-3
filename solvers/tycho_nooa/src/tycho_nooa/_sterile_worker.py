@@ -13,6 +13,7 @@ import json
 import os
 import struct
 import sys
+from inspect import Parameter, Signature
 from itertools import islice
 from pathlib import Path
 from typing import Any
@@ -92,14 +93,17 @@ class _CapabilityClient:
         )
 
 
-class _EvidenceProxy:
+class _EvidenceQuery:
     def __init__(  # pragma: no cover - exec process seam
-        self, client: _CapabilityClient
+        self, client: _CapabilityClient, contract: dict[str, Any] | None
     ) -> None:
         self._client = client
         self._cache: dict[str, str] = {}
+        if contract:
+            self.__signature__ = _evidence_query_signature(contract)
+            self.__doc__ = _evidence_query_documentation(contract)
 
-    def query(self, **arguments: Any) -> Any:  # pragma: no cover - exec process seam
+    def __call__(self, **arguments: Any) -> Any:  # pragma: no cover - exec process seam
         key = json.dumps(arguments, allow_nan=False, sort_keys=True, separators=(",", ":"))
         cached = self._cache.get(key)
         if cached is None:
@@ -107,6 +111,65 @@ class _EvidenceProxy:
             cached = json.dumps(value, allow_nan=False, separators=(",", ":"))
             self._cache[key] = cached
         return json.loads(cached)
+
+
+class _EvidenceProxy:
+    def __init__(  # pragma: no cover - exec process seam
+        self, client: _CapabilityClient, contract: dict[str, Any] | None
+    ) -> None:
+        self.query = _EvidenceQuery(client, contract)
+
+
+def _evidence_query_signature(  # pragma: no cover - exec process seam
+    contract: dict[str, Any],
+) -> Signature:
+    required = ("kind", "level", "limit", "projection")
+    parameters = [Parameter(name, Parameter.KEYWORD_ONLY) for name in required]
+    encoding_default = (
+        None if contract.get("projection") == "metadata" else Parameter.empty
+    )
+    parameters.append(
+        Parameter(
+            "grid_encoding",
+            Parameter.KEYWORD_ONLY,
+            default=encoding_default,
+        )
+    )
+    return Signature(parameters)
+
+
+def _evidence_query_documentation(  # pragma: no cover - exec process seam
+    contract: dict[str, Any],
+) -> str:
+    names = ("kind", "level", "limit", "projection")
+    arguments = [f"{name}={contract[name]!r}" for name in names]
+    encoding = contract.get("grid_encoding")
+    if contract.get("projection") != "metadata":
+        arguments.append(f"grid_encoding={encoding!r}")
+    lines = [
+        "Query the exact evidence view admitted for this invocation.",
+        "Required call: evidence.query(" + ", ".join(arguments) + ")",
+    ]
+    if contract.get("projection") == "metadata":
+        lines.append(
+            "grid_encoding is optional and semantically ignored for metadata."
+        )
+    attempts = contract.get("max_query_attempts")
+    disclosures = contract.get("max_successful_disclosures")
+    if attempts is not None and disclosures is not None:
+        disclosure_word = "disclosure" if disclosures == 1 else "disclosures"
+        lines.append(
+            f"Budget: {attempts} attempts; at most {disclosures} successful "
+            f"{disclosure_word}."
+        )
+    return "\n".join(lines)
+
+
+def _help(value: Any) -> None:  # pragma: no cover - exec process seam
+    """Render bounded help without importing site or exposing another capability."""
+    signature = getattr(value, "__signature__", None)
+    documentation = getattr(value, "__doc__", None) or "No documentation available."
+    print(f"Help on {type(value).__name__}:\n\n{signature}\n\n{documentation}")
 
 
 def _read() -> dict[str, Any] | None:  # pragma: no cover - exec process seam
@@ -205,6 +268,7 @@ def main() -> None:  # pragma: no cover - exercised only through the exec proces
     capability_values = _capability_namespace(manifest)
     namespace: dict[str, Any] = {
         "__builtins__": __builtins__,
+        "help": _help,
         "return_result": _return_result,
         **input_values,
         **capability_values,
@@ -230,7 +294,13 @@ def _capability_namespace(  # pragma: no cover - exec process seam
     if unknown:
         raise RuntimeError(f"unknown sterile capabilities: {sorted(unknown)!r}")
     client = _CapabilityClient(str(manifest["invocation_id"]))
-    return {"evidence": _EvidenceProxy(client)} if capabilities else {}
+    contracts = manifest.get("capability_contracts", {})
+    if not isinstance(contracts, dict):
+        raise TypeError("sterile worker capability_contracts must be an object")
+    contract = contracts.get("evidence.query")
+    if contract is not None and not isinstance(contract, dict):
+        raise TypeError("evidence.query contract must be an object")
+    return {"evidence": _EvidenceProxy(client, contract)} if capabilities else {}
 
 
 def _initialization(  # pragma: no cover - exec process seam

@@ -184,8 +184,65 @@ async def test_output_and_locals_preview_are_bounded() -> None:
     assert len(result.locals_preview) == 3
 
 
+async def test_capability_contract_describes_the_executable_query_surface() -> None:
+    contract = {
+        "kind": "transitions",
+        "level": 0,
+        "limit": 4,
+        "projection": "metadata",
+        "max_query_attempts": 2,
+        "max_successful_disclosures": 1,
+    }
+    manifest = ExecutionManifest(
+        invocation_id="actor-query-help-1",
+        role="actor",
+        capabilities=("evidence.query",),
+        capability_contracts={"evidence.query": contract},
+    )
+
+    async with SterileExecutor(
+        manifest,
+        return_type=ActionDecision,
+        capability_handlers={"evidence.query": lambda arguments: arguments},
+    ) as executor:
+        result = await executor.run_cell(
+            "import inspect; "
+            "print(inspect.signature(evidence.query)); "
+            "print(evidence.query.__doc__); "
+            "help(evidence.query)"
+        )
+
+    signature, documentation = result.stdout.split("\n", maxsplit=1)
+    assert signature == "(*, kind, level, limit, projection, grid_encoding=None)"
+    assert "evidence.query(" in documentation
+    assert "kind='transitions'" in documentation
+    assert "level=0" in documentation
+    assert "limit=4" in documentation
+    assert "projection='metadata'" in documentation
+    assert "grid_encoding is optional and semantically ignored" in documentation
+    assert "2 attempts; at most 1 successful disclosure" in documentation
+    assert "Help on _EvidenceQuery" in documentation
+    assert "evidence.query(kind='transitions'" in documentation
+
+
+def test_manifest_rejects_contract_for_ungranted_capability() -> None:
+    with pytest.raises(ValueError, match="ungranted capabilities"):
+        ExecutionManifest(
+            invocation_id="actor-query-help-invalid",
+            role="actor",
+            capability_contracts={"evidence.query": {"kind": "transitions"}},
+        )
+
+
 def test_manifest_rejects_names_that_break_namespace_contract() -> None:
-    for name in ("self", "return_result", "__builtins__", "not-valid", "class"):
+    for name in (
+        "self",
+        "help",
+        "return_result",
+        "__builtins__",
+        "not-valid",
+        "class",
+    ):
         with pytest.raises(ValueError, match="input_values name"):
             ExecutionManifest(
                 invocation_id="actor-invalid-manifest",
