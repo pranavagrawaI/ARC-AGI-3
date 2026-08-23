@@ -26,7 +26,8 @@ from tycho_nooa.sterile_execution import (
 SYSTEM_PROMPT = (
     "You are solving a frozen cognitive-parity task. Use only "
     "execute_python(code) and return_result(result). Python locals "
-    "persist across cells; evidence.query is available inside Python. "
+    "persist across cells; evidence.query is available inside Python. Its exact "
+    "grid encoding defaults to RLE: each row is comma-separated hex count:cell runs. "
     "There is no self, filesystem authority, network, Builder, planner, "
     "or environment action capability. Finish with the task's typed result."
 )
@@ -96,7 +97,7 @@ class SterileCodeActController:
         async with SterileExecutor(
             manifest,
             return_type=CognitiveAnswer,
-            capability_handlers={"evidence.query": self._evidence.query},
+            capability_handlers={"evidence.query": self._model_evidence_query},
             provenance=self._provenance,
         ) as executor:
             for _ in range(self._max_llm_calls):
@@ -110,6 +111,11 @@ class SterileCodeActController:
                 if result.return_value is not None:
                     return result.return_value
         raise RuntimeError("sterile CodeAct exhausted its LLM-call budget")
+
+    def _model_evidence_query(self, raw_query: dict[str, Any]) -> dict[str, Any]:
+        query = {**raw_query}
+        query.setdefault("grid_encoding", "rle")
+        return self._evidence.query(query)
 
     async def _call_provider(self):
         messages = self.reconstructed_messages()

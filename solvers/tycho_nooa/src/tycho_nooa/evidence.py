@@ -61,6 +61,7 @@ class EvidenceQuery(BaseModel):
     after: EvidenceRef | None = None
     frontier: EvidenceRef | None = None
     limit: int = Field(default=16, ge=1, le=32)
+    grid_encoding: Literal["raw", "rle"] = "raw"
 
 
 class EvidenceQueryResult(BaseModel):
@@ -71,6 +72,8 @@ class EvidenceQueryResult(BaseModel):
     records: tuple[EvidenceRecord, ...]
     next_after: EvidenceRef | None
     truncated: bool
+    grid_encoding: Literal["raw", "rle"]
+    encoding_legend: str | None = None
 
 
 class WorkspaceEvidenceCapability:
@@ -107,8 +110,17 @@ class WorkspaceEvidenceCapability:
             records=tuple(page),
             next_after=_record_ref(page[-1]) if truncated else None,
             truncated=truncated,
+            grid_encoding=query.grid_encoding,
+            encoding_legend=(
+                "Each grid row is comma-separated <hex count>:<hex cell> runs."
+                if query.grid_encoding == "rle"
+                else None
+            ),
         )
-        return result.model_dump(mode="json")
+        value = result.model_dump(mode="json")
+        if query.grid_encoding == "rle":
+            _encode_record_grids(value["records"])
+        return value
 
     @staticmethod
     def _records(query: EvidenceQuery, root: str) -> list[EvidenceRecord]:
@@ -135,6 +147,29 @@ class WorkspaceEvidenceCapability:
 
 def _grid(value: Any) -> Grid:
     return tuple(tuple(int(cell) for cell in row) for row in value)
+
+
+def _encode_record_grids(records: list[dict[str, Any]]) -> None:
+    for record in records:
+        for field in ("grid", "prev", "next"):
+            grid = record.get(field)
+            if grid is not None:
+                record[field] = [_rle_row(row) for row in grid]
+
+
+def _rle_row(row: list[int]) -> str:
+    runs: list[str] = []
+    current = row[0]
+    count = 0
+    for cell in row:
+        if cell == current:
+            count += 1
+            continue
+        runs.append(f"{count:x}:{current:x}")
+        current = cell
+        count = 1
+    runs.append(f"{count:x}:{current:x}")
+    return ",".join(runs)
 
 
 def _evidence_ref(key: tuple[int, int] | None) -> EvidenceRef | None:

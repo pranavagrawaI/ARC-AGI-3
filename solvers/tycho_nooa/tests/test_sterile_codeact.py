@@ -22,9 +22,7 @@ def response(name: str, arguments: dict, *, content: str = "") -> LLMResponse:
     return LLMResponse(
         raw_response=None,
         content=content,
-        tool_calls=[
-            ToolCall(id="call", name=name, arguments=json.dumps(arguments))
-        ],
+        tool_calls=[ToolCall(id="call", name=name, arguments=json.dumps(arguments))],
         finish_reason="tool_calls",
         assistant_message={"role": "assistant", "content": content},
         usage={"prompt_tokens": 1, "completion_tokens": 1},
@@ -45,7 +43,7 @@ def task_packet() -> CognitiveParityPacket:
         ),
         expected=ExpectedAnswer(
             rationale="The sole frame is L0:T0.",
-            required_evidence_refs=(EvidenceRef(level=0, turn=0),)
+            required_evidence_refs=(EvidenceRef(level=0, turn=0),),
         ),
     )
 
@@ -129,6 +127,12 @@ async def test_evidence_cell_next_turn_and_context_reconstruct_from_raw_events(
         "completion_tokens": 1,
     }
     assert subject.provider_turns[0].tool_names == ("execute_python",)
+    returned = next(
+        event
+        for event in subject._provenance.log.events
+        if event.event_type == "CapabilityReturned"
+    )
+    assert returned.payload["result"]["grid_encoding"] == "rle"
     names = {tool.name for tool in subject._llm.last_tools or []}
     assert names == {"execute_python", "return_result"}
 

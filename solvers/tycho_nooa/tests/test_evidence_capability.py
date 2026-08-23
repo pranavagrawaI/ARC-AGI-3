@@ -112,6 +112,21 @@ def test_query_is_paginated_and_bound_to_one_evidence_frontier(tmp_path: Path) -
         )
 
 
+def test_rle_grid_encoding_is_exact_and_reversible(tmp_path: Path) -> None:
+    capability = WorkspaceEvidenceCapability(recorded_workspace(tmp_path))
+
+    raw = capability.query({"kind": "transitions", "level": 0, "grid_encoding": "raw"})
+    encoded = capability.query(
+        {"kind": "transitions", "level": 0, "grid_encoding": "rle"}
+    )
+
+    assert encoded["grid_encoding"] == "rle"
+    assert "hex count" in encoded["encoding_legend"]
+    for raw_record, encoded_record in zip(raw["records"], encoded["records"]):
+        assert _decode_grid(encoded_record["prev"]) == raw_record["prev"]
+        assert _decode_grid(encoded_record["next"]) == raw_record["next"]
+
+
 async def test_manifest_and_handlers_must_describe_the_same_capabilities() -> None:
     manifest = ExecutionManifest(
         invocation_id="actor-evidence-mismatch",
@@ -165,3 +180,20 @@ async def test_evidence_name_is_absent_without_manifest_capability() -> None:
     assert result.status == "error"
     assert result.exception is not None
     assert result.exception.type == "NameError"
+
+
+def _decode_grid(rows: list[str]) -> list[list[int]]:
+    return [
+        [
+            value
+            for run in row.split(",")
+            for count, value in [_decode_run(run)]
+            for _ in range(count)
+        ]
+        for row in rows
+    ]
+
+
+def _decode_run(run: str) -> tuple[int, int]:
+    count, value = run.split(":")
+    return int(count, 16), int(value, 16)

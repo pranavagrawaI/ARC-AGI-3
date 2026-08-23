@@ -29,6 +29,7 @@ class NativeEvidenceArguments(BaseModel):
     after: dict[str, int] | None = None
     frontier: dict[str, int] | None = None
     limit: int = 16
+    grid_encoding: Literal["raw", "rle"] = "rle"
 
 
 class NativeReturnArguments(BaseModel):
@@ -184,7 +185,7 @@ def _base_messages(packet: CognitiveParityPacket) -> list[dict[str, Any]]:
 
 def _native_tools() -> list[Tool]:
     def evidence_query(**kwargs: Any) -> dict[str, Any]:
-        """Read one immutable page of ordinary frames or transitions."""
+        """Read evidence; exact RLE grids use comma-separated hex count:cell runs."""
         return kwargs
 
     def return_result(result: dict[str, Any]) -> dict[str, Any]:

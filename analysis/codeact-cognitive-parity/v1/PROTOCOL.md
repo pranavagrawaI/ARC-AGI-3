@@ -30,6 +30,8 @@ The evaluator-only key was curated before any model treatment. It scores atomic 
 
 Both arms receive the same treatment payload and no answer key. Neither has filesystem, network, mutation, Builder, planner, or environment-action authority. Resource ceilings—not actual consumption—are matched. Actual calls, tokens, evidence queries, Python cells, invalid returns, and wall time are outcomes.
 
+At the model-facing membrane, grids use an exact reversible RLE value encoding by default: each row is a comma-separated sequence of hexadecimal `count:cell` runs. Raw grids remain available to internal parity tests. This bounds context transport without summarizing or deleting cells, and both arms receive the same encoded values.
+
 ## Controls
 
 - Easy positive: retrieve a known remote `UP` transition.

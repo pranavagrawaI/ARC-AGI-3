@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from tycho_nooa.cognitive_corpus import load_corpus
@@ -64,9 +65,7 @@ def test_cross_level_atomic_key_matches_independent_grid_diffs() -> None:
     capability = WorkspaceEvidenceCapability.from_root(
         REPOSITORY_ROOT / packet.checkpoint_root
     )
-    transitions = capability.query({"kind": "transitions", "limit": 32})[
-        "records"
-    ]
+    transitions = capability.query({"kind": "transitions", "limit": 32})["records"]
     by_ref = {(item["level"], item["turn"]): item for item in transitions}
 
     assert _changed_cells(by_ref[(0, 16)]) == 108
@@ -76,6 +75,22 @@ def test_cross_level_atomic_key_matches_independent_grid_diffs() -> None:
         "level0_changed_cells": 108,
         "level1_changed_cells": 487,
     }
+
+
+def test_model_facing_rle_page_fits_the_observed_provider_context() -> None:
+    _, packets = load_corpus(MANIFEST, repository_root=REPOSITORY_ROOT)
+    packet = next(
+        item for item in packets if item.task.packet_id == "remote-success-old-up"
+    )
+    capability = WorkspaceEvidenceCapability.from_root(
+        REPOSITORY_ROOT / packet.checkpoint_root
+    )
+
+    page = capability.query(
+        {"kind": "transitions", "limit": 16, "grid_encoding": "rle"}
+    )
+
+    assert len(json.dumps(page, separators=(",", ":"))) < 55_000
 
 
 def _changed_cells(transition: dict) -> int:
