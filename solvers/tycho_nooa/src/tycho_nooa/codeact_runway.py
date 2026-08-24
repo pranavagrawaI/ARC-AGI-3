@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
 
@@ -371,7 +372,7 @@ def _validate_route_and_caps(
         authorization.maximum_calls != caps.calls_total
         or authorization.max_input_tokens_per_call != caps.input_tokens_per_call,
         authorization.max_output_tokens_per_call != caps.output_tokens_per_call,
-        str(authorization.maximum_spend_usd) != str(caps.max_cost_usd),
+        authorization.maximum_spend_usd != Decimal(str(caps.max_cost_usd)),
     )
     if any(cap_values):
         raise ValueError("authorization caps do not match diagnostic caps")

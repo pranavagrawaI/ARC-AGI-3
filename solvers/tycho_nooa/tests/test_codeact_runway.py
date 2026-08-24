@@ -114,7 +114,7 @@ def diagnostic_inputs(tmp_path: Path) -> tuple[Path, Path]:
         expected_reported_model="fake-model",
         allowed_reasoning_effort="enabled",
         maximum_calls=6,
-        maximum_spend_usd=Decimal("3.0"),
+        maximum_spend_usd=Decimal("3.00"),
         max_input_tokens_per_call=1000,
         max_output_tokens_per_call=100,
         expires_at=datetime.now(UTC) + timedelta(days=1),
