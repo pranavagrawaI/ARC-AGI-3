@@ -104,8 +104,8 @@ def test_experiment_is_fully_committed_but_paid_execution_is_disabled() -> None:
         EXPERIMENT, repository_root=REPOSITORY_ROOT
     )
 
-    assert manifest.runtime_commit == "0c29770"
-    assert manifest.package_commit == "0c29770"
+    assert manifest.runtime_commit == "0c16f03"
+    assert manifest.package_commit == "0c16f03"
     assert manifest.caps.calls_per_arm_gate == 3
     assert manifest.caps.calls_total == 30
     assert manifest.caps.input_tokens_per_call == 16384
