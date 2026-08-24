@@ -25,6 +25,7 @@ def test_repaired_sample_loads_all_six_packets() -> None:
     assert [item.packet_id for item in sample.packets] == [
         packet.task.packet_id for packet in packets
     ]
+    assert all("analysis/matched-actor-v5-pilot/checkpoints/" in packet.checkpoint_root for packet in packets)
 
 
 def test_semantic_hash_survives_clean_checkout_without_python_cache(
@@ -32,7 +33,7 @@ def test_semantic_hash_survives_clean_checkout_without_python_cache(
 ) -> None:
     index = json.loads(CHECKPOINTS.read_text())
     for position, record in enumerate(index["checkpoints"]):
-        source = REPOSITORY_ROOT / record["checkpoint_root"]
+        source = REPOSITORY_ROOT / record["frozen_checkpoint_root"]
         destination = tmp_path / f"checkpoint-{position}"
         shutil.copytree(
             source,

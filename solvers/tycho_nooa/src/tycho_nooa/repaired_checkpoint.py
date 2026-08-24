@@ -20,7 +20,8 @@ from tycho_nooa.matched_actor_pilot import MatchedActorPilotSample
 class RepairedCheckpointCommitment(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    checkpoint_root: str
+    source_checkpoint_root: str
+    frozen_checkpoint_root: str
     semantic_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
@@ -36,8 +37,9 @@ class RepairedCheckpointIndex(BaseModel):
 
     @model_validator(mode="after")
     def roots_are_unique(self) -> RepairedCheckpointIndex:
-        roots = [item.checkpoint_root for item in self.checkpoints]
-        if len(roots) != len(set(roots)):
+        sources = [item.source_checkpoint_root for item in self.checkpoints]
+        frozen = [item.frozen_checkpoint_root for item in self.checkpoints]
+        if len(sources) != len(set(sources)) or len(frozen) != len(set(frozen)):
             raise ValueError("repaired checkpoint root is duplicated")
         return self
 
@@ -80,7 +82,7 @@ def load_repaired_pilot_sample(
     index = RepairedCheckpointIndex.model_validate_json(
         checkpoint_index_path.read_text()
     )
-    commitments = {item.checkpoint_root: item for item in index.checkpoints}
+    commitments = {item.source_checkpoint_root: item for item in index.checkpoints}
     records = {item.packet_id: item for item in corpus.records}
     packets = tuple(
         _load_repaired_packet(record.packet_id, records, commitments, root)
@@ -105,10 +107,12 @@ def _load_repaired_packet(
     commitment = commitments.get(packet.checkpoint_root)
     if commitment is None:
         raise ValueError(f"repaired checkpoint is uncommitted: {packet.checkpoint_root}")
-    checkpoint = _confined_path(packet.checkpoint_root, root)
+    checkpoint = _confined_path(commitment.frozen_checkpoint_root, root)
     if semantic_tree_sha256(checkpoint) != commitment.semantic_sha256:
         raise ValueError(f"repaired checkpoint commitment mismatch: {packet_id}")
-    return packet
+    return packet.model_copy(
+        update={"checkpoint_root": commitment.frozen_checkpoint_root}
+    )
 
 
 def _committed_path(path_text: str, expected_sha256: str, root: Path) -> Path:

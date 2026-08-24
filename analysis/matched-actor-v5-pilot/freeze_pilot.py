@@ -73,6 +73,9 @@ manifest = {
     "checkpoint_loader": bind(
         "solvers/tycho_nooa/src/tycho_nooa/repaired_checkpoint.py"
     ),
+    "checkpoint_freeze_driver": bind(
+        "analysis/matched-actor-v5-pilot/freeze_checkpoints.py"
+    ),
     "checkpoint_commitments": bind(
         "analysis/matched-actor-v5-pilot/checkpoints.json"
     ),

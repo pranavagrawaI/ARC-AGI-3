@@ -30,6 +30,7 @@ class MatchedActorPilotManifestV5(MatchedActorPilotManifestV4):
     schema_version: Literal[5] = 5
     base_v4_package: FileCommitment
     checkpoint_loader: FileCommitment
+    checkpoint_freeze_driver: FileCommitment
     checkpoint_commitments: FileCommitment
 
 
@@ -65,6 +66,7 @@ def load_matched_actor_pilot_manifest_v5(
         manifest.context_controller,
         manifest.audit_driver,
         manifest.checkpoint_loader,
+        manifest.checkpoint_freeze_driver,
         manifest.checkpoint_commitments,
         manifest.freeze_driver,
         manifest.replay_driver,
