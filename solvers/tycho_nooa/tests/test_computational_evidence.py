@@ -11,7 +11,9 @@ from tycho_nooa.computational_evidence import (
     describe_evidence_page,
 )
 from tycho_nooa.computational_execution import ComputationalSterileExecutor
+from tycho_nooa.computational_milestones import extract_computational_milestones
 from tycho_nooa.evidence import WorkspaceEvidenceCapability
+from tycho_nooa.execution_events import ExecutionProvenanceLog, InvocationProvenance
 from tycho_nooa.sterile_execution import ExecutionManifest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -64,7 +66,9 @@ def test_candidate_golden_path_has_no_undocumented_lookup() -> None:
     assert result == CompositionReturn(conclusion="11->5", evidence_ref="L0:T1")
 
 
-async def test_candidate_golden_path_crosses_the_sterile_membrane() -> None:
+async def test_candidate_golden_path_crosses_the_sterile_membrane(
+    tmp_path: Path,
+) -> None:
     capability = WorkspaceEvidenceCapability.from_root(CHECKPOINT)
 
     def query(arguments):
@@ -94,10 +98,13 @@ async def test_candidate_golden_path_crosses_the_sterile_membrane() -> None:
         "after = rle.decode_row(record.next_rows[0])[63]\n"
         "print(record.ref, f'{before}->{after}')"
     )
+    provenance_path = tmp_path / "provenance.jsonl"
+    log = ExecutionProvenanceLog(provenance_path, actor_session_id="golden")
     async with ComputationalSterileExecutor(
         manifest,
         return_type=CompositionReturn,
         capability_handlers={"evidence.query": query},
+        provenance=InvocationProvenance(log, invocation_id=manifest.invocation_id),
     ) as executor:
         computed = await executor.run_cell(code)
         returned = await executor.run_cell(
@@ -109,3 +116,30 @@ async def test_candidate_golden_path_crosses_the_sterile_membrane() -> None:
     assert returned.return_value == CompositionReturn(
         conclusion="11->5", evidence_ref="L0:T1"
     )
+    milestones = extract_computational_milestones(
+        provenance_path, target_ref="L0:T1", before=11, after=5
+    )
+    assert milestones.model_dump() == {
+        "target_record_disclosed": 1,
+        "representation_decoded": 1,
+        "target_value_identified": 1,
+        "provenance_bound": 1,
+        "terminal_result_accepted": 2,
+    }
+
+
+def test_v13_failure_has_disclosure_but_no_semantic_completion() -> None:
+    path = REPOSITORY_ROOT / (
+        "analysis/parity-compat-v13/runs/"
+        "20260824T121205Z-gemma-4-31b-openinference/codeact/provenance.jsonl"
+    )
+
+    milestones = extract_computational_milestones(
+        path, target_ref="L0:T1", before=11, after=5
+    )
+
+    assert milestones.target_record_disclosed == 3
+    assert milestones.representation_decoded is None
+    assert milestones.target_value_identified is None
+    assert milestones.provenance_bound is None
+    assert milestones.terminal_result_accepted is None
