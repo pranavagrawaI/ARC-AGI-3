@@ -209,3 +209,15 @@ def test_schema_v6_binds_gate_specific_contracts() -> None:
     manifest = CompatibilityExperimentManifest.model_validate(raw)
     assert manifest.return_contract == "gate_specific"
     assert manifest.return_schema_sha256 == compatibility_return_schemas_sha256()
+
+
+def test_schema_v7_requires_evidence_implementation_commitment() -> None:
+    raw = json.loads(EXPERIMENT.read_text())
+    raw["schema_version"] = 7
+    raw.pop("evidence_module", None)
+
+    with pytest.raises(ValidationError, match="evidence DTO implementation"):
+        CompatibilityExperimentManifest.model_validate(raw)
+
+    raw["evidence_module"] = raw["gate_definitions"]
+    assert CompatibilityExperimentManifest.model_validate(raw).evidence_module

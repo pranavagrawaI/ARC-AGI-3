@@ -78,7 +78,7 @@ class CompatibilityExperimentManifest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[1, 2, 3, 4, 5, 6] = 1
+    schema_version: Literal[1, 2, 3, 4, 5, 6, 7] = 1
     experiment_id: str = Field(min_length=1)
     execution_authorized: bool
     runtime_commit: str = Field(pattern=r"^[0-9a-f]{7,40}$")
@@ -98,6 +98,7 @@ class CompatibilityExperimentManifest(BaseModel):
     sterile_executor: FileCommitment | None = None
     sterile_worker: FileCommitment | None = None
     return_contract_module: FileCommitment | None = None
+    evidence_module: FileCommitment | None = None
     return_schema_sha256: str | None = Field(
         default=None, pattern=r"^sha256:[0-9a-f]{64}$"
     )
@@ -165,6 +166,7 @@ def load_compatibility_experiment_manifest(
         manifest.sterile_executor,
         manifest.sterile_worker,
         manifest.return_contract_module,
+        manifest.evidence_module,
     ):
         if commitment is not None:
             _validate_file(commitment, repository_root)
@@ -233,6 +235,10 @@ def _schema_v6_is_fully_bound(manifest: CompatibilityExperimentManifest) -> bool
     )
 
 
+def _schema_v7_is_fully_bound(manifest: CompatibilityExperimentManifest) -> bool:
+    return _schema_v6_is_fully_bound(manifest) and manifest.evidence_module is not None
+
+
 def _validate_schema_bindings(manifest: CompatibilityExperimentManifest) -> None:
     validator = _SCHEMA_BINDING_VALIDATORS.get(manifest.schema_version)
     if validator is not None:
@@ -270,12 +276,18 @@ def _require_schema_v6(manifest: CompatibilityExperimentManifest) -> None:
         )
 
 
+def _require_schema_v7(manifest: CompatibilityExperimentManifest) -> None:
+    if not _schema_v7_is_fully_bound(manifest):
+        raise ValueError("schema v7 must also bind the evidence DTO implementation")
+
+
 _SCHEMA_BINDING_VALIDATORS = {
     2: _require_schema_v2,
     3: _require_schema_v3,
     4: _require_schema_v4,
     5: _require_schema_v5,
     6: _require_schema_v6,
+    7: _require_schema_v7,
 }
 
 
