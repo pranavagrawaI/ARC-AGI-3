@@ -234,22 +234,49 @@ def _schema_v6_is_fully_bound(manifest: CompatibilityExperimentManifest) -> bool
 
 
 def _validate_schema_bindings(manifest: CompatibilityExperimentManifest) -> None:
-    if manifest.schema_version == 2 and not _schema_v2_is_fully_bound(manifest):
+    validator = _SCHEMA_BINDING_VALIDATORS.get(manifest.schema_version)
+    if validator is not None:
+        validator(manifest)
+
+
+def _require_schema_v2(manifest: CompatibilityExperimentManifest) -> None:
+    if not _schema_v2_is_fully_bound(manifest):
         raise ValueError("schema v2 must bind both controllers and return schema")
-    if manifest.schema_version == 3 and not _schema_v3_is_fully_bound(manifest):
+
+
+def _require_schema_v3(manifest: CompatibilityExperimentManifest) -> None:
+    if not _schema_v3_is_fully_bound(manifest):
         raise ValueError(
             "schema v3 must bind controllers, return schema, projection, and executor"
         )
-    if manifest.schema_version == 4 and not _schema_v4_is_fully_bound(manifest):
+
+
+def _require_schema_v4(manifest: CompatibilityExperimentManifest) -> None:
+    if not _schema_v4_is_fully_bound(manifest):
         raise ValueError("schema v4 must also bind the sterile worker")
-    if manifest.schema_version == 5 and not _schema_v5_is_fully_bound(manifest):
+
+
+def _require_schema_v5(manifest: CompatibilityExperimentManifest) -> None:
+    if not _schema_v5_is_fully_bound(manifest):
         raise ValueError(
             "schema v5 must bind the flat retrieval return contract and module"
         )
-    if manifest.schema_version == 6 and not _schema_v6_is_fully_bound(manifest):
+
+
+def _require_schema_v6(manifest: CompatibilityExperimentManifest) -> None:
+    if not _schema_v6_is_fully_bound(manifest):
         raise ValueError(
             "schema v6 must bind the gate-specific return contracts and module"
         )
+
+
+_SCHEMA_BINDING_VALIDATORS = {
+    2: _require_schema_v2,
+    3: _require_schema_v3,
+    4: _require_schema_v4,
+    5: _require_schema_v5,
+    6: _require_schema_v6,
+}
 
 
 def _return_schema_sha256(manifest: CompatibilityExperimentManifest) -> str:

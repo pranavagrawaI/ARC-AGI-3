@@ -12,12 +12,15 @@ from tycho_nooa.compatibility_manifest import (
     load_compatibility_experiment_manifest,
     load_gate_manifest,
 )
-from tycho_nooa.compatibility_return import retrieval_return_schema_sha256
+from tycho_nooa.compatibility_return import (
+    compatibility_return_schemas_sha256,
+    retrieval_return_schema_sha256,
+)
 from tycho_nooa.parity_compatibility import CompatibilityEvidenceCapability
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-GATE_MANIFEST = REPOSITORY_ROOT / "analysis/parity-compat-v9/gate-manifest.json"
-EXPERIMENT = REPOSITORY_ROOT / "analysis/parity-compat-v9/experiment.json"
+GATE_MANIFEST = REPOSITORY_ROOT / "analysis/parity-compat-v10/gate-manifest.json"
+EXPERIMENT = REPOSITORY_ROOT / "analysis/parity-compat-v10/experiment.json"
 LEGACY_EXPERIMENT = REPOSITORY_ROOT / "analysis/parity-compat-v2/experiment.json"
 
 
@@ -26,14 +29,13 @@ def test_frozen_gate_manifest_loads_every_validated_ladder_role() -> None:
         GATE_MANIFEST, repository_root=REPOSITORY_ROOT
     )
 
-    assert manifest.ladder_id == "parity-compat-v9"
+    assert manifest.ladder_id == "parity-compat-v10"
     assert [gate.task.gate_id for gate in ladder.ordered_gates()] == [
         "g0-termination",
-        "g1-metadata-query",
-        "g2-representation-rle",
-        "g2-representation-raw",
-        "g3-easy-positive-rle",
-        "g3-easy-positive-raw",
+        "g1-capability-retrieval",
+        "g2a-identifier-binding",
+        "g2b-representation-rle",
+        "g3-composition",
     ]
     assert ladder.termination.treatment_payload().keys() == {
         "task",
@@ -46,11 +48,11 @@ def test_metadata_gate_exact_query_excludes_grids() -> None:
         GATE_MANIFEST, repository_root=REPOSITORY_ROOT
     )
     capability = CompatibilityEvidenceCapability.from_gate(
-        ladder.metadata_query, repository_root=REPOSITORY_ROOT
+        ladder.capability_retrieval, repository_root=REPOSITORY_ROOT
     )
 
     assert capability is not None
-    result = capability.query(ladder.metadata_query.evidence.query_value())
+    result = capability.query(ladder.capability_retrieval.evidence.query_value())
 
     assert result["records"][2] == {
         "type": "transition_metadata",
@@ -63,26 +65,19 @@ def test_metadata_gate_exact_query_excludes_grids() -> None:
     assert all("prev" not in record and "next" not in record for record in result["records"])
 
 
-def test_representation_alternatives_name_the_same_cell_values() -> None:
-    _, ladder = load_gate_manifest(
-        GATE_MANIFEST, repository_root=REPOSITORY_ROOT
+def test_factored_gates_preserve_v9_topology_and_isolate_rle() -> None:
+    _, ladder = load_gate_manifest(GATE_MANIFEST, repository_root=REPOSITORY_ROOT)
+    binding = CompatibilityEvidenceCapability.from_gate(
+        ladder.identifier_binding, repository_root=REPOSITORY_ROOT
     )
-    raw_capability = CompatibilityEvidenceCapability.from_gate(
-        ladder.representation_raw, repository_root=REPOSITORY_ROOT
-    )
-    rle_capability = CompatibilityEvidenceCapability.from_gate(
-        ladder.representation_rle, repository_root=REPOSITORY_ROOT
-    )
-
-    assert raw_capability is not None
-    assert rle_capability is not None
-    raw = raw_capability.query(ladder.representation_raw.evidence.query_value())
-    rle = rle_capability.query(ladder.representation_rle.evidence.query_value())
-
-    assert raw["records"][0]["prev"][0][63] == 11
-    assert raw["records"][0]["next"][0][63] == 5
-    assert rle["records"][0]["prev"][0].endswith("1:b")
-    assert rle["records"][0]["next"][0].endswith("1:5")
+    assert binding is not None
+    page = binding.query(ladder.identifier_binding.evidence.query_value())
+    assert page["frontier"] == {"level": 1, "turn": 2}
+    assert page["records"][0]["level"] == 0
+    assert page["records"][0]["turn"] == 1
+    assert page["next_after"] == {"level": 0, "turn": 1}
+    assert ladder.representation_rle.evidence.enabled is False
+    assert ladder.representation_rle.task.inputs["after_row_rle"].endswith("1:5")
 
 
 def test_gate_manifest_detects_packet_commitment_drift(tmp_path: Path) -> None:
@@ -100,12 +95,12 @@ def test_experiment_is_fully_committed_but_paid_execution_is_disabled() -> None:
         EXPERIMENT, repository_root=REPOSITORY_ROOT
     )
 
-    assert manifest.runtime_commit == "2913039"
-    assert manifest.package_commit == "2913039"
+    assert manifest.runtime_commit == "d3d0158"
+    assert manifest.package_commit == "d3d0158"
     assert manifest.caps.calls_per_arm_gate == 3
     assert manifest.caps.calls_total == 30
-    assert manifest.caps.input_tokens_per_call == 65536
-    assert manifest.return_contract == "retrieval_flat"
+    assert manifest.caps.input_tokens_per_call == 16384
+    assert manifest.return_contract == "gate_specific"
     assert manifest.model_route.model is None
     assert ladder.termination.task.gate_id == "g0-termination"
     with pytest.raises(RuntimeError, match="execution is disabled"):
@@ -205,3 +200,10 @@ def test_schema_v5_requires_and_checks_flat_retrieval_contract() -> None:
 
     assert manifest.return_contract == "retrieval_flat"
     assert manifest.return_schema_sha256 == retrieval_return_schema_sha256()
+
+
+def test_schema_v6_binds_gate_specific_contracts() -> None:
+    raw = json.loads(EXPERIMENT.read_text())
+    manifest = CompatibilityExperimentManifest.model_validate(raw)
+    assert manifest.return_contract == "gate_specific"
+    assert manifest.return_schema_sha256 == compatibility_return_schemas_sha256()

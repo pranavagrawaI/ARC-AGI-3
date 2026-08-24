@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -17,7 +16,7 @@ class _CompatibilityReturn(BaseModel):
 
 
 class TerminationReturn(_CompatibilityReturn):
-    ok: Literal[True]
+    ok: bool
 
 
 class CapabilityRetrievalReturn(_CompatibilityReturn):

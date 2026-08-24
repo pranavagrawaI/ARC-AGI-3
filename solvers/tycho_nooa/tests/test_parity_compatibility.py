@@ -7,7 +7,12 @@ import pytest
 from tycho.workspace.workspace import GameWorkspace
 
 from tycho_nooa.cognitive_parity import tree_sha256
-from tycho_nooa.compatibility_return import IdentifierBindingReturn, TerminationReturn
+from tycho_nooa.compatibility_return import (
+    CompositionReturn,
+    IdentifierBindingReturn,
+    RepresentationReturn,
+    TerminationReturn,
+)
 from tycho_nooa.evidence import WorkspaceEvidenceCapability
 from tycho_nooa.parity_compatibility import (
     CompatibilityEvidenceCapability,
@@ -119,6 +124,38 @@ def test_evaluator_scores_gate_value_and_identifier_interference() -> None:
     assert accepted.passed is True
     assert leakage.passed is False
     assert leakage.identifier_classification == "turn_number_leakage"
+
+
+def test_representation_and_composition_are_independently_scored() -> None:
+    representation = CompatibilityGate(
+        task=CompatibilityTask(
+            gate_id="g2b", gate_kind="representation_rle", instruction="Decode."
+        ),
+        evidence=CompatibilityEvidencePolicy(enabled=False, max_queries=0),
+        expected=CompatibilityExpected(decoded_value=5),
+    )
+    composition = CompatibilityGate(
+        checkpoint_root="checkpoint",
+        checkpoint_sha256="sha256:" + "0" * 64,
+        task=CompatibilityTask(
+            gate_id="g3", gate_kind="composition", instruction="Compose."
+        ),
+        evidence=metadata_policy().model_copy(
+            update={"projection": "full", "grid_encoding": "rle"}
+        ),
+        expected=CompatibilityExpected(conclusion="11->5", evidence_ref="L0:T1"),
+    )
+
+    assert evaluate_compatibility_answer(
+        representation, RepresentationReturn(decoded_value=5), evidence_queries=0
+    ).passed
+    wrong_ref = evaluate_compatibility_answer(
+        composition,
+        CompositionReturn(conclusion="11->5", evidence_ref="L0:T2"),
+        evidence_queries=1,
+    )
+    assert wrong_ref.value_correct is False
+    assert wrong_ref.capability_use_correct is True
 
 
 def test_capability_allows_one_exact_metadata_query(tmp_path: Path) -> None:

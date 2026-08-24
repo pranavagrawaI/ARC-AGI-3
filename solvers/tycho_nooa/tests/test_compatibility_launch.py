@@ -19,7 +19,7 @@ from tycho_nooa.compatibility_launch import (
 from tycho_nooa.compatibility_manifest import sha256_file
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-BASE_MANIFEST = REPOSITORY_ROOT / "analysis/parity-compat-v9/experiment.json"
+BASE_MANIFEST = REPOSITORY_ROOT / "analysis/parity-compat-v10/experiment.json"
 
 
 def response(
@@ -28,7 +28,7 @@ def response(
     provider: str = "provider-a",
     model: str = "reported-fake-model",
 ) -> LLMResponse:
-    result = {"evidence_refs": [], "conclusion": conclusion}
+    result = {"ok": conclusion == "READY"}
     return LLMResponse(
         raw_response={"provider": provider, "model": model},
         content="",
