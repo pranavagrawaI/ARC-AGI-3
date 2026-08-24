@@ -4,22 +4,59 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator, Mapping
-from typing import Any
+from typing import Any, Literal
+
+MAX_DECODED_ROW_CELLS = 4_096
+RLE_HELPER_SURFACE = {
+    "namespace": "rle",
+    "method": "decode_row",
+    "signature": "decode_row(encoded: str) -> tuple[int, ...]",
+    "max_decoded_cells": MAX_DECODED_ROW_CELLS,
+}
+RLEDecodeErrorCode = Literal[
+    "empty_encoding",
+    "invalid_encoding",
+    "invalid_run_length",
+    "decoded_size_exceeded",
+]
+
+
+class RLEDecodeError(ValueError):
+    """Stable semantic rejection shared by every decoder surface."""
+
+    def __init__(self, code: RLEDecodeErrorCode, detail: str):
+        self.code = code
+        super().__init__(f"{code}: {detail}")
 
 
 def decode_rle_row(encoded: str) -> tuple[int, ...]:
     """Decode comma-separated ``<hex count>:<hex cell>`` runs exactly."""
-    if not isinstance(encoded, str) or not encoded:
-        raise ValueError("RLE row must be non-empty text")
+    if not isinstance(encoded, str):
+        raise RLEDecodeError("invalid_encoding", "RLE row must be text")
+    if not encoded:
+        raise RLEDecodeError("empty_encoding", "RLE row must not be empty")
     cells: list[int] = []
     for run in encoded.split(","):
         try:
             count_text, cell_text = run.split(":")
             count, cell = int(count_text, 16), int(cell_text, 16)
         except (ValueError, TypeError) as error:
-            raise ValueError(f"invalid RLE run: {run!r}") from error
+            raise RLEDecodeError(
+                "invalid_encoding", f"invalid RLE run: {run!r}"
+            ) from error
+        if cell < 0:
+            raise RLEDecodeError(
+                "invalid_encoding", f"cell values must be non-negative: {run!r}"
+            )
         if count < 1:
-            raise ValueError("RLE counts must be positive")
+            raise RLEDecodeError(
+                "invalid_run_length", f"run length must be positive: {run!r}"
+            )
+        if len(cells) + count > MAX_DECODED_ROW_CELLS:
+            raise RLEDecodeError(
+                "decoded_size_exceeded",
+                f"decoded row exceeds {MAX_DECODED_ROW_CELLS} cells",
+            )
         cells.extend([cell] * count)
     return tuple(cells)
 
@@ -106,4 +143,7 @@ class RLEHelpers:
         return decode_rle_row(encoded)
 
     def __repr__(self) -> str:
-        return "RLEHelpers(decode_row(encoded: str) -> tuple[int, ...])"
+        return (
+            "RLEHelpers(decode_row(encoded: str) -> tuple[int, ...], "
+            f"max_decoded_cells={MAX_DECODED_ROW_CELLS})"
+        )
