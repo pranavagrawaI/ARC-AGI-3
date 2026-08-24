@@ -19,8 +19,8 @@ from tycho_nooa.compatibility_return import (
 from tycho_nooa.parity_compatibility import CompatibilityEvidenceCapability
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-GATE_MANIFEST = REPOSITORY_ROOT / "analysis/parity-compat-v10/gate-manifest.json"
-EXPERIMENT = REPOSITORY_ROOT / "analysis/parity-compat-v10/experiment.json"
+GATE_MANIFEST = REPOSITORY_ROOT / "analysis/parity-compat-v11/gate-manifest.json"
+EXPERIMENT = REPOSITORY_ROOT / "analysis/parity-compat-v11/experiment.json"
 LEGACY_EXPERIMENT = REPOSITORY_ROOT / "analysis/parity-compat-v2/experiment.json"
 
 
@@ -29,7 +29,7 @@ def test_frozen_gate_manifest_loads_every_validated_ladder_role() -> None:
         GATE_MANIFEST, repository_root=REPOSITORY_ROOT
     )
 
-    assert manifest.ladder_id == "parity-compat-v10"
+    assert manifest.ladder_id == "parity-compat-v11"
     assert [gate.task.gate_id for gate in ladder.ordered_gates()] == [
         "g0-termination",
         "g1-capability-retrieval",
@@ -97,8 +97,8 @@ def test_experiment_is_fully_committed_but_paid_execution_is_disabled() -> None:
         EXPERIMENT, repository_root=REPOSITORY_ROOT
     )
 
-    assert manifest.runtime_commit == "15003c3"
-    assert manifest.package_commit == "15003c3"
+    assert manifest.runtime_commit == "c964a9f"
+    assert manifest.package_commit == "c964a9f"
     assert manifest.caps.calls_per_arm_gate == 3
     assert manifest.caps.calls_total == 30
     assert manifest.caps.input_tokens_per_call == 16384
