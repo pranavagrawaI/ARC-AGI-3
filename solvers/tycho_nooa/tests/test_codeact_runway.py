@@ -37,6 +37,7 @@ CODEACT_TRACE = REPOSITORY_ROOT / (
     "20260824T112416Z-gemma-4-31b-openinference/ladder/"
     "g3-composition/codeact/provenance.jsonl"
 )
+V13_MANIFEST = REPOSITORY_ROOT / "analysis/parity-compat-v13/experiment.json"
 
 
 def response(name: str, arguments: dict) -> LLMResponse:
@@ -202,6 +203,18 @@ def test_provider_call_ceiling_is_not_rendered_into_codeact_provenance(
 
     assert "max_provider_calls" not in text
     assert "max_llm_calls" not in text
+
+
+def test_frozen_v13_package_is_committed_but_disabled() -> None:
+    manifest, gate = load_codeact_runway_manifest(
+        V13_MANIFEST, repository_root=REPOSITORY_ROOT
+    )
+
+    assert manifest.execution_authorized is False
+    assert manifest.caps.calls_total == 6
+    assert gate.task.gate_id == "g3-composition"
+    with pytest.raises(RuntimeError, match="disabled"):
+        manifest.require_execution_authorized()
 
 
 async def test_authorized_diagnostic_executes_only_codeact(tmp_path: Path) -> None:
