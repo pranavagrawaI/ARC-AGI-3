@@ -31,15 +31,17 @@ from tycho_nooa.modes import ModePolicy, mode_from_env, world_model_enabled
 from tycho_nooa.protocol import ActionResultMessage
 from tycho_nooa.scribe import ScribeConfig, ScribeStrategy
 from tycho_nooa.strategy import NativeToolConfig, NativeToolStrategy
-from tycho_nooa.symmetry_notice import PROMPT_BRIEF
+from tycho_nooa.symmetry_notice import prompt_brief
 from tycho_nooa.theory_evaluation import SandboxTheoryEvaluator
 from tycho_nooa.theory_transaction import TheoryEvaluator
 from tycho_nooa.tools import WorkspaceToolSurface, actor_tool_profile
 from tycho_nooa.treatments import TreatmentPolicy, treatment_from_env
 from tycho_nooa.trigger_builder import BuilderExposure, TriggerBuilderLoop
+from tycho_nooa.trusted_runtime import TrustedRuntime, current_runtime, inspect_runtime
 from tycho_nooa.wm_probe import (
     GatedToolExecutor,
     ReadOnlyWorkspacePythonSandbox,
+    TrustedRuntimePythonSandbox,
 )
 
 LEVEL_COMPLETE_RECORD = "level_{level}/level_complete.json"
@@ -50,20 +52,28 @@ def _builder_runtime(
     control_executor: ToolExecutor,
     treatment: TreatmentPolicy,
     evaluator: TheoryEvaluator | None,
+    trusted_runtime: TrustedRuntime | None,
 ) -> tuple[ToolExecutor, TheoryEvaluator | None]:
     if not treatment.transactional_builder:
         return control_executor, evaluator
+    if trusted_runtime is None:
+        raise RuntimeError(
+            "transactional Builder requires a declared trusted runtime; "
+            "this legacy checkpoint has unknown helper provenance"
+        )
     builder_executor = GatedToolExecutor(
         workspace,
         wm_feedback_enabled=False,
         python_sandbox=ReadOnlyWorkspacePythonSandbox(),
     )
-    evaluator = evaluator or SandboxTheoryEvaluator(
-        ReadOnlyWorkspacePythonSandbox(),
-        allow_unsafe_host=(
-            os.environ.get("TYCHO_THEORY_EVALUATOR_ALLOW_HOST") == "1"
-        ),
-    )
+    if evaluator is None:
+        evaluator = SandboxTheoryEvaluator(
+            ReadOnlyWorkspacePythonSandbox(),
+            allow_unsafe_host=(
+                os.environ.get("TYCHO_THEORY_EVALUATOR_ALLOW_HOST") == "1"
+            ),
+            trusted_runtime=trusted_runtime,
+        )
     return builder_executor, evaluator
 
 
@@ -122,20 +132,6 @@ def _event_terminal(result: ActionResultMessage) -> str:
         return "game_over"
     completed = after.levels_completed > result.before.levels_completed
     return "level_complete" if completed or after.state.upper() == "WIN" else "nonterminal"
-
-
-def _seed_symmetry(workspace_dir: Path) -> None:
-    """Write `symmetry.py` next to Tycho's `wmlib.py`.
-
-    Kept a separate file rather than folded into wmlib because wmlib is upstream's:
-    `GameWorkspace._seed_worldmodel` rewrites it from `wmlib_template.py` on every fresh
-    start, so anything merged in would be overwritten or would fork 1,627 vendored lines.
-    Nothing is lost by the split — the two things the model needs, that the module is
-    preloaded and that it is described in run_python's tool text, are both arranged below.
-    """
-    (workspace_dir / "symmetry.py").write_text(
-        (Path(__file__).with_name("symmetry_template.py")).read_text()
-    )
 
 
 def _sibling_trace(path: Path | None, name: str) -> Path | None:
@@ -201,17 +197,23 @@ class TychoNooaAgent(Agent, context={"self": None, "state": None}):
             resume=resume_workspace,
         )
         if not resume_workspace:
-            _seed_symmetry(self._workspace.dir)
+            trusted_runtime = current_runtime()
+            trusted_runtime.write_to(self._workspace.dir)
+        else:
+            trusted_runtime = inspect_runtime(self._workspace.dir).runtime
         # One executor for both the actor's tool surface and the trigger builder's,
         # so the goal gate reaches every automatic world-model probe either issues.
         self._tool_executor = GatedToolExecutor(
-            self._workspace, wm_feedback_enabled=wm_enabled
+            self._workspace,
+            wm_feedback_enabled=wm_enabled,
+            python_sandbox=TrustedRuntimePythonSandbox(),
         )
         builder_executor, theory_evaluator = _builder_runtime(
             self._workspace,
             self._tool_executor,
             self._treatment,
             theory_evaluator,
+            trusted_runtime,
         )
         trace_path = Path(tool_trace_path) if tool_trace_path is not None else None
         self._goal_ledger = (
@@ -291,7 +293,7 @@ class TychoNooaAgent(Agent, context={"self": None, "state": None}):
         )
         return (
             f"{super()._resolve_system_prompt()}"
-            f"{treatment_prompt}\n\n{PROMPT_BRIEF}"
+            f"{treatment_prompt}\n\n{prompt_brief(self._workspace.dir)}"
         )
 
     @property

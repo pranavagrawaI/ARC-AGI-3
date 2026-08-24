@@ -15,6 +15,7 @@ from tycho_nooa.theory_evaluation import (
     TheoryEvaluation,
     compare,
 )
+from tycho_nooa.trusted_runtime import TrustedModule, TrustedRuntime, current_runtime
 
 
 def transition(name: str, status: ObligationStatus) -> ObligationResult:
@@ -265,6 +266,67 @@ def actions(state): return [{\"action\": \"RIGHT\", \"row\": None, \"col\": None
     assert len(transitions) == 1
     assert transitions[0].status is ObligationStatus.PASSED
     assert "L0:T1:RIGHT" in transitions[0].obligation_id
+
+
+def test_evaluator_supplies_the_declared_symmetry_runtime(tmp_path: Path) -> None:
+    workspace = observed_right_transition(tmp_path)
+    evaluator = SandboxTheoryEvaluator(
+        PythonSandbox(runtime="host"), allow_unsafe_host=True
+    )
+    exact_model = b"""import numpy as np
+import symmetry
+def init_state(grid, level): return np.asarray(grid).copy()
+def transition(state, action):
+    result = state.copy()
+    if symmetry.canon({(0, 0): 1}) and action["action"] == "RIGHT": result[0, 0] = 1
+    return result
+def render(state): return state
+def outcome(state): return "ongoing"
+def actions(state): return [{"action": "RIGHT", "row": None, "col": None}]
+"""
+
+    result = evaluator.evaluate(exact_model, EvidenceFrontier.freeze(workspace))
+
+    assert result.run_status is EvaluationRunStatus.COMPLETE
+
+
+def test_evaluator_uses_the_runtime_version_it_was_given(tmp_path: Path) -> None:
+    workspace = observed_right_transition(tmp_path)
+    current = current_runtime()
+    historical_modules = tuple(
+        TrustedModule.from_source(
+            module.path,
+            module.import_name,
+            module.provenance,
+            module.content + b"\nRUNTIME_TEST_MARKER = True\n",
+            module.availability,
+        )
+        if module.path == "symmetry.py"
+        else module
+        for module in current.modules
+    )
+    historical = TrustedRuntime.create(historical_modules)
+    evaluator = SandboxTheoryEvaluator(
+        PythonSandbox(runtime="host"),
+        allow_unsafe_host=True,
+        trusted_runtime=historical,
+    )
+    exact_model = b"""import numpy as np
+import symmetry
+assert symmetry.RUNTIME_TEST_MARKER
+def init_state(grid, level): return np.asarray(grid).copy()
+def transition(state, action):
+    result = state.copy()
+    if action["action"] == "RIGHT": result[0, 0] = 1
+    return result
+def render(state): return state
+def outcome(state): return "ongoing"
+def actions(state): return [{"action": "RIGHT", "row": None, "col": None}]
+"""
+
+    result = evaluator.evaluate(exact_model, EvidenceFrontier.freeze(workspace))
+
+    assert result.run_status is EvaluationRunStatus.COMPLETE
 
 
 def test_unknown_or_observation_variants_are_inconclusive_not_publishable(

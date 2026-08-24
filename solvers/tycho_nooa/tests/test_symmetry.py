@@ -217,6 +217,124 @@ def test_the_agent_seeds_symmetry_beside_wmlib(tmp_path):
     seeded = agent.workspace_dir / "symmetry.py"
     assert (agent.workspace_dir / "wmlib.py").exists()
     assert seeded.read_text() == Path(S.__file__).read_text()
+    assert (agent.workspace_dir / ".trusted-runtime.json").exists()
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "wmlib.py",
+        "symmetry.py",
+        ".trusted-runtime.json",
+        "notes/../symmetry.py",
+    ],
+)
+def test_models_cannot_modify_the_trusted_runtime(tmp_path, path):
+    from nooa.unifiedllm import FakeLLMClient
+
+    from tycho_nooa import TychoNooaAgent
+
+    agent = TychoNooaAgent(
+        llm=FakeLLMClient(scripted_responses=[]),
+        trigger_builder=False,
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+    )
+
+    with pytest.raises(PermissionError, match="trusted runtime"):
+        agent._tool_surface.write_file(path, "model-authored")
+
+
+def test_run_python_mounts_the_trusted_runtime_read_only(tmp_path):
+    from nooa.unifiedllm import FakeLLMClient
+
+    from tycho_nooa import TychoNooaAgent
+    from tycho_nooa.trusted_runtime import inspect_runtime
+
+    agent = TychoNooaAgent(
+        llm=FakeLLMClient(scripted_responses=[]),
+        trigger_builder=False,
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+    )
+    declared = inspect_runtime(agent.workspace_dir).runtime
+
+    result = agent._tool_surface.run_python(
+        "open('symmetry.py', 'w').write('# model-authored\\n')"
+    )
+
+    assert "PermissionError" in result or "Read-only file system" in result
+    assert inspect_runtime(agent.workspace_dir).runtime == declared
+
+
+def test_run_python_cannot_downgrade_the_manifest_then_edit_a_helper(tmp_path):
+    from nooa.unifiedllm import FakeLLMClient
+
+    from tycho_nooa import TychoNooaAgent
+    from tycho_nooa.trusted_runtime import inspect_runtime
+
+    agent = TychoNooaAgent(
+        llm=FakeLLMClient(scripted_responses=[]),
+        trigger_builder=False,
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+    )
+    declared = inspect_runtime(agent.workspace_dir).runtime
+
+    deletion = agent._tool_surface.run_python(
+        "import os; os.unlink('.trusted-runtime.json')"
+    )
+    mutation = agent._tool_surface.run_python(
+        "open('symmetry.py', 'w').write('# model-authored\\n')"
+    )
+
+    assert "PermissionError" in deletion or "Device or resource busy" in deletion
+    assert "PermissionError" in mutation or "Read-only file system" in mutation
+    assert inspect_runtime(agent.workspace_dir).runtime == declared
+
+
+def test_legacy_checkpoint_notice_does_not_claim_symmetry(tmp_path):
+    from tycho_nooa import symmetry_notice
+
+    (tmp_path / "symmetry.py").write_text("# historical and unverified\n")
+
+    assert "legacy/unknown" in symmetry_notice.prompt_brief(tmp_path)
+    tool_note = symmetry_notice.tool_note(tmp_path)["run_python"]
+    assert "unverified" in tool_note
+    assert "None" in tool_note
+
+
+def test_resumed_legacy_workspace_reports_unknown_runtime(tmp_path):
+    from nooa.unifiedllm import FakeLLMClient
+
+    from tycho_nooa import TychoNooaAgent
+
+    first = TychoNooaAgent(
+        llm=FakeLLMClient(scripted_responses=[]),
+        trigger_builder=False,
+        game_id="legacy-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+    )
+    (first.workspace_dir / ".trusted-runtime.json").unlink()
+
+    resumed = TychoNooaAgent(
+        llm=FakeLLMClient(scripted_responses=[]),
+        trigger_builder=False,
+        game_id="legacy-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+        resume_workspace=True,
+    )
+
+    assert "legacy/unknown" in resumed._resolve_system_prompt()
+    run_python = next(
+        tool for tool in resumed._tool_surface.native_tools() if tool.name == "run_python"
+    )
+    assert "unverified" in run_python.description
 
 
 def test_run_python_preloads_symmetry(tmp_path):

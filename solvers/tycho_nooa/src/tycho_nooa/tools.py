@@ -17,8 +17,9 @@ from tycho_nooa.epistemic import GoalToolSurface
 from tycho_nooa.models import ActionDecision, GameTurn
 from tycho_nooa.modes import ModePolicy
 from tycho_nooa.planner import PlannerIntegration, planner_command
-from tycho_nooa.symmetry_notice import TOOL_NOTE
+from tycho_nooa.symmetry_notice import tool_note
 from tycho_nooa.theory_transaction import TheoryTransaction
+from tycho_nooa.trusted_runtime import TRUSTED_PATHS
 
 
 class _Arguments(BaseModel):
@@ -279,6 +280,7 @@ class WorkspaceToolSurface:
     def native_tools(self) -> list[Tool]:
         """Return Tycho's generic tool names/descriptions as NOOA tools."""
         tools: list[Tool] = []
+        runtime_note = tool_note(self._executor.ws.dir)
         dispatch: dict[str, Callable[..., str | ActionDecision]] = {
             "ls": self.ls,
             "read_file": self.read_file,
@@ -305,7 +307,7 @@ class WorkspaceToolSurface:
             tools.append(
                 Tool(
                     name=name,
-                    description=spec["description"] + TOOL_NOTE.get(name, ""),
+                    description=spec["description"] + runtime_note.get(name, ""),
                     callable=dispatch[name],
                     parameters_model=_ARGUMENT_MODELS[name],
                 )
@@ -439,8 +441,9 @@ class WorkspaceToolSurface:
         return self._executor.execute("read_file", {"path": path})
 
     def write_file(self, path: str, content: str) -> str:
-        self._authorize_actor_write(path)
         self._authorize_transactional_builder_write(path)
+        self._authorize_trusted_runtime_write(path)
+        self._authorize_actor_write(path)
         return self._execute_theory_edit(
             "write_file",
             path,
@@ -450,8 +453,9 @@ class WorkspaceToolSurface:
         )
 
     def edit_file(self, path: str, old: str, new: str) -> str:
-        self._authorize_actor_write(path)
         self._authorize_transactional_builder_write(path)
+        self._authorize_trusted_runtime_write(path)
+        self._authorize_actor_write(path)
         return self._execute_theory_edit(
             "edit_file",
             path,
@@ -461,8 +465,9 @@ class WorkspaceToolSurface:
         )
 
     def edit_function(self, path: str, name: str, code: str) -> str:
-        self._authorize_actor_write(path)
         self._authorize_transactional_builder_write(path)
+        self._authorize_trusted_runtime_write(path)
+        self._authorize_actor_write(path)
         return self._execute_theory_edit(
             "edit_function",
             path,
@@ -470,6 +475,20 @@ class WorkspaceToolSurface:
                 "edit_function", {"path": path, "name": name, "code": code}
             ),
         )
+
+    def _authorize_trusted_runtime_write(self, path: str) -> None:
+        requested = Path(path.replace("\\", "/"))
+        workspace = self._executor.ws.dir.resolve()
+        candidate = (
+            requested.resolve()
+            if requested.is_absolute()
+            else (workspace / requested).resolve()
+        )
+        protected = {(workspace / name).resolve() for name in TRUSTED_PATHS}
+        if candidate in protected:
+            raise PermissionError(
+                f"cannot modify trusted runtime path {path!r}; runtime files are read-only"
+            )
 
     def _authorize_actor_write(self, path: str) -> None:
         if self._mode_policy is not None:

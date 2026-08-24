@@ -24,7 +24,7 @@ from tycho.workspace.agent_tools import ToolExecutor, canonical
 
 from tycho_nooa.history import replayed_reasoning, retain_assistant_turn
 from tycho_nooa.models import GameTurn
-from tycho_nooa.symmetry_notice import PROMPT_BRIEF
+from tycho_nooa.symmetry_notice import prompt_brief
 from tycho_nooa.theory_transaction import TheoryTransaction
 from tycho_nooa.tools import BUILDER_TOOL_PROFILE, WorkspaceToolSurface, tool_by_name
 
@@ -722,7 +722,10 @@ class FocusedBuilder(Agent, context={"self": None, "state": None}):
             if theory_transaction is not None
             else RETAINED_CANDIDATE_BRIEF
         )
-        self._builder_system_prompt = f"{system_prompt}\n\n{candidate_brief}\n\n{PROMPT_BRIEF}"
+        self._builder_system_prompt = (
+            f"{system_prompt}\n\n{candidate_brief}\n\n"
+            f"{prompt_brief(executor.ws.dir)}"
+        )
         self._executor = executor
         self._tool_surface = WorkspaceToolSurface(
             executor,

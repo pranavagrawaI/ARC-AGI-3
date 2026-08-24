@@ -26,12 +26,14 @@ from __future__ import annotations
 import ast
 import hashlib
 import inspect
+import shutil
 from pathlib import Path
 
 from tycho.workspace.agent_tools import ToolExecutor
 from tycho.workspace.sandbox import PythonSandbox, SandboxError
 
 from tycho_nooa import probe_gate
+from tycho_nooa.trusted_runtime import MANIFEST_PATH, inspect_runtime
 
 # Upstream's planner configuration block: the last statement before the probe's
 # planner machinery, and below the point where `wmlib` and `world_model` are both
@@ -98,6 +100,84 @@ class ReadOnlyWorkspacePythonSandbox(PythonSandbox):
         mount_index = command.index("--mount") + 1
         command[mount_index] = command[mount_index] + ",readonly"
         return command
+
+
+class TrustedRuntimePythonSandbox(PythonSandbox):
+    """Keep the workspace writable while mounting declared runtime files read-only."""
+
+    def command(self, workspace, script, *, name, args=()):
+        command = super().command(workspace, script, name=name, args=args)
+        runtime = inspect_runtime(Path(workspace)).runtime
+        if runtime is None:
+            return command
+        root = Path(workspace).resolve()
+        paths = (
+            root / MANIFEST_PATH,
+            *(root / module.path for module in runtime.modules),
+        )
+        if self.runtime == "host":
+            return _host_runtime_command(root, paths, command)
+        return _container_runtime_command(self.image, paths, command)
+
+
+def _host_runtime_command(
+    workspace: Path, protected_paths: tuple[Path, ...], command: list[str]
+) -> list[str]:
+    bwrap = shutil.which("bwrap")
+    if bwrap is None:
+        raise SandboxError(
+            "host run_python requires bubblewrap to protect the trusted runtime"
+        )
+    return _bubblewrap_command(bwrap, workspace, protected_paths, command)
+
+
+def _container_runtime_command(
+    image: str, protected_paths: tuple[Path, ...], command: list[str]
+) -> list[str]:
+    image_index = command.index(image)
+    mounts = [
+        argument
+        for path in protected_paths
+        for argument in (
+            "--mount",
+            f"type=bind,src={path},dst=/workspace/{path.name},readonly",
+        )
+    ]
+    command[image_index:image_index] = mounts
+    return command
+
+
+def _bubblewrap_command(
+    bwrap: str,
+    workspace: Path,
+    protected_paths: tuple[Path, ...],
+    command: list[str],
+) -> list[str]:
+    mounts = [
+        argument
+        for path in protected_paths
+        for argument in ("--ro-bind", str(path), str(path))
+    ]
+    return [
+        bwrap,
+        "--die-with-parent",
+        "--unshare-net",
+        "--ro-bind",
+        "/",
+        "/",
+        "--dev",
+        "/dev",
+        "--proc",
+        "/proc",
+        "--tmpfs",
+        "/tmp",
+        "--bind",
+        str(workspace),
+        str(workspace),
+        *mounts,
+        "--",
+        *command,
+    ]
 
 
 def gated_probe_source() -> str:

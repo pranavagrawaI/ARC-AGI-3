@@ -18,6 +18,10 @@ The three channels, and who reads each:
 Kept here rather than beside each use so the three cannot drift apart.
 """
 
+from pathlib import Path
+
+from tycho_nooa.trusted_runtime import RuntimeState, inspect_runtime
+
 # Deliberately terse: this rides on every run_python description, on every call, forever.
 TOOL_NOTE = {
     "run_python": (
@@ -75,3 +79,34 @@ quotients is the modelling act, and it is yours. If a goal hypothesis in your no
 form "X ends up matching Y", `symmetry` is how you turn it into a test you can run instead of
 a sentence you leave open. Read symmetry.py's docstring for the traps.
 """.strip()
+
+LEGACY_TOOL_NOTE = {
+    "run_python": (
+        " This resumed checkpoint has no trusted-runtime manifest. Any `wmlib` or "
+        "`symmetry` file present has unverified provenance; `symmetry` may therefore be "
+        "unavailable (the preload falls back to None). Inspect before relying on it."
+    )
+}
+
+LEGACY_PROMPT_BRIEF = """
+TRUSTED RUNTIME STATUS: legacy/unknown. This resumed checkpoint has no runtime manifest,
+so the host cannot claim byte-exact `wmlib` or `symmetry` availability. Files with those
+names, if present, are historical and unverified. Inspect them before use; `symmetry` may be
+unavailable and its run_python preload may be None.
+""".strip()
+
+
+def tool_note(workspace: Path) -> dict[str, str]:
+    return (
+        TOOL_NOTE
+        if inspect_runtime(workspace).state is RuntimeState.DECLARED
+        else LEGACY_TOOL_NOTE
+    )
+
+
+def prompt_brief(workspace: Path) -> str:
+    return (
+        PROMPT_BRIEF
+        if inspect_runtime(workspace).state is RuntimeState.DECLARED
+        else LEGACY_PROMPT_BRIEF
+    )

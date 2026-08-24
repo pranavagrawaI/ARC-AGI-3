@@ -10,10 +10,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
-from tycho.workspace import wmlib_template
 from tycho.workspace.sandbox import PythonSandbox
 
-from tycho_nooa import probe_gate
+from tycho_nooa.trusted_runtime import TrustedRuntime, current_runtime
 
 _RESULT_PREFIX = "THEORY_EVALUATION_JSON="
 
@@ -147,18 +146,17 @@ class SandboxTheoryEvaluator:
         sandbox: PythonSandbox | None = None,
         *,
         allow_unsafe_host: bool = False,
+        trusted_runtime: TrustedRuntime | None = None,
     ) -> None:
         self._sandbox = sandbox or PythonSandbox()
         self._allow_unsafe_host = allow_unsafe_host
-        self._probe_source = (
-            Path(__file__).with_name("templates")
-            / "theory_evaluation_probe.py.tmpl"
-        ).read_bytes()
-        self._wmlib_source = Path(wmlib_template.__file__).read_bytes()
-        self._planner_source = Path(probe_gate.__file__).read_bytes()
+        self._trusted_runtime = trusted_runtime or current_runtime()
         self.evaluator_sha256 = hashlib.sha256(
             b"\0".join(
-                (self._probe_source, self._wmlib_source, self._planner_source)
+                (
+                    self._trusted_runtime.manifest_bytes(),
+                    *(module.content for module in self._trusted_runtime.modules),
+                )
             )
         ).hexdigest()
 
@@ -255,12 +253,18 @@ class SandboxTheoryEvaluator:
         model: bytes,
         frontier: EvidenceFrontier,
     ) -> None:
-        for name, content in (
+        fixed_files = (
             ("world_model.py", model),
-            ("wmlib.py", self._wmlib_source),
-            ("host_planner_contract.py", self._planner_source),
-            ("theory_probe.py", self._probe_source),
-        ):
+            *(
+                (module.path, module.content)
+                for module in self._trusted_runtime.modules
+            ),
+            (
+                ".trusted-runtime.json",
+                self._trusted_runtime.manifest_bytes(),
+            ),
+        )
+        for name, content in fixed_files:
             (bundle / name).write_bytes(content)
         for item in frontier.files:
             path = bundle / item.path
