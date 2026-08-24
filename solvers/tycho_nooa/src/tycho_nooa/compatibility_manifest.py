@@ -96,6 +96,7 @@ class CompatibilityExperimentManifest(BaseModel):
     execution_projection: FileCommitment | None = None
     sterile_executor: FileCommitment | None = None
     sterile_worker: FileCommitment | None = None
+    return_contract_module: FileCommitment | None = None
     return_schema_sha256: str | None = Field(
         default=None, pattern=r"^sha256:[0-9a-f]{64}$"
     )
@@ -160,6 +161,7 @@ def load_compatibility_experiment_manifest(
         manifest.execution_projection,
         manifest.sterile_executor,
         manifest.sterile_worker,
+        manifest.return_contract_module,
     ):
         if commitment is not None:
             _validate_file(commitment, repository_root)
@@ -216,6 +218,7 @@ def _schema_v5_is_fully_bound(manifest: CompatibilityExperimentManifest) -> bool
     return (
         _schema_v4_is_fully_bound(manifest)
         and manifest.return_contract == "retrieval_flat"
+        and manifest.return_contract_module is not None
     )
 
 
@@ -229,7 +232,9 @@ def _validate_schema_bindings(manifest: CompatibilityExperimentManifest) -> None
     if manifest.schema_version == 4 and not _schema_v4_is_fully_bound(manifest):
         raise ValueError("schema v4 must also bind the sterile worker")
     if manifest.schema_version == 5 and not _schema_v5_is_fully_bound(manifest):
-        raise ValueError("schema v5 must bind the flat retrieval return contract")
+        raise ValueError(
+            "schema v5 must bind the flat retrieval return contract and module"
+        )
 
 
 def _return_schema_sha256(manifest: CompatibilityExperimentManifest) -> str:

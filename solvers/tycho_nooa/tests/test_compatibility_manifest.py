@@ -194,6 +194,11 @@ def test_schema_v5_requires_and_checks_flat_retrieval_contract() -> None:
         CompatibilityExperimentManifest.model_validate(raw)
 
     raw["return_contract"] = "retrieval_flat"
+
+    with pytest.raises(ValidationError, match="contract and module"):
+        CompatibilityExperimentManifest.model_validate(raw)
+
+    raw["return_contract_module"] = raw["gate_executor"]
     manifest = CompatibilityExperimentManifest.model_validate(raw)
 
     assert manifest.return_contract == "retrieval_flat"
