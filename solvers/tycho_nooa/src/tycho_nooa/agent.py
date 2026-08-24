@@ -29,9 +29,9 @@ from tycho_nooa.llm_trace import LLMTrace
 from tycho_nooa.models import ActionDecision, GameTurn
 from tycho_nooa.modes import ModePolicy, mode_from_env, world_model_enabled
 from tycho_nooa.protocol import ActionResultMessage
+from tycho_nooa.runtime_notice import prompt_brief
 from tycho_nooa.scribe import ScribeConfig, ScribeStrategy
 from tycho_nooa.strategy import NativeToolConfig, NativeToolStrategy
-from tycho_nooa.symmetry_notice import prompt_brief
 from tycho_nooa.theory_evaluation import SandboxTheoryEvaluator
 from tycho_nooa.theory_transaction import TheoryEvaluator
 from tycho_nooa.tools import WorkspaceToolSurface, actor_tool_profile

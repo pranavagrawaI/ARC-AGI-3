@@ -24,7 +24,7 @@ from tycho.workspace.agent_tools import ToolExecutor, canonical
 
 from tycho_nooa.history import replayed_reasoning, retain_assistant_turn
 from tycho_nooa.models import GameTurn
-from tycho_nooa.symmetry_notice import prompt_brief
+from tycho_nooa.runtime_notice import prompt_brief
 from tycho_nooa.theory_transaction import TheoryTransaction
 from tycho_nooa.tools import BUILDER_TOOL_PROFILE, WorkspaceToolSurface, tool_by_name
 

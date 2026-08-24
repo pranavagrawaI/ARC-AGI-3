@@ -17,7 +17,7 @@ from tycho_nooa.epistemic import GoalToolSurface
 from tycho_nooa.models import ActionDecision, GameTurn
 from tycho_nooa.modes import ModePolicy
 from tycho_nooa.planner import PlannerIntegration, planner_command
-from tycho_nooa.symmetry_notice import tool_note
+from tycho_nooa.runtime_notice import tool_note
 from tycho_nooa.theory_transaction import TheoryTransaction
 from tycho_nooa.trusted_runtime import TRUSTED_PATHS
 

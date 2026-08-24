@@ -1,4 +1,4 @@
-"""What the model is told about `symmetry.py`, in the one place that says it.
+"""What the model is told about workspace mathematics, in the one place that says it.
 
 A seeded file the model never hears about is a file it never opens, and this project has
 already paid for that once: the durable-surface nulls were void because the models could not
@@ -23,20 +23,27 @@ from pathlib import Path
 from tycho_nooa.trusted_runtime import RuntimeState, inspect_runtime
 
 # Deliberately terse: this rides on every run_python description, on every call, forever.
-TOOL_NOTE = {
-    "run_python": (
-        " `symmetry` is also preloaded, for comparing two spatial arrangements: "
-        "`symmetry.canon(fig, point='full'|'rotations'|'halfturn'|'none', translate=True|False, "
-        "scale=True|False, colours='fixed'|'any')` returns a canonical form, and two figures "
-        "are the same — under the quotients you chose — iff their canonical forms are ==. "
-        "A figure is a dict {(y, x): colour}. "
-        "`congruent`/`similar`/`chiral`/`enantiomorphic` are one-line presets over it, and "
-        "`stabiliser`/`transporter`/`orbit` say which of the square's eight symmetries fix a "
-        "figure, carry one onto another, or are reachable. There is no helper for this game's "
-        "win condition: choose the four quotients yourself and read symmetry.py's docstring "
-        "for what each one decides."
-    )
-}
+_SYMMETRY_TOOL_NOTE = (
+    " `symmetry` is also preloaded, for comparing two spatial arrangements: "
+    "`symmetry.canon(fig, point='full'|'rotations'|'halfturn'|'none', translate=True|False, "
+    "scale=True|False, colours='fixed'|'any')` returns a canonical form, and two figures "
+    "are the same — under the quotients you chose — iff their canonical forms are ==. "
+    "A figure is a dict {(y, x): colour}. "
+    "`congruent`/`similar`/`chiral`/`enantiomorphic` are one-line presets over it, and "
+    "`stabiliser`/`transporter`/`orbit` say which of the square's eight symmetries fix a "
+    "figure, carry one onto another, or are reachable. There is no helper for this game's "
+    "win condition: choose the four quotients yourself and read symmetry.py's docstring "
+    "for what each one decides."
+)
+_DYNAMICS_TOOL_NOTE = (
+    " `dynamics` is preloaded too. Use `dynamics.key_counterexample(model, "
+    "[left, right], actions=..., max_depth=...)` for the shortest bounded suffix "
+    "that refutes a planner-key merge, and `dynamics.action_laws(model, states, "
+    "actions=..., projection=..., representation='name')` for bounded idempotence, inverse, commutation, "
+    "and many-to-one certificates. No separator within a bound is inconclusive, "
+    "never proof of equivalence."
+)
+TOOL_NOTE = {"run_python": _SYMMETRY_TOOL_NOTE + _DYNAMICS_TOOL_NOTE}
 
 # The four quotients are named here, not just pointed at, because the choice IS the work:
 # every named relation in the library is one line over canon with these four fixed.
@@ -47,7 +54,7 @@ TOOL_NOTE = {
 # one takes an object and the other a string. The library now accepts the names as well --
 # both halves of that fix matter, because a brief that hides the vocabulary costs a turn
 # even when the call would have worked.
-PROMPT_BRIEF = """
+_SYMMETRY_PROMPT_BRIEF = """
 The workspace also holds `symmetry.py`, which is preloaded into every run_python call as
 `symmetry` alongside `grid`, `np` and `wmlib` — any preload list you were given elsewhere
 predates it. It answers "are these two spatial arrangements the same?", which `wmlib` does
@@ -80,33 +87,68 @@ form "X ends up matching Y", `symmetry` is how you turn it into a test you can r
 a sentence you leave open. Read symmetry.py's docstring for the traps.
 """.strip()
 
+_DYNAMICS_PROMPT_BRIEF = """
+The workspace also preloads `dynamics`. It tests a candidate transition system without
+choosing the model, states, actions, or representation for you:
+
+  dynamics.key_counterexample(model, [left, right], actions=..., max_depth=4)
+  dynamics.action_laws(model, states, actions=..., projection=..., representation='position')
+
+The first returns the shortest tested action suffix that distinguishes two states merged by
+the chosen planner key. The second returns bounded certificates for idempotence, directional
+inverse laws, commutation, and many-to-one behaviour. A certificate marked `supported` is
+supported only on its recorded finite domain and named projection. Name every custom
+`projection` or `observe` with `representation=...`. No separator within a bound is
+`inconclusive`, never proof of equivalence. Read dynamics.py's docstring before relying on a
+certificate.
+""".strip()
+
+PROMPT_BRIEF = f"{_SYMMETRY_PROMPT_BRIEF}\n\n{_DYNAMICS_PROMPT_BRIEF}"
+HISTORICAL_TOOL_NOTE = {
+    "run_python": (
+        _SYMMETRY_TOOL_NOTE
+        + " This declared exact runtime predates `dynamics.py`; the `dynamics` preload is None."
+    )
+}
+HISTORICAL_PROMPT_BRIEF = f"""{_SYMMETRY_PROMPT_BRIEF}
+
+TRUSTED RUNTIME STATUS: this declared exact version predates `dynamics.py`; its `dynamics`
+preload is None. Resume remains on that version rather than silently changing its mathematics.
+"""
+
 LEGACY_TOOL_NOTE = {
     "run_python": (
-        " This resumed checkpoint has no trusted-runtime manifest. Any `wmlib` or "
-        "`symmetry` file present has unverified provenance; `symmetry` may therefore be "
-        "unavailable (the preload falls back to None). Inspect before relying on it."
+        " This resumed checkpoint has no trusted-runtime manifest. Any `wmlib`, "
+        "`symmetry`, or `dynamics` file present has unverified provenance; either "
+        "mathematics preload may therefore be None. Inspect before relying on it."
     )
 }
 
 LEGACY_PROMPT_BRIEF = """
 TRUSTED RUNTIME STATUS: legacy/unknown. This resumed checkpoint has no runtime manifest,
-so the host cannot claim byte-exact `wmlib` or `symmetry` availability. Files with those
-names, if present, are historical and unverified. Inspect them before use; `symmetry` may be
-unavailable and its run_python preload may be None.
+so the host cannot claim byte-exact `wmlib`, `symmetry`, or `dynamics` availability. Files
+with those names, if present, are historical and unverified. Inspect them before use; either
+mathematics preload may be None.
 """.strip()
 
 
 def tool_note(workspace: Path) -> dict[str, str]:
-    return (
-        TOOL_NOTE
-        if inspect_runtime(workspace).state is RuntimeState.DECLARED
-        else LEGACY_TOOL_NOTE
-    )
+    inspection = inspect_runtime(workspace)
+    if inspection.state is not RuntimeState.DECLARED:
+        return LEGACY_TOOL_NOTE
+    if inspection.runtime is not None and any(
+        module.path == "dynamics.py" for module in inspection.runtime.modules
+    ):
+        return TOOL_NOTE
+    return HISTORICAL_TOOL_NOTE
 
 
 def prompt_brief(workspace: Path) -> str:
-    return (
-        PROMPT_BRIEF
-        if inspect_runtime(workspace).state is RuntimeState.DECLARED
-        else LEGACY_PROMPT_BRIEF
-    )
+    inspection = inspect_runtime(workspace)
+    if inspection.state is not RuntimeState.DECLARED:
+        return LEGACY_PROMPT_BRIEF
+    if inspection.runtime is not None and any(
+        module.path == "dynamics.py" for module in inspection.runtime.modules
+    ):
+        return PROMPT_BRIEF
+    return HISTORICAL_PROMPT_BRIEF

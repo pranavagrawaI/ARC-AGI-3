@@ -27,7 +27,7 @@ from tycho_nooa.builder import (
     _builder_budget_notice,
 )
 from tycho_nooa.deadlines import DecisionDeadlineConfig
-from tycho_nooa.symmetry_notice import PROMPT_BRIEF
+from tycho_nooa.runtime_notice import PROMPT_BRIEF
 from tycho_nooa.theory_evaluation import (
     EvaluationRunStatus,
     EvidenceFrontier,

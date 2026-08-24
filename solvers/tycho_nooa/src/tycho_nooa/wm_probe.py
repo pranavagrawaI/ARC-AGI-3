@@ -196,14 +196,18 @@ def gated_probe_source() -> str:
 class GatedToolExecutor(ToolExecutor):
     """Tycho's tool executor, running the gated probe in place of the upstream one."""
 
-    # `symmetry` joins upstream's preloaded `np`/`wmlib`/`grid`. A helper the model has to
-    # remember to import is a helper it does not use; the guard keeps a workspace that was
-    # never seeded (tests, bare dirs) from breaking every run_python call.
+    # Workspace mathematics joins upstream's preloaded `np`/`wmlib`/`grid`. A helper the
+    # model has to remember to import is a helper it does not use; the guards also preserve
+    # exact historical runtimes that predate one of the current modules.
     _PREAMBLE = ToolExecutor._PREAMBLE + (
         "try:\n"
         "    import symmetry\n"
         "except Exception:\n"
         "    symmetry = None\n"
+        "try:\n"
+        "    import dynamics\n"
+        "except Exception:\n"
+        "    dynamics = None\n"
     )
 
     def _wm_feedback(

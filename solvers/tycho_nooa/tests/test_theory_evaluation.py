@@ -268,17 +268,20 @@ def actions(state): return [{\"action\": \"RIGHT\", \"row\": None, \"col\": None
     assert "L0:T1:RIGHT" in transitions[0].obligation_id
 
 
-def test_evaluator_supplies_the_declared_symmetry_runtime(tmp_path: Path) -> None:
+def test_evaluator_supplies_the_declared_mathematics_runtime(tmp_path: Path) -> None:
     workspace = observed_right_transition(tmp_path)
     evaluator = SandboxTheoryEvaluator(
         PythonSandbox(runtime="host"), allow_unsafe_host=True
     )
     exact_model = b"""import numpy as np
+import dynamics
 import symmetry
 def init_state(grid, level): return np.asarray(grid).copy()
 def transition(state, action):
     result = state.copy()
-    if symmetry.canon({(0, 0): 1}) and action["action"] == "RIGHT": result[0, 0] = 1
+    identity = type("Identity", (), {"transition": staticmethod(lambda s, a: s)})()
+    checked = dynamics.action_laws(identity, [0], actions=["WAIT"])
+    if checked and symmetry.canon({(0, 0): 1}) and action["action"] == "RIGHT": result[0, 0] = 1
     return result
 def render(state): return state
 def outcome(state): return "ongoing"

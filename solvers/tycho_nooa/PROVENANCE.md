@@ -104,7 +104,7 @@
   structural-unreachability reason given there.
 - builder reuse: the system and kickoff messages are rendered directly from
   pinned `tycho/prompts/builder.system.j2` and `builder.user.j2` — the system
-  message with `symmetry_notice.prompt_brief(...)` appended, because that template
+  message with `runtime_notice.prompt_brief(...)` appended, because that template
   enumerates run_python's preloads as a closed list written before `symmetry`
   existed, so leaving it alone would have told the builder the module is not
   there; the
@@ -112,7 +112,7 @@
   `tycho.agent.builder._verify_state`; and the mandatory report path is pinned
   `tycho.agent.builder.REPORT_FILE`.
 - semantic parity: the tool names and descriptions come from Tycho's
-  `tool_specs("generic")`, with `symmetry_notice.tool_note(...)` appended to
+  `tool_specs("generic")`, with `runtime_notice.tool_note(...)` appended to
   `run_python` only; the actor receives Tycho's default generic surface,
   while the builder uses Tycho's builder flags (`include_edit_func=True`,
   `include_take_action=False`, `include_set_verbosity=False`). Non-action
@@ -413,30 +413,36 @@
   tests control flow and metric capture only, never objective-inference
   capability. See `tests/test_matched_replay.py`.
 
-Added beside upstream, not into it: `symmetry_template.py` is ours while
-`wmlib_template.py` remains pinned Tycho. `tycho_nooa.trusted_runtime` preserves those
-separate sources under one versioned runtime contract. A fresh agent writes the exact helper
+Added beside upstream, not into it: `symmetry_template.py` and
+`dynamics_template.py` are ours while `wmlib_template.py` remains pinned Tycho.
+`tycho_nooa.trusted_runtime` preserves those separate sources under one versioned runtime
+contract. A fresh agent writes the exact helper
 bytes plus `.trusted-runtime.json`; the manifest commits each module's provenance, SHA-256,
 availability, read-only integrity, and exact-version restore policy. It also commits the
 transaction evaluator's `host_planner_contract.py` and `theory_probe.py`, so the evaluator
 constructs its fixed bundle by iterating the same manifest rather than maintaining a second
-helper list. A resumed workspace restores and validates its declared bytes. A historical
-workspace without metadata remains `legacy/unknown`, makes no symmetry claim, and cannot
-enter transactional publication.
+helper list. Runtime inspection has three explicit outcomes: a fresh or resumed current
+declaration validates the complete byte-exact runtime including `dynamics.py`; an exact P0
+declaration resumes its original byte-exact runtime without dynamics; and a historical
+workspace without metadata remains `legacy/unknown`, makes no mathematics claim, and cannot
+enter transactional publication. The historical P0 branch is declared and trusted for what
+it contains, but is never silently upgraded to a different mathematical runtime.
 
 The trusted files are denied at the Actor/Builder file gateway. `run_python` receives the
 same declared files through read-only bind mounts (bubblewrap for the trusted-development
 host runtime, per-file container mounts otherwise), closing the file-tool bypass without
-making the rest of the workspace read-only. `GatedToolExecutor._PREAMBLE` still appends the
-symmetry import to upstream's. Verified by `tests/test_trusted_runtime.py` and the wiring and
-mathematical tests in `tests/test_symmetry.py`.
+making the rest of the workspace read-only. `GatedToolExecutor._PREAMBLE` appends the
+symmetry and dynamics imports to upstream's; an exact declared runtime that predates dynamics
+retains `dynamics = None` rather than being silently upgraded. Verified by
+`tests/test_trusted_runtime.py` and the wiring and mathematical tests in
+`tests/test_symmetry.py` and `tests/test_dynamics.py`.
 
-Telling the model it exists is a separate problem from seeding it, and needed three channels,
-all sourced from `symmetry_notice.py` so they cannot drift: `tool_note(...)` on `run_python`,
+Telling the model the mathematics exists is a separate problem from seeding it, and needed
+three channels, all sourced from `runtime_notice.py` so they cannot drift: `tool_note(...)` on `run_python`,
 and `prompt_brief(...)` appended to both system prompts — the actor's via
 `TychoNooaAgent._resolve_system_prompt`, the builder's via `FocusedBuilder.__init__`. The
-functions select the full symmetry contract only for a validated declared runtime and select
-an explicit legacy/unknown warning otherwise. The
+functions distinguish all three runtime outcomes: the complete current contract, a truthful
+historical P0 notice with no dynamics preload, and an explicit legacy/unknown warning. The
 builder channel is the load-bearing one: `builder.system.j2` lists run_python's preloads as
 `grid`, `np`, `wmlib`, `frames`/`transitions` and nothing else, so an unamended prompt does not
 merely omit `symmetry`, it denies it. A tool description is read when choosing a tool; a system

@@ -26,6 +26,7 @@ def test_current_runtime_has_a_versioned_byte_exact_manifest(tmp_path: Path) -> 
     assert manifest["restore_policy"] == "exact_version"
     assert "transaction_evaluator" in manifest["availability"]
     assert {module["path"] for module in manifest["modules"]} == {
+        "dynamics.py",
         "wmlib.py",
         "symmetry.py",
         "host_planner_contract.py",
@@ -66,11 +67,13 @@ def test_checkpoint_without_manifest_is_legacy_unknown(tmp_path: Path) -> None:
     assert inspection.observed_paths == ("symmetry.py", "wmlib.py")
 
 
-def test_runtime_constructor_rejects_unsafe_or_incomplete_modules() -> None:
+def test_runtime_constructor_rejects_unsafe_or_duplicate_modules() -> None:
     from tycho_nooa.trusted_runtime import TrustedModule, TrustedRuntime
 
     module = current_runtime().modules[0]
-    with pytest.raises(TrustedRuntimeError, match="each required module"):
+    with pytest.raises(TrustedRuntimeError, match="at most once"):
+        TrustedRuntime.create((module, module))
+    with pytest.raises(TrustedRuntimeError, match="unsupported.*module set"):
         TrustedRuntime.create((module,))
     with pytest.raises(TrustedRuntimeError, match="identity"):
         TrustedModule.from_source("../escape.py", "escape", "model", b"bad")

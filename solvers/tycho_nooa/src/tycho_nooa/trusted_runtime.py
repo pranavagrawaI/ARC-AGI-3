@@ -15,6 +15,11 @@ from tycho.workspace import wmlib_template
 MANIFEST_PATH = ".trusted-runtime.json"
 SCHEMA_VERSION = 1
 _MODULE_CONTRACTS = {
+    "dynamics.py": (
+        "dynamics",
+        "tycho_nooa.dynamics_template",
+        ("actor", "builder", "verifier", "planner", "transaction_evaluator"),
+    ),
     "wmlib.py": (
         "wmlib",
         "tycho.workspace.wmlib_template",
@@ -37,6 +42,10 @@ _MODULE_CONTRACTS = {
     ),
 }
 RUNTIME_MODULE_PATHS = frozenset(_MODULE_CONTRACTS)
+_SUPPORTED_RUNTIME_MODULE_SETS = {
+    frozenset(RUNTIME_MODULE_PATHS - {"dynamics.py"}),  # P0 exact runtime
+    RUNTIME_MODULE_PATHS,  # P1 current runtime
+}
 TRUSTED_PATHS = RUNTIME_MODULE_PATHS | {MANIFEST_PATH}
 
 
@@ -106,8 +115,10 @@ class TrustedRuntime:
 
     def __post_init__(self) -> None:
         paths = tuple(module.path for module in self.modules)
-        if len(paths) != len(set(paths)) or set(paths) != RUNTIME_MODULE_PATHS:
-            raise TrustedRuntimeError("trusted runtime must contain each required module once")
+        if len(paths) != len(set(paths)):
+            raise TrustedRuntimeError("trusted runtime must contain known modules at most once")
+        if frozenset(paths) not in _SUPPORTED_RUNTIME_MODULE_SETS:
+            raise TrustedRuntimeError("unsupported trusted runtime module set")
         if self.sha256 != _commitment(_manifest_body(self.modules)):
             raise TrustedRuntimeError("trusted runtime commitment does not match its modules")
 
@@ -155,6 +166,12 @@ class RuntimeInspection:
 def current_runtime() -> TrustedRuntime:
     return TrustedRuntime.create(
         (
+            TrustedModule.from_source(
+                "dynamics.py",
+                "dynamics",
+                "tycho_nooa.dynamics_template",
+                Path(__file__).with_name("dynamics_template.py").read_bytes(),
+            ),
             TrustedModule.from_source(
                 "wmlib.py",
                 "wmlib",
@@ -205,10 +222,7 @@ def _load_declared_modules(
     workspace: Path, manifest: object
 ) -> tuple[TrustedModule, ...]:
     entries = _manifest_entries(manifest)
-    modules = tuple(_load_declared_module(workspace, entry) for entry in entries)
-    if {module.path for module in modules} != RUNTIME_MODULE_PATHS:
-        raise TrustedRuntimeError(f"{MANIFEST_PATH} does not declare the complete runtime")
-    return modules
+    return tuple(_load_declared_module(workspace, entry) for entry in entries)
 
 
 def _manifest_entries(manifest: object) -> list[dict[str, object]]:

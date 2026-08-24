@@ -223,6 +223,7 @@ def test_the_agent_seeds_symmetry_beside_wmlib(tmp_path):
 @pytest.mark.parametrize(
     "path",
     [
+        "dynamics.py",
         "wmlib.py",
         "symmetry.py",
         ".trusted-runtime.json",
@@ -297,12 +298,12 @@ def test_run_python_cannot_downgrade_the_manifest_then_edit_a_helper(tmp_path):
 
 
 def test_legacy_checkpoint_notice_does_not_claim_symmetry(tmp_path):
-    from tycho_nooa import symmetry_notice
+    from tycho_nooa import runtime_notice
 
     (tmp_path / "symmetry.py").write_text("# historical and unverified\n")
 
-    assert "legacy/unknown" in symmetry_notice.prompt_brief(tmp_path)
-    tool_note = symmetry_notice.tool_note(tmp_path)["run_python"]
+    assert "legacy/unknown" in runtime_notice.prompt_brief(tmp_path)
+    tool_note = runtime_notice.tool_note(tmp_path)["run_python"]
     assert "unverified" in tool_note
     assert "None" in tool_note
 
@@ -435,13 +436,13 @@ def test_the_builder_shares_the_actors_symmetry_aware_tool_surface(tmp_path):
 
 def test_the_three_channels_have_one_source(tmp_path):
     """Three places tell the model about symmetry. They drift unless they share a source."""
-    from tycho_nooa import symmetry_notice
+    from tycho_nooa import runtime_notice
 
     agent, builder = _agent_and_builder(tmp_path)
     described = {t.name: t.description for t in agent._tool_surface.native_tools()}
-    assert described["run_python"].endswith(symmetry_notice.TOOL_NOTE["run_python"])
-    assert agent._resolve_system_prompt().endswith(symmetry_notice.PROMPT_BRIEF)
-    assert builder._resolve_system_prompt().endswith(symmetry_notice.PROMPT_BRIEF)
+    assert described["run_python"].endswith(runtime_notice.TOOL_NOTE["run_python"])
+    assert agent._resolve_system_prompt().endswith(runtime_notice.PROMPT_BRIEF)
+    assert builder._resolve_system_prompt().endswith(runtime_notice.PROMPT_BRIEF)
 
 
 # --- what the first live run broke on ------------------------------------------------
