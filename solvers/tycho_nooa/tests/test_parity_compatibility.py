@@ -6,8 +6,9 @@ from pathlib import Path
 import pytest
 from tycho.workspace.workspace import GameWorkspace
 
-from tycho_nooa.cognitive_parity import RetrievalAnswer, tree_sha256
-from tycho_nooa.evidence import EvidenceRef, WorkspaceEvidenceCapability
+from tycho_nooa.cognitive_parity import tree_sha256
+from tycho_nooa.compatibility_return import IdentifierBindingReturn, TerminationReturn
+from tycho_nooa.evidence import WorkspaceEvidenceCapability
 from tycho_nooa.parity_compatibility import (
     CompatibilityEvidenceCapability,
     CompatibilityEvidencePolicy,
@@ -26,10 +27,10 @@ def termination_gate() -> CompatibilityGate:
             gate_id="g0-termination",
             gate_kind="termination",
             instruction="Return READY.",
-            inputs={"supplied_answer": "READY"},
+            inputs={"supplied_answer": True},
         ),
         evidence=CompatibilityEvidencePolicy(enabled=False, max_queries=0),
-        expected=CompatibilityExpected(conclusion="READY"),
+        expected=CompatibilityExpected(ok=True),
     )
 
 
@@ -51,7 +52,7 @@ def test_treatment_payload_excludes_checkpoint_and_answer_key() -> None:
 
     visible = gate.treatment_payload()
 
-    assert visible["task"]["inputs"] == {"supplied_answer": "READY"}
+    assert visible["task"]["inputs"] == {"supplied_answer": True}
     assert visible["evidence_contract"]["enabled"] is False
     assert visible["evidence_contract"]["max_successful_disclosures"] == 0
     assert "max_queries" not in visible["evidence_contract"]
@@ -62,10 +63,10 @@ def test_treatment_payload_excludes_checkpoint_and_answer_key() -> None:
         checkpoint_root="checkpoint",
         checkpoint_sha256="sha256:" + "0" * 64,
         task=CompatibilityTask(
-            gate_id="g1", gate_kind="metadata_query", instruction="Query metadata."
+            gate_id="g1", gate_kind="capability_retrieval", instruction="Query metadata."
         ),
         evidence=metadata_policy(),
-        expected=CompatibilityExpected(conclusion="LEFT"),
+        expected=CompatibilityExpected(evidence_ref="L0:T1"),
     )
     assert "grid_encoding" not in metadata_gate.treatment_payload()[
         "evidence_contract"
@@ -76,10 +77,10 @@ def test_gate_topology_requires_checkpoint_exactly_when_evidence_is_enabled() ->
     with pytest.raises(ValueError, match="requires a frozen checkpoint"):
         CompatibilityGate(
             task=CompatibilityTask(
-                gate_id="g1", gate_kind="metadata_query", instruction="Query once."
+                gate_id="g1", gate_kind="capability_retrieval", instruction="Query once."
             ),
             evidence=metadata_policy(),
-            expected=CompatibilityExpected(conclusion="LEFT"),
+            expected=CompatibilityExpected(evidence_ref="L0:T1"),
         )
 
     with pytest.raises(ValueError, match="cannot carry"):
@@ -92,31 +93,32 @@ def test_gate_topology_requires_checkpoint_exactly_when_evidence_is_enabled() ->
         )
 
 
-def test_evaluator_scores_exact_value_and_reference() -> None:
-    gate = termination_gate()
-
+def test_evaluator_scores_gate_value_and_identifier_interference() -> None:
     accepted = evaluate_compatibility_answer(
-        gate,
-        RetrievalAnswer(evidence_refs=(), conclusion="READY"),
-        evidence_queries=0,
+        termination_gate(), TerminationReturn(ok=True), evidence_queries=0
     )
-    rejected = evaluate_compatibility_answer(
-        gate,
-        RetrievalAnswer(
-            evidence_refs=(EvidenceRef(level=0, turn=1),), conclusion="ready"
+    gate = CompatibilityGate(
+        checkpoint_root="checkpoint",
+        checkpoint_sha256="sha256:" + "0" * 64,
+        task=CompatibilityTask(
+            gate_id="g2a",
+            gate_kind="identifier_binding",
+            instruction="Bind the record ref.",
         ),
-        evidence_queries=1,
+        evidence=metadata_policy(),
+        expected=CompatibilityExpected(
+            evidence_ref="L0:T1",
+            frontier_substitution="L1:T2",
+            turn_number_leakage="L0:T2",
+        ),
+    )
+    leakage = evaluate_compatibility_answer(
+        gate, IdentifierBindingReturn(evidence_ref="L0:T2"), evidence_queries=1
     )
 
     assert accepted.passed is True
-    assert rejected.model_dump() == {
-        "gate_id": "g0-termination",
-        "valid_typed_return": True,
-        "conclusion_correct": False,
-        "evidence_refs_correct": False,
-        "capability_use_correct": False,
-        "passed": False,
-    }
+    assert leakage.passed is False
+    assert leakage.identifier_classification == "turn_number_leakage"
 
 
 def test_capability_allows_one_exact_metadata_query(tmp_path: Path) -> None:
@@ -275,10 +277,10 @@ def test_loaded_gate_binds_checkpoint_and_constructs_capability(
         checkpoint_root="checkpoint",
         checkpoint_sha256=f"sha256:{tree_sha256(checkpoint)}",
         task=CompatibilityTask(
-            gate_id="g1", gate_kind="metadata_query", instruction="Query once."
+            gate_id="g1", gate_kind="capability_retrieval", instruction="Query once."
         ),
         evidence=metadata_policy(),
-        expected=CompatibilityExpected(conclusion="LEFT"),
+        expected=CompatibilityExpected(evidence_ref="L0:T1"),
     )
     path = tmp_path / "gate.json"
     path.write_text(json.dumps(gate.model_dump(mode="json")))
@@ -301,10 +303,10 @@ def test_checkpoint_path_cannot_escape_repository(tmp_path: Path) -> None:
         checkpoint_root="../escape",
         checkpoint_sha256="sha256:" + "0" * 64,
         task=CompatibilityTask(
-            gate_id="g1", gate_kind="metadata_query", instruction="Query once."
+            gate_id="g1", gate_kind="capability_retrieval", instruction="Query once."
         ),
         evidence=metadata_policy(),
-        expected=CompatibilityExpected(conclusion="LEFT"),
+        expected=CompatibilityExpected(evidence_ref="L0:T1"),
     )
     path = tmp_path / "gate.json"
     path.write_text(json.dumps(gate.model_dump(mode="json")))

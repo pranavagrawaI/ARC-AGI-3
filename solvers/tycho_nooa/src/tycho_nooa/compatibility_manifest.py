@@ -14,25 +14,26 @@ from tycho_nooa.compatibility_experiment import (
     NATIVE_COMPATIBILITY_PROMPT,
 )
 from tycho_nooa.compatibility_ladder import CompatibilityLadder
-from tycho_nooa.compatibility_return import retrieval_return_schema_sha256
+from tycho_nooa.compatibility_return import (
+    compatibility_return_schemas_sha256,
+    retrieval_return_schema_sha256,
+)
 from tycho_nooa.parity_compatibility import load_compatibility_gate
 from tycho_nooa.parity_manifest import FileCommitment, ModelRoute
 
 CompatibilityGateRole = Literal[
     "termination",
-    "metadata_query",
+    "capability_retrieval",
+    "identifier_binding",
     "representation_rle",
-    "representation_raw",
-    "easy_positive_rle",
-    "easy_positive_raw",
+    "composition",
 ]
 GATE_ROLES: tuple[CompatibilityGateRole, ...] = (
     "termination",
-    "metadata_query",
+    "capability_retrieval",
+    "identifier_binding",
     "representation_rle",
-    "representation_raw",
-    "easy_positive_rle",
-    "easy_positive_raw",
+    "composition",
 )
 
 
@@ -77,7 +78,7 @@ class CompatibilityExperimentManifest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[1, 2, 3, 4, 5] = 1
+    schema_version: Literal[1, 2, 3, 4, 5, 6] = 1
     experiment_id: str = Field(min_length=1)
     execution_authorized: bool
     runtime_commit: str = Field(pattern=r"^[0-9a-f]{7,40}$")
@@ -100,7 +101,9 @@ class CompatibilityExperimentManifest(BaseModel):
     return_schema_sha256: str | None = Field(
         default=None, pattern=r"^sha256:[0-9a-f]{64}$"
     )
-    return_contract: Literal["cognitive_union", "retrieval_flat"] = (
+    return_contract: Literal[
+        "cognitive_union", "retrieval_flat", "gate_specific"
+    ] = (
         "cognitive_union"
     )
     native_prompt_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
@@ -222,6 +225,14 @@ def _schema_v5_is_fully_bound(manifest: CompatibilityExperimentManifest) -> bool
     )
 
 
+def _schema_v6_is_fully_bound(manifest: CompatibilityExperimentManifest) -> bool:
+    return (
+        _schema_v4_is_fully_bound(manifest)
+        and manifest.return_contract == "gate_specific"
+        and manifest.return_contract_module is not None
+    )
+
+
 def _validate_schema_bindings(manifest: CompatibilityExperimentManifest) -> None:
     if manifest.schema_version == 2 and not _schema_v2_is_fully_bound(manifest):
         raise ValueError("schema v2 must bind both controllers and return schema")
@@ -235,11 +246,17 @@ def _validate_schema_bindings(manifest: CompatibilityExperimentManifest) -> None
         raise ValueError(
             "schema v5 must bind the flat retrieval return contract and module"
         )
+    if manifest.schema_version == 6 and not _schema_v6_is_fully_bound(manifest):
+        raise ValueError(
+            "schema v6 must bind the gate-specific return contracts and module"
+        )
 
 
 def _return_schema_sha256(manifest: CompatibilityExperimentManifest) -> str:
     if manifest.return_contract == "retrieval_flat":
         return retrieval_return_schema_sha256()
+    if manifest.return_contract == "gate_specific":
+        return compatibility_return_schemas_sha256()
     return cognitive_return_schema_sha256()
 
 

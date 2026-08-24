@@ -26,8 +26,8 @@ def response(name: str, arguments: dict) -> LLMResponse:
     )
 
 
-def answer(conclusion: str = "READY") -> dict:
-    return {"evidence_refs": [], "conclusion": conclusion}
+def answer(evidence_ref: str = "L0:T1") -> dict:
+    return {"evidence_ref": evidence_ref}
 
 
 def termination_gate() -> CompatibilityGate:
@@ -36,10 +36,10 @@ def termination_gate() -> CompatibilityGate:
             gate_id="g0-termination",
             gate_kind="termination",
             instruction="Return READY.",
-            inputs={"supplied_answer": "READY"},
+            inputs={"supplied_answer": True},
         ),
         evidence=CompatibilityEvidencePolicy(enabled=False, max_queries=0),
-        expected=CompatibilityExpected(conclusion="READY"),
+        expected=CompatibilityExpected(ok=True),
     )
 
 
@@ -47,10 +47,10 @@ async def test_return_only_gate_passes_both_arms_without_evidence(
     tmp_path: Path,
 ) -> None:
     native_llm = FakeLLMClient(
-        scripted_responses=[response("return_result", answer())]
+        scripted_responses=[response("return_result", {"ok": True})]
     )
     codeact_llm = FakeLLMClient(
-        scripted_responses=[response("return_result", answer())]
+        scripted_responses=[response("return_result", {"ok": True})]
     )
     report = await execute_compatibility_gate(
         termination_gate(),
@@ -74,25 +74,25 @@ async def test_return_only_gate_passes_both_arms_without_evidence(
             tool for tool in llm.last_tools or [] if tool.name == "return_result"
         )
         schema = tool.parameters_model.model_json_schema()
-        assert set(schema["properties"]) == {"conclusion", "evidence_refs"}
-        assert set(schema["required"]) == {"conclusion", "evidence_refs"}
+        assert set(schema["properties"]) == {"ok"}
+        assert set(schema["required"]) == {"ok"}
         assert "result" not in schema["properties"]
 
 
 async def test_flat_return_rejects_union_wrapper_then_accepts_exact_shape(
     tmp_path: Path,
 ) -> None:
-    nested = {"result": {"task_kind": "retrieve", **answer()}}
+    nested = {"result": {"ok": True}}
     native_llm = FakeLLMClient(
         scripted_responses=[
             response("return_result", nested),
-            response("return_result", answer()),
+            response("return_result", {"ok": True}),
         ]
     )
     codeact_llm = FakeLLMClient(
         scripted_responses=[
             response("return_result", nested),
-            response("return_result", answer()),
+            response("return_result", {"ok": True}),
         ]
     )
 
@@ -117,7 +117,7 @@ async def test_valid_answer_without_required_query_fails_eligibility(
         checkpoint_sha256="sha256:" + "0" * 64,
         task=CompatibilityTask(
             gate_id="g1-metadata",
-            gate_kind="metadata_query",
+            gate_kind="capability_retrieval",
             instruction="Query once, then return LEFT.",
         ),
         evidence=CompatibilityEvidencePolicy(
@@ -129,10 +129,10 @@ async def test_valid_answer_without_required_query_fails_eligibility(
             grid_encoding="raw",
             max_queries=1,
         ),
-        expected=CompatibilityExpected(conclusion="LEFT"),
+        expected=CompatibilityExpected(evidence_ref="L0:T1"),
     )
     (tmp_path / "checkpoint").mkdir()
-    direct = response("return_result", answer("LEFT"))
+    direct = response("return_result", answer())
 
     report = await execute_compatibility_gate(
         gate,
@@ -201,7 +201,7 @@ async def test_both_arms_share_normalization_and_codeact_can_repair(
         checkpoint_sha256="sha256:" + "0" * 64,
         task=CompatibilityTask(
             gate_id="g1-metadata",
-            gate_kind="metadata_query",
+            gate_kind="capability_retrieval",
             instruction="Query metadata and return LEFT.",
         ),
         evidence=CompatibilityEvidencePolicy(
@@ -214,7 +214,7 @@ async def test_both_arms_share_normalization_and_codeact_can_repair(
             max_queries=1,
             max_query_attempts=2,
         ),
-        expected=CompatibilityExpected(conclusion="LEFT"),
+        expected=CompatibilityExpected(evidence_ref="L0:T1"),
     )
     exact = {
         "kind": "transitions",
@@ -231,7 +231,7 @@ async def test_both_arms_share_normalization_and_codeact_can_repair(
         native_llm=FakeLLMClient(
             scripted_responses=[
                 response("evidence_query", exact),
-                response("return_result", answer("LEFT")),
+                response("return_result", answer()),
             ]
         ),
         codeact_llm=FakeLLMClient(
@@ -249,7 +249,7 @@ async def test_both_arms_share_normalization_and_codeact_can_repair(
                     "execute_python",
                     {"code": f"evidence.query(**{exact!r})"},
                 ),
-                response("return_result", answer("LEFT")),
+                response("return_result", answer()),
             ]
         ),
         max_llm_calls=3,
@@ -293,7 +293,7 @@ async def test_codeact_contract_help_leads_to_the_admitted_metadata_query(
         checkpoint_sha256="sha256:" + "0" * 64,
         task=CompatibilityTask(
             gate_id="g1-metadata-help",
-            gate_kind="metadata_query",
+            gate_kind="capability_retrieval",
             instruction="Inspect the contract, query metadata, and return LEFT.",
         ),
         evidence=CompatibilityEvidencePolicy(
@@ -306,7 +306,7 @@ async def test_codeact_contract_help_leads_to_the_admitted_metadata_query(
             max_queries=1,
             max_query_attempts=2,
         ),
-        expected=CompatibilityExpected(conclusion="LEFT"),
+        expected=CompatibilityExpected(evidence_ref="L0:T1"),
     )
     exact = {
         "kind": "transitions",
@@ -322,7 +322,7 @@ async def test_codeact_contract_help_leads_to_the_admitted_metadata_query(
         native_llm=FakeLLMClient(
             scripted_responses=[
                 response("evidence_query", exact),
-                response("return_result", answer("LEFT")),
+                response("return_result", answer()),
             ]
         ),
         codeact_llm=FakeLLMClient(
@@ -335,7 +335,7 @@ async def test_codeact_contract_help_leads_to_the_admitted_metadata_query(
                     "execute_python",
                     {"code": f"page = evidence.query(**{exact!r})"},
                 ),
-                response("return_result", answer("LEFT")),
+                response("return_result", answer()),
             ]
         ),
         max_llm_calls=3,
@@ -377,7 +377,7 @@ async def test_codeact_can_query_directly_without_discovery_step(tmp_path: Path)
         checkpoint_sha256="sha256:" + "0" * 64,
         task=CompatibilityTask(
             gate_id="g1-metadata-direct",
-            gate_kind="metadata_query",
+            gate_kind="capability_retrieval",
             instruction="Query metadata and return LEFT.",
         ),
         evidence=CompatibilityEvidencePolicy(
@@ -390,7 +390,7 @@ async def test_codeact_can_query_directly_without_discovery_step(tmp_path: Path)
             max_queries=1,
             max_query_attempts=2,
         ),
-        expected=CompatibilityExpected(conclusion="LEFT"),
+        expected=CompatibilityExpected(evidence_ref="L0:T1"),
     )
     exact = {
         "kind": "transitions",
@@ -406,7 +406,7 @@ async def test_codeact_can_query_directly_without_discovery_step(tmp_path: Path)
         native_llm=FakeLLMClient(
             scripted_responses=[
                 response("evidence_query", exact),
-                response("return_result", answer("LEFT")),
+                response("return_result", answer()),
             ]
         ),
         codeact_llm=FakeLLMClient(
@@ -415,7 +415,7 @@ async def test_codeact_can_query_directly_without_discovery_step(tmp_path: Path)
                     "execute_python",
                     {"code": f"page = evidence.query(**{exact!r})"},
                 ),
-                response("return_result", answer("LEFT")),
+                response("return_result", answer()),
             ]
         ),
         max_llm_calls=3,

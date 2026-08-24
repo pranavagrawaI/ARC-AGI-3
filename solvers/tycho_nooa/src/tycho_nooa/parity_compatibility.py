@@ -9,15 +9,23 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from tycho_nooa.cognitive_parity import RetrievalAnswer, tree_sha256
-from tycho_nooa.evidence import EvidenceQuery, EvidenceRef, WorkspaceEvidenceCapability
+from tycho_nooa.cognitive_parity import tree_sha256
+from tycho_nooa.compatibility_return import (
+    CapabilityRetrievalReturn,
+    CompatibilityReturn,
+    CompositionReturn,
+    IdentifierBindingReturn,
+    RepresentationReturn,
+    TerminationReturn,
+)
+from tycho_nooa.evidence import EvidenceQuery, WorkspaceEvidenceCapability
 
 CompatibilityGateKind = Literal[
     "termination",
-    "metadata_query",
+    "capability_retrieval",
+    "identifier_binding",
     "representation_rle",
-    "representation_raw",
-    "easy_positive",
+    "composition",
 ]
 
 
@@ -101,8 +109,12 @@ class EvidenceQueryAudit(BaseModel):
 class CompatibilityExpected(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    conclusion: str
-    evidence_refs: tuple[EvidenceRef, ...] = ()
+    ok: Literal[True] | None = None
+    evidence_ref: str | None = Field(default=None, pattern=r"^L\d+:T\d+$")
+    decoded_value: int | None = None
+    conclusion: str | None = None
+    frontier_substitution: str | None = Field(default=None, pattern=r"^L\d+:T\d+$")
+    turn_number_leakage: str | None = Field(default=None, pattern=r"^L\d+:T\d+$")
 
 
 class CompatibilityGate(BaseModel):
@@ -128,8 +140,10 @@ class CompatibilityGate(BaseModel):
             value is not None for value in checkpoint_values
         ):
             raise ValueError("return-only gate cannot carry an evidence checkpoint")
-        if (self.task.gate_kind == "termination") == self.evidence.enabled:
-            raise ValueError("only the termination gate may disable evidence")
+        evidence_kinds = {"capability_retrieval", "identifier_binding", "composition"}
+        if self.evidence.enabled != (self.task.gate_kind in evidence_kinds):
+            raise ValueError("gate kind and evidence authority disagree")
+        _validate_expected(self.task.gate_kind, self.expected)
         return self
 
     def treatment_payload(self) -> dict[str, Any]:
@@ -150,9 +164,14 @@ class CompatibilityEvaluation(BaseModel):
 
     gate_id: str
     valid_typed_return: Literal[True] = True
-    conclusion_correct: bool
-    evidence_refs_correct: bool
+    value_correct: bool
     capability_use_correct: bool
+    identifier_classification: Literal[
+        "correct_record_binding",
+        "frontier_substitution",
+        "turn_number_leakage",
+        "generic_grounding_error",
+    ] | None = None
     passed: bool
 
 
@@ -289,22 +308,71 @@ def load_compatibility_gate(
 
 
 def evaluate_compatibility_answer(
-    gate: CompatibilityGate, answer: RetrievalAnswer, *, evidence_queries: int
+    gate: CompatibilityGate, answer: CompatibilityReturn, *, evidence_queries: int
 ) -> CompatibilityEvaluation:
-    conclusion_correct = answer.conclusion == gate.expected.conclusion
-    refs = {(ref.level, ref.turn) for ref in answer.evidence_refs}
-    expected_refs = {(ref.level, ref.turn) for ref in gate.expected.evidence_refs}
-    evidence_refs_correct = refs == expected_refs
+    value_correct = _answer_matches_expected(gate, answer)
     capability_use_correct = evidence_queries == gate.evidence.max_queries
+    identifier_classification = _identifier_classification(gate, answer)
     return CompatibilityEvaluation(
         gate_id=gate.task.gate_id,
-        conclusion_correct=conclusion_correct,
-        evidence_refs_correct=evidence_refs_correct,
+        value_correct=value_correct,
         capability_use_correct=capability_use_correct,
-        passed=(
-            conclusion_correct and evidence_refs_correct and capability_use_correct
-        ),
+        identifier_classification=identifier_classification,
+        passed=value_correct and capability_use_correct,
     )
+
+
+def _answer_matches_expected(
+    gate: CompatibilityGate, answer: CompatibilityReturn
+) -> bool:
+    expected = gate.expected
+    match answer:
+        case TerminationReturn(ok=ok):
+            return ok == expected.ok
+        case CapabilityRetrievalReturn(evidence_ref=ref):
+            return ref == expected.evidence_ref
+        case IdentifierBindingReturn(evidence_ref=ref):
+            return ref == expected.evidence_ref
+        case RepresentationReturn(decoded_value=value):
+            return value == expected.decoded_value
+        case CompositionReturn(conclusion=conclusion, evidence_ref=ref):
+            return conclusion == expected.conclusion and ref == expected.evidence_ref
+
+
+def _identifier_classification(
+    gate: CompatibilityGate, answer: CompatibilityReturn
+) -> str | None:
+    if gate.task.gate_kind != "identifier_binding" or not isinstance(
+        answer, IdentifierBindingReturn
+    ):
+        return None
+    if answer.evidence_ref == gate.expected.evidence_ref:
+        return "correct_record_binding"
+    if answer.evidence_ref == gate.expected.frontier_substitution:
+        return "frontier_substitution"
+    if answer.evidence_ref == gate.expected.turn_number_leakage:
+        return "turn_number_leakage"
+    return "generic_grounding_error"
+
+
+def _validate_expected(
+    gate_kind: CompatibilityGateKind, expected: CompatibilityExpected
+) -> None:
+    required = {
+        "termination": {"ok"},
+        "capability_retrieval": {"evidence_ref"},
+        "identifier_binding": {
+            "evidence_ref",
+            "frontier_substitution",
+            "turn_number_leakage",
+        },
+        "representation_rle": {"decoded_value"},
+        "composition": {"conclusion", "evidence_ref"},
+    }[gate_kind]
+    values = expected.model_dump()
+    present = {name for name, value in values.items() if value is not None}
+    if present != required:
+        raise ValueError(f"{gate_kind} expected key must contain exactly {sorted(required)}")
 
 
 def _checkpoint_path(value: str, repository_root: Path) -> Path:

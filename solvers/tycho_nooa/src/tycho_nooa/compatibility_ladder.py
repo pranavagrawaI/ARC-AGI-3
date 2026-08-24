@@ -19,12 +19,11 @@ from tycho_nooa.parity_compatibility import CompatibilityGate
 CompatibilityDisposition = Literal[
     "not_eligible_termination",
     "rejected_capability_pairing",
+    "rejected_identifier_binding",
     "rejected_representation",
-    "rejected_cognitive_eligibility",
-    "eligible_rle",
-    "eligible_raw",
+    "rejected_composition",
+    "eligible",
 ]
-CompatibilityEncoding = Literal["rle", "raw"]
 ArmIntegrity = Literal[
     "valid",
     "provider_censored",
@@ -62,27 +61,25 @@ class CompatibilityLadderObserver(Protocol):
 
 
 class CompatibilityLadder(BaseModel):
-    """The complete frozen gate set, including conditional alternatives."""
+    """Five sequential gates, each introducing one additional burden."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     termination: CompatibilityGate
-    metadata_query: CompatibilityGate
+    capability_retrieval: CompatibilityGate
+    identifier_binding: CompatibilityGate
     representation_rle: CompatibilityGate
-    representation_raw: CompatibilityGate
-    easy_positive_rle: CompatibilityGate
-    easy_positive_raw: CompatibilityGate
+    composition: CompatibilityGate
 
     @model_validator(mode="after")
-    def gate_roles_and_matched_alternatives_are_exact(self) -> CompatibilityLadder:
+    def gate_roles_are_exact(self) -> CompatibilityLadder:
         expected_kinds = {
             "termination": "termination",
-            "metadata_query": "metadata_query",
+            "capability_retrieval": "capability_retrieval",
+            "identifier_binding": "identifier_binding",
             "representation_rle": "representation_rle",
-            "representation_raw": "representation_raw",
-            "easy_positive_rle": "easy_positive",
-            "easy_positive_raw": "easy_positive",
+            "composition": "composition",
         }
         for name, expected_kind in expected_kinds.items():
             gate = getattr(self, name)
@@ -91,28 +88,30 @@ class CompatibilityLadder(BaseModel):
         gate_ids = [gate.task.gate_id for gate in self.ordered_gates()]
         if len(gate_ids) != len(set(gate_ids)):
             raise ValueError("compatibility ladder gate ids must be unique")
-        _validate_projection(self.metadata_query, projection="metadata")
-        _validate_encoding_pair(self.representation_rle, self.representation_raw)
-        _validate_encoding_pair(self.easy_positive_rle, self.easy_positive_raw)
+        _validate_projection(self.capability_retrieval, projection="metadata")
+        _validate_projection(self.identifier_binding, projection="metadata")
+        _validate_projection(self.composition, projection="full")
+        if self.representation_rle.evidence.enabled:
+            raise ValueError("representation gate must use immutable task data")
+        if self.composition.evidence.grid_encoding != "rle":
+            raise ValueError("composition gate must use RLE evidence")
         return self
 
     def ordered_gates(self) -> tuple[CompatibilityGate, ...]:
         return (
             self.termination,
-            self.metadata_query,
+            self.capability_retrieval,
+            self.identifier_binding,
             self.representation_rle,
-            self.representation_raw,
-            self.easy_positive_rle,
-            self.easy_positive_raw,
+            self.composition,
         )
 
 
 class CompatibilityLadderReport(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     disposition: CompatibilityDisposition
-    selected_encoding: CompatibilityEncoding | None
     stopped_after: str
     gate_reports: tuple[CompatibilityGateReport, ...]
     skipped_gate_ids: tuple[str, ...]
@@ -210,57 +209,53 @@ async def run_compatibility_ladder(
             destination,
             reports,
             "not_eligible_termination",
-            None,
             observer,
         )
 
-    metadata = await _run(
-        ladder.metadata_query, destination, execute_gate, reports, observer
+    retrieval = await _run(
+        ladder.capability_retrieval, destination, execute_gate, reports, observer
     )
-    if not metadata.passed:
+    if not retrieval.passed:
         return _finish(
             ladder,
             destination,
             reports,
             "rejected_capability_pairing",
-            None,
+            observer,
+        )
+
+    binding = await _run(
+        ladder.identifier_binding, destination, execute_gate, reports, observer
+    )
+    if not binding.passed:
+        return _finish(
+            ladder,
+            destination,
+            reports,
+            "rejected_identifier_binding",
             observer,
         )
 
     representation = await _run(
         ladder.representation_rle, destination, execute_gate, reports, observer
     )
-    if representation.passed:
-        selected: CompatibilityEncoding = "rle"
-        easy_gate = ladder.easy_positive_rle
-    else:
-        raw = await _run(
-            ladder.representation_raw, destination, execute_gate, reports, observer
-        )
-        if not raw.passed:
-            return _finish(
-                ladder,
-                destination,
-                reports,
-                "rejected_representation",
-                None,
-                observer,
-            )
-        selected = "raw"
-        easy_gate = ladder.easy_positive_raw
-
-    easy = await _run(easy_gate, destination, execute_gate, reports, observer)
-    if not easy.passed:
+    if not representation.passed:
         return _finish(
             ladder,
             destination,
             reports,
-            "rejected_cognitive_eligibility",
-            selected,
+            "rejected_representation",
             observer,
         )
-    disposition: CompatibilityDisposition = f"eligible_{selected}"
-    return _finish(ladder, destination, reports, disposition, selected, observer)
+
+    composition = await _run(
+        ladder.composition, destination, execute_gate, reports, observer
+    )
+    if not composition.passed:
+        return _finish(
+            ladder, destination, reports, "rejected_composition", observer
+        )
+    return _finish(ladder, destination, reports, "eligible", observer)
 
 
 async def _run(
@@ -286,13 +281,11 @@ def _finish(
     destination: Path,
     reports: list[CompatibilityGateReport],
     disposition: CompatibilityDisposition,
-    selected_encoding: CompatibilityEncoding | None,
     observer: CompatibilityLadderObserver | None,
 ) -> CompatibilityLadderReport:
     run_ids = {report.gate_id for report in reports}
     report = CompatibilityLadderReport(
         disposition=disposition,
-        selected_encoding=selected_encoding,
         stopped_after=reports[-1].gate_id,
         gate_reports=tuple(reports),
         skipped_gate_ids=tuple(
@@ -314,27 +307,6 @@ def _validate_projection(
 ) -> None:
     if gate.evidence.projection != projection:
         raise ValueError(f"{gate.task.gate_id} must use {projection} evidence")
-
-
-def _validate_encoding_pair(
-    rle_gate: CompatibilityGate, raw_gate: CompatibilityGate
-) -> None:
-    _validate_projection(rle_gate, projection="full")
-    _validate_projection(raw_gate, projection="full")
-    if rle_gate.evidence.grid_encoding != "rle":
-        raise ValueError(f"{rle_gate.task.gate_id} must use RLE evidence")
-    if raw_gate.evidence.grid_encoding != "raw":
-        raise ValueError(f"{raw_gate.task.gate_id} must use raw evidence")
-    if _matched_gate_value(rle_gate) != _matched_gate_value(raw_gate):
-        raise ValueError("RLE and raw alternatives must differ only by identity and encoding")
-
-
-def _matched_gate_value(gate: CompatibilityGate) -> dict:
-    value = gate.model_dump(mode="json")
-    value["task"].pop("gate_id")
-    value["task"].pop("gate_kind")
-    value["evidence"].pop("grid_encoding")
-    return value
 
 
 def _write_json(path: Path, value: object) -> None:

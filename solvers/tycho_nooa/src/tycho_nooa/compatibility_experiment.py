@@ -13,7 +13,10 @@ from typing import Any, Literal
 from nooa.unifiedllm import UnifiedLLM
 from pydantic import BaseModel, ConfigDict, Field
 
-from tycho_nooa.cognitive_parity import RetrievalAnswer
+from tycho_nooa.compatibility_return import (
+    CompatibilityReturn,
+    return_model_for_gate,
+)
 from tycho_nooa.execution_events import ExecutionProvenanceLog, InvocationProvenance
 from tycho_nooa.native_parity import NativeParityController
 from tycho_nooa.parity_compatibility import (
@@ -29,13 +32,13 @@ CompatibilityArm = Literal["native", "codeact"]
 NATIVE_COMPATIBILITY_PROMPT = (
     "You are completing a protocol-compatibility eligibility gate, not a reasoning "
     "benchmark. Follow the visible evidence contract exactly when it is enabled. "
-    "Use only the offered tools and finish with "
-    "return_result(conclusion=..., evidence_refs=[...])."
+    "Use only the offered tools and finish with the exact gate-specific "
+    "return_result schema shown by the provider."
 )
 CODEACT_COMPATIBILITY_PROMPT = (
     "You are completing a protocol-compatibility eligibility gate, not a reasoning "
     "benchmark. Use only execute_python(code) and "
-    "return_result(conclusion=..., evidence_refs=[...]). Python "
+    "the exact gate-specific return_result schema shown by the provider. Python "
     "locals persist across cells. evidence.query exists only when the visible "
     "contract enables it; use that exact query shape. Finish with the typed result."
 )
@@ -151,7 +154,7 @@ async def _run_native(
         max_llm_calls=max_llm_calls,
         max_output_tokens=max_output_tokens,
         system_prompt=NATIVE_COMPATIBILITY_PROMPT,
-        flat_retrieval_return=True,
+        return_model=return_model_for_gate(gate.task.gate_kind),
     )
     started = time.monotonic()
     answer, failure = await _answer_or_exhaustion(controller.run())
@@ -199,7 +202,7 @@ async def _run_codeact(
         max_output_tokens=max_output_tokens,
         cell_timeout_seconds=cell_timeout_seconds,
         system_prompt=CODEACT_COMPATIBILITY_PROMPT,
-        flat_retrieval_return=True,
+        return_model=return_model_for_gate(gate.task.gate_kind),
     )
     started = time.monotonic()
     answer, failure = await _answer_or_exhaustion(controller.run())
@@ -236,22 +239,22 @@ async def _run_codeact(
 
 async def _answer_or_exhaustion(
     awaitable: Awaitable[object],
-) -> tuple[RetrievalAnswer | None, str | None]:
+) -> tuple[CompatibilityReturn | None, str | None]:
     try:
         answer = await awaitable
     except RuntimeError as error:
         if "exhausted its LLM-call budget" not in str(error):
             raise
         return None, str(error)
-    if not isinstance(answer, RetrievalAnswer):
-        raise TypeError("compatibility gate requires a retrieval answer")
+    if not isinstance(answer, BaseModel):
+        raise TypeError("compatibility gate requires a typed answer")
     return answer, None
 
 
 def _observation(
     gate: CompatibilityGate,
     arm: CompatibilityArm,
-    answer: RetrievalAnswer | None,
+    answer: CompatibilityReturn | None,
     failure: str | None,
     metrics: CompatibilityMetrics,
     *,
