@@ -14,6 +14,7 @@ from tycho_nooa.compatibility_experiment import (
     NATIVE_COMPATIBILITY_PROMPT,
 )
 from tycho_nooa.compatibility_ladder import CompatibilityLadder
+from tycho_nooa.compatibility_return import retrieval_return_schema_sha256
 from tycho_nooa.parity_compatibility import load_compatibility_gate
 from tycho_nooa.parity_manifest import FileCommitment, ModelRoute
 
@@ -76,7 +77,7 @@ class CompatibilityExperimentManifest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[1, 2, 3, 4] = 1
+    schema_version: Literal[1, 2, 3, 4, 5] = 1
     experiment_id: str = Field(min_length=1)
     execution_authorized: bool
     runtime_commit: str = Field(pattern=r"^[0-9a-f]{7,40}$")
@@ -97,6 +98,9 @@ class CompatibilityExperimentManifest(BaseModel):
     sterile_worker: FileCommitment | None = None
     return_schema_sha256: str | None = Field(
         default=None, pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+    return_contract: Literal["cognitive_union", "retrieval_flat"] = (
+        "cognitive_union"
     )
     native_prompt_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     codeact_prompt_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
@@ -173,7 +177,7 @@ def load_compatibility_experiment_manifest(
     )
     if (
         manifest.return_schema_sha256 is not None
-        and manifest.return_schema_sha256 != cognitive_return_schema_sha256()
+        and manifest.return_schema_sha256 != _return_schema_sha256(manifest)
     ):
         raise ValueError("return schema commitment mismatch")
     card = _committed_path(manifest.experiment_card.path, repository_root)
@@ -208,6 +212,13 @@ def _schema_v4_is_fully_bound(manifest: CompatibilityExperimentManifest) -> bool
     return _schema_v3_is_fully_bound(manifest) and manifest.sterile_worker is not None
 
 
+def _schema_v5_is_fully_bound(manifest: CompatibilityExperimentManifest) -> bool:
+    return (
+        _schema_v4_is_fully_bound(manifest)
+        and manifest.return_contract == "retrieval_flat"
+    )
+
+
 def _validate_schema_bindings(manifest: CompatibilityExperimentManifest) -> None:
     if manifest.schema_version == 2 and not _schema_v2_is_fully_bound(manifest):
         raise ValueError("schema v2 must bind both controllers and return schema")
@@ -217,6 +228,14 @@ def _validate_schema_bindings(manifest: CompatibilityExperimentManifest) -> None
         )
     if manifest.schema_version == 4 and not _schema_v4_is_fully_bound(manifest):
         raise ValueError("schema v4 must also bind the sterile worker")
+    if manifest.schema_version == 5 and not _schema_v5_is_fully_bound(manifest):
+        raise ValueError("schema v5 must bind the flat retrieval return contract")
+
+
+def _return_schema_sha256(manifest: CompatibilityExperimentManifest) -> str:
+    if manifest.return_contract == "retrieval_flat":
+        return retrieval_return_schema_sha256()
+    return cognitive_return_schema_sha256()
 
 
 def _validate_authorized_manifest(

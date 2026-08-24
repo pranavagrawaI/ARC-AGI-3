@@ -29,11 +29,13 @@ CompatibilityArm = Literal["native", "codeact"]
 NATIVE_COMPATIBILITY_PROMPT = (
     "You are completing a protocol-compatibility eligibility gate, not a reasoning "
     "benchmark. Follow the visible evidence contract exactly when it is enabled. "
-    "Use only the offered tools and finish with one typed return_result."
+    "Use only the offered tools and finish with "
+    "return_result(conclusion=..., evidence_refs=[...])."
 )
 CODEACT_COMPATIBILITY_PROMPT = (
     "You are completing a protocol-compatibility eligibility gate, not a reasoning "
-    "benchmark. Use only execute_python(code) and return_result(result). Python "
+    "benchmark. Use only execute_python(code) and "
+    "return_result(conclusion=..., evidence_refs=[...]). Python "
     "locals persist across cells. evidence.query exists only when the visible "
     "contract enables it; use that exact query shape. Finish with the typed result."
 )
@@ -149,6 +151,7 @@ async def _run_native(
         max_llm_calls=max_llm_calls,
         max_output_tokens=max_output_tokens,
         system_prompt=NATIVE_COMPATIBILITY_PROMPT,
+        flat_retrieval_return=True,
     )
     started = time.monotonic()
     answer, failure = await _answer_or_exhaustion(controller.run())
@@ -196,6 +199,7 @@ async def _run_codeact(
         max_output_tokens=max_output_tokens,
         cell_timeout_seconds=cell_timeout_seconds,
         system_prompt=CODEACT_COMPATIBILITY_PROMPT,
+        flat_retrieval_return=True,
     )
     started = time.monotonic()
     answer, failure = await _answer_or_exhaustion(controller.run())

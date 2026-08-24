@@ -11,7 +11,12 @@ from typing import Any
 from nooa.unifiedllm import Tool, ToolCall, UnifiedLLM
 from pydantic import BaseModel, ConfigDict
 
-from tycho_nooa.cognitive_parity import CognitiveAnswer, CognitiveReturnArguments
+from tycho_nooa.cognitive_parity import (
+    CognitiveAnswer,
+    CognitiveReturnArguments,
+    RetrievalAnswer,
+)
+from tycho_nooa.compatibility_return import RetrievalReturnArguments
 from tycho_nooa.evidence import EvidenceCapability
 from tycho_nooa.execution_events import (
     InvocationProvenance,
@@ -67,6 +72,7 @@ class SterileCodeActController:
         max_output_tokens: int | None = None,
         cell_timeout_seconds: float = 5.0,
         system_prompt: str = SYSTEM_PROMPT,
+        flat_retrieval_return: bool = False,
     ):
         if max_llm_calls < 1:
             raise ValueError("max_llm_calls must be positive")
@@ -78,6 +84,7 @@ class SterileCodeActController:
         self._max_output_tokens = max_output_tokens
         self._cell_timeout_seconds = cell_timeout_seconds
         self._system_prompt = system_prompt
+        self._flat_retrieval_return = flat_retrieval_return
         self._provider_turns: list[ProviderTurn] = []
         self._transport_adherence: Counter[str] = Counter()
 
@@ -92,7 +99,9 @@ class SterileCodeActController:
     async def run(self) -> CognitiveAnswer:
         async with SterileExecutor(
             self._execution_manifest(),
-            return_type=CognitiveAnswer,
+            return_type=(
+                RetrievalAnswer if self._flat_retrieval_return else CognitiveAnswer
+            ),
             capability_handlers=self._capability_handlers(),
             capability_auditors=self._capability_auditors(),
             provenance=self._provenance,
@@ -138,7 +147,11 @@ class SterileCodeActController:
         response = await self._call_provider()
         try:
             tool_call = _one_tool_call(response.tool_calls)
-            code, arguments = _tool_call_execution(tool_call, response.content)
+            code, arguments = _tool_call_execution(
+                tool_call,
+                response.content,
+                flat_retrieval_return=self._flat_retrieval_return,
+            )
         except (RuntimeError, ValueError, TypeError) as error:
             category = _rejected_transport_class(
                 response.tool_calls, response.content
@@ -173,7 +186,9 @@ class SterileCodeActController:
         event_seq = len(self._provenance.log.events)
         response = await self._llm.acall(
             messages,
-            tools=_codeact_tools(),
+            tools=_codeact_tools(
+                flat_retrieval_return=self._flat_retrieval_return
+            ),
             output_model=None,
             **self._sampling_kwargs(),
         )
@@ -229,7 +244,7 @@ def _base_messages(packet: ModelTask, system_prompt: str) -> list[dict[str, str]
     ]
 
 
-def _codeact_tools() -> list[Tool]:
+def _codeact_tools(*, flat_retrieval_return: bool = False) -> list[Tool]:
     def execute_python(code: str) -> str:
         """Execute one sterile Python cell; invocation locals persist."""
         return code
@@ -249,7 +264,11 @@ def _codeact_tools() -> list[Tool]:
             name="return_result",
             description=return_result.__doc__ or "Return a result.",
             callable=return_result,
-            parameters_model=CognitiveReturnArguments,
+            parameters_model=(
+                RetrievalReturnArguments
+                if flat_retrieval_return
+                else CognitiveReturnArguments
+            ),
         ),
     ]
 
@@ -264,7 +283,10 @@ def _one_tool_call(tool_calls: list[ToolCall]) -> ToolCall:
 
 
 def _tool_call_execution(
-    tool_call: ToolCall, content: object
+    tool_call: ToolCall,
+    content: object,
+    *,
+    flat_retrieval_return: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     arguments = json.loads(tool_call.arguments)
     if not isinstance(arguments, dict):
@@ -273,7 +295,11 @@ def _tool_call_execution(
     if tool_call.name == "execute_python":
         code = ExecutePythonArguments.model_validate(arguments).code
     else:
-        result = _return_result_value(arguments)
+        result = (
+            RetrievalReturnArguments.model_validate(arguments).model_dump(mode="json")
+            if flat_retrieval_return
+            else _return_result_value(arguments)
+        )
         code = f"return_result({result!r})"
     return (f"{prefix}\n{code}" if prefix else code), arguments
 

@@ -12,6 +12,7 @@ from tycho_nooa.compatibility_manifest import (
     load_compatibility_experiment_manifest,
     load_gate_manifest,
 )
+from tycho_nooa.compatibility_return import retrieval_return_schema_sha256
 from tycho_nooa.parity_compatibility import CompatibilityEvidenceCapability
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -175,3 +176,25 @@ def test_schema_v4_requires_the_exec_worker_commitment() -> None:
     manifest = CompatibilityExperimentManifest.model_validate(raw)
 
     assert manifest.sterile_worker is not None
+
+
+def test_schema_v5_requires_and_checks_flat_retrieval_contract() -> None:
+    raw = json.loads(EXPERIMENT.read_text())
+    raw.update(
+        schema_version=5,
+        native_controller=raw["gate_executor"],
+        codeact_controller=raw["gate_executor"],
+        return_schema_sha256=retrieval_return_schema_sha256(),
+        execution_projection=raw["gate_executor"],
+        sterile_executor=raw["gate_executor"],
+        sterile_worker=raw["gate_executor"],
+    )
+
+    with pytest.raises(ValidationError, match="flat retrieval"):
+        CompatibilityExperimentManifest.model_validate(raw)
+
+    raw["return_contract"] = "retrieval_flat"
+    manifest = CompatibilityExperimentManifest.model_validate(raw)
+
+    assert manifest.return_contract == "retrieval_flat"
+    assert manifest.return_schema_sha256 == retrieval_return_schema_sha256()

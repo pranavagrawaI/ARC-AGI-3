@@ -10,7 +10,11 @@ from typing import Any, Literal
 from nooa.unifiedllm import Tool, ToolCall, UnifiedLLM
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
-from tycho_nooa.cognitive_parity import CognitiveAnswer, CognitiveReturnArguments
+from tycho_nooa.cognitive_parity import (
+    CognitiveAnswer,
+    CognitiveReturnArguments,
+)
+from tycho_nooa.compatibility_return import RetrievalReturnArguments
 from tycho_nooa.evidence import EvidenceCapability, EvidenceQuery
 from tycho_nooa.model_task import ModelTask
 
@@ -54,6 +58,7 @@ class NativeParityController:
         max_llm_calls: int = 8,
         max_output_tokens: int | None = None,
         system_prompt: str = SYSTEM_PROMPT,
+        flat_retrieval_return: bool = False,
     ):
         if max_llm_calls < 1:
             raise ValueError("max_llm_calls must be positive")
@@ -62,6 +67,7 @@ class NativeParityController:
         self._evidence = evidence
         self._max_llm_calls = max_llm_calls
         self._max_output_tokens = max_output_tokens
+        self._flat_retrieval_return = flat_retrieval_return
         self._messages = _base_messages(packet, system_prompt)
         self._provider_turns: list[NativeProviderTurn] = []
         self._evidence_queries = 0
@@ -127,7 +133,10 @@ class NativeParityController:
     async def _call_provider(self):
         response = await self._llm.acall(
             list(self._messages),
-            tools=_native_tools(evidence_enabled=self._evidence is not None),
+            tools=_native_tools(
+                evidence_enabled=self._evidence is not None,
+                flat_retrieval_return=self._flat_retrieval_return,
+            ),
             output_model=None,
             **self._sampling_kwargs(),
         )
@@ -185,8 +194,7 @@ class NativeParityController:
 
     def _handle_return(self, call: ToolCall) -> CognitiveAnswer | None:
         try:
-            raw = CognitiveReturnArguments.model_validate_json(call.arguments)
-            answer = ANSWER_ADAPTER.validate_python(raw.result)
+            answer = self._parse_return(call.arguments)
             if answer.task_kind != self._packet.task.task_kind:
                 raise ValueError("answer task_kind does not match its packet")
         except (ValidationError, ValueError, TypeError) as error:
@@ -200,6 +208,12 @@ class NativeParityController:
             )
             return None
         return answer
+
+    def _parse_return(self, arguments: str) -> CognitiveAnswer:
+        if self._flat_retrieval_return:
+            return RetrievalReturnArguments.model_validate_json(arguments).answer()
+        raw = CognitiveReturnArguments.model_validate_json(arguments)
+        return ANSWER_ADAPTER.validate_python(raw.result)
 
     def _sampling_kwargs(self) -> dict[str, int]:
         return (
@@ -224,7 +238,11 @@ def _base_messages(packet: ModelTask, system_prompt: str) -> list[dict[str, Any]
     ]
 
 
-def _native_tools(*, evidence_enabled: bool = True) -> list[Tool]:
+def _native_tools(
+    *,
+    evidence_enabled: bool = True,
+    flat_retrieval_return: bool = False,
+) -> list[Tool]:
     def evidence_query(**kwargs: Any) -> dict[str, Any]:
         """Read evidence; exact RLE grids use comma-separated hex count:cell runs."""
         return kwargs
@@ -238,7 +256,11 @@ def _native_tools(*, evidence_enabled: bool = True) -> list[Tool]:
             name="return_result",
             description=return_result.__doc__ or "Return result.",
             callable=return_result,
-            parameters_model=CognitiveReturnArguments,
+            parameters_model=(
+                RetrievalReturnArguments
+                if flat_retrieval_return
+                else CognitiveReturnArguments
+            ),
         )
     ]
     if evidence_enabled:

@@ -27,7 +27,7 @@ def response(name: str, arguments: dict) -> LLMResponse:
 
 
 def answer(conclusion: str = "READY") -> dict:
-    return {"task_kind": "retrieve", "evidence_refs": [], "conclusion": conclusion}
+    return {"evidence_refs": [], "conclusion": conclusion}
 
 
 def termination_gate() -> CompatibilityGate:
@@ -46,16 +46,18 @@ def termination_gate() -> CompatibilityGate:
 async def test_return_only_gate_passes_both_arms_without_evidence(
     tmp_path: Path,
 ) -> None:
+    native_llm = FakeLLMClient(
+        scripted_responses=[response("return_result", answer())]
+    )
+    codeact_llm = FakeLLMClient(
+        scripted_responses=[response("return_result", answer())]
+    )
     report = await execute_compatibility_gate(
         termination_gate(),
         repository_root=tmp_path,
         destination=tmp_path / "result",
-        native_llm=FakeLLMClient(
-            scripted_responses=[response("return_result", {"result": answer()})]
-        ),
-        codeact_llm=FakeLLMClient(
-            scripted_responses=[response("return_result", {"result": answer()})]
-        ),
+        native_llm=native_llm,
+        codeact_llm=codeact_llm,
     )
 
     assert report.passed is True
@@ -67,6 +69,44 @@ async def test_return_only_gate_passes_both_arms_without_evidence(
     assert report.codeact.metrics.evidence_queries == 0
     assert (tmp_path / "result/report.json").is_file()
     assert (tmp_path / "result/codeact/provenance.jsonl").is_file()
+    for llm in (native_llm, codeact_llm):
+        tool = next(
+            tool for tool in llm.last_tools or [] if tool.name == "return_result"
+        )
+        schema = tool.parameters_model.model_json_schema()
+        assert set(schema["properties"]) == {"conclusion", "evidence_refs"}
+        assert set(schema["required"]) == {"conclusion", "evidence_refs"}
+        assert "result" not in schema["properties"]
+
+
+async def test_flat_return_rejects_union_wrapper_then_accepts_exact_shape(
+    tmp_path: Path,
+) -> None:
+    nested = {"result": {"task_kind": "retrieve", **answer()}}
+    native_llm = FakeLLMClient(
+        scripted_responses=[
+            response("return_result", nested),
+            response("return_result", answer()),
+        ]
+    )
+    codeact_llm = FakeLLMClient(
+        scripted_responses=[
+            response("return_result", nested),
+            response("return_result", answer()),
+        ]
+    )
+
+    report = await execute_compatibility_gate(
+        termination_gate(),
+        repository_root=tmp_path,
+        destination=tmp_path / "result",
+        native_llm=native_llm,
+        codeact_llm=codeact_llm,
+    )
+
+    assert report.passed is True
+    assert report.native.metrics.invalid_interactions == 1
+    assert report.codeact.metrics.invalid_interactions == 1
 
 
 async def test_valid_answer_without_required_query_fails_eligibility(
@@ -92,7 +132,7 @@ async def test_valid_answer_without_required_query_fails_eligibility(
         expected=CompatibilityExpected(conclusion="LEFT"),
     )
     (tmp_path / "checkpoint").mkdir()
-    direct = response("return_result", {"result": answer("LEFT")})
+    direct = response("return_result", answer("LEFT"))
 
     report = await execute_compatibility_gate(
         gate,
@@ -191,7 +231,7 @@ async def test_both_arms_share_normalization_and_codeact_can_repair(
         native_llm=FakeLLMClient(
             scripted_responses=[
                 response("evidence_query", exact),
-                response("return_result", {"result": answer("LEFT")}),
+                response("return_result", answer("LEFT")),
             ]
         ),
         codeact_llm=FakeLLMClient(
@@ -209,7 +249,7 @@ async def test_both_arms_share_normalization_and_codeact_can_repair(
                     "execute_python",
                     {"code": f"evidence.query(**{exact!r})"},
                 ),
-                response("return_result", {"result": answer("LEFT")}),
+                response("return_result", answer("LEFT")),
             ]
         ),
         max_llm_calls=3,
@@ -282,7 +322,7 @@ async def test_codeact_contract_help_leads_to_the_admitted_metadata_query(
         native_llm=FakeLLMClient(
             scripted_responses=[
                 response("evidence_query", exact),
-                response("return_result", {"result": answer("LEFT")}),
+                response("return_result", answer("LEFT")),
             ]
         ),
         codeact_llm=FakeLLMClient(
@@ -295,7 +335,7 @@ async def test_codeact_contract_help_leads_to_the_admitted_metadata_query(
                     "execute_python",
                     {"code": f"page = evidence.query(**{exact!r})"},
                 ),
-                response("return_result", {"result": answer("LEFT")}),
+                response("return_result", answer("LEFT")),
             ]
         ),
         max_llm_calls=3,
@@ -366,7 +406,7 @@ async def test_codeact_can_query_directly_without_discovery_step(tmp_path: Path)
         native_llm=FakeLLMClient(
             scripted_responses=[
                 response("evidence_query", exact),
-                response("return_result", {"result": answer("LEFT")}),
+                response("return_result", answer("LEFT")),
             ]
         ),
         codeact_llm=FakeLLMClient(
@@ -375,7 +415,7 @@ async def test_codeact_can_query_directly_without_discovery_step(tmp_path: Path)
                     "execute_python",
                     {"code": f"page = evidence.query(**{exact!r})"},
                 ),
-                response("return_result", {"result": answer("LEFT")}),
+                response("return_result", answer("LEFT")),
             ]
         ),
         max_llm_calls=3,
