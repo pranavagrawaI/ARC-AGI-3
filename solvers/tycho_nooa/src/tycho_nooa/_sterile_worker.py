@@ -99,6 +99,14 @@ class _EvidenceQuery:
     ) -> None:
         self._client = client
         self._cache: dict[str, str] = {}
+        self._contract = dict(contract or {})
+        attempt_budget = self._contract.get("max_query_attempts")
+        if attempt_budget is None:
+            attempt_budget = self._contract.get("max_successful_disclosures", 0)
+        self._attempts_remaining = int(attempt_budget)
+        self._disclosures_remaining = int(
+            self._contract.get("max_successful_disclosures", 0)
+        )
         if contract:
             self.__signature__ = _evidence_query_signature(contract)
             self.__doc__ = _evidence_query_documentation(contract)
@@ -107,10 +115,32 @@ class _EvidenceQuery:
         key = json.dumps(arguments, allow_nan=False, sort_keys=True, separators=(",", ":"))
         cached = self._cache.get(key)
         if cached is None:
+            self._attempts_remaining = max(0, self._attempts_remaining - 1)
             value = self._client.call("evidence.query", arguments)
+            self._disclosures_remaining = max(
+                0, self._disclosures_remaining - 1
+            )
             cached = json.dumps(value, allow_nan=False, separators=(",", ":"))
             self._cache[key] = cached
         return json.loads(cached)
+
+    def __repr__(self) -> str:  # pragma: no cover - exec process seam
+        if not self._contract:
+            return "<evidence.query>"
+        return (
+            "<evidence.query; call="
+            + _evidence_query_example(self._contract)
+            + f"; attempts_remaining={self._attempts_remaining}"
+            + f"; disclosures_remaining={self._disclosures_remaining}>"
+        )
+
+    def _documentation(self) -> str:  # pragma: no cover - exec process seam
+        documentation = self.__doc__ or "No documentation available."
+        return (
+            documentation
+            + f"\nRemaining: {self._attempts_remaining} attempts; "
+            + f"{self._disclosures_remaining} disclosures."
+        )
 
 
 class _EvidenceProxy:
@@ -141,14 +171,10 @@ def _evidence_query_signature(  # pragma: no cover - exec process seam
 def _evidence_query_documentation(  # pragma: no cover - exec process seam
     contract: dict[str, Any],
 ) -> str:
-    names = ("kind", "level", "limit", "projection")
-    arguments = [f"{name}={contract[name]!r}" for name in names]
-    encoding = contract.get("grid_encoding")
-    if contract.get("projection") != "metadata":
-        arguments.append(f"grid_encoding={encoding!r}")
+    example = _evidence_query_example(contract)
     lines = [
         "Query the exact evidence view admitted for this invocation.",
-        "Required call: evidence.query(" + ", ".join(arguments) + ")",
+        "Required call: " + example,
     ]
     if contract.get("projection") == "metadata":
         lines.append(
@@ -165,10 +191,26 @@ def _evidence_query_documentation(  # pragma: no cover - exec process seam
     return "\n".join(lines)
 
 
+def _evidence_query_example(  # pragma: no cover - exec process seam
+    contract: dict[str, Any],
+) -> str:
+    names = ("kind", "level", "limit", "projection")
+    arguments = [f"{name}={contract[name]!r}" for name in names]
+    encoding = contract.get("grid_encoding")
+    if contract.get("projection") != "metadata":
+        arguments.append(f"grid_encoding={encoding!r}")
+    return "evidence.query(" + ", ".join(arguments) + ")"
+
+
 def _help(value: Any) -> None:  # pragma: no cover - exec process seam
     """Render bounded help without importing site or exposing another capability."""
     signature = getattr(value, "__signature__", None)
-    documentation = getattr(value, "__doc__", None) or "No documentation available."
+    render = getattr(value, "_documentation", None)
+    documentation = (
+        render()
+        if callable(render)
+        else getattr(value, "__doc__", None) or "No documentation available."
+    )
     print(f"Help on {type(value).__name__}:\n\n{signature}\n\n{documentation}")
 
 

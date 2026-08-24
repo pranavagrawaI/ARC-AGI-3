@@ -207,12 +207,20 @@ async def test_capability_contract_describes_the_executable_query_surface() -> N
     ) as executor:
         result = await executor.run_cell(
             "import inspect; "
+            "print(repr(evidence.query)); "
             "print(inspect.signature(evidence.query)); "
             "print(evidence.query.__doc__); "
             "help(evidence.query)"
         )
 
-    signature, documentation = result.stdout.split("\n", maxsplit=1)
+    representation, signature, documentation = result.stdout.split("\n", maxsplit=2)
+    assert "evidence.query(kind='transitions', level=0" in representation
+    assert "limit=4, projection='metadata'" in representation
+    assert "attempts_remaining=2" in representation
+    assert "disclosures_remaining=1" in representation
+    assert "frames" not in representation
+    assert "'raw'" not in representation
+    assert "'rle'" not in representation
     assert signature == "(*, kind, level, limit, projection, grid_encoding=None)"
     assert "evidence.query(" in documentation
     assert "kind='transitions'" in documentation
@@ -223,6 +231,55 @@ async def test_capability_contract_describes_the_executable_query_surface() -> N
     assert "2 attempts; at most 1 successful disclosure" in documentation
     assert "Help on _EvidenceQuery" in documentation
     assert "evidence.query(kind='transitions'" in documentation
+
+
+async def test_capability_repr_tracks_attempts_and_disclosures() -> None:
+    contract = {
+        "kind": "transitions",
+        "level": 0,
+        "limit": 4,
+        "projection": "metadata",
+        "max_query_attempts": 2,
+        "max_successful_disclosures": 1,
+    }
+
+    def query(arguments):
+        if arguments.get("kind") != "transitions":
+            raise ValueError("wrong kind")
+        return {"records": []}
+
+    manifest = ExecutionManifest(
+        invocation_id="actor-query-budget-1",
+        role="actor",
+        capabilities=("evidence.query",),
+        capability_contracts={"evidence.query": contract},
+    )
+    exact = "kind='transitions', level=0, limit=4, projection='metadata'"
+
+    async with SterileExecutor(
+        manifest,
+        return_type=ActionDecision,
+        capability_handlers={"evidence.query": query},
+    ) as executor:
+        initial = await executor.run_cell("print(repr(evidence.query))")
+        rejected = await executor.run_cell(
+            "evidence.query(kind='frames', level=0, limit=4, projection='metadata')"
+        )
+        after_rejection = await executor.run_cell("print(repr(evidence.query))")
+        accepted = await executor.run_cell(f"evidence.query({exact})")
+        after_disclosure = await executor.run_cell(
+            "print(repr(evidence.query)); help(evidence.query)"
+        )
+
+    assert "attempts_remaining=2" in initial.stdout
+    assert "disclosures_remaining=1" in initial.stdout
+    assert rejected.status == "error"
+    assert "attempts_remaining=1" in after_rejection.stdout
+    assert "disclosures_remaining=1" in after_rejection.stdout
+    assert accepted.status == "complete"
+    assert "attempts_remaining=0" in after_disclosure.stdout
+    assert "disclosures_remaining=0" in after_disclosure.stdout
+    assert "Remaining: 0 attempts; 0 disclosures" in after_disclosure.stdout
 
 
 def test_manifest_rejects_contract_for_ungranted_capability() -> None:
