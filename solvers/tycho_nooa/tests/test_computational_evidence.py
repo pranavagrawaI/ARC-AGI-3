@@ -10,7 +10,9 @@ from tycho_nooa.computational_evidence import (
     decode_rle_row,
     describe_evidence_page,
 )
+from tycho_nooa.computational_execution import ComputationalSterileExecutor
 from tycho_nooa.evidence import WorkspaceEvidenceCapability
+from tycho_nooa.sterile_execution import ExecutionManifest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 CHECKPOINT = REPOSITORY_ROOT / (
@@ -60,3 +62,50 @@ def test_candidate_golden_path_has_no_undocumented_lookup() -> None:
     )
 
     assert result == CompositionReturn(conclusion="11->5", evidence_ref="L0:T1")
+
+
+async def test_candidate_golden_path_crosses_the_sterile_membrane() -> None:
+    capability = WorkspaceEvidenceCapability.from_root(CHECKPOINT)
+
+    def query(arguments):
+        return describe_evidence_page(capability.query(arguments))
+
+    manifest = ExecutionManifest(
+        invocation_id="computational-golden-path",
+        role="actor",
+        capabilities=("evidence.query",),
+        capability_contracts={
+            "evidence.query": {
+                "kind": "transitions",
+                "level": 0,
+                "limit": 1,
+                "projection": "full",
+                "grid_encoding": "rle",
+                "max_query_attempts": 1,
+                "max_successful_disclosures": 1,
+            }
+        },
+    )
+    code = (
+        "page = evidence.query(kind='transitions', level=0, limit=1, "
+        "projection='full', grid_encoding='rle')\n"
+        "record = page.records[0]\n"
+        "before = rle.decode_row(record.prev_rows[0])[63]\n"
+        "after = rle.decode_row(record.next_rows[0])[63]\n"
+        "print(record.ref, f'{before}->{after}')"
+    )
+    async with ComputationalSterileExecutor(
+        manifest,
+        return_type=CompositionReturn,
+        capability_handlers={"evidence.query": query},
+    ) as executor:
+        computed = await executor.run_cell(code)
+        returned = await executor.run_cell(
+            "return_result(conclusion=f'{before}->{after}', evidence_ref=record.ref)"
+        )
+
+    assert computed.status == "complete"
+    assert computed.stdout == "L0:T1 11->5\n"
+    assert returned.return_value == CompositionReturn(
+        conclusion="11->5", evidence_ref="L0:T1"
+    )
