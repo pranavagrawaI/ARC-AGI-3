@@ -129,8 +129,9 @@ class ParityReport(BaseModel):
 
     report_schema: Literal[1] = 1
     contract: str = (
-        "legacy workspace wmlib and sterile evidence.query produce identical "
-        "ordered frame/transition values and derived color/diff profiles"
+        "legacy workspace wmlib with canonical refs synthesized from level/turn "
+        "and sterile evidence.query produce identical ordered frame/transition "
+        "values and derived color/diff profiles"
     )
     all_passed: bool
     checkpoints: tuple[WorkspaceParityResult, ...]
@@ -209,6 +210,7 @@ def _legacy_evidence(
             "type": "frame",
             "level": int(level),
             "turn": int(turn),
+            "ref": f"L{int(level)}:T{int(turn)}",
             "grid": grid.tolist(),
         }
         for (level, turn), grid in sorted(module.frames(root).items())
@@ -218,6 +220,7 @@ def _legacy_evidence(
             "type": "transition",
             "level": int(item["level"]),
             "turn": int(item["turn"]),
+            "ref": f"L{int(item['level'])}:T{int(item['turn'])}",
             "prev": item["prev"].tolist(),
             "next": item["next"].tolist(),
             "action": item.get("action"),

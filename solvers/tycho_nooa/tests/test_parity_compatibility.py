@@ -182,6 +182,7 @@ def test_capability_allows_one_exact_metadata_query(tmp_path: Path) -> None:
             "type": "transition_metadata",
             "level": 0,
             "turn": 1,
+            "ref": "L0:T1",
             "action": "LEFT",
             "row": None,
             "col": None,

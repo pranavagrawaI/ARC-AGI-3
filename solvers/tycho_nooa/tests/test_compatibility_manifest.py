@@ -58,6 +58,7 @@ def test_metadata_gate_exact_query_excludes_grids() -> None:
         "type": "transition_metadata",
         "level": 0,
         "turn": 3,
+        "ref": "L0:T3",
         "action": "LEFT",
         "row": None,
         "col": None,
@@ -75,6 +76,7 @@ def test_factored_gates_preserve_v9_topology_and_isolate_rle() -> None:
     assert page["frontier"] == {"level": 1, "turn": 2}
     assert page["records"][0]["level"] == 0
     assert page["records"][0]["turn"] == 1
+    assert page["records"][0]["ref"] == "L0:T1"
     assert page["next_after"] == {"level": 0, "turn": 1}
     assert ladder.representation_rle.evidence.enabled is False
     assert ladder.representation_rle.task.inputs["after_row_rle"].endswith("1:5")

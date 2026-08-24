@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Annotated, Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 from tycho.workspace import wmlib_template
 from tycho.workspace.workspace import GameWorkspace
 
@@ -23,20 +23,31 @@ class EvidenceRef(BaseModel):
     turn: int = Field(ge=0)
 
 
-class FrameEvidence(BaseModel):
+class EvidenceRecordIdentity(BaseModel):
+    """A record carries its canonical citation; cursors deliberately do not."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    level: int = Field(ge=0)
+    turn: int = Field(ge=0)
+
+    @computed_field
+    @property
+    def ref(self) -> str:
+        return f"L{self.level}:T{self.turn}"
+
+
+class FrameEvidence(EvidenceRecordIdentity):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     type: Literal["frame"] = "frame"
-    level: int = Field(ge=0)
-    turn: int = Field(ge=0)
     grid: Grid
 
 
-class TransitionEvidence(BaseModel):
+class TransitionEvidence(EvidenceRecordIdentity):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     type: Literal["transition"] = "transition"
-    level: int = Field(ge=0)
     turn: int = Field(ge=1)
     prev: Grid
     next: Grid
@@ -51,19 +62,16 @@ EvidenceRecord = Annotated[
 ]
 
 
-class FrameMetadataEvidence(BaseModel):
+class FrameMetadataEvidence(EvidenceRecordIdentity):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     type: Literal["frame_metadata"] = "frame_metadata"
-    level: int = Field(ge=0)
-    turn: int = Field(ge=0)
 
 
-class TransitionMetadataEvidence(BaseModel):
+class TransitionMetadataEvidence(EvidenceRecordIdentity):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     type: Literal["transition_metadata"] = "transition_metadata"
-    level: int = Field(ge=0)
     turn: int = Field(ge=1)
     action: str | None
     row: int | None
