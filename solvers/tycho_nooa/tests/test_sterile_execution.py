@@ -265,10 +265,10 @@ async def test_capability_repr_tracks_attempts_and_disclosures() -> None:
         rejected = await executor.run_cell(
             "evidence.query(kind='frames', level=0, limit=4, projection='metadata')"
         )
-        after_rejection = await executor.run_cell("print(repr(evidence.query))")
+        after_rejection = await executor.run_cell("print(repr(evidence))")
         accepted = await executor.run_cell(f"evidence.query({exact})")
         after_disclosure = await executor.run_cell(
-            "print(repr(evidence.query)); help(evidence.query)"
+            "print(repr(evidence)); help(evidence.query)"
         )
 
     assert "attempts_remaining=2" in initial.stdout
@@ -280,6 +280,45 @@ async def test_capability_repr_tracks_attempts_and_disclosures() -> None:
     assert "attempts_remaining=0" in after_disclosure.stdout
     assert "disclosures_remaining=0" in after_disclosure.stdout
     assert "Remaining: 0 attempts; 0 disclosures" in after_disclosure.stdout
+
+
+async def test_capability_namespace_repr_only_lists_the_granted_surface() -> None:
+    contract = {
+        "kind": "transitions",
+        "level": 0,
+        "limit": 4,
+        "projection": "metadata",
+        "max_query_attempts": 2,
+        "max_successful_disclosures": 1,
+    }
+    manifest = ExecutionManifest(
+        invocation_id="actor-evidence-namespace-1",
+        role="actor",
+        capabilities=("evidence.query",),
+        capability_contracts={"evidence.query": contract},
+    )
+
+    async with SterileExecutor(
+        manifest,
+        return_type=ActionDecision,
+        capability_handlers={"evidence.query": lambda arguments: arguments},
+    ) as executor:
+        initial = await executor.run_cell("print(evidence)")
+        await executor.run_cell(
+            "evidence.query(kind='transitions', level=0, limit=4, "
+            "projection='metadata')"
+        )
+        after_disclosure = await executor.run_cell("print(evidence)")
+
+    assert initial.stdout.startswith("EvidenceCapabilities(granted=['query']")
+    assert "evidence.query(kind='transitions', level=0" in initial.stdout
+    assert "attempts_remaining=2" in initial.stdout
+    assert "disclosures_remaining=1" in initial.stdout
+    assert "workspace" not in initial.stdout
+    assert "write" not in initial.stdout
+    assert "terminal" not in initial.stdout
+    assert "attempts_remaining=1" in after_disclosure.stdout
+    assert "disclosures_remaining=0" in after_disclosure.stdout
 
 
 def test_manifest_rejects_contract_for_ungranted_capability() -> None:

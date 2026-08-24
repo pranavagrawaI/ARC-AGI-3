@@ -289,7 +289,7 @@ async def test_codeact_contract_help_leads_to_the_admitted_metadata_query(
             scripted_responses=[
                 response(
                     "execute_python",
-                    {"code": "print(evidence.query)"},
+                    {"code": "print(evidence)"},
                 ),
                 response(
                     "execute_python",

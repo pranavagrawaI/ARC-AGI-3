@@ -136,10 +136,13 @@ class _EvidenceQuery:
 
     def _documentation(self) -> str:  # pragma: no cover - exec process seam
         documentation = self.__doc__ or "No documentation available."
+        disclosure_word = (
+            "disclosure" if self._disclosures_remaining == 1 else "disclosures"
+        )
         return (
             documentation
             + f"\nRemaining: {self._attempts_remaining} attempts; "
-            + f"{self._disclosures_remaining} disclosures."
+            + f"{self._disclosures_remaining} {disclosure_word}."
         )
 
 
@@ -148,6 +151,9 @@ class _EvidenceProxy:
         self, client: _CapabilityClient, contract: dict[str, Any] | None
     ) -> None:
         self.query = _EvidenceQuery(client, contract)
+
+    def __repr__(self) -> str:  # pragma: no cover - exec process seam
+        return f"EvidenceCapabilities(granted=['query'], query={self.query!r})"
 
 
 def _evidence_query_signature(  # pragma: no cover - exec process seam
