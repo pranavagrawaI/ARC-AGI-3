@@ -16,8 +16,9 @@ from tycho_nooa.compatibility_return import retrieval_return_schema_sha256
 from tycho_nooa.parity_compatibility import CompatibilityEvidenceCapability
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-GATE_MANIFEST = REPOSITORY_ROOT / "analysis/parity-compat-v2/gate-manifest.json"
-EXPERIMENT = REPOSITORY_ROOT / "analysis/parity-compat-v2/experiment.json"
+GATE_MANIFEST = REPOSITORY_ROOT / "analysis/parity-compat-v9/gate-manifest.json"
+EXPERIMENT = REPOSITORY_ROOT / "analysis/parity-compat-v9/experiment.json"
+LEGACY_EXPERIMENT = REPOSITORY_ROOT / "analysis/parity-compat-v2/experiment.json"
 
 
 def test_frozen_gate_manifest_loads_every_validated_ladder_role() -> None:
@@ -25,7 +26,7 @@ def test_frozen_gate_manifest_loads_every_validated_ladder_role() -> None:
         GATE_MANIFEST, repository_root=REPOSITORY_ROOT
     )
 
-    assert manifest.ladder_id == "parity-compat-v2"
+    assert manifest.ladder_id == "parity-compat-v9"
     assert [gate.task.gate_id for gate in ladder.ordered_gates()] == [
         "g0-termination",
         "g1-metadata-query",
@@ -99,11 +100,12 @@ def test_experiment_is_fully_committed_but_paid_execution_is_disabled() -> None:
         EXPERIMENT, repository_root=REPOSITORY_ROOT
     )
 
-    assert manifest.runtime_commit == "99e71f3"
-    assert manifest.package_commit == "99e71f3"
+    assert manifest.runtime_commit == "2913039"
+    assert manifest.package_commit == "2913039"
     assert manifest.caps.calls_per_arm_gate == 3
     assert manifest.caps.calls_total == 30
     assert manifest.caps.input_tokens_per_call == 65536
+    assert manifest.return_contract == "retrieval_flat"
     assert manifest.model_route.model is None
     assert ladder.termination.task.gate_id == "g0-termination"
     with pytest.raises(RuntimeError, match="execution is disabled"):
@@ -131,7 +133,7 @@ def test_experiment_detects_runner_commitment_drift(tmp_path: Path) -> None:
 
 
 def test_schema_v2_requires_and_checks_the_shared_return_contract() -> None:
-    raw = json.loads(EXPERIMENT.read_text())
+    raw = json.loads(LEGACY_EXPERIMENT.read_text())
     raw["schema_version"] = 2
 
     with pytest.raises(ValidationError, match="bind both controllers"):
@@ -148,7 +150,7 @@ def test_schema_v2_requires_and_checks_the_shared_return_contract() -> None:
 
 
 def test_schema_v3_requires_projection_and_executor_commitments() -> None:
-    raw = json.loads(EXPERIMENT.read_text())
+    raw = json.loads(LEGACY_EXPERIMENT.read_text())
     raw["schema_version"] = 3
 
     with pytest.raises(ValidationError, match="projection, and executor"):
@@ -156,7 +158,7 @@ def test_schema_v3_requires_projection_and_executor_commitments() -> None:
 
 
 def test_schema_v4_requires_the_exec_worker_commitment() -> None:
-    raw = json.loads(EXPERIMENT.read_text())
+    raw = json.loads(LEGACY_EXPERIMENT.read_text())
     raw.update(
         schema_version=4,
         native_controller=raw["gate_executor"],
@@ -179,7 +181,7 @@ def test_schema_v4_requires_the_exec_worker_commitment() -> None:
 
 
 def test_schema_v5_requires_and_checks_flat_retrieval_contract() -> None:
-    raw = json.loads(EXPERIMENT.read_text())
+    raw = json.loads(LEGACY_EXPERIMENT.read_text())
     raw.update(
         schema_version=5,
         native_controller=raw["gate_executor"],
