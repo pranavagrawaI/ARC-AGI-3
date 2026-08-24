@@ -52,7 +52,14 @@ class CodeActRunwayManifest(BaseModel):
     prior_codeact_trace: FileCommitment
     runner: FileCommitment
     gate_executor: FileCommitment
+    launch_wrapper: FileCommitment
     authorization_schema: FileCommitment
+    codeact_controller: FileCommitment
+    execution_projection: FileCommitment
+    sterile_executor: FileCommitment
+    sterile_worker: FileCommitment
+    return_contract_module: FileCommitment
+    evidence_module: FileCommitment
     protocol: FileCommitment
     experiment_card: FileCommitment
     codeact_prompt_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
@@ -135,7 +142,14 @@ def load_codeact_runway_manifest(
         manifest.prior_codeact_trace,
         manifest.runner,
         manifest.gate_executor,
+        manifest.launch_wrapper,
         manifest.authorization_schema,
+        manifest.codeact_controller,
+        manifest.execution_projection,
+        manifest.sterile_executor,
+        manifest.sterile_worker,
+        manifest.return_contract_module,
+        manifest.evidence_module,
         manifest.protocol,
         manifest.experiment_card,
     ):

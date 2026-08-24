@@ -67,6 +67,7 @@ def diagnostic_inputs(tmp_path: Path) -> tuple[Path, Path]:
     authorization_schema = REPOSITORY_ROOT / (
         "solvers/tycho_nooa/src/tycho_nooa/compatibility_authorization.py"
     )
+    module_root = REPOSITORY_ROOT / "solvers/tycho_nooa/src/tycho_nooa"
     raw = {
         "schema_version": 1,
         "experiment_id": "test-runway",
@@ -78,7 +79,14 @@ def diagnostic_inputs(tmp_path: Path) -> tuple[Path, Path]:
         "prior_codeact_trace": commitment(CODEACT_TRACE),
         "runner": commitment(runner),
         "gate_executor": commitment(executor),
+        "launch_wrapper": commitment(module_root / "compatibility_launch.py"),
         "authorization_schema": commitment(authorization_schema),
+        "codeact_controller": commitment(module_root / "sterile_codeact.py"),
+        "execution_projection": commitment(module_root / "execution_events.py"),
+        "sterile_executor": commitment(module_root / "sterile_execution.py"),
+        "sterile_worker": commitment(module_root / "_sterile_worker.py"),
+        "return_contract_module": commitment(module_root / "compatibility_return.py"),
+        "evidence_module": commitment(module_root / "evidence.py"),
         "protocol": commitment(protocol),
         "experiment_card": commitment(card),
         "codeact_prompt_sha256": sha256_text(
