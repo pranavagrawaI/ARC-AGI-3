@@ -48,11 +48,16 @@ def ladder() -> CompatibilityLadder:
         capability_retrieval=evidence_gate(
             "g1", "capability_retrieval", {"evidence_ref": "L0:T1"}, projection="metadata"
         ),
-        identifier_binding=evidence_gate(
-            "g2a", "identifier_binding", {
-                "evidence_ref": "L0:T1", "frontier_substitution": "L1:T2",
-                "turn_number_leakage": "L0:T2",
-            }, projection="metadata"
+        identifier_binding=CompatibilityGate(
+            task=CompatibilityTask(
+                gate_id="g2a", gate_kind="identifier_binding", instruction="Do it.",
+                inputs={"record": {"ref": "L0:T1"}, "frontier": "L1:T2", "next_after": "L0:T1"},
+            ),
+            evidence=CompatibilityEvidencePolicy(enabled=False, max_queries=0),
+            expected=CompatibilityExpected(
+                evidence_ref="L0:T1", frontier_substitution="L1:T2",
+                turn_number_leakage="L0:T2",
+            ),
         ),
         representation_rle=disabled_gate(
             "g2b", "representation_rle", {"decoded_value": 5}

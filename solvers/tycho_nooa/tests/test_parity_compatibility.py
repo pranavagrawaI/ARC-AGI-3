@@ -103,14 +103,17 @@ def test_evaluator_scores_gate_value_and_identifier_interference() -> None:
         termination_gate(), TerminationReturn(ok=True), evidence_queries=0
     )
     gate = CompatibilityGate(
-        checkpoint_root="checkpoint",
-        checkpoint_sha256="sha256:" + "0" * 64,
         task=CompatibilityTask(
             gate_id="g2a",
             gate_kind="identifier_binding",
             instruction="Bind the record ref.",
+            inputs={
+                "record": {"ref": "L0:T1"},
+                "frontier": "L1:T2",
+                "next_after": "L0:T1",
+            },
         ),
-        evidence=metadata_policy(),
+        evidence=CompatibilityEvidencePolicy(enabled=False, max_queries=0),
         expected=CompatibilityExpected(
             evidence_ref="L0:T1",
             frontier_substitution="L1:T2",
@@ -118,12 +121,30 @@ def test_evaluator_scores_gate_value_and_identifier_interference() -> None:
         ),
     )
     leakage = evaluate_compatibility_answer(
-        gate, IdentifierBindingReturn(evidence_ref="L0:T2"), evidence_queries=1
+        gate, IdentifierBindingReturn(evidence_ref="L0:T2"), evidence_queries=0
     )
 
     assert accepted.passed is True
     assert leakage.passed is False
     assert leakage.identifier_classification == "turn_number_leakage"
+
+
+def test_identifier_binding_requires_exact_immutable_interference_input() -> None:
+    with pytest.raises(ValueError, match="record, frontier, and next_after"):
+        CompatibilityGate(
+            task=CompatibilityTask(
+                gate_id="g2a",
+                gate_kind="identifier_binding",
+                instruction="Bind the record ref.",
+                inputs={"record": {"ref": "L0:T1"}},
+            ),
+            evidence=CompatibilityEvidencePolicy(enabled=False, max_queries=0),
+            expected=CompatibilityExpected(
+                evidence_ref="L0:T1",
+                frontier_substitution="L1:T2",
+                turn_number_leakage="L0:T2",
+            ),
+        )
 
 
 def test_representation_and_composition_are_independently_scored() -> None:

@@ -19,8 +19,8 @@ from tycho_nooa.compatibility_return import (
 from tycho_nooa.parity_compatibility import CompatibilityEvidenceCapability
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-GATE_MANIFEST = REPOSITORY_ROOT / "analysis/parity-compat-v11/gate-manifest.json"
-EXPERIMENT = REPOSITORY_ROOT / "analysis/parity-compat-v11/experiment.json"
+GATE_MANIFEST = REPOSITORY_ROOT / "analysis/parity-compat-v12/gate-manifest.json"
+EXPERIMENT = REPOSITORY_ROOT / "analysis/parity-compat-v12/experiment.json"
 LEGACY_EXPERIMENT = REPOSITORY_ROOT / "analysis/parity-compat-v2/experiment.json"
 
 
@@ -29,7 +29,7 @@ def test_frozen_gate_manifest_loads_every_validated_ladder_role() -> None:
         GATE_MANIFEST, repository_root=REPOSITORY_ROOT
     )
 
-    assert manifest.ladder_id == "parity-compat-v11"
+    assert manifest.ladder_id == "parity-compat-v12"
     assert [gate.task.gate_id for gate in ladder.ordered_gates()] == [
         "g0-termination",
         "g1-capability-retrieval",
@@ -71,13 +71,20 @@ def test_factored_gates_preserve_v9_topology_and_isolate_rle() -> None:
     binding = CompatibilityEvidenceCapability.from_gate(
         ladder.identifier_binding, repository_root=REPOSITORY_ROOT
     )
-    assert binding is not None
-    page = binding.query(ladder.identifier_binding.evidence.query_value())
-    assert page["frontier"] == {"level": 1, "turn": 2}
-    assert page["records"][0]["level"] == 0
-    assert page["records"][0]["turn"] == 1
-    assert page["records"][0]["ref"] == "L0:T1"
-    assert page["next_after"] == {"level": 0, "turn": 1}
+    assert binding is None
+    assert ladder.identifier_binding.task.inputs == {
+        "record": {
+            "level": 0,
+            "turn": 1,
+            "type": "transition_metadata",
+            "action": "UP",
+            "row": None,
+            "col": None,
+            "ref": "L0:T1",
+        },
+        "frontier": "L1:T2",
+        "next_after": "L0:T1",
+    }
     assert ladder.representation_rle.evidence.enabled is False
     assert ladder.representation_rle.task.inputs["after_row_rle"].endswith("1:5")
 
@@ -97,8 +104,8 @@ def test_experiment_is_fully_committed_but_paid_execution_is_disabled() -> None:
         EXPERIMENT, repository_root=REPOSITORY_ROOT
     )
 
-    assert manifest.runtime_commit == "b240f4f"
-    assert manifest.package_commit == "b240f4f"
+    assert manifest.runtime_commit == "0c29770"
+    assert manifest.package_commit == "0c29770"
     assert manifest.caps.calls_per_arm_gate == 3
     assert manifest.caps.calls_total == 30
     assert manifest.caps.input_tokens_per_call == 16384

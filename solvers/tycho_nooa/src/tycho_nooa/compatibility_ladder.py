@@ -89,8 +89,9 @@ class CompatibilityLadder(BaseModel):
         if len(gate_ids) != len(set(gate_ids)):
             raise ValueError("compatibility ladder gate ids must be unique")
         _validate_projection(self.capability_retrieval, projection="metadata")
-        _validate_projection(self.identifier_binding, projection="metadata")
         _validate_projection(self.composition, projection="full")
+        if self.identifier_binding.evidence.enabled:
+            _validate_projection(self.identifier_binding, projection="metadata")
         if self.representation_rle.evidence.enabled:
             raise ValueError("representation gate must use immutable task data")
         if self.composition.evidence.grid_encoding != "rle":

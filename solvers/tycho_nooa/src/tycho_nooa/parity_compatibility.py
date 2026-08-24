@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 from tycho_nooa.cognitive_parity import tree_sha256
 from tycho_nooa.compatibility_return import (
@@ -36,7 +36,7 @@ class CompatibilityTask(BaseModel):
     gate_kind: CompatibilityGateKind
     task_kind: Literal["retrieve"] = "retrieve"
     instruction: str = Field(min_length=1)
-    inputs: dict[str, str | int | bool] = Field(default_factory=dict)
+    inputs: dict[str, JsonValue] = Field(default_factory=dict)
 
 
 class CompatibilityEvidencePolicy(BaseModel):
@@ -133,16 +133,10 @@ class CompatibilityGate(BaseModel):
 
     @model_validator(mode="after")
     def checkpoint_matches_authority(self) -> CompatibilityGate:
-        checkpoint_values = (self.checkpoint_root, self.checkpoint_sha256)
-        if self.evidence.enabled and any(value is None for value in checkpoint_values):
-            raise ValueError("evidence-enabled gate requires a frozen checkpoint")
-        if not self.evidence.enabled and any(
-            value is not None for value in checkpoint_values
-        ):
-            raise ValueError("return-only gate cannot carry an evidence checkpoint")
-        evidence_kinds = {"capability_retrieval", "identifier_binding", "composition"}
-        if self.evidence.enabled != (self.task.gate_kind in evidence_kinds):
-            raise ValueError("gate kind and evidence authority disagree")
+        _validate_checkpoint_config(self)
+        _validate_gate_evidence_authority(self)
+        if self.task.gate_kind == "identifier_binding" and not self.evidence.enabled:
+            _validate_identifier_binding_inputs(self.task.inputs)
         _validate_expected(self.task.gate_kind, self.expected)
         return self
 
@@ -373,6 +367,35 @@ def _validate_expected(
     present = {name for name, value in values.items() if value is not None}
     if present != required:
         raise ValueError(f"{gate_kind} expected key must contain exactly {sorted(required)}")
+
+
+def _validate_identifier_binding_inputs(inputs: dict[str, JsonValue]) -> None:
+    """Keep the binding probe exact and free of evidence-acquisition authority."""
+    if set(inputs) != {"record", "frontier", "next_after"}:
+        raise ValueError(
+            "identifier-binding input must contain record, frontier, and next_after"
+        )
+    record = inputs["record"]
+    if not isinstance(record, dict) or not isinstance(record.get("ref"), str):
+        raise TypeError("identifier-binding record must expose a string ref")
+    if not all(isinstance(inputs[name], str) for name in ("frontier", "next_after")):
+        raise TypeError("identifier-binding cursor values must be strings")
+
+
+def _validate_checkpoint_config(gate: CompatibilityGate) -> None:
+    checkpoint_values = (gate.checkpoint_root, gate.checkpoint_sha256)
+    if gate.evidence.enabled and any(value is None for value in checkpoint_values):
+        raise ValueError("evidence-enabled gate requires a frozen checkpoint")
+    if not gate.evidence.enabled and any(value is not None for value in checkpoint_values):
+        raise ValueError("return-only gate cannot carry an evidence checkpoint")
+
+
+def _validate_gate_evidence_authority(gate: CompatibilityGate) -> None:
+    if gate.task.gate_kind == "identifier_binding":
+        return
+    evidence_kinds = {"capability_retrieval", "composition"}
+    if gate.evidence.enabled != (gate.task.gate_kind in evidence_kinds):
+        raise ValueError("gate kind and evidence authority disagree")
 
 
 def _checkpoint_path(value: str, repository_root: Path) -> Path:

@@ -6,12 +6,12 @@ import asyncio
 import json
 import time
 from collections import Counter
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Iterable
 from pathlib import Path
 from typing import Any, Literal
 
 from nooa.unifiedllm import UnifiedLLM
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from tycho_nooa.compatibility_return import (
     CompatibilityReturn,
@@ -55,7 +55,14 @@ class CompatibilityMetrics(BaseModel):
     python_cells: int = Field(ge=0)
     invalid_interactions: int = Field(ge=0)
     transport_adherence: dict[str, int] = Field(default_factory=dict)
+    return_call_index: int | None = Field(default=None, ge=1)
     wall_seconds: float = Field(ge=0)
+
+    @computed_field
+    @property
+    def provider_calls(self) -> int:
+        """Provider-call spelling retained beside the historical llm_calls metric."""
+        return self.llm_calls
 
 
 class CompatibilityArmObservation(BaseModel):
@@ -165,6 +172,7 @@ async def _run_native(
         python_cells=0,
         invalid_interactions=controller.invalid_returns,
         transport_adherence={},
+        return_call_index=_return_call_index(controller.provider_turns),
         wall_seconds=time.monotonic() - started,
     )
     observation = _observation(gate, "native", answer, failure, metrics)
@@ -223,6 +231,7 @@ async def _run_codeact(
             + counts["CellFailed"]
         ),
         transport_adherence=controller.transport_adherence,
+        return_call_index=_return_call_index(controller.provider_turns),
         wall_seconds=time.monotonic() - started,
     )
     observation = _observation(
@@ -288,6 +297,7 @@ def _metrics(
     python_cells: int,
     invalid_interactions: int,
     transport_adherence: dict[str, int],
+    return_call_index: int | None,
     wall_seconds: float,
 ) -> CompatibilityMetrics:
     input_tokens = sum(_usage_value(row, "prompt_tokens", "input_tokens") for row in usage)
@@ -303,8 +313,16 @@ def _metrics(
         python_cells=python_cells,
         invalid_interactions=invalid_interactions,
         transport_adherence=transport_adherence,
+        return_call_index=return_call_index,
         wall_seconds=wall_seconds,
     )
+
+
+def _return_call_index(provider_turns: Iterable[Any]) -> int | None:
+    for index, turn in enumerate(provider_turns, start=1):
+        if "return_result" in turn.tool_names:
+            return index
+    return None
 
 
 def _usage_value(usage: dict[str, int] | None, *names: str) -> int:

@@ -19,7 +19,7 @@ from tycho_nooa.compatibility_launch import (
 from tycho_nooa.compatibility_manifest import sha256_file
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-BASE_MANIFEST = REPOSITORY_ROOT / "analysis/parity-compat-v11/experiment.json"
+BASE_MANIFEST = REPOSITORY_ROOT / "analysis/parity-compat-v12/experiment.json"
 
 
 def response(

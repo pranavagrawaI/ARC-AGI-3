@@ -43,6 +43,27 @@ def termination_gate() -> CompatibilityGate:
     )
 
 
+def immutable_identifier_gate() -> CompatibilityGate:
+    return CompatibilityGate(
+        task=CompatibilityTask(
+            gate_id="g2a-identifier-binding",
+            gate_kind="identifier_binding",
+            instruction="Return the record ref.",
+            inputs={
+                "record": {"ref": "L0:T1"},
+                "frontier": "L1:T2",
+                "next_after": "L0:T1",
+            },
+        ),
+        evidence=CompatibilityEvidencePolicy(enabled=False, max_queries=0),
+        expected=CompatibilityExpected(
+            evidence_ref="L0:T1",
+            frontier_substitution="L1:T2",
+            turn_number_leakage="L0:T2",
+        ),
+    )
+
+
 async def test_return_only_gate_passes_both_arms_without_evidence(
     tmp_path: Path,
 ) -> None:
@@ -67,6 +88,10 @@ async def test_return_only_gate_passes_both_arms_without_evidence(
     assert report.codeact.evaluation.capability_use_correct is True
     assert report.native.metrics.evidence_queries == 0
     assert report.codeact.metrics.evidence_queries == 0
+    assert report.native.metrics.provider_calls == 1
+    assert report.codeact.metrics.provider_calls == 1
+    assert report.native.metrics.return_call_index == 1
+    assert report.codeact.metrics.return_call_index == 1
     assert (tmp_path / "result/report.json").is_file()
     assert (tmp_path / "result/codeact/provenance.jsonl").is_file()
     for llm in (native_llm, codeact_llm):
@@ -107,6 +132,32 @@ async def test_flat_return_rejects_union_wrapper_then_accepts_exact_shape(
     assert report.passed is True
     assert report.native.metrics.invalid_interactions == 1
     assert report.codeact.metrics.invalid_interactions == 1
+
+
+async def test_immutable_binding_can_return_without_query_or_python(
+    tmp_path: Path,
+) -> None:
+    direct = response("return_result", {"evidence_ref": "L0:T1"})
+
+    report = await execute_compatibility_gate(
+        immutable_identifier_gate(),
+        repository_root=tmp_path,
+        destination=tmp_path / "result",
+        native_llm=FakeLLMClient(scripted_responses=[direct]),
+        codeact_llm=FakeLLMClient(scripted_responses=[direct]),
+    )
+
+    assert report.passed is True
+    assert report.native.evaluation is not None
+    assert report.native.evaluation.identifier_classification == (
+        "correct_record_binding"
+    )
+    for arm in (report.native, report.codeact):
+        assert arm.metrics.evidence_queries == 0
+        assert arm.metrics.query_attempts == 0
+        assert arm.metrics.python_cells == 0
+        assert arm.metrics.provider_calls == 1
+        assert arm.metrics.return_call_index == 1
 
 
 async def test_valid_answer_without_required_query_fails_eligibility(
