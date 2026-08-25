@@ -6,12 +6,14 @@ import hashlib
 import inspect
 import json
 import os
+import shutil
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
 
 from nooa.unifiedllm import UnifiedLLM
 from pydantic import BaseModel, ConfigDict, Field
+from tycho.workspace.sandbox import resolve_runtime
 
 from tycho_nooa.compatibility_authorization_v2 import (
     CompatibilityAuthorization,
@@ -72,6 +74,7 @@ class ProductionShadowManifest(BaseModel):
     execution_authorized: bool
     phase: Literal["short", "long"]
     prerequisite: ProductionShadowPrerequisite | None = None
+    sandbox_runtime: Literal["host"]
     runtime_bundle_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     transcript_path: str
     transcript_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
@@ -179,6 +182,7 @@ def preflight_production_shadow(
 
     manifest = ProductionShadowManifest.model_validate_json(manifest_path.read_text())
     manifest.require_authorized()
+    _validate_sandbox_runtime(manifest.sandbox_runtime)
     _validate_runtime_bundle(repository_root, manifest.runtime_bundle_sha256)
     _validate_import_origin(repository_root)
     _validate_committed_file(
@@ -315,6 +319,18 @@ def _validate_import_origin(repository_root: Path) -> None:
         raise ValueError(
             "imported tycho_nooa does not resolve under the bound checkout"
         )
+
+
+def _validate_sandbox_runtime(expected: str) -> None:
+    configured = os.environ.get("TYCHO_SANDBOX_RUNTIME", "auto").strip().lower()
+    if configured != expected:
+        raise ValueError(
+            f"sandbox runtime mismatch: expected {expected!r}, got {configured!r}"
+        )
+    if resolve_runtime(configured) != expected:
+        raise ValueError("sandbox runtime did not resolve to the bound treatment")
+    if expected == "host" and shutil.which("bwrap") is None:
+        raise RuntimeError("host sandbox treatment requires bubblewrap")
 
 
 def _safe_file(repository_root: Path, relative: str) -> Path:

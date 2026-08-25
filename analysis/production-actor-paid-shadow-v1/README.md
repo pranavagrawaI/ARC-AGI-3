@@ -19,6 +19,7 @@ ARC_LLM_PROVIDER_ENDPOINT=DeepInfra \
 ARC_LLM_CONTEXT_WINDOW=1048576 \
 ARC_LLM_MAX_TOKENS=4096 \
 TYCHO_NOOA_CAPTURE_REASONING=1 \
+TYCHO_SANDBOX_RUNTIME=host \
 solvers/tycho_nooa/.venv/bin/python \
 analysis/production-actor-paid-shadow-v1/run.py --preflight
 ```

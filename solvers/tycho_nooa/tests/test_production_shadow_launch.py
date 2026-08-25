@@ -28,6 +28,7 @@ def trusted_test_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TYCHO_SANDBOX_RUNTIME", "host")
     monkeypatch.setenv("ARC_LLM_MAX_TOKENS", "4096")
     monkeypatch.setattr(shadow_launch, "_validate_import_origin", lambda _root: None)
+    monkeypatch.setattr(shadow_launch.shutil, "which", lambda _name: "/usr/bin/bwrap")
 
 
 def _response(action: str, call_id: str) -> LLMResponse:
@@ -112,6 +113,7 @@ def _authorized_inputs(
         "execution_authorized": True,
         "phase": phase,
         "prerequisite": prerequisite,
+        "sandbox_runtime": "host",
         "runtime_bundle_sha256": runtime_bundle_sha256(tmp_path),
         "transcript_path": relative(transcript),
         "transcript_sha256": sha256_file(transcript),
@@ -252,6 +254,25 @@ def test_preflight_runtime_bundle_drift_makes_zero_calls(tmp_path: Path) -> None
     llm = _configured_fake()
 
     with pytest.raises(ValueError, match="runtime bundle drift"):
+        preflight_production_shadow(
+            manifest_path,
+            authorization_path,
+            repository_root=tmp_path,
+            llm=llm,
+        )
+
+    assert llm.call_count == 0
+
+
+def test_preflight_sandbox_mismatch_makes_zero_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path, authorization_path = _authorized_inputs(tmp_path)
+    monkeypatch.setenv("TYCHO_SANDBOX_RUNTIME", "auto")
+    llm = _configured_fake()
+
+    with pytest.raises(ValueError, match="sandbox runtime mismatch"):
         preflight_production_shadow(
             manifest_path,
             authorization_path,
