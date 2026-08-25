@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from nooa.context_blocks import ToolCallEvent
 from nooa.errors import GenerationError
-from nooa.events import Task
+from nooa.events import Summary, Task
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 from tycho.agent.colors import COLORMAP
 from tycho.prompts.render import render_prompt
@@ -757,11 +757,11 @@ async def test_verbosity_changes_the_next_observation_payload(tmp_path: Path) ->
 async def test_only_the_last_three_observations_keep_their_inlined_grid(
     tmp_path: Path,
 ) -> None:
-    """Tycho's TYCHO_GRID_KEEP=3 bound, on NOOA's event history.
+    """Keep three exact turns and archive older events behind structural facts.
 
-    The grid text is the one payload that grows once per turn, so a long game
-    ends on an over-length request without this. Eliding costs no evidence: the
-    frame is on disk and the breadcrumb that replaces it says where.
+    Exact evidence remains on disk and NOOA retains every archived event by its
+    stable tag. The provider view receives one bounded, non-semantic summary plus
+    the three recent observations with their full grids.
     """
     llm = FakeLLMClient(
         scripted_responses=[
@@ -780,6 +780,7 @@ async def test_only_the_last_three_observations_keep_their_inlined_grid(
     )
 
     assert NativeToolConfig().grid_keep == 3
+    assert NativeToolConfig().history_keep_turns == 3
 
     for number in range(4):
         await agent.act(turn(number, previous_action="UP" if number else ""))
@@ -787,27 +788,30 @@ async def test_only_the_last_three_observations_keep_their_inlined_grid(
     observations = [
         event for event in agent.event_manager.values() if isinstance(event, Task)
     ]
-    assert len(observations) == 4
-    assert "grid (row labels at left" not in observations[0].prompt
-    assert all(
-        "grid (row labels at left" in observation.prompt
-        for observation in observations[1:]
-    )
+    assert len(observations) == 3
+    assert all("grid (row labels at left" in item.prompt for item in observations)
+    summaries = [
+        event for event in agent.event_manager.values() if isinstance(event, Summary)
+    ]
+    assert len(summaries) == 1
+    summary = json.loads(summaries[0].summary_text)
+    assert summary["schema"] == "production_actor_history_collapse.v1"
+    assert summary["collapsed_turns"] == 1
+    assert "semantic" not in summaries[0].summary_text
 
-    # The elided turn keeps everything except the two heavy payloads, and still
-    # names the frame that carried them.
-    elided = observations[0].prompt
-    assert "frame on disk = level_0/turn_000.txt" in elided
-    assert "grid and transition elided" in elided
-    assert "turn_in_level': 0" in elided
+    archived_tasks = [
+        agent.event_manager[tag]
+        for tag in summaries[0].children_tags
+        if isinstance(agent.event_manager[tag], Task)
+    ]
+    assert "frame on disk = level_0/turn_000.txt" in archived_tasks[0].prompt
     assert (agent.workspace_dir / "level_0/turn_000.txt").exists()
 
     # What the model actually saw on the last call, not just what is stored.
     rendered_history = json.dumps(llm.last_messages)
     assert rendered_history.count("grid (row labels at left") == 3
-    # Every observation carries a breadcrumb in event metadata, but metadata is
-    # never rendered; only the one observation actually elided shows it.
-    assert rendered_history.count("grid and transition elided") == 1
+    assert "production_actor_history_collapse.v1" in rendered_history
+    assert "grid and transition elided" not in rendered_history
 
 
 @pytest.mark.asyncio

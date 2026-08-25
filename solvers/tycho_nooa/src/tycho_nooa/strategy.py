@@ -16,6 +16,8 @@ from tycho.workspace.workspace import GameWorkspace
 from tycho_nooa.epistemic import RequestBuilderArguments
 from tycho_nooa.history import (
     ELIDED_OBSERVATION,
+    OBSERVATION_REF,
+    collapse_old_actor_turns,
     evict_old_grids,
     replayed_reasoning,
     retain_assistant_turn,
@@ -44,6 +46,7 @@ class NativeToolConfig:
     max_tool_steps: int = 25
     # Tycho's TYCHO_GRID_KEEP default: how many recent turns keep their inlined grid.
     grid_keep: int = 3
+    history_keep_turns: int = 3
     max_tokens: int = 16_000
     temperature: float | None = None
 
@@ -81,13 +84,24 @@ class NativeToolStrategy(GenerationStrategy):
         tools_by_name = tool_by_name(tools)
         actor_beliefs_before = _read_optional(workspace.dir, ACTOR_BELIEFS_NOTES)
         observation = self._observation(call, surface)
+        turn = surface.current_turn()
         runtime.event_manager.add(
             Task(
                 prompt=observation.prompt,
-                metadata={ELIDED_OBSERVATION: observation.elided},
+                metadata={
+                    ELIDED_OBSERVATION: observation.elided,
+                    OBSERVATION_REF: {
+                        "level": turn.level,
+                        "turn": turn.turn_in_level,
+                    },
+                },
             )
         )
         evict_old_grids(runtime.event_manager, keep=config.grid_keep)
+        collapse_old_actor_turns(
+            runtime.event_manager,
+            keep=config.history_keep_turns,
+        )
 
         for _ in range(config.max_tool_steps):
             response, event_id = await runtime.generate(

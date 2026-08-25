@@ -2,9 +2,19 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
-from tycho_nooa.history import replayed_reasoning, retain_assistant_turn
+from nooa.events import Error, Task
+from nooa.runtime.event_manager import EventManager
+
+from tycho_nooa.history import (
+    ELIDED_OBSERVATION,
+    OBSERVATION_REF,
+    collapse_old_actor_turns,
+    replayed_reasoning,
+    retain_assistant_turn,
+)
 
 
 @dataclass
@@ -52,3 +62,34 @@ def test_reasoning_is_replayed_and_falls_back_to_prose() -> None:
     assert replayed_reasoning(_Response(content="", reasoning="because")) == "because"
     assert replayed_reasoning(_Response(content="prose")) == "prose"
     assert replayed_reasoning(_Response(content="")) is None
+
+
+def test_old_actor_turns_collapse_to_structural_facts_without_deleting_history() -> (
+    None
+):
+    events = EventManager()
+    original_tags = []
+    for turn in range(5):
+        original_tags.append(
+            events.add(
+                Task(
+                    prompt=f"semantic observation {turn}",
+                    metadata={
+                        ELIDED_OBSERVATION: f"frame pointer {turn}",
+                        OBSERVATION_REF: {"level": 0, "turn": turn},
+                    },
+                )
+            )
+        )
+        events.add(Error(content=f"tool feedback {turn}"))
+        collapse_old_actor_turns(events, keep=2)
+
+    active = events.keys()
+    summary = events[active[0]]
+    payload = json.loads(summary.summary_text)
+
+    assert payload["schema"] == "production_actor_history_collapse.v1"
+    assert payload["collapsed_turns"] == 3
+    assert "semantic observation" not in summary.summary_text
+    assert events[original_tags[0]].prompt == "semantic observation 0"
+    assert len(active) == 5  # one summary plus two exact Task/Error pairs

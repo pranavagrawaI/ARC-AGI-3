@@ -8,12 +8,94 @@ in one place (`agent/context_config.py`, `agent/agent.py`'s history rewriters).
 
 from __future__ import annotations
 
+import hashlib
+import json
+from collections import Counter
 from typing import Any
 
 # Event metadata key carrying an observation's own breadcrumb form. Present only
 # on the per-turn observation tasks, so it is also what identifies them among the
 # other tasks the actor strategy adds.
 ELIDED_OBSERVATION = "tycho_nooa.elided_observation"
+OBSERVATION_REF = "tycho_nooa.observation_ref"
+
+
+def collapse_old_actor_turns(event_manager: Any, *, keep: int) -> None:
+    """Keep recent cognition exact and replace older turns with host facts.
+
+    NOOA's collapse archives the original events rather than deleting them. The
+    model-visible replacement is deliberately non-semantic: turn range, tool
+    counts, and a pointer to the durable workspace. It does not infer what the
+    old evidence meant or which uncertainty matters now.
+    """
+
+    if keep < 1:
+        raise ValueError("at least one exact Actor turn must remain visible")
+    items = list(event_manager.items())
+    observations = [
+        (tag, event)
+        for tag, event in items
+        if OBSERVATION_REF in getattr(event, "metadata", {})
+    ]
+    if len(observations) <= keep:
+        return
+    first_kept_tag = observations[-keep][0]
+    keys = event_manager.keys()
+    cutoff = keys.index(first_kept_tag)
+    if cutoff == 0:
+        return
+    collapsed_items = items[:cutoff]
+    summary = _actor_history_summary(collapsed_items)
+    event_manager.collapse(
+        keys[0],
+        keys[cutoff - 1],
+        summary_text=json.dumps(summary, sort_keys=True, separators=(",", ":")),
+    )
+
+
+def _actor_history_summary(items: list[tuple[str, Any]]) -> dict[str, Any]:
+    prior = _prior_actor_summary(items)
+    refs = [
+        event.metadata[OBSERVATION_REF]
+        for _, event in items
+        if OBSERVATION_REF in getattr(event, "metadata", {})
+    ]
+    tool_names = [
+        str(event.name)
+        for _, event in items
+        if hasattr(event, "name") and event.name is not None
+    ]
+    counts = Counter(prior.get("tool_counts", {}))
+    counts.update(tool_names)
+    collapsed_turns = int(prior.get("collapsed_turns", 0)) + len(refs)
+    last_ref = refs[-1] if refs else prior.get("last_observation_ref")
+    tags = [tag for tag, _ in items]
+    return {
+        "schema": "production_actor_history_collapse.v1",
+        "collapsed_turns": collapsed_turns,
+        "last_observation_ref": last_ref,
+        "tool_counts": dict(sorted(counts.items())),
+        "durable_history": (
+            "Exact public frames/actions remain in workspace level_N/turn_NNN.* "
+            "and are retrievable with read_file or run_python."
+        ),
+        "collapsed_active_tags_sha256": "sha256:"
+        + hashlib.sha256(json.dumps(tags, separators=(",", ":")).encode()).hexdigest(),
+    }
+
+
+def _prior_actor_summary(items: list[tuple[str, Any]]) -> dict[str, Any]:
+    for _, event in items:
+        text = getattr(event, "summary_text", None)
+        if not isinstance(text, str):
+            continue
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if value.get("schema") == "production_actor_history_collapse.v1":
+            return value
+    return {}
 
 
 def retain_assistant_turn(event_manager: Any, event_id: Any, response: Any) -> None:
