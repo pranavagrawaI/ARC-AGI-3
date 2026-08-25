@@ -167,3 +167,48 @@ async def test_old_turn_projection_is_bounded_while_exact_evidence_keeps_growing
     evidence = [row["available_exact_evidence_bytes"] for row in report["trajectory"]]
     assert max(bounded_tail) - min(bounded_tail) < 1_000
     assert evidence[-1] > evidence[4]
+
+
+@pytest.mark.asyncio
+async def test_shadow_can_freeze_a_bounded_prefix(tmp_path: Path) -> None:
+    transcript = tmp_path / "transcript.jsonl"
+    write_long_transcript(transcript, 5)
+    llm = FakeLLMClient(
+        scripted_responses=[response("UP", f"call-{index}") for index in range(2)]
+    )
+
+    report = await execute_production_shadow_replay(
+        transcript=transcript,
+        destination=tmp_path / "result",
+        llm=llm,
+        game_id="game",
+        mode="single",
+        treatment="control",
+        max_turns=2,
+    )
+
+    assert report["turns"] == 2
+    assert [row["sequence"] for row in report["trajectory"]] == [0, 1]
+    assert llm.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_shadow_rejects_nonpositive_prefix_before_model_calls(
+    tmp_path: Path,
+) -> None:
+    transcript = tmp_path / "transcript.jsonl"
+    write_long_transcript(transcript, 2)
+    llm = FakeLLMClient(scripted_responses=[])
+
+    with pytest.raises(ValueError, match="max_turns must be positive"):
+        await execute_production_shadow_replay(
+            transcript=transcript,
+            destination=tmp_path / "result",
+            llm=llm,
+            game_id="game",
+            mode="single",
+            treatment="control",
+            max_turns=0,
+        )
+
+    assert llm.call_count == 0

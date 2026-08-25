@@ -28,6 +28,7 @@ async def execute_production_shadow_replay(
     game_id: str,
     mode: str,
     treatment: str,
+    max_turns: int | None = None,
 ) -> dict[str, Any]:
     """Replay recorded observations while never executing proposed decisions.
 
@@ -40,6 +41,10 @@ async def execute_production_shadow_replay(
     if destination.exists():
         raise FileExistsError(destination)
     events = _action_results(transcript)
+    if max_turns is not None:
+        if max_turns < 1:
+            raise ValueError("max_turns must be positive")
+        events = events[:max_turns]
     _validate_causal_chain(events)
     mode_policy = served_mode(mode)
     treatment_policy = treatment_from_env(
