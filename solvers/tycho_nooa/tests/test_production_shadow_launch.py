@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
+import tycho_nooa.production_shadow_launch as shadow_launch
 from tycho_nooa.compatibility_authorization_v2 import (
     CompatibilityAuthorization,
     PricingSchedule,
@@ -16,6 +17,7 @@ from tycho_nooa.matched_actor_manifest import sha256_file
 from tycho_nooa.production_shadow_launch import (
     execute_authorized_production_shadow,
     preflight_production_shadow,
+    runtime_bundle_sha256,
 )
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -25,6 +27,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 def trusted_test_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TYCHO_SANDBOX_RUNTIME", "host")
     monkeypatch.setenv("ARC_LLM_MAX_TOKENS", "4096")
+    monkeypatch.setattr(shadow_launch, "_validate_import_origin", lambda _root: None)
 
 
 def _response(action: str, call_id: str) -> LLMResponse:
@@ -80,25 +83,36 @@ def _authorized_inputs(
     tmp_path: Path,
     *,
     phase: str = "short",
-    prerequisite_assessment: str | None = None,
+    prerequisite: dict | None = None,
 ) -> tuple[Path, Path]:
-    transcript = tmp_path / "transcript.jsonl"
-    controller = tmp_path / "controller.py"
-    launcher = tmp_path / "launcher.py"
-    card = tmp_path / "card.md"
-    pricing_source = tmp_path / "pricing.json"
+    directory = tmp_path / phase
+    directory.mkdir(parents=True, exist_ok=True)
+    transcript = directory / "transcript.jsonl"
+    controller = directory / "controller.py"
+    launcher = directory / "launcher.py"
+    card = directory / "card.md"
+    pricing_source = directory / "pricing.json"
     _write_transcript(transcript)
     controller.write_text("controller\n")
     launcher.write_text("launcher\n")
     card.write_text("card\n")
     pricing_source.write_text("{}\n")
+    runtime = tmp_path / "solvers/tycho_nooa/src/tycho_nooa/runtime.py"
+    runtime.parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_text("runtime\n")
+    for relative_path in shadow_launch.RUNTIME_FIXED_FILES:
+        path = tmp_path / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_text(f"{relative_path}\n")
     relative = lambda path: str(path.relative_to(tmp_path))
     manifest = {
         "schema_version": 1,
         "experiment_id": f"production-shadow-{phase}-test",
         "execution_authorized": True,
         "phase": phase,
-        "prerequisite_assessment": prerequisite_assessment,
+        "prerequisite": prerequisite,
+        "runtime_bundle_sha256": runtime_bundle_sha256(tmp_path),
         "transcript_path": relative(transcript),
         "transcript_sha256": sha256_file(transcript),
         "controller_path": relative(controller),
@@ -127,7 +141,7 @@ def _authorized_inputs(
         "advancement_rule": "short pass advances",
         "invalidity_conditions": ["route drift"],
     }
-    manifest_path = tmp_path / "experiment.json"
+    manifest_path = directory / "experiment.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     authorization = CompatibilityAuthorization(
         authorization_id=f"production-shadow-{phase}-test",
@@ -151,7 +165,7 @@ def _authorized_inputs(
             effective_at=datetime(2026, 8, 25, tzinfo=UTC),
         ),
     )
-    authorization_path = tmp_path / "authorization.json"
+    authorization_path = directory / "authorization.json"
     authorization_path.write_text(authorization.model_dump_json(indent=2) + "\n")
     return manifest_path, authorization_path
 
@@ -176,6 +190,7 @@ async def test_authorized_shadow_completes_without_arc_actions(
     assert assessment["turns"] == 2
     assert assessment["provider_calls"] == 2
     assert assessment["environment_actions_executed"] == 0
+    assert (tmp_path / "result/advancement-certificate.json").is_file()
     events = [
         json.loads(line)
         for line in (tmp_path / "result/authorization-events.jsonl")
@@ -183,6 +198,32 @@ async def test_authorized_shadow_completes_without_arc_actions(
         .splitlines()
     ]
     assert events[-1]["event_type"] == "RunCompleted"
+
+    prerequisite = {
+        "certificate_path": str(
+            (tmp_path / "result/advancement-certificate.json").relative_to(tmp_path)
+        ),
+        "short_manifest_path": str(manifest_path.relative_to(tmp_path)),
+        "short_manifest_sha256": sha256_file(manifest_path),
+        "short_authorization_path": str(authorization_path.relative_to(tmp_path)),
+        "short_authorization_sha256": sha256_file(authorization_path),
+    }
+    long_manifest, long_authorization = _authorized_inputs(
+        tmp_path,
+        phase="long",
+        prerequisite=prerequisite,
+    )
+    long_llm = _configured_fake()
+
+    manifest, _, _ = preflight_production_shadow(
+        long_manifest,
+        long_authorization,
+        repository_root=tmp_path,
+        llm=long_llm,
+    )
+
+    assert manifest.phase == "long"
+    assert long_llm.call_count == 0
 
 
 def test_preflight_hash_drift_makes_zero_calls(tmp_path: Path) -> None:
@@ -203,13 +244,62 @@ def test_preflight_hash_drift_makes_zero_calls(tmp_path: Path) -> None:
     assert llm.call_count == 0
 
 
-def test_long_preflight_requires_successful_short_assessment(tmp_path: Path) -> None:
-    prerequisite = tmp_path / "short-assessment.json"
-    prerequisite.write_text('{"passed": false, "advance": false}\n')
+def test_preflight_runtime_bundle_drift_makes_zero_calls(tmp_path: Path) -> None:
+    manifest_path, authorization_path = _authorized_inputs(tmp_path)
+    (tmp_path / "solvers/tycho_nooa/src/tycho_nooa/runtime.py").write_text(
+        "drifted runtime\n"
+    )
+    llm = _configured_fake()
+
+    with pytest.raises(ValueError, match="runtime bundle drift"):
+        preflight_production_shadow(
+            manifest_path,
+            authorization_path,
+            repository_root=tmp_path,
+            llm=llm,
+        )
+
+    assert llm.call_count == 0
+
+
+def test_long_preflight_requires_completed_identity_bound_short_run(
+    tmp_path: Path,
+) -> None:
+    short_manifest, short_authorization = _authorized_inputs(tmp_path)
+    run = tmp_path / "runs/short"
+    run.mkdir(parents=True)
+    assessment = run / "assessment.json"
+    ledger = run / "authorization-events.jsonl"
+    assessment.write_text('{"passed": false, "advance": false}\n')
+    ledger.write_text('{"event_type":"RunCompleted"}\n')
+    certificate = run / "advancement-certificate.json"
+    certificate.write_text(
+        json.dumps(
+            {
+                "schema": "tycho-nooa-production-shadow-advancement-v1",
+                "authorization_id": "production-shadow-short-test",
+                "short_manifest_sha256": sha256_file(short_manifest),
+                "short_authorization_sha256": sha256_file(short_authorization),
+                "assessment_path": str(assessment.relative_to(tmp_path)),
+                "assessment_sha256": sha256_file(assessment),
+                "ledger_path": str(ledger.relative_to(tmp_path)),
+                "ledger_sha256": sha256_file(ledger),
+                "advance": True,
+            }
+        )
+        + "\n"
+    )
+    prerequisite = {
+        "certificate_path": str(certificate.relative_to(tmp_path)),
+        "short_manifest_path": str(short_manifest.relative_to(tmp_path)),
+        "short_manifest_sha256": sha256_file(short_manifest),
+        "short_authorization_path": str(short_authorization.relative_to(tmp_path)),
+        "short_authorization_sha256": sha256_file(short_authorization),
+    }
     manifest_path, authorization_path = _authorized_inputs(
         tmp_path,
         phase="long",
-        prerequisite_assessment=prerequisite.name,
+        prerequisite=prerequisite,
     )
     llm = _configured_fake()
 
