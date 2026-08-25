@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from tycho_nooa.matched_actor_golden_paths import prove_golden_paths
+from tycho_nooa.matched_actor_contract_golden_paths import prove_golden_paths
 from tycho_nooa.repaired_checkpoint import load_repaired_pilot_sample
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -30,6 +30,12 @@ async def test_five_answer_key_independent_golden_paths(tmp_path: Path) -> None:
     assert proof.arc_actions == 0
     assert proof.answer_key_used_for_planning is False
     assert proof.all_runtime_paths_correct is True
+    assert proof.interface_findings == ()
+    assert all(
+        arm.contract_derivable and not arm.undocumented_dependencies
+        for packet in proof.packets
+        for arm in (packet.native, packet.codeact)
+    )
     assert {
         packet.packet_id: (
             packet.native.provider_calls,
