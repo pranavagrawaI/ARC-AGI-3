@@ -14,6 +14,14 @@ from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
+from tycho_nooa.builder_proposal_protocol import (
+    BuilderReport,
+    FrozenBuildCase,
+    ProposalLedger,
+    ProposalValidationError,
+    canonicalize_source,
+    object_sha256,
+)
 from tycho_nooa.theory_evaluation import (
     EvidenceFrontier,
     ObligationKind,
@@ -161,7 +169,47 @@ class TheoryTransaction:
             source_record_id=record_id,
         )
 
-    def finish(self) -> PublicationDecision:
+    def freeze_build_case(
+        self,
+        *,
+        metadata: dict[str, object] | None = None,
+    ) -> FrozenBuildCase:
+        """Copy transaction inputs into an authority-free Builder case."""
+        self._require_open()
+        if self._working_bytes != self._canonical_bytes:
+            raise RuntimeError("cannot freeze a proposal case after legacy edits")
+        if (self.workspace / "world_model.py").read_bytes() != self._canonical_bytes:
+            raise RuntimeError("canonical theory changed before case construction")
+        source = canonicalize_source(self._canonical_bytes)
+        evaluation = self._canonical_evaluation
+        if hashlib.sha256(source).hexdigest() != evaluation.model_sha256:
+            evaluation = self.evaluator.evaluate(source, self.frontier)
+        case_metadata = {
+            "cause": self.cause,
+            "focus": self.focus,
+            **(metadata or {}),
+        }
+        return FrozenBuildCase.freeze(
+            frontier=self.frontier,
+            incumbent_source=source,
+            incumbent_evaluation=evaluation,
+            evaluator_sha256=self.evaluator.evaluator_sha256,
+            metadata=case_metadata,
+        )
+
+    def finish(
+        self,
+        *,
+        report: BuilderReport | None = None,
+        receipts: ProposalLedger | None = None,
+    ) -> PublicationDecision:
+        if report is not None or receipts is not None:
+            if report is None or receipts is None:
+                raise ValueError("proposal finish requires both report and receipt ledger")
+            return self._finish_proposals(report, receipts)
+        return self._finish_legacy()
+
+    def _finish_legacy(self) -> PublicationDecision:
         self._require_open()
         decision = compare(self._canonical_evaluation, self._working_evaluation)
         if decision.disposition is PublicationDisposition.PUBLISHABLE:
@@ -194,6 +242,184 @@ class TheoryTransaction:
         self._journal("transaction_finished", **canonical)
         self._close()
         return decision
+
+    def _finish_proposals(
+        self,
+        report: BuilderReport,
+        ledger: ProposalLedger,
+    ) -> PublicationDecision:
+        """Interpret immutable receipts without granting the Builder retention."""
+        self._require_open()
+        case = ledger.case
+        ledger.validate_integrity()
+        self._validate_proposal_finish(report, ledger)
+        current = (self.workspace / "world_model.py").read_bytes()
+        if canonicalize_source(current) != case.incumbent_source:
+            return self._close_without_publication(
+                PublicationDecision(
+                    PublicationDisposition.WITHHELD_STALE_CONTEXT,
+                    reason="canonical theory changed after Builder case construction",
+                ),
+                report,
+            )
+
+        judged = tuple(
+            (receipt, compare(case.incumbent_evaluation, receipt.semantic.evaluation))
+            for receipt in ledger.eligible_receipts()
+        )
+        publishable = tuple(
+            item
+            for item in judged
+            if item[1].disposition is PublicationDisposition.PUBLISHABLE
+        )
+        if len(publishable) > 1:
+            return self._close_without_publication(
+                PublicationDecision(
+                    PublicationDisposition.WITHHELD_AMBIGUOUS,
+                    reason=(
+                        "multiple Pareto-safe candidates require a committed "
+                        "host tie-break policy"
+                    ),
+                ),
+                report,
+            )
+        nominated = report.nominated_candidate_source_sha256
+        if nominated is not None:
+            match = next(
+                (item for item in judged if item[0].candidate_source_sha256 == nominated),
+                None,
+            )
+            if match is None:
+                return self._close_without_publication(
+                    PublicationDecision(
+                        PublicationDisposition.REJECTED_INVALID,
+                        reason="report nominates a candidate without an eligible receipt",
+                    ),
+                    report,
+                )
+            selected_receipt, decision = match
+            if decision.disposition is not PublicationDisposition.PUBLISHABLE:
+                return self._close_without_publication(decision, report)
+        else:
+            if not publishable:
+                disposition = (
+                    PublicationDisposition.WITHHELD_INCONCLUSIVE
+                    if ledger.determinism_faults
+                    else PublicationDisposition.UNCHANGED
+                )
+                return self._close_without_publication(
+                    PublicationDecision(
+                        disposition,
+                        reason=(
+                            "evaluator determinism fault"
+                            if ledger.determinism_faults
+                            else "no Pareto-safe proposal candidate"
+                        ),
+                    ),
+                    report,
+                )
+            selected_receipt, decision = publishable[0]
+
+        candidate = ledger.candidate_bytes(selected_receipt.candidate_source_sha256)
+        candidate_evaluation = selected_receipt.semantic.evaluation
+        candidate_sha = self._write_blob(candidate)
+        self._journal(
+            "proposal_publication_intent",
+            case_sha256=case.case_sha256,
+            report_sha256=report.report_sha256,
+            semantic_result_sha256=(
+                selected_receipt.semantic.semantic_result_sha256
+            ),
+            model_sha256=candidate_sha,
+        )
+        self._restore(candidate)
+        self._working_bytes = candidate
+        self._working_evaluation = candidate_evaluation
+        canonical = self._publication_record(
+            decision=decision,
+            disposition="published",
+            case_sha256=case.case_sha256,
+            report_sha256=report.report_sha256,
+            semantic_result_sha256=(
+                selected_receipt.semantic.semantic_result_sha256
+            ),
+        )
+        _write_json_atomic(self.store_root / "canonical.json", canonical)
+        self._invalidate_stale_plan()
+        self._journal("transaction_finished", **canonical)
+        self._close()
+        return decision
+
+    def _validate_proposal_finish(
+        self,
+        report: BuilderReport,
+        ledger: ProposalLedger,
+    ) -> None:
+        case = ledger.case
+        if report.case_sha256 != case.case_sha256:
+            raise ProposalValidationError("Builder report belongs to another case")
+        if object_sha256("BuilderReport", report.payload()) != report.report_sha256:
+            raise ProposalValidationError("Builder report hash does not match its payload")
+        evidence_ids = {item.identifier for item in case.evidence}
+        unknown_evidence = set(report.evidence_references) - evidence_ids
+        if unknown_evidence:
+            raise ProposalValidationError(
+                "Builder report references evidence outside the frozen case"
+            )
+        if case.evidence_frontier_sha256 != self.frontier.sha256:
+            raise ProposalValidationError("proposal case uses another evidence frontier")
+        if case.evaluator_sha256 != self.evaluator.evaluator_sha256:
+            raise ProposalValidationError("proposal case uses another evaluator")
+        if canonicalize_source(self._canonical_bytes) != case.incumbent_source:
+            raise ProposalValidationError("proposal case uses another incumbent")
+
+    def _close_without_publication(
+        self,
+        decision: PublicationDecision,
+        report: BuilderReport,
+    ) -> PublicationDecision:
+        self._journal(
+            "transaction_finished",
+            disposition="proposal_withheld",
+            report_sha256=report.report_sha256,
+            decision=_jsonable(decision),
+        )
+        self._close()
+        return decision
+
+    def _publication_record(
+        self,
+        *,
+        decision: PublicationDecision,
+        disposition: str,
+        case_sha256: str | None = None,
+        report_sha256: str | None = None,
+        semantic_result_sha256: str | None = None,
+    ) -> dict[str, object]:
+        return {
+            "schema_version": 2 if case_sha256 is not None else 1,
+            "transaction_id": self.transaction_id,
+            "parent_id": _theory_id(self._canonical_evaluation),
+            "child_id": _theory_id(self._working_evaluation),
+            "parent_model_sha256": self._canonical_evaluation.model_sha256,
+            "model_sha256": self._working_evaluation.model_sha256,
+            "evidence_frontier_sha256": self.frontier.sha256,
+            "evaluator_sha256": self._working_evaluation.evaluator_sha256,
+            "cause": self.cause,
+            "focus": self.focus,
+            "disposition": disposition,
+            "decision": _jsonable(decision),
+            "parent_evaluation": _jsonable(self._canonical_evaluation),
+            "child_evaluation": _jsonable(self._working_evaluation),
+            "canonical_path": str(self.workspace / "world_model.py"),
+            **({"case_sha256": case_sha256} if case_sha256 is not None else {}),
+            **({"report_sha256": report_sha256} if report_sha256 is not None else {}),
+            **(
+                {"semantic_result_sha256": semantic_result_sha256}
+                if semantic_result_sha256 is not None
+                else {}
+            ),
+        }
 
     def abort(self, reason: str) -> None:
         self._require_open()

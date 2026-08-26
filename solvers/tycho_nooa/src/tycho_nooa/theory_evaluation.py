@@ -97,6 +97,8 @@ class PublicationDisposition(StrEnum):
     REJECTED_REGRESSION = "rejected_regression"
     REJECTED_INVALID = "rejected_invalid"
     WITHHELD_INCONCLUSIVE = "withheld_inconclusive"
+    WITHHELD_STALE_CONTEXT = "withheld_stale_context"
+    WITHHELD_AMBIGUOUS = "withheld_ambiguous"
     UNCHANGED = "unchanged"
 
 
