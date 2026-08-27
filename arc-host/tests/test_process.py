@@ -129,6 +129,7 @@ def test_worker_environment_forwards_solver_context_and_capture_settings():
         {
             "ARC_LLM_CONTEXT_WINDOW": "131072",
             "ARC_LLM_MAX_TOKENS": "8000",
+            "ARC_LLM_PROVIDER_ENDPOINT": "DeepInfra",
             "TYCHO_MODE": "no_world_model",
             "TYCHO_NOOA_TREATMENT": "control",
             "TYCHO_NOOA_REQUEST_REASONING": "1",
@@ -140,6 +141,7 @@ def test_worker_environment_forwards_solver_context_and_capture_settings():
     assert result == {
         "ARC_LLM_CONTEXT_WINDOW": "131072",
         "ARC_LLM_MAX_TOKENS": "8000",
+        "ARC_LLM_PROVIDER_ENDPOINT": "DeepInfra",
         "TYCHO_MODE": "no_world_model",
         "TYCHO_NOOA_TREATMENT": "control",
         "TYCHO_NOOA_REQUEST_REASONING": "1",
