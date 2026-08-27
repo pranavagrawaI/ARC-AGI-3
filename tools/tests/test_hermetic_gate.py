@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from pathlib import Path
 
 from tools.hermetic_gate_core import (
+    _audit_checkpoint_trace_joins,
+    _captured_schema_accepts,
+    _validated_arguments_derive_from_parsed,
     audit_bundle,
     audit_checkpoints,
     audit_run,
@@ -28,7 +32,7 @@ def write_valid_checkpoint(root: Path) -> tuple[Path, str]:
     blob.write_bytes(content)
 
     workspace = {
-        "schema_version": 1,
+        "schema_version": 2,
         "directories": [],
         "files": [
             {
@@ -41,6 +45,7 @@ def write_valid_checkpoint(root: Path) -> tuple[Path, str]:
     }
     body = {"model": "fake", "messages": [], "tools": [], "parameters": {}}
     request = {
+        "schema_version": 2,
         "call_index": 1,
         "source": "actor",
         "request_payload_commitment": commitment(body),
@@ -51,14 +56,88 @@ def write_valid_checkpoint(root: Path) -> tuple[Path, str]:
     call.mkdir(parents=True)
     (call / "workspace.json").write_text(json.dumps(workspace))
     (call / "request.json").write_text(json.dumps(request))
-    (call / "response.json").write_text(
-        json.dumps({"schema_version": 1, "status": "complete"})
-    )
+    response = {"schema_version": 2, "status": "complete"}
+    response["response_payload_commitment"] = commitment(response)
+    (call / "response.json").write_text(json.dumps(response))
     return call, digest
 
 
 def test_synthetic_baseline_satisfies_every_gate() -> None:
     assert audit_bundle(synthetic_bundle()) == []
+
+
+def test_actor_only_mode_does_not_require_a_builder_outcome_checkpoint() -> None:
+    bundle = synthetic_bundle()
+    bundle.summary["mode"] = "no_world_model"
+    bundle.triggers.clear()
+
+    assert audit_bundle(bundle) == []
+
+
+def test_schema_two_checkpoint_rejects_a_tampered_response(tmp_path: Path) -> None:
+    root = tmp_path / "decision-checkpoints"
+    call, _ = write_valid_checkpoint(root)
+    request_path = call / "request.json"
+    request = json.loads(request_path.read_text())
+    request["schema_version"] = 2
+    request_path.write_text(json.dumps(request))
+    response = {"schema_version": 2, "status": "complete", "content": "before"}
+    response["response_payload_commitment"] = commitment(response)
+    response_path = call / "response.json"
+    response_path.write_text(json.dumps(response))
+    assert audit_checkpoints(root) == []
+
+    request.pop("schema_version")
+    request_path.write_text(json.dumps(request))
+    assert "unsupported_checkpoint_schema" in violation_codes(
+        audit_checkpoints(root)
+    )
+    request["schema_version"] = 2
+    request_path.write_text(json.dumps(request))
+
+    response["content"] = "after"
+    response_path.write_text(json.dumps(response))
+    assert "response_commitment_mismatch" in violation_codes(
+        audit_checkpoints(root)
+    )
+
+    response.pop("schema_version")
+    response.pop("response_payload_commitment")
+    response_path.write_text(json.dumps(response))
+    assert "response_commitment_mismatch" in violation_codes(
+        audit_checkpoints(root)
+    )
+
+
+def test_schema_two_tool_contract_rejects_semantic_mutations() -> None:
+    bundle = synthetic_bundle()
+    for llm_row, tool_row in zip(bundle.llm, bundle.actor_tools, strict=True):
+        llm_row.update({"schema_version": 2, "phase": "decision"})
+        tool_row.update(
+            {
+                "schema_version": 2,
+                "source": "actor",
+                "phase": "decision",
+                "raw_arguments": json.dumps(tool_row["arguments"]),
+                "parse_status": "complete",
+                "validation_status": "complete",
+                "validated_arguments": tool_row["arguments"],
+                "execution_status": "complete",
+                "error_stage": None,
+            }
+        )
+    assert audit_bundle(bundle) == []
+
+    mutations = {
+        "schema_version": None,
+        "phase": "post_action",
+        "raw_arguments": json.dumps({"action": "LEFT"}),
+        "execution_status": "not_attempted",
+    }
+    for field, value in mutations.items():
+        candidate = copy.deepcopy(bundle)
+        candidate.actor_tools[0][field] = value
+        assert audit_bundle(candidate), field
 
 
 def test_generated_campaign_detects_and_reduces_every_declared_fault() -> None:
@@ -81,6 +160,271 @@ def test_bijective_tool_id_rename_is_invariant_but_one_sided_rename_is_not() -> 
         "missing_tool_result",
         "orphan_tool_result",
     } <= violation_codes(audit_bundle(baseline))
+
+
+def test_new_tool_sequences_disambiguate_reused_level_turn_coordinates() -> None:
+    bundle = synthetic_bundle()
+    for row in bundle.transcript:
+        if row.get("sequence") == 1 and row.get("type") in {
+            "turn",
+            "action_result",
+        }:
+            row["turn_in_level"] = 0
+    for sequence, row in enumerate(bundle.actor_tools):
+        row["sequence"] = sequence
+        row["turn_in_level"] = 0
+    for row in bundle.triggers:
+        row["turn_in_level"] = 0
+
+    assert audit_bundle(bundle) == []
+
+
+def test_schema_two_actor_evidence_requires_direct_sequences() -> None:
+    bundle = synthetic_bundle()
+    bundle.llm[0]["sequence"] = True
+    bundle.actor_tools[0]["sequence"] = True
+
+    assert {
+        "missing_llm_sequence",
+        "missing_tool_sequence",
+    } <= violation_codes(audit_bundle(bundle))
+
+    builder_bundle = synthetic_bundle()
+    builder_bundle.llm[0]["source"] = "builder"
+    builder_bundle.llm[0].pop("sequence")
+    builder_bundle.actor_tools[0]["source"] = "builder"
+    builder_bundle.actor_tools[0]["sequence"] = "bogus"
+    assert {
+        "invalid_builder_llm_sequence",
+        "invalid_builder_tool_sequence",
+    } <= violation_codes(audit_bundle(builder_bundle))
+
+
+def test_successful_generic_tool_requires_a_result_field() -> None:
+    bundle = synthetic_bundle()
+    bundle.llm.append(
+        {
+            "schema_version": 2,
+            "call_index": 3,
+            "source": "builder",
+            "phase": "decision",
+            "sequence": None,
+            "tool_calls": ["read_file"],
+            "tool_call_ids": ["builder-read"],
+        }
+    )
+    row = dict(bundle.actor_tools[0])
+    row.update(
+        {
+            "call_index": 3,
+            "tool_call_id": "builder-read",
+            "source": "builder",
+            "sequence": None,
+            "name": "read_file",
+            "raw_arguments": "{}",
+            "arguments": {},
+            "validated_arguments": {},
+        }
+    )
+    row.pop("result")
+    bundle.builder_tools.append(row)
+
+    assert "missing_tool_result_value" in violation_codes(audit_bundle(bundle))
+
+
+def test_captured_schema_enforces_constraints_beyond_basic_types() -> None:
+    schema = {"type": "integer", "minimum": 1, "maximum": 300}
+
+    assert _captured_schema_accepts(300, schema)
+    assert not _captured_schema_accepts(301, schema)
+    assert not _captured_schema_accepts(1, {"type": "not-a-json-schema-type"})
+    assert not _captured_schema_accepts(
+        1,
+        {"$schema": "https://example.invalid/unknown-dialect", "type": "integer"},
+    )
+    assert not _captured_schema_accepts(1, {"$ref": "#/$defs/missing"})
+    assert not _captured_schema_accepts(1, {"$ref": "#"})
+
+
+def test_validated_arguments_cannot_rewrite_parsed_values() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "content": {"type": "string"},
+            "mode": {"type": "string", "default": "safe"},
+        },
+        "required": ["content"],
+        "additionalProperties": False,
+    }
+
+    assert _validated_arguments_derive_from_parsed(
+        {"content": "a"},
+        {"content": "a", "mode": "safe"},
+        schema,
+    )
+    assert not _validated_arguments_derive_from_parsed(
+        {"content": "a"},
+        {"content": "DIFFERENT", "mode": "safe"},
+        schema,
+    )
+    assert not _validated_arguments_derive_from_parsed(
+        {"content": None},
+        {},
+        schema,
+    )
+
+    referenced_schema = {
+        "$defs": {
+            "arguments": {
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string"},
+                    "mode": {"type": "string"},
+                },
+                "required": ["content"],
+                "additionalProperties": False,
+            }
+        },
+        "allOf": [{"$ref": "#/$defs/arguments"}],
+    }
+    assert _captured_schema_accepts(
+        {"content": "a", "mode": "safe"},
+        referenced_schema,
+    )
+    assert _validated_arguments_derive_from_parsed(
+        {"content": "a"},
+        {"content": "a", "mode": "safe"},
+        referenced_schema,
+    )
+
+    dependent_schema = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {"content": {"type": "string"}},
+        "dependentSchemas": {
+            "content": {
+                "properties": {"mode": {"type": "string"}},
+            }
+        },
+        "unevaluatedProperties": False,
+    }
+    assert _captured_schema_accepts(
+        {"content": "a", "mode": "safe"},
+        dependent_schema,
+    )
+    assert _validated_arguments_derive_from_parsed(
+        {"content": "a"},
+        {"content": "a", "mode": "safe"},
+        dependent_schema,
+    )
+
+    draft_seven_ignored_keyword = {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "dependentSchemas": {
+            "content": {"properties": {"mode": {"type": "string"}}},
+        },
+    }
+    assert not _validated_arguments_derive_from_parsed(
+        {"content": "a"},
+        {"content": "a", "mode": "safe"},
+        draft_seven_ignored_keyword,
+    )
+
+    draft_seven_dependency = {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {"content": {"type": "string"}},
+        "dependencies": {
+            "content": {"properties": {"mode": {"type": "string"}}},
+        },
+    }
+    assert _validated_arguments_derive_from_parsed(
+        {"content": "a"},
+        {"content": "a", "mode": "safe"},
+        draft_seven_dependency,
+    )
+
+    exclusive_schema = {
+        "type": "object",
+        "oneOf": [
+            {
+                "required": ["a"],
+                "properties": {"a": {}, "x": {}},
+            },
+            {"required": ["b"], "properties": {"b": {}}},
+        ],
+    }
+    assert not _validated_arguments_derive_from_parsed(
+        {"b": 1},
+        {"b": 1, "x": 2},
+        exclusive_schema,
+    )
+    assert _validated_arguments_derive_from_parsed(
+        {"a": 1},
+        {"a": 1, "x": 2},
+        exclusive_schema,
+    )
+
+    conditional_schema = {
+        "type": "object",
+        "if": {"required": ["a"]},
+        "then": {"properties": {"x": {}}},
+        "else": {"properties": {"b": {}}},
+    }
+    assert not _validated_arguments_derive_from_parsed(
+        {"b": 1},
+        {"b": 1, "x": 2},
+        conditional_schema,
+    )
+    assert _validated_arguments_derive_from_parsed(
+        {"a": 1},
+        {"a": 1, "x": 2},
+        conditional_schema,
+    )
+
+
+def test_scribe_requests_join_the_shared_actor_tool_stream() -> None:
+    bundle = synthetic_bundle()
+    bundle.llm.append(
+        {
+            "schema_version": 2,
+            "call_index": 3,
+            "source": "scribe",
+            "phase": "post_action",
+            "sequence": 1,
+            "tool_calls": ["write_file"],
+            "tool_call_ids": ["scribe-note"],
+        }
+    )
+    bundle.actor_tools.append(
+        {
+            "schema_version": 2,
+            "call_index": 3,
+            "tool_call_id": "scribe-note",
+            "source": "scribe",
+            "phase": "post_action",
+            "sequence": 1,
+            "level": 0,
+            "turn_in_level": 1,
+            "name": "write_file",
+            "raw_arguments": json.dumps(
+                {"path": "notes/level_0_insights.md", "content": "done"}
+            ),
+            "arguments": {"path": "notes/level_0_insights.md", "content": "done"},
+            "parse_status": "complete",
+            "validation_status": "complete",
+            "validated_arguments": {
+                "path": "notes/level_0_insights.md",
+                "content": "done",
+            },
+            "execution_status": "complete",
+            "error_stage": None,
+            "status": "complete",
+            "result": "wrote note",
+        }
+    )
+
+    assert audit_bundle(bundle) == []
 
 
 def test_failed_take_action_cannot_masquerade_as_host_execution() -> None:
@@ -129,6 +473,212 @@ def test_checkpoint_audit_verifies_commitments_and_content_addressed_blobs(
         "request_commitment_mismatch",
         "checkpoint_blob_corrupt",
     } <= violation_codes(audit_checkpoints(root))
+
+
+def test_checkpoint_llm_completion_ordinal_skips_failed_calls(tmp_path: Path) -> None:
+    bundle = synthetic_bundle()
+    bundle.llm = [
+        {
+            **bundle.llm[1],
+            "call_index": 1,
+            "content": "",
+            "reasoning": None,
+        }
+    ]
+    root = tmp_path / "decision-checkpoints"
+    failed = root / "calls/000001"
+    complete = root / "calls/000002"
+    failed.mkdir(parents=True)
+    complete.mkdir(parents=True)
+    (failed / "request.json").write_text(
+        json.dumps(
+            {
+                "call_index": 1,
+                "source": "actor",
+                "decision_point": {"phase": "decision", "sequence": 0},
+            }
+        )
+    )
+    (failed / "response.json").write_text(json.dumps({"status": "error"}))
+    (complete / "request.json").write_text(
+        json.dumps(
+            {
+                "call_index": 2,
+                "source": "actor",
+                "decision_point": {"phase": "decision", "sequence": 1},
+                "request_body": {
+                    "tools": [
+                        {
+                            "name": "take_action",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"action": {"type": "string"}},
+                                "required": ["action"],
+                            },
+                        }
+                    ]
+                },
+            }
+        )
+    )
+    (complete / "response.json").write_text(
+        json.dumps(
+            {
+                "status": "complete",
+                "content": "",
+                "reasoning": None,
+                "tool_calls": [
+                    {
+                        "id": "act-1",
+                        "name": "take_action",
+                        "arguments": "{\"action\":\"DOWN\"}",
+                    }
+                ],
+            }
+        )
+    )
+
+    assert _audit_checkpoint_trace_joins(root, bundle) == []
+
+
+def test_audit_run_accepts_a_faithful_validation_rejection(
+    tmp_path: Path,
+) -> None:
+    bundle = synthetic_bundle()
+    initial_observation = bundle.transcript[0]["initial_observation"]
+    bundle.transcript = [
+        bundle.transcript[0],
+        bundle.transcript[1],
+        {
+            "type": "finish",
+            "actions": 0,
+            "levels_completed": 0,
+            "final_observation": initial_observation,
+        },
+    ]
+    bundle.llm = [
+        {
+            "schema_version": 2,
+            "call_index": 1,
+            "source": "builder",
+            "phase": "decision",
+            "sequence": None,
+            "tool_calls": ["read_file"],
+            "tool_call_ids": ["builder-read"],
+        }
+    ]
+    bundle.actor_tools = []
+    bundle.builder_tools = [
+        {
+            "schema_version": 2,
+            "call_index": 1,
+            "tool_call_id": "builder-read",
+            "source": "builder",
+            "phase": "decision",
+            "sequence": None,
+            "level": 0,
+            "turn_in_level": 0,
+            "name": "read_file",
+            "raw_arguments": "{}",
+            "arguments": {},
+            "parse_status": "complete",
+            "validation_status": "error",
+            "validated_arguments": None,
+            "execution_status": "not_attempted",
+            "error_stage": "validation",
+            "status": "error",
+            "result": "ValidationError: path is required",
+        }
+    ]
+    bundle.triggers = []
+    bundle.summary = {
+        "actions": 0,
+        "levels_completed": 0,
+        "mode": "no_world_model",
+    }
+
+    run_dir = tmp_path / "run"
+    checkpoint_root = run_dir / "decision-checkpoints"
+    call, _ = write_valid_checkpoint(checkpoint_root)
+    request_path = call / "request.json"
+    request = json.loads(request_path.read_text())
+    request_body = {
+        "model": "fake",
+        "messages": [],
+        "tools": [
+            {
+                "name": "read_file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            }
+        ],
+        "parameters": {},
+    }
+    request.update(
+        {
+            "source": "builder",
+            "decision_point": {"phase": "decision", "sequence": None},
+            "request_body": request_body,
+            "request_payload_commitment": commitment(request_body),
+        }
+    )
+    request_path.write_text(json.dumps(request))
+    response = {
+        "schema_version": 2,
+        "status": "complete",
+        "content": "",
+        "reasoning": None,
+        "tool_calls": [
+            {
+                "id": "builder-read",
+                "name": "read_file",
+                "arguments": "{}",
+            }
+        ],
+    }
+    response["response_payload_commitment"] = commitment(response)
+    (call / "response.json").write_text(json.dumps(response))
+
+    stream_files = {
+        "transcript": "transcript.jsonl",
+        "llm": "llm-trace.jsonl",
+        "actor_tools": "tool-trace.jsonl",
+        "builder_tools": "builder-tool-trace.jsonl",
+        "triggers": "trigger-builder-trace.jsonl",
+        "planner": "planner-trace.jsonl",
+        "builder_planner": "builder-planner-trace.jsonl",
+    }
+    for stream, filename in stream_files.items():
+        rows = getattr(bundle, stream)
+        (run_dir / filename).write_text(
+            "".join(f"{json.dumps(row)}\n" for row in rows)
+        )
+    (run_dir / "summary.json").write_text(json.dumps(bundle.summary))
+
+    result = audit_run(run_dir)
+    assert result["status"] == "pass"
+    assert result["promotion_allowed"] is True
+
+    bundle.builder_tools[0].update(
+        {
+            "validation_status": "complete",
+            "validated_arguments": {},
+            "execution_status": "complete",
+            "error_stage": None,
+            "status": "complete",
+            "result": "unexpected success",
+        }
+    )
+    (run_dir / "builder-tool-trace.jsonl").write_text(
+        f"{json.dumps(bundle.builder_tools[0])}\n"
+    )
+
+    assert "validated_tool_arguments_mismatch" in {
+        violation["code"] for violation in audit_run(run_dir)["violations"]
+    }
 
 
 def test_checkpoint_audit_rejects_a_missing_required_file(tmp_path: Path) -> None:

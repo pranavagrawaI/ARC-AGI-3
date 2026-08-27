@@ -14,7 +14,11 @@ import json
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, cast
+
+from jsonschema.exceptions import SchemaError
+from jsonschema.validators import validator_for
+from referencing.exceptions import Unresolvable
 
 SCHEMA = "tycho-nooa-hermetic-gate-v1"
 STREAM_FILES = {
@@ -60,6 +64,12 @@ def audit_run(run_dir: Path) -> dict[str, Any]:
     bundle = load_bundle(run_dir)
     violations = audit_bundle(bundle)
     violations.extend(audit_checkpoints(run_dir / "decision-checkpoints"))
+    violations.extend(
+        _audit_checkpoint_trace_joins(
+            run_dir / "decision-checkpoints",
+            bundle,
+        )
+    )
     return report(
         violations,
         source=str(run_dir),
@@ -375,10 +385,28 @@ def _coordinate_violations(
 
 def _audit_tool_joins(bundle: TraceBundle) -> list[Violation]:
     violations: list[Violation] = []
-    requested: dict[str, list[tuple[str, str, int]]] = {}
+    requested: dict[str, list[tuple[str, str, str | None, Any, int]]] = {}
     for row_index, row in enumerate(bundle.llm):
         source = row.get("source")
-        if source not in {"actor", "builder"}:
+        if row.get("schema_version") != 2:
+            violations.append(
+                Violation(
+                    "unsupported_llm_schema",
+                    f"LLM trace schema is {row.get('schema_version')!r}",
+                    "llm",
+                    row_index,
+                )
+            )
+        if row.get("phase") not in {"decision", "post_action"}:
+            violations.append(
+                Violation(
+                    "invalid_llm_phase",
+                    f"LLM trace phase is {row.get('phase')!r}",
+                    "llm",
+                    row_index,
+                )
+            )
+        if source not in {"actor", "builder", "scribe"}:
             violations.append(
                 Violation(
                     "invalid_llm_source",
@@ -388,6 +416,28 @@ def _audit_tool_joins(bundle: TraceBundle) -> list[Violation]:
                 )
             )
             continue
+        sequence = row.get("sequence")
+        if source == "builder":
+            if "sequence" not in row or (
+                sequence is not None and type(sequence) is not int
+            ):
+                violations.append(
+                    Violation(
+                        "invalid_builder_llm_sequence",
+                        "Builder LLM trace sequence must be an integer or explicit null",
+                        "llm",
+                        row_index,
+                    )
+                )
+        elif type(sequence) is not int:
+            violations.append(
+                Violation(
+                    "missing_llm_sequence",
+                    f"{source} LLM trace lacks a direct integer host sequence",
+                    "llm",
+                    row_index,
+                )
+            )
         lane = source
         ids = row.get("tool_call_ids", [])
         names = row.get("tool_calls", [])
@@ -411,7 +461,15 @@ def _audit_tool_joins(bundle: TraceBundle) -> list[Violation]:
                     )
                 )
                 continue
-            requested.setdefault(call_id, []).append((lane, str(name), row_index))
+            requested.setdefault(call_id, []).append(
+                (
+                    lane,
+                    str(name),
+                    row.get("phase"),
+                    row.get("schema_version"),
+                    row_index,
+                )
+            )
     for call_id, entries in requested.items():
         if len(entries) > 1:
             violations.append(
@@ -419,7 +477,7 @@ def _audit_tool_joins(bundle: TraceBundle) -> list[Violation]:
                     "duplicate_tool_call_id",
                     f"tool_call_id {call_id!r} was requested {len(entries)} times",
                     "llm",
-                    entries[1][2],
+                    entries[1][4],
                     {"tool_call_id": call_id},
                 )
             )
@@ -430,6 +488,7 @@ def _audit_tool_joins(bundle: TraceBundle) -> list[Violation]:
         ("builder", "builder_tools", bundle.builder_tools),
     ):
         for row_index, row in enumerate(rows):
+            observed_lane = row.get("source", lane)
             call_id = row.get("tool_call_id")
             if not isinstance(call_id, str) or not call_id:
                 violations.append(
@@ -441,7 +500,9 @@ def _audit_tool_joins(bundle: TraceBundle) -> list[Violation]:
                     )
                 )
                 continue
-            observed.setdefault(call_id, []).append((lane, str(row.get("name")), row_index))
+            observed.setdefault(call_id, []).append(
+                (observed_lane, str(row.get("name")), row_index)
+            )
             candidates = requested.get(call_id, [])
             if not candidates:
                 violations.append(
@@ -454,12 +515,18 @@ def _audit_tool_joins(bundle: TraceBundle) -> list[Violation]:
                     )
                 )
                 continue
-            request_lane, request_name, _ = candidates[0]
-            if request_lane != lane:
+            (
+                request_lane,
+                request_name,
+                request_phase,
+                request_schema_version,
+                _,
+            ) = candidates[0]
+            if request_lane != observed_lane:
                 violations.append(
                     Violation(
                         "cross_lane_tool_result",
-                        f"{call_id!r} requested by {request_lane}, recorded by {lane}",
+                        f"{call_id!r} requested by {request_lane}, recorded by {observed_lane}",
                         stream,
                         row_index,
                         {"tool_call_id": call_id},
@@ -484,6 +551,15 @@ def _audit_tool_joins(bundle: TraceBundle) -> list[Violation]:
                         row_index,
                     )
                 )
+            violations.extend(
+                _schema_two_tool_violations(
+                    row,
+                    stream=stream,
+                    row_index=row_index,
+                    request_phase=request_phase,
+                    request_schema_version=request_schema_version,
+                )
+            )
     for call_id, entries in observed.items():
         if len(entries) > 1:
             violations.append(
@@ -507,22 +583,140 @@ def _audit_tool_joins(bundle: TraceBundle) -> list[Violation]:
     return violations
 
 
+def _schema_two_tool_violations(
+    row: dict[str, Any],
+    *,
+    stream: str,
+    row_index: int,
+    request_phase: str | None,
+    request_schema_version: Any,
+) -> list[Violation]:
+    if request_schema_version != 2 and row.get("schema_version") != 2:
+        return []
+
+    violations: list[Violation] = []
+    call_id = row.get("tool_call_id")
+
+    def reject(code: str, message: str) -> None:
+        violations.append(
+            Violation(
+                code,
+                f"{call_id!r} {message}",
+                stream,
+                row_index,
+                {"tool_call_id": call_id},
+            )
+        )
+
+    if row.get("schema_version") != 2:
+        reject(
+            "tool_schema_version_mismatch",
+            "was requested by schema 2 but lacks a schema-2 result",
+        )
+
+    sequence = row.get("sequence")
+    if row.get("source") == "builder":
+        if "sequence" not in row or (
+            sequence is not None and type(sequence) is not int
+        ):
+            reject(
+                "invalid_builder_tool_sequence",
+                "sequence must be an integer or explicit null",
+            )
+    elif type(sequence) is not int:
+        reject("missing_tool_sequence", "lacks a direct integer host sequence")
+
+    phase = row.get("phase")
+    if phase not in {"decision", "post_action"}:
+        reject("invalid_tool_phase", f"has phase {phase!r}")
+    elif request_phase is not None and phase != request_phase:
+        reject(
+            "tool_phase_mismatch",
+            f"was requested during {request_phase!r} but recorded during {phase!r}",
+        )
+
+    raw_arguments = row.get("raw_arguments")
+    parsed_arguments: Any = None
+    raw_parsed = False
+    if isinstance(raw_arguments, str):
+        try:
+            parsed_arguments = json.loads(raw_arguments)
+            raw_parsed = True
+        except json.JSONDecodeError:
+            pass
+    else:
+        reject("missing_raw_tool_arguments", "lacks raw_arguments")
+
+    parse_status = row.get("parse_status")
+    validation_status = row.get("validation_status")
+    execution_status = row.get("execution_status")
+    status = row.get("status")
+    error_stage = row.get("error_stage")
+    actual = (parse_status, validation_status, execution_status, status)
+    expected_by_stage = {
+        None: ("complete", "complete", "complete", "complete"),
+        "parse": ("error", "not_attempted", "not_attempted", "error"),
+        "availability": ("complete", "not_attempted", "not_attempted", "error"),
+        "policy": ("complete", "not_attempted", "not_attempted", "error"),
+        "validation": ("complete", "error", "not_attempted", "error"),
+        "execution": ("complete", "complete", "error", "error"),
+    }
+    expected = expected_by_stage.get(error_stage)
+    if expected is None and error_stage is not None:
+        reject("invalid_tool_error_stage", f"has error_stage {error_stage!r}")
+    elif expected is not None and actual != expected:
+        reject(
+            "inconsistent_tool_outcomes",
+            f"has outcomes {actual!r} for error_stage {error_stage!r}",
+        )
+
+    if parse_status == "complete":
+        if not raw_parsed or parsed_arguments != row.get("arguments"):
+            reject(
+                "tool_argument_mismatch",
+                "raw_arguments do not decode to recorded arguments",
+            )
+    elif parse_status == "error" and raw_parsed:
+        reject("inconsistent_tool_parse", "reports a parse error for valid JSON")
+
+    if validation_status == "complete" and not isinstance(
+        row.get("validated_arguments"), dict
+    ):
+        reject(
+            "missing_validated_tool_arguments",
+            "completed validation without validated_arguments",
+        )
+    if "result" not in row:
+        reject("missing_tool_result_value", "lacks an exact result or error field")
+    return violations
+
+
 def _audit_action_traceability(bundle: TraceBundle) -> list[Violation]:
     violations: list[Violation] = []
     turns = _by_sequence(bundle.transcript, "turn")
     decisions = _by_sequence(bundle.transcript, "decision")
-    commits: dict[tuple[int, int], list[tuple[int, dict[str, Any]]]] = {}
+    commits: dict[int, list[tuple[int, dict[str, Any]]]] = {}
+    legacy_commits: dict[tuple[Any, Any], list[tuple[int, dict[str, Any]]]] = {}
     for index, row in enumerate(bundle.actor_tools):
-        if row.get("name") == "take_action" and row.get("status") == "complete":
+        sequence = row.get("sequence")
+        if row.get("name") != "take_action" or row.get("status") != "complete":
+            continue
+        if row.get("source", "actor") != "actor":
+            continue
+        if isinstance(sequence, int):
+            commits.setdefault(sequence, []).append((index, row))
+        else:
             key = (row.get("level"), row.get("turn_in_level"))
-            commits.setdefault(key, []).append((index, row))
+            legacy_commits.setdefault(key, []).append((index, row))
     for sequence, decision_rows in decisions.items():
         turn_rows = turns.get(sequence, [])
         if len(turn_rows) != 1 or len(decision_rows) != 1:
             continue
         turn = turn_rows[0][1]
-        key = (turn.get("level"), turn.get("turn_in_level"))
-        candidates = commits.get(key, [])
+        candidates = commits.get(sequence)
+        if candidates is None:
+            key = (turn.get("level"), turn.get("turn_in_level"))
+            candidates = legacy_commits.get(key, [])
         if len(candidates) != 1:
             violations.append(
                 Violation(
@@ -615,6 +809,9 @@ def _audit_builder_lifecycle(bundle: TraceBundle) -> list[Violation]:
                 "triggers",
             )
         )
+
+    if bundle.summary.get("mode") == "no_world_model":
+        return violations
 
     completions: list[tuple[int, int]] = []
     for row in bundle.transcript:
@@ -750,6 +947,15 @@ def audit_checkpoints(root: Path) -> list[Violation]:
         request = documents.get("request.json")
         response = documents.get("response.json")
         if request is not None:
+            if request.get("schema_version") != 2:
+                violations.append(
+                    Violation(
+                        "unsupported_checkpoint_schema",
+                        f"checkpoint {call_dir.name} request schema is {request.get('schema_version')!r}",
+                        "checkpoints",
+                        evidence={"call": call_dir.name},
+                    )
+                )
             expected_index = int(call_dir.name) if call_dir.name.isdigit() else None
             if expected_index is None or request.get("call_index") != expected_index:
                 violations.append(
@@ -760,7 +966,7 @@ def audit_checkpoints(root: Path) -> list[Violation]:
                         evidence={"call": call_dir.name},
                     )
                 )
-            if request.get("source") not in {"actor", "builder"}:
+            if request.get("source") not in {"actor", "builder", "scribe"}:
                 violations.append(
                     Violation(
                         "checkpoint_source_invalid",
@@ -778,8 +984,34 @@ def audit_checkpoints(root: Path) -> list[Violation]:
                     evidence={"call": call_dir.name},
                 )
             )
+        if response is not None and request is not None:
+            response_payload = {
+                key: value
+                for key, value in response.items()
+                if key != "response_payload_commitment"
+            }
+            if response.get("schema_version") != 2 or response.get(
+                "response_payload_commitment"
+            ) != _commitment(response_payload):
+                violations.append(
+                    Violation(
+                        "response_commitment_mismatch",
+                        f"checkpoint {call_dir.name} response commitment is stale",
+                        "checkpoints",
+                        evidence={"call": call_dir.name},
+                    )
+                )
         if workspace is None or request is None:
             continue
+        if workspace.get("schema_version") != 2:
+            violations.append(
+                Violation(
+                    "unsupported_checkpoint_schema",
+                    f"checkpoint {call_dir.name} workspace schema is {workspace.get('schema_version')!r}",
+                    "checkpoints",
+                    evidence={"call": call_dir.name},
+                )
+            )
         if request.get("workspace_commitment") != _commitment(workspace):
             violations.append(
                 Violation(
@@ -916,6 +1148,357 @@ def shrink_bundle(bundle: TraceBundle, code: str) -> TraceBundle:
     return candidate
 
 
+def _audit_checkpoint_trace_joins(
+    root: Path,
+    bundle: TraceBundle,
+) -> list[Violation]:
+    """Join committed model output to LLM and tool rows by durable identifiers."""
+
+    if not root.exists():
+        return []
+    violations: list[Violation] = []
+    remaining_llm = list(bundle.llm)
+    tools_by_id: dict[str, list[dict[str, Any]]] = {}
+    for row in [*bundle.actor_tools, *bundle.builder_tools]:
+        call_id = row.get("tool_call_id")
+        if call_id:
+            tools_by_id.setdefault(str(call_id), []).append(row)
+
+    completion_ordinal = 0
+    for call_dir in sorted((root / "calls").glob("[0-9]*")):
+        try:
+            request = json.loads((call_dir / "request.json").read_text())
+            response = json.loads((call_dir / "response.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(request, dict) or not isinstance(response, dict):
+            continue
+        if response.get("status") != "complete":
+            continue
+        completion_ordinal += 1
+        decision_point = request.get("decision_point") or {}
+        offered_calls = response.get("tool_calls") or []
+        offered_ids = [row.get("id") for row in offered_calls if isinstance(row, dict)]
+        offered_names = [row.get("name") for row in offered_calls if isinstance(row, dict)]
+        llm_row = remaining_llm[0] if remaining_llm else None
+        row_matches = (
+            llm_row is not None
+            and llm_row.get("call_index") == completion_ordinal
+            and llm_row.get("source") == request.get("source")
+            and llm_row.get("phase") == decision_point.get("phase")
+            and llm_row.get("sequence") == decision_point.get("sequence")
+            and llm_row.get("tool_call_ids") == offered_ids
+            and llm_row.get("tool_calls") == offered_names
+            and str(llm_row.get("content") or "")
+            == str(response.get("content") or "")
+            and str(llm_row.get("reasoning") or "")
+            == str(response.get("reasoning") or "")
+        )
+        if not row_matches:
+            violations.append(
+                Violation(
+                    "checkpoint_llm_join_mismatch",
+                    f"checkpoint {call_dir.name} does not match the next LLM row",
+                    "checkpoints",
+                    evidence={
+                        "call": call_dir.name,
+                        "expected": {
+                            "source": request.get("source"),
+                            "call_index": completion_ordinal,
+                            "phase": decision_point.get("phase"),
+                            "sequence": decision_point.get("sequence"),
+                            "tool_call_ids": offered_ids,
+                            "tool_calls": offered_names,
+                            "content": response.get("content"),
+                            "reasoning": response.get("reasoning"),
+                        },
+                        "next": (
+                            {
+                                key: llm_row.get(key)
+                                for key in (
+                                    "source",
+                                    "call_index",
+                                    "phase",
+                                    "sequence",
+                                    "tool_call_ids",
+                                    "tool_calls",
+                                    "content",
+                                    "reasoning",
+                                )
+                            }
+                            if llm_row is not None
+                            else None
+                        ),
+                    },
+                )
+            )
+            continue
+        remaining_llm.pop(0)
+
+        schemas = {
+            row.get("name"): row.get("parameters")
+            for row in (request.get("request_body", {}).get("tools") or [])
+            if isinstance(row, dict)
+        }
+        for offered in offered_calls:
+            if not isinstance(offered, dict) or not offered.get("id"):
+                continue
+            tool_rows = tools_by_id.get(str(offered["id"]), [])
+            if len(tool_rows) != 1:
+                continue
+            tool_row = tool_rows[0]
+            if tool_row.get("raw_arguments") != offered.get("arguments"):
+                violations.append(
+                    Violation(
+                        "checkpoint_tool_arguments_mismatch",
+                        f"tool {offered['id']!r} raw arguments differ from committed output",
+                        "tool_traces",
+                        evidence={"tool_call_id": offered["id"]},
+                    )
+                )
+            schema = schemas.get(offered.get("name"))
+            validated_arguments = tool_row.get("validated_arguments")
+            parsed_arguments = tool_row.get("arguments")
+            if not isinstance(schema, dict):
+                if not (
+                    tool_row.get("status") == "error"
+                    and tool_row.get("error_stage") == "availability"
+                ):
+                    violations.append(
+                        Violation(
+                            "unoffered_tool_execution",
+                            f"tool {offered['id']!r} was not declared in the request",
+                            "tool_traces",
+                            evidence={"tool_call_id": offered["id"]},
+                        )
+                    )
+            elif tool_row.get("validation_status") == "error":
+                if (
+                    tool_row.get("error_stage") != "validation"
+                    or validated_arguments is not None
+                    or _captured_schema_accepts(parsed_arguments, schema)
+                ):
+                    violations.append(
+                        Violation(
+                            "tool_validation_rejection_mismatch",
+                            f"tool {offered['id']!r} validation rejection disagrees with the offered schema",
+                            "tool_traces",
+                            evidence={"tool_call_id": offered["id"]},
+                        )
+                    )
+            elif not _captured_schema_accepts(validated_arguments, schema):
+                violations.append(
+                    Violation(
+                        "validated_tool_arguments_mismatch",
+                        f"tool {offered['id']!r} validated arguments violate the offered schema",
+                        "tool_traces",
+                        evidence={"tool_call_id": offered["id"]},
+                    )
+                )
+            elif not _validated_arguments_derive_from_parsed(
+                parsed_arguments,
+                validated_arguments,
+                schema,
+            ):
+                violations.append(
+                    Violation(
+                        "validated_tool_arguments_not_derived",
+                        f"tool {offered['id']!r} validated arguments change parsed values",
+                        "tool_traces",
+                        evidence={
+                            "tool_call_id": offered["id"],
+                            "parsed_arguments": parsed_arguments,
+                            "validated_arguments": validated_arguments,
+                            "captured_schema": schema,
+                        },
+                    )
+                )
+    for row in remaining_llm:
+        violations.append(
+            Violation(
+                "llm_checkpoint_join_missing",
+                f"LLM call {row.get('call_index')!r} has no committed checkpoint response",
+                "llm",
+                evidence={
+                    "call_index": row.get("call_index"),
+                    "source": row.get("source"),
+                    "phase": row.get("phase"),
+                    "sequence": row.get("sequence"),
+                },
+            )
+        )
+    return violations
+
+
+def _validated_arguments_derive_from_parsed(
+    parsed: Any,
+    validated: Any,
+    schema: dict[str, Any],
+) -> bool:
+    """Preserve supplied values; allow only schema-declared validator additions."""
+
+    if not isinstance(parsed, dict) or not isinstance(validated, dict):
+        return False
+    if any(
+        key not in validated or validated[key] != value
+        for key, value in parsed.items()
+    ):
+        return False
+    validator_type = _captured_validator_type(schema)
+    if validator_type is None:
+        return False
+    validator = validator_type(schema)
+    declared = _declared_object_properties(
+        schema,
+        active_keys=frozenset(validated),
+        instance=validated,
+        supported_keywords=frozenset(validator_type.VALIDATORS),
+        validator=validator,
+    )
+    return set(validated) - set(parsed) <= declared
+
+
+def _declared_object_properties(
+    schema: dict[str, Any],
+    *,
+    root: dict[str, Any] | None = None,
+    seen_refs: frozenset[str] = frozenset(),
+    active_keys: frozenset[str] = frozenset(),
+    instance: dict[str, Any],
+    supported_keywords: frozenset[str],
+    validator: Any,
+) -> set[str]:
+    """Collect top-level object keys declared through local refs/composition."""
+
+    root = schema if root is None else root
+    declared = (
+        set(schema.get("properties") or {})
+        if "properties" in supported_keywords
+        else set()
+    )
+    ref = schema.get("$ref")
+    if (
+        "$ref" in supported_keywords
+        and isinstance(ref, str)
+        and ref.startswith("#/")
+        and ref not in seen_refs
+    ):
+        target: Any = root
+        try:
+            for token in ref[2:].split("/"):
+                token = token.replace("~1", "/").replace("~0", "~")
+                target = target[token]
+        except (KeyError, TypeError):
+            target = None
+        if isinstance(target, dict):
+            declared.update(
+                _declared_object_properties(
+                    target,
+                    root=root,
+                    seen_refs=seen_refs | {ref},
+                    active_keys=active_keys,
+                    instance=instance,
+                    supported_keywords=supported_keywords,
+                    validator=validator,
+                )
+            )
+    for keyword in ("allOf", "anyOf", "oneOf"):
+        if keyword not in supported_keywords:
+            continue
+        for child in schema.get(keyword) or []:
+            if isinstance(child, dict) and (
+                keyword == "allOf"
+                or _subschema_accepts(validator, child, instance)
+            ):
+                declared.update(
+                    _declared_object_properties(
+                        child,
+                        root=root,
+                        seen_refs=seen_refs,
+                        active_keys=active_keys,
+                        instance=instance,
+                        supported_keywords=supported_keywords,
+                        validator=validator,
+                    )
+                )
+    if "if" in supported_keywords:
+        condition = schema.get("if")
+        branch = (
+            schema.get("then")
+            if isinstance(condition, dict)
+            and _subschema_accepts(validator, condition, instance)
+            else schema.get("else")
+        )
+        if isinstance(branch, dict):
+            declared.update(
+                _declared_object_properties(
+                    branch,
+                    root=root,
+                    seen_refs=seen_refs,
+                    active_keys=active_keys,
+                    instance=instance,
+                    supported_keywords=supported_keywords,
+                    validator=validator,
+                )
+            )
+    dependency_keyword = (
+        "dependentSchemas"
+        if "dependentSchemas" in supported_keywords
+        else "dependencies"
+        if "dependencies" in supported_keywords
+        else None
+    )
+    dependencies = schema.get(dependency_keyword, {}) if dependency_keyword else {}
+    for key, child in dependencies.items():
+        if key in active_keys and isinstance(child, dict):
+            declared.update(
+                _declared_object_properties(
+                    child,
+                    root=root,
+                    seen_refs=seen_refs,
+                    active_keys=active_keys,
+                    instance=instance,
+                    supported_keywords=supported_keywords,
+                    validator=validator,
+                )
+            )
+    return declared
+
+
+def _subschema_accepts(validator: Any, schema: dict[str, Any], value: Any) -> bool:
+    try:
+        return validator.evolve(schema=schema).is_valid(value)
+    except (RecursionError, Unresolvable):
+        return False
+
+
+def _captured_validator_type(schema: dict[str, Any]) -> Any | None:
+    try:
+        validator_type = (
+            cast(Any, validator_for)(schema, default=None)
+            if "$schema" in schema
+            else validator_for(schema)
+        )
+        if validator_type is None:
+            return None
+        validator_type.check_schema(schema)
+    except (SchemaError, Unresolvable):
+        return None
+    return validator_type
+
+
+def _captured_schema_accepts(value: Any, schema: dict[str, Any]) -> bool:
+    """Validate with the JSON Schema dialect declared by the captured schema."""
+
+    validator_type = _captured_validator_type(schema)
+    if validator_type is None:
+        return False
+    try:
+        return validator_type(schema).is_valid(value)
+    except (RecursionError, Unresolvable):
+        return False
+
+
 def rename_tool_call_ids(bundle: TraceBundle, *, prefix: str) -> TraceBundle:
     candidate = bundle.clone()
     ids = {
@@ -953,12 +1536,12 @@ def synthetic_bundle() -> TraceBundle:
         {"type": "finish", "actions": 2, "levels_completed": 1, "final_observation": obs2},
     ]
     llm = [
-        {"call_index": 1, "source": "actor", "tool_calls": ["take_action"], "tool_call_ids": ["act-0"]},
-        {"call_index": 2, "source": "actor", "tool_calls": ["take_action"], "tool_call_ids": ["act-1"]},
+        {"schema_version": 2, "call_index": 1, "source": "actor", "phase": "decision", "sequence": 0, "tool_calls": ["take_action"], "tool_call_ids": ["act-0"]},
+        {"schema_version": 2, "call_index": 2, "source": "actor", "phase": "decision", "sequence": 1, "tool_calls": ["take_action"], "tool_call_ids": ["act-1"]},
     ]
     actor_tools = [
-        {"call_index": 1, "tool_call_id": "act-0", "level": 0, "turn_in_level": 0, "name": "take_action", "arguments": {"action": "UP"}, "status": "complete", "result": up},
-        {"call_index": 2, "tool_call_id": "act-1", "level": 0, "turn_in_level": 1, "name": "take_action", "arguments": {"action": "DOWN"}, "status": "complete", "result": down},
+        {"schema_version": 2, "call_index": 1, "tool_call_id": "act-0", "source": "actor", "phase": "decision", "sequence": 0, "level": 0, "turn_in_level": 0, "name": "take_action", "raw_arguments": "{\"action\":\"UP\"}", "arguments": {"action": "UP"}, "parse_status": "complete", "validation_status": "complete", "validated_arguments": {"action": "UP"}, "execution_status": "complete", "error_stage": None, "status": "complete", "result": up},
+        {"schema_version": 2, "call_index": 2, "tool_call_id": "act-1", "source": "actor", "phase": "decision", "sequence": 1, "level": 0, "turn_in_level": 1, "name": "take_action", "raw_arguments": "{\"action\":\"DOWN\"}", "arguments": {"action": "DOWN"}, "parse_status": "complete", "validation_status": "complete", "validated_arguments": {"action": "DOWN"}, "execution_status": "complete", "error_stage": None, "status": "complete", "result": down},
     ]
     triggers = [
         {"event": "mechanical_trigger", "level": 0, "turn_in_level": 2, "fired": True, "cause": "level_complete"},
