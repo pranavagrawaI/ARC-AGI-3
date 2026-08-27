@@ -1,0 +1,11 @@
+# typed-goal-muse-glimmer-ar25-s0-20260826T192015Z
+Question: On a live orchestrator + typed_candidate_goals run, does the model reach request_builder / update_goal, and does the next Actor observation inline the live goal ledger?
+Posture: feasibility
+Contrast: none
+Prediction: The worker reports mode=orchestrator and treatment=typed_candidate_goals; propose_goal, request_builder, update_goal, and list_candidate_goals are offered; invoke_builder is absent; at least one legal ARC action is committed; if a goal is selected before a second decision, that decision's observation contains the selected id, assessment, and recommended_action.
+Measure: run `summary.json`; worker ready metadata (`mode`, `treatment`); `tool-trace.jsonl` tool names/statuses; `trigger-builder-trace.jsonl` `actor_request` rows; `epistemic/candidate-goals.json` and `epistemic/objective-builder-reviews.jsonl` if present; decision-checkpoint / llm-trace request tool lists.
+Cap: 2 ARC actions; 600 seconds per worker decision; 1860 seconds launcher wall time; model `meta/muse-glimmer-30b` via the existing OpenRouter env file; no on-policy spend wrapper (unknown dollar spend; wall-clock and action caps only).
+Stop: stop after two accepted actions or earlier host/worker/provider failure; do not retry this run directory; do not reuse the spent on-policy authorization. The 191939Z directory is a failed launch (arc-host refused a pre-existing run-dir that only held this card) and is not a retry of an executed run.
+Invalid if: worker metadata is not orchestrator/typed_candidate_goals; invoke_builder is offered; on-policy authority env is present; Builder or Actor writes `world_model.py` during an objective review; fallback/scripted LLM; missing traces.
+Result map: model completes propose → request_builder → update_goal → action, and the next observation inlines the ledger → treat the live channel as feasible and inspect the raw trajectory; model acts without using goal tools → interface is offered but unused; channel breaks (wrong mode, missing tools, crash, unauthorized world-model write) → diagnose the first violated boundary without adaptive rerun; timeout/provider error before a discriminating tool event → preserve artifacts and stop.
+Outputs: `analysis/typed-goal-live-v1/runs/typed-goal-muse-glimmer-ar25-s0-20260826T192015Z/`
