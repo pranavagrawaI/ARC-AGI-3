@@ -44,6 +44,7 @@ from tycho_nooa.trigger_builder import (
     TriggerDecision,
     _contemporaneous_score,
     _publication_feedback,
+    _recommended_action,
 )
 from tycho_nooa.wm_probe import AST_UNCHANGED_NOTICE
 
@@ -1223,6 +1224,30 @@ async def test_malformed_builder_click_recommendation_does_not_end_episode(
     ]
     assert trace[1]["recommended_action"] is None
     assert "CLICK requires row and col" in trace[1]["recommendation_parse_error"]
+
+
+def test_recommended_action_parses_click_coordinates_on_the_same_field() -> None:
+    available = ["UP", "DOWN", "CLICK"]
+    parsed = _recommended_action(
+        "candidate_goal_assessment: inconclusive\nrecommended_action: CLICK row 19 col 22\n",
+        available,
+    )
+    assert parsed.error is None
+    assert parsed.action == ActionDecision(action="CLICK", row=19, col=22)
+    assert (
+        _recommended_action(
+            "recommended_action: CLICK(row=16, col=22)\n",
+            available,
+        ).action
+        == ActionDecision(action="CLICK", row=16, col=22)
+    )
+    bare = _recommended_action(
+        "recommended_action: CLICK | subgoal: try CLICK(16,22) then UP",
+        available,
+    )
+    assert bare.action is None
+    assert bare.error is not None
+    assert "CLICK requires row and col" in bare.error
 
 
 @pytest.mark.asyncio

@@ -1004,20 +1004,31 @@ def _level_complete_evidence(workspace_dir: Path, level: int) -> str | None:
     return json.dumps(evidence, separators=(",", ":"), sort_keys=True)
 
 
-_RECOMMENDED_ACTION = re.compile(
-    r"^recommended_action:\s*([A-Za-z0-9_]+)"
-    r"(?:\(\s*(?:row\s*=\s*)?(\d+)\s*,\s*(?:col\s*=\s*)?(\d+)\s*\))?",
-    re.MULTILINE,
+_RECOMMENDED_ACTION_LINE = re.compile(r"^recommended_action:\s*(.+)$", re.MULTILINE)
+_RECOMMENDED_ACTION_CUT = re.compile(r"\s*(?:\||\bsubgoal:)")
+_RECOMMENDED_ACTION_TOKEN = re.compile(r"^([A-Za-z0-9_]+)\s*(.*)$")
+_RECOMMENDED_PAREN_COORDS = re.compile(
+    r"^\(\s*(?:row\s*=\s*)?(\d+)\s*,\s*(?:col\s*=\s*)?(\d+)\s*\)$"
+)
+_RECOMMENDED_PROSE_COORDS = re.compile(
+    r"^row\s*=?\s*(\d+)\s+col\s*=?\s*(\d+)$",
+    re.IGNORECASE,
 )
 
 
 def _recommended_action(
     report: str, available_actions: list[str]
 ) -> RecommendationParse:
-    match = _RECOMMENDED_ACTION.search(report)
-    if match is None or match.group(1).lower() == "none":
+    line = _RECOMMENDED_ACTION_LINE.search(report)
+    if line is None:
         return RecommendationParse(action=None, error=None)
-    action = match.group(1).upper()
+    field = _RECOMMENDED_ACTION_CUT.split(line.group(1).strip(), maxsplit=1)[0].strip()
+    if not field or field.lower() == "none":
+        return RecommendationParse(action=None, error=None)
+    token = _RECOMMENDED_ACTION_TOKEN.match(field)
+    if token is None:
+        return RecommendationParse(action=None, error=None)
+    action = token.group(1).upper()
     if action not in available_actions:
         return RecommendationParse(
             action=None,
@@ -1026,12 +1037,18 @@ def _recommended_action(
                 f"available actions: {available_actions}"
             ),
         )
+    remainder = token.group(2).strip()
+    row: int | None = None
+    col: int | None = None
+    if remainder:
+        coords = _RECOMMENDED_PAREN_COORDS.fullmatch(
+            remainder
+        ) or _RECOMMENDED_PROSE_COORDS.fullmatch(remainder)
+        if coords is not None:
+            row = int(coords.group(1))
+            col = int(coords.group(2))
     try:
-        decision = ActionDecision(
-            action=action,
-            row=int(match.group(2)) if match.group(2) is not None else None,
-            col=int(match.group(3)) if match.group(3) is not None else None,
-        )
+        decision = ActionDecision(action=action, row=row, col=col)
     except ValidationError as error:
         return RecommendationParse(action=None, error=str(error))
     return RecommendationParse(action=decision, error=None)
