@@ -1005,11 +1005,13 @@ def _validate_checkpoint_metadata(
 
 
 def _validate_checkpoint_identity(request: dict[str, Any], call_index: int) -> None:
+    if request.get("schema_version") != 2:
+        raise ShadowValidationError("checkpoint schema is not promotion-grade")
     if request.get("call_index") != call_index:
         raise ShadowValidationError("checkpoint call index mismatch")
     if request.get("request_boundary") != REQUEST_BOUNDARY:
         raise ShadowValidationError("checkpoint was captured at a different boundary")
-    if request.get("source") not in {"actor", "builder"}:
+    if request.get("source") not in {"actor", "builder", "scribe"}:
         raise ShadowValidationError("checkpoint source lane is invalid")
     if not isinstance(request.get("replay_context"), dict):
         raise ShadowValidationError("checkpoint replay context is missing")
@@ -1027,6 +1029,16 @@ def _validate_checkpoint_commitments(
         raise ShadowValidationError("checkpoint workspace commitment is stale")
     if response.get("status") not in {"complete", "error"}:
         raise ShadowValidationError("checkpoint response status is invalid")
+    if workspace.get("schema_version") != 2:
+        raise ShadowValidationError("checkpoint workspace schema is not promotion-grade")
+    commitment = response.get("response_payload_commitment")
+    payload = {
+        key: value
+        for key, value in response.items()
+        if key != "response_payload_commitment"
+    }
+    if response.get("schema_version") != 2 or commitment != _commitment(payload):
+        raise ShadowValidationError("checkpoint response commitment is stale")
 
 
 def _validate_request_body(value: Any) -> None:

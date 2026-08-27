@@ -123,6 +123,8 @@ class ScribeStrategy(GenerationStrategy):
                 {"raw_arguments": tool_call.arguments},
                 message,
                 tool_call_id=tool_call.id,
+                raw_arguments=tool_call.arguments,
+                rejection_stage="parse",
             )
             runtime.event_manager.add(Error(content=message))
             return
@@ -135,6 +137,8 @@ class ScribeStrategy(GenerationStrategy):
                 arguments,
                 message,
                 tool_call_id=tool_call.id,
+                raw_arguments=tool_call.arguments,
+                rejection_stage="availability",
             )
             runtime.event_manager.add(Error(content=message))
             return
@@ -148,17 +152,30 @@ class ScribeStrategy(GenerationStrategy):
             )
         )
         if _is_world_model_edit(tool_call.name, arguments):
+            surface.record_rejected_call(
+                tool_call.name,
+                arguments,
+                _WORLD_MODEL_EDIT_BLOCK_MESSAGE,
+                tool_call_id=tool_call.id,
+                raw_arguments=tool_call.arguments,
+                rejection_stage="policy",
+            )
             runtime.event_manager.update(
                 event_id,
                 result=ToolResult(
                     tool_call_id=tool_call.id,
                     content=_WORLD_MODEL_EDIT_BLOCK_MESSAGE,
-                    result_status=ResultStatus.COMPLETE,
+                    result_status=ResultStatus.ERROR,
                 ),
             )
             return
         try:
-            result = surface.dispatch(tool, arguments, tool_call_id=tool_call.id)
+            result = surface.dispatch(
+                tool,
+                arguments,
+                tool_call_id=tool_call.id,
+                raw_arguments=tool_call.arguments,
+            )
         except Exception as error:  # noqa: BLE001 - a model tool error is recoverable feedback
             runtime.event_manager.update(
                 event_id,

@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
-from nooa.context_blocks import ToolCallEvent
+from nooa.context_blocks import ResultStatus, ToolCallEvent
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
 from tycho_nooa import GameTurn, TychoNooaAgent
@@ -93,7 +93,7 @@ async def test_scribe_blocks_world_model_edit(tmp_path: Path) -> None:
     seeded = world_model_path.read_text() if world_model_path.exists() else None
 
     await agent.act(turn(0))
-    await agent._summarize_level(0)
+    await agent._run_scribe(0)
 
     assert (world_model_path.read_text() if world_model_path.exists() else None) == seeded
     tool_events = [
@@ -106,6 +106,19 @@ async def test_scribe_blocks_world_model_edit(tmp_path: Path) -> None:
     )
     assert blocked.result is not None
     assert blocked.result.content == scribe_module._WORLD_MODEL_EDIT_BLOCK_MESSAGE
+    assert blocked.result.result_status == ResultStatus.ERROR
+    trace = next(
+        json.loads(line)
+        for line in (tmp_path / "tool-trace.jsonl").read_text().splitlines()
+        if "scribe-edit" in line
+    )
+    assert trace["source"] == "scribe"
+    assert trace["phase"] == "post_action"
+    assert trace["parse_status"] == "complete"
+    assert trace["validation_status"] == "not_attempted"
+    assert trace["execution_status"] == "not_attempted"
+    assert trace["error_stage"] == "policy"
+    assert trace["status"] == "error"
 
 
 @pytest.mark.asyncio

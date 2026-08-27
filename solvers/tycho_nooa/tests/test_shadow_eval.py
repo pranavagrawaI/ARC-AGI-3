@@ -152,7 +152,7 @@ def write_checkpoint(root: Path, *, output_model: object = None) -> dict[str, An
     blob.parent.mkdir(parents=True)
     blob.write_bytes(content)
     workspace = {
-        "schema_version": 1,
+        "schema_version": 2,
         "directories": [],
         "files": [
             {
@@ -188,7 +188,7 @@ def write_checkpoint(root: Path, *, output_model: object = None) -> dict[str, An
         "parameters": {"max_tokens": 100},
     }
     request = {
-        "schema_version": 1,
+        "schema_version": 2,
         "call_index": 1,
         "source": "actor",
         "request_boundary": "nooa.llm_call",
@@ -209,7 +209,7 @@ def write_checkpoint(root: Path, *, output_model: object = None) -> dict[str, An
         "request_body": body,
     }
     response = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "complete",
         "content": "",
         "reasoning": None,
@@ -224,6 +224,7 @@ def write_checkpoint(root: Path, *, output_model: object = None) -> dict[str, An
             }
         ],
     }
+    response["response_payload_commitment"] = canonical_commitment(response)
     call = root / "calls" / "000001"
     call.mkdir(parents=True)
     for name, value in (
@@ -322,6 +323,29 @@ def test_prepare_rejects_a_spec_bound_to_another_request(tmp_path: Path) -> None
             perturbation=spec,
             destination=tmp_path / "packet",
         )
+
+
+def test_schema_two_checkpoint_cannot_downgrade_its_response(tmp_path: Path) -> None:
+    root = tmp_path / "checkpoints"
+    write_checkpoint(root)
+    call = root / "calls" / "000001"
+    response_path = call / "response.json"
+    response = json.loads(response_path.read_text())
+    inspect_checkpoint(root, call_index=1)
+
+    response.pop("schema_version")
+    response.pop("response_payload_commitment")
+    response_path.write_text(json.dumps(response))
+    with pytest.raises(ShadowValidationError, match="response commitment"):
+        inspect_checkpoint(root, call_index=1)
+
+    write_checkpoint(tmp_path / "downgraded")
+    downgraded = tmp_path / "downgraded" / "calls" / "000001" / "request.json"
+    request = json.loads(downgraded.read_text())
+    request.pop("schema_version")
+    downgraded.write_text(json.dumps(request))
+    with pytest.raises(ShadowValidationError, match="not promotion-grade"):
+        inspect_checkpoint(tmp_path / "downgraded", call_index=1)
 
 
 def test_packet_tampering_is_detected_before_execution(tmp_path: Path) -> None:
