@@ -100,6 +100,108 @@ def test_authoritative_evidence_rejects_content_changed_after_registration(
         )
 
 
+def test_goal_update_revalidates_existing_evidence_when_no_refs_are_added(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "game"
+    evidence = workspace / "level_0" / "turn_000.txt"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text("host-authored frame")
+    ledger = GoalLedger(workspace)
+    ledger.register_authoritative_evidence("level_0/turn_000.txt")
+    goal = ledger.propose_goal(
+        predicate="reach the target",
+        evidence_refs=["level_0/turn_000.txt"],
+        falsifier="target contact is nonterminal",
+        level=0,
+        turn_in_level=0,
+    )
+    evidence.write_text("changed before no-op evidence update")
+
+    with pytest.raises(ValueError, match="changed after registration"):
+        ledger.update_goal(
+            goal.id,
+            status=CandidateGoalStatus.PROPOSED,
+            evidence_refs=[],
+            note="retain without adding evidence",
+            level=0,
+            turn_in_level=0,
+        )
+
+
+def test_action_admission_revalidates_independent_review_evidence(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "game"
+    goal_evidence = workspace / "level_0" / "turn_000.txt"
+    review_evidence = workspace / "level_0" / "turn_001.txt"
+    goal_evidence.parent.mkdir(parents=True)
+    goal_evidence.write_text("host-authored proposal frame")
+    review_evidence.write_text("host-authored review frame")
+    ledger = GoalLedger(workspace)
+    ledger.register_authoritative_evidence("level_0/turn_000.txt")
+    ledger.register_authoritative_evidence("level_0/turn_001.txt")
+    goal = ledger.propose_goal(
+        predicate="reach the target",
+        evidence_refs=["level_0/turn_000.txt"],
+        falsifier="target contact is nonterminal",
+        level=0,
+        turn_in_level=0,
+    )
+    review = ledger.record_builder_review(
+        candidate_goal_id=goal.id,
+        evidence_refs=["level_0/turn_001.txt"],
+        report="candidate_goal_assessment: inconclusive",
+        level=0,
+        turn_in_level=0,
+    )
+    ledger.update_goal(
+        goal.id,
+        status=CandidateGoalStatus.SELECTED,
+        evidence_refs=[],
+        note="select after review",
+        level=0,
+        turn_in_level=0,
+        resolved_review_id=review.id,
+    )
+    review_evidence.write_text("changed after independent review")
+
+    required = GoalToolSurface(ledger).required_before_action()
+
+    assert required is not None
+    assert "stale evidence" in required
+    assert "changed after registration" in required
+
+
+def test_rejected_goal_does_not_retain_action_authority(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "game"
+    evidence = workspace / "level_0" / "turn_000.txt"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text("host-authored frame")
+    ledger = GoalLedger(workspace)
+    ledger.register_authoritative_evidence("level_0/turn_000.txt")
+    goal = ledger.propose_goal(
+        predicate="reach the target",
+        evidence_refs=["level_0/turn_000.txt"],
+        falsifier="target contact is nonterminal",
+        level=0,
+        turn_in_level=0,
+    )
+    ledger.update_goal(
+        goal.id,
+        status=CandidateGoalStatus.REJECTED,
+        evidence_refs=[],
+        note="discarded",
+        level=0,
+        turn_in_level=0,
+    )
+    evidence.write_text("changed after rejection")
+
+    assert GoalToolSurface(ledger).required_before_action() is None
+
+
 def test_authoritative_evidence_commitment_survives_restart(tmp_path: Path) -> None:
     workspace = tmp_path / "game"
     evidence = workspace / "level_0" / "turn_000.txt"

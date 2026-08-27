@@ -214,8 +214,8 @@ class GoalLedger:
                 raise ValueError(
                     f"candidate goal {selected[0]} is already selected; revise it first"
                 )
-        added = self.validate_evidence_refs(evidence_refs) if evidence_refs else ()
-        refs = tuple(dict.fromkeys([*current.evidence_refs, *added]))
+        combined = list(dict.fromkeys([*current.evidence_refs, *evidence_refs]))
+        refs = self.validate_evidence_refs(combined)
         if not refs:
             raise ValueError("candidate goals require authoritative public evidence")
         updated = current.model_copy(
@@ -551,6 +551,15 @@ class GoalToolSurface:
         """Return the typed lifecycle edge the actor must close before commitment."""
         for goal in self._ledger.list_goals():
             pending = self._ledger.pending_review(goal.id)
+            if goal.status is CandidateGoalStatus.REJECTED and pending is None:
+                continue
+            review = self._ledger.latest_review(goal.id)
+            try:
+                self._ledger.validate_evidence_refs(list(goal.evidence_refs))
+                if review is not None:
+                    self._ledger.validate_evidence_refs(list(review.evidence_refs))
+            except ValueError as error:
+                return f"candidate goal {goal.id} has stale evidence: {error}"
             if pending is not None:
                 return (
                     f"candidate goal {goal.id} has objective review {pending.id}; "
