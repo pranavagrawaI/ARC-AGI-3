@@ -30,7 +30,6 @@ WORKER_ENVIRONMENT_KEYS = frozenset(
         "ARC_LLM_CONTEXT_WINDOW",
         "ARC_LLM_MAX_TOKENS",
         "ARC_LLM_MODEL",
-        "ARC_LLM_PROVIDER_ENDPOINT",
         "ARC_LLM_USE_RESPONSES",
         "HOME",
         "LANG",
