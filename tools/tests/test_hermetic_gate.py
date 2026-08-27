@@ -66,6 +66,63 @@ def test_synthetic_baseline_satisfies_every_gate() -> None:
     assert audit_bundle(synthetic_bundle()) == []
 
 
+def test_audit_run_rejects_legacy_typed_goal_evidence_authority(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace" / "ar25"
+    evidence = workspace / "level_0" / "turn_000.txt"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text("host frame")
+    index = workspace / "epistemic" / "authoritative-evidence.json"
+    index.parent.mkdir()
+    index.write_text(json.dumps(["level_0/turn_000.txt"]))
+
+    result = audit_run(tmp_path)
+
+    assert "legacy_authoritative_evidence_index" in {
+        violation["code"] for violation in result["violations"]
+    }
+    assert result["promotion_allowed"] is False
+
+
+def test_audit_run_recomputes_typed_goal_evidence_commitments(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace" / "ar25"
+    evidence = workspace / "level_0" / "turn_000.txt"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text("host frame")
+    payload = evidence.read_bytes()
+    index = workspace / "epistemic" / "authoritative-evidence.json"
+    index.parent.mkdir()
+    index.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "files": {
+                    "level_0/turn_000.txt": {
+                        "sha256": hashlib.sha256(payload).hexdigest(),
+                        "size_bytes": len(payload),
+                    }
+                },
+            }
+        )
+    )
+
+    result = audit_run(tmp_path)
+    assert not {
+        violation["code"]
+        for violation in result["violations"]
+        if "authoritative_evidence" in violation["code"]
+    }
+
+    evidence.write_text("changed frame")
+    result = audit_run(tmp_path)
+    assert "authoritative_evidence_commitment_mismatch" in {
+        violation["code"] for violation in result["violations"]
+    }
+
+
 def test_actor_only_mode_does_not_require_a_builder_outcome_checkpoint() -> None:
     bundle = synthetic_bundle()
     bundle.summary["mode"] = "no_world_model"

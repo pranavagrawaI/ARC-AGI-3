@@ -64,6 +64,7 @@ def audit_run(run_dir: Path) -> dict[str, Any]:
     bundle = load_bundle(run_dir)
     violations = audit_bundle(bundle)
     violations.extend(audit_checkpoints(run_dir / "decision-checkpoints"))
+    violations.extend(audit_authoritative_evidence(run_dir / "workspace"))
     violations.extend(
         _audit_checkpoint_trace_joins(
             run_dir / "decision-checkpoints",
@@ -104,6 +105,128 @@ def load_bundle(run_dir: Path) -> TraceBundle:
                 Violation("malformed_json", str(error), "summary")
             )
     return bundle
+
+
+def audit_authoritative_evidence(workspace_root: Path) -> list[Violation]:
+    """Recompute content authority for every typed-goal evidence index."""
+
+    violations: list[Violation] = []
+    indexes = sorted(workspace_root.glob("*/epistemic/authoritative-evidence.json"))
+    for index in indexes:
+        game_workspace = index.parent.parent.resolve()
+        try:
+            payload = json.loads(index.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            violations.append(
+                Violation(
+                    "invalid_authoritative_evidence_index",
+                    str(error),
+                    "authoritative_evidence",
+                    evidence={"index": str(index)},
+                )
+            )
+            continue
+        if isinstance(payload, list):
+            violations.append(
+                Violation(
+                    "legacy_authoritative_evidence_index",
+                    "path-only evidence has no content identity",
+                    "authoritative_evidence",
+                    evidence={"index": str(index)},
+                )
+            )
+            continue
+        if (
+            not isinstance(payload, dict)
+            or payload.get("schema_version") != 1
+            or not isinstance(payload.get("files"), dict)
+        ):
+            violations.append(
+                Violation(
+                    "invalid_authoritative_evidence_index",
+                    "expected schema_version 1 with an object-valued files field",
+                    "authoritative_evidence",
+                    evidence={"index": str(index)},
+                )
+            )
+            continue
+        for reference, commitment in payload["files"].items():
+            if not isinstance(reference, str) or not isinstance(commitment, dict):
+                violations.append(
+                    Violation(
+                        "invalid_authoritative_evidence_commitment",
+                        "evidence references and commitments must be objects",
+                        "authoritative_evidence",
+                        evidence={"index": str(index), "reference": reference},
+                    )
+                )
+                continue
+            relative = PurePosixPath(reference)
+            candidate = (game_workspace / relative).resolve()
+            try:
+                candidate.relative_to(game_workspace)
+            except ValueError:
+                candidate_is_safe = False
+            else:
+                candidate_is_safe = not relative.is_absolute() and ".." not in relative.parts
+            if not candidate_is_safe or not candidate.is_file():
+                violations.append(
+                    Violation(
+                        "authoritative_evidence_reference_invalid",
+                        f"evidence reference is unsafe or missing: {reference!r}",
+                        "authoritative_evidence",
+                        evidence={"index": str(index), "reference": reference},
+                    )
+                )
+                continue
+            try:
+                content = candidate.read_bytes()
+            except OSError as error:
+                violations.append(
+                    Violation(
+                        "authoritative_evidence_reference_invalid",
+                        str(error),
+                        "authoritative_evidence",
+                        evidence={"index": str(index), "reference": reference},
+                    )
+                )
+                continue
+            digest = commitment.get("sha256")
+            size = commitment.get("size_bytes")
+            if (
+                not isinstance(digest, str)
+                or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
+                or type(size) is not int
+                or size < 0
+            ):
+                violations.append(
+                    Violation(
+                        "invalid_authoritative_evidence_commitment",
+                        f"invalid commitment for {reference!r}",
+                        "authoritative_evidence",
+                        evidence={"index": str(index), "reference": reference},
+                    )
+                )
+                continue
+            observed_digest = hashlib.sha256(content).hexdigest()
+            if observed_digest != digest or len(content) != size:
+                violations.append(
+                    Violation(
+                        "authoritative_evidence_commitment_mismatch",
+                        f"authoritative evidence changed: {reference!r}",
+                        "authoritative_evidence",
+                        evidence={
+                            "index": str(index),
+                            "reference": reference,
+                            "expected_sha256": digest,
+                            "observed_sha256": observed_digest,
+                            "expected_size_bytes": size,
+                            "observed_size_bytes": len(content),
+                        },
+                    )
+                )
+    return violations
 
 
 def audit_bundle(bundle: TraceBundle) -> list[Violation]:

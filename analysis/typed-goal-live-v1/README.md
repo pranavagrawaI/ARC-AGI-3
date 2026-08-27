@@ -15,7 +15,7 @@ The complete run is not tracked here. It remains in the local preservation archi
 
 That archive retains all 34 checkpoints, the raw provider recording, generated workspace, logs, and caches. This package excludes those broad families and keeps only five claim-bearing checkpoints, their referenced content-addressed blobs, the typed ledger and review, the host evidence cited by the goal, and the causal trace rows needed to join the lifecycle to the next Actor request.
 
-Because it is deliberately partial, this directory is **not** a substitute input for a whole-run Hermetic Gate audit. The full preserved dossier passed the Gate before curation. `SELECTED-EVIDENCE.sha256` verifies only the bytes retained here.
+Because it is deliberately partial, this directory is **not** a substitute input for a whole-run Hermetic Gate audit. The full preserved dossier passes its trace and checkpoint contracts but fails the current Gate on `legacy_authoritative_evidence_index`: its path-only evidence index predates content-bound typed-goal authority. It remains historical mechanism evidence and is not promotable. `SELECTED-EVIDENCE.sha256` verifies only the bytes retained here.
 
 ## Evidence map
 
