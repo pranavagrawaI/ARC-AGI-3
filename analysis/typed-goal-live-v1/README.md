@@ -19,7 +19,7 @@ Because it is deliberately partial, this directory is **not** a substitute input
 
 ## Evidence map
 
-`EXPERIMENT-CARD.md` is the precommitted feasibility question. `SOURCE-GENERATION.json` retrospectively binds the protected generating worktree's complete Solver and host source inventories, dependency locks, base revision, archived dirty-worktree patch, and run configuration. It is explicitly non-authorizing: retrospective byte binding does not manufacture contemporaneous approval or reusable execution authority.
+`EXPERIMENT-CARD.md` is the precommitted feasibility question. `SOURCE-GENERATION.json` retrospectively binds the protected generating worktree's complete Solver and host source inventories, dependency locks, base revision, archived dirty-worktree patch, and run configuration. Two inventory entries are absent from the fixed revision plus patch and are named in `reconstruction_sources`: the card already retained here and one imported untracked source file preserved byte-for-byte under `source-generation/untracked/`. The latter is historical source evidence, not stable Solver code. The manifest is explicitly non-authorizing: retrospective byte binding does not manufacture contemporaneous approval or reusable execution authority.
 
 The retained checkpoints are:
 
