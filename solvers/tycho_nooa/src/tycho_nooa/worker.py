@@ -19,6 +19,7 @@ from tycho_nooa.protocol import (
     ActionResultMessage,
     CloseMessage,
     FinishMessage,
+    ObservationPayload,
     StartGameMessage,
     TurnMessage,
     parse_host_message,
@@ -32,7 +33,10 @@ class WorkerSession:
         self.agent: TychoNooaAgent | None = None
         self.client_kind: str | None = None
         self.next_sequence = 0
-        self.pending: tuple[int, ActionDecision] | None = None
+        self.pending: tuple[TurnMessage, ActionDecision] | None = None
+        self.previous_result: ActionResultMessage | None = None
+        self.initial_observation: ObservationPayload | None = None
+        self.finished = False
 
     def start_game(self, message: StartGameMessage) -> dict[str, Any]:
         if self.agent is not None:
@@ -45,6 +49,7 @@ class WorkerSession:
             available_actions=message.initial_observation.available_actions,
             tool_trace_path=Path(message.workspace_root).parent / "tool-trace.jsonl",
         )
+        self.initial_observation = message.initial_observation
         return {
             "worker_id": str(os.getpid()),
             "metadata": {
@@ -58,13 +63,35 @@ class WorkerSession:
         }
 
     async def decide(self, message: TurnMessage) -> dict[str, Any]:
-        agent = self._agent()
+        agent = self._active_agent()
         if self.pending is not None:
             raise RuntimeError("action_result is required before the next turn")
         if message.sequence != self.next_sequence:
             raise RuntimeError(
                 f"expected turn sequence {self.next_sequence}, got {message.sequence}"
             )
+        if self.previous_result is None:
+            if self.initial_observation is None:
+                raise RuntimeError("turn arrived before the initial observation")
+            if (
+                message.observation != self.initial_observation
+                or message.previous_decision is not None
+            ):
+                raise RuntimeError("first turn does not match the initial observation")
+        else:
+            crossed_boundary = (
+                self.previous_result.after.full_reset
+                or self.previous_result.after.levels_completed
+                > self.previous_result.before.levels_completed
+            )
+            expected_previous = (
+                None if crossed_boundary else self.previous_result.decision
+            )
+            if (
+                message.observation != self.previous_result.after
+                or message.previous_decision != expected_previous
+            ):
+                raise RuntimeError("turn does not continue the previous action result")
         previous = message.previous_decision
         observation = message.observation
         decision = await agent.act(
@@ -82,30 +109,57 @@ class WorkerSession:
             ),
             decision_timeout_seconds=message.decision_timeout_seconds,
         )
-        self.pending = (message.sequence, decision)
+        self.pending = (message, decision)
         return {"sequence": message.sequence, "decision": decision.model_dump()}
 
     async def observe(self, message: ActionResultMessage) -> dict[str, Any]:
-        agent = self._agent()
+        agent = self._active_agent()
         if self.pending is None:
             raise RuntimeError("action_result arrived without a pending decision")
-        sequence, decision = self.pending
-        if message.sequence != sequence or message.decision != decision:
-            raise RuntimeError("action_result does not match the pending decision")
+        turn, decision = self.pending
+        if (
+            message.sequence != turn.sequence
+            or message.level != turn.level
+            or message.turn_in_level != turn.turn_in_level
+            or message.before != turn.observation
+            or message.decision != decision
+        ):
+            raise RuntimeError(
+                "action_result does not match the pending turn and decision"
+            )
         await agent.observe(message)
         self.pending = None
+        self.previous_result = message
         self.next_sequence += 1
         return {"sequence": message.sequence}
 
     def finish(self, message: FinishMessage) -> dict[str, Any]:
-        self._agent()
+        self._active_agent()
         if self.pending is not None:
             raise RuntimeError("cannot finish before the pending action_result")
         if message.actions != self.next_sequence:
             raise RuntimeError(
                 f"finish reports {message.actions} actions; worker observed {self.next_sequence}"
             )
+        final_observation = (
+            self.previous_result.after
+            if self.previous_result is not None
+            else self.initial_observation
+        )
+        if final_observation is None:
+            raise RuntimeError("finish arrived before the initial observation")
+        if message.final_observation != final_observation:
+            raise RuntimeError("finish observation does not match the last accepted successor")
+        if message.levels_completed != final_observation.levels_completed:
+            raise RuntimeError("finish level count does not match the final observation")
+        self.finished = True
         return {}
+
+    def _active_agent(self) -> TychoNooaAgent:
+        agent = self._agent()
+        if self.finished:
+            raise RuntimeError("the game has already finished")
+        return agent
 
     def _agent(self) -> TychoNooaAgent:
         if self.agent is None:

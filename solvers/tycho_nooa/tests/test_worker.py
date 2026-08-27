@@ -30,6 +30,7 @@ def observation(
     *,
     actions: list[str] | None = None,
     levels: int = 0,
+    full_reset: bool = False,
 ) -> ObservationPayload:
     return ObservationPayload(
         decision_frame=[[value, value + 1], [value + 2, value + 3]],
@@ -45,7 +46,7 @@ def observation(
         available_actions=actions if actions is not None else ["UP", "DOWN"],
         levels_completed=levels,
         state="NOT_FINISHED",
-        full_reset=False,
+        full_reset=full_reset,
     )
 
 
@@ -88,7 +89,9 @@ def test_protocol_preserves_the_complete_frame_evidence_envelope() -> None:
 async def test_worker_passes_the_host_decision_timeout_to_the_agent() -> None:
     act = AsyncMock(return_value=ActionDecision(action="UP"))
     session = WorkerSession()
-    session.agent = SimpleNamespace(act=act)
+    session.agent = SimpleNamespace(act=act)  # type: ignore[assignment]
+    first = observation(0)
+    session.initial_observation = first
 
     await session.decide(
         TurnMessage(
@@ -98,12 +101,248 @@ async def test_worker_passes_the_host_decision_timeout_to_the_agent() -> None:
             level=0,
             turn_in_level=0,
             decision_timeout_seconds=600,
-            observation=observation(0),
+            observation=first,
             previous_decision=None,
         )
     )
 
     assert act.await_args.kwargs == {"decision_timeout_seconds": 600.0}
+
+
+@pytest.mark.asyncio
+async def test_worker_rejects_a_first_turn_that_substitutes_the_initial_observation() -> None:
+    act = AsyncMock(return_value=ActionDecision(action="UP"))
+    session = WorkerSession()
+    session.agent = SimpleNamespace(act=act)  # type: ignore[assignment]
+    session.initial_observation = observation(0)
+
+    with pytest.raises(RuntimeError, match="initial observation"):
+        await session.decide(
+            TurnMessage(
+                protocol_version=PROTOCOL_VERSION,
+                type="turn",
+                sequence=0,
+                level=0,
+                turn_in_level=0,
+                decision_timeout_seconds=600,
+                observation=observation(8),
+                previous_decision=None,
+            )
+        )
+
+    act.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_worker_rejects_action_result_from_a_different_turn() -> None:
+    agent = SimpleNamespace(
+        act=AsyncMock(return_value=ActionDecision(action="UP")),
+        observe=AsyncMock(return_value=None),
+    )
+    session = WorkerSession()
+    session.agent = agent  # type: ignore[assignment]
+    before = observation(0)
+    session.initial_observation = before
+
+    await session.decide(
+        TurnMessage(
+            protocol_version=PROTOCOL_VERSION,
+            type="turn",
+            sequence=0,
+            level=0,
+            turn_in_level=0,
+            decision_timeout_seconds=600,
+            observation=before,
+            previous_decision=None,
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="pending turn"):
+        await session.observe(
+            ActionResultMessage(
+                protocol_version=PROTOCOL_VERSION,
+                type="action_result",
+                sequence=0,
+                level=0,
+                turn_in_level=0,
+                decision=ActionDecision(action="UP"),
+                before=observation(8),
+                after=observation(12),
+            )
+        )
+
+    agent.observe.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_worker_rejects_a_next_turn_that_substitutes_the_successor() -> None:
+    decision = ActionDecision(action="UP")
+    agent = SimpleNamespace(
+        act=AsyncMock(return_value=decision),
+        observe=AsyncMock(return_value=None),
+    )
+    session = WorkerSession()
+    session.agent = agent  # type: ignore[assignment]
+    before = observation(0)
+    after = observation(4)
+    session.initial_observation = before
+
+    await session.decide(
+        TurnMessage(
+            protocol_version=PROTOCOL_VERSION,
+            type="turn",
+            sequence=0,
+            level=0,
+            turn_in_level=0,
+            decision_timeout_seconds=600,
+            observation=before,
+            previous_decision=None,
+        )
+    )
+    await session.observe(
+        ActionResultMessage(
+            protocol_version=PROTOCOL_VERSION,
+            type="action_result",
+            sequence=0,
+            level=0,
+            turn_in_level=0,
+            decision=decision,
+            before=before,
+            after=after,
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="previous action result"):
+        await session.decide(
+            TurnMessage(
+                protocol_version=PROTOCOL_VERSION,
+                type="turn",
+                sequence=1,
+                level=0,
+                turn_in_level=1,
+                decision_timeout_seconds=600,
+                observation=observation(8),
+                previous_decision=decision,
+            )
+        )
+
+    assert agent.act.await_count == 1
+
+
+@pytest.mark.parametrize(
+    ("levels", "full_reset"),
+    [(1, False), (0, True)],
+)
+@pytest.mark.asyncio
+async def test_worker_accepts_a_cleared_previous_decision_at_a_boundary(
+    levels: int,
+    full_reset: bool,
+) -> None:
+    decision = ActionDecision(action="UP")
+    agent = SimpleNamespace(
+        act=AsyncMock(return_value=decision),
+        observe=AsyncMock(return_value=None),
+    )
+    session = WorkerSession()
+    session.agent = agent  # type: ignore[assignment]
+    before = observation(0)
+    after = observation(4, levels=levels, full_reset=full_reset)
+    session.initial_observation = before
+
+    await session.decide(
+        TurnMessage(
+            protocol_version=PROTOCOL_VERSION,
+            type="turn",
+            sequence=0,
+            level=0,
+            turn_in_level=0,
+            decision_timeout_seconds=600,
+            observation=before,
+            previous_decision=None,
+        )
+    )
+    await session.observe(
+        ActionResultMessage(
+            protocol_version=PROTOCOL_VERSION,
+            type="action_result",
+            sequence=0,
+            level=0,
+            turn_in_level=0,
+            decision=decision,
+            before=before,
+            after=after,
+        )
+    )
+
+    await session.decide(
+        TurnMessage(
+            protocol_version=PROTOCOL_VERSION,
+            type="turn",
+            sequence=1,
+            level=levels,
+            turn_in_level=0,
+            decision_timeout_seconds=600,
+            observation=after,
+            previous_decision=None,
+        )
+    )
+
+    assert agent.act.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_worker_requires_the_previous_decision_without_a_boundary() -> None:
+    decision = ActionDecision(action="UP")
+    agent = SimpleNamespace(
+        act=AsyncMock(return_value=decision),
+        observe=AsyncMock(return_value=None),
+    )
+    session = WorkerSession()
+    session.agent = agent  # type: ignore[assignment]
+    before = observation(0)
+    after = observation(4)
+    session.initial_observation = before
+
+    await session.decide(
+        TurnMessage(
+            protocol_version=PROTOCOL_VERSION,
+            type="turn",
+            sequence=0,
+            level=0,
+            turn_in_level=0,
+            decision_timeout_seconds=600,
+            observation=before,
+            previous_decision=None,
+        )
+    )
+    await session.observe(
+        ActionResultMessage(
+            protocol_version=PROTOCOL_VERSION,
+            type="action_result",
+            sequence=0,
+            level=0,
+            turn_in_level=0,
+            decision=decision,
+            before=before,
+            after=after,
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="previous action result"):
+        await session.decide(
+            TurnMessage(
+                protocol_version=PROTOCOL_VERSION,
+                type="turn",
+                sequence=1,
+                level=0,
+                turn_in_level=1,
+                decision_timeout_seconds=600,
+                observation=after,
+                previous_decision=None,
+            )
+        )
+
+    assert agent.act.await_count == 1
 
 
 @pytest.mark.parametrize(
@@ -226,16 +465,38 @@ async def test_worker_keeps_one_agent_and_observes_level_boundary(
     assert checkpoint_turn.turn_in_level == 1
     assert checkpoint_turn.levels_completed == 1
     assert '"outcome":"level_complete"' in checkpoint_evidence
-    session.finish(
-        FinishMessage(
-            protocol_version=PROTOCOL_VERSION,
-            type="finish",
-            stop_reason="level_limit",
-            actions=1,
-            levels_completed=1,
-            final_observation=after,
-        )
+    finish = FinishMessage(
+        protocol_version=PROTOCOL_VERSION,
+        type="finish",
+        stop_reason="level_limit",
+        actions=1,
+        levels_completed=1,
+        final_observation=after,
     )
+    with pytest.raises(RuntimeError, match="last accepted successor"):
+        session.finish(
+            finish.model_copy(
+                update={"final_observation": observation(12, actions=[], levels=1)}
+            )
+        )
+    with pytest.raises(RuntimeError, match="level count"):
+        session.finish(finish.model_copy(update={"levels_completed": 0}))
+    session.finish(finish)
+    with pytest.raises(RuntimeError, match="already finished"):
+        session.finish(finish)
+    with pytest.raises(RuntimeError, match="already finished"):
+        await session.decide(
+            TurnMessage(
+                protocol_version=PROTOCOL_VERSION,
+                type="turn",
+                sequence=1,
+                level=1,
+                turn_in_level=0,
+                decision_timeout_seconds=600,
+                observation=after,
+                previous_decision=decision,
+            )
+        )
 
     assert session.agent is agent
     assert agent._native_tool_config.max_tokens == 8_000
@@ -255,6 +516,7 @@ async def test_worker_keeps_one_agent_and_observes_level_boundary(
         for line in (tmp_path.parent / "tool-trace.jsonl").read_text().splitlines()
     ]
     assert [record["name"] for record in trace] == ["write_file", "take_action"]
+    assert [record["sequence"] for record in trace] == [0, 0]
     assert json.loads((agent.workspace_dir / "level_0/solved.json").read_text()) == {
         "action": "UP",
         "row": None,
