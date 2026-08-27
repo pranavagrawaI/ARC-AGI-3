@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DETECTOR_VERSION = "2026-08-21.1"
 STAGES = (
     "candidate_objective",
@@ -151,14 +151,22 @@ def _tool_sequence_maps(
     sequence_index: dict[tuple[int, int], int] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, list[dict[str, Any]]]]:
     by_id: dict[str, dict[str, Any]] = {}
-    by_owner: dict[str, list[dict[str, Any]]] = {"actor": [], "builder": []}
+    by_owner: dict[str, list[dict[str, Any]]] = {
+        "actor": [],
+        "builder": [],
+        "scribe": [],
+    }
     for owner, name in (("actor", "tool-trace.jsonl"), ("builder", "builder-tool-trace.jsonl")):
-        for row in read_jsonl(run_path / name):
+        for row_number, row in enumerate(read_jsonl(run_path / name), 1):
             row = dict(row)
-            row["owner"] = owner
+            row["_trace_name"] = name
+            row["_line_number"] = row_number
+            effective_owner = str(row.get("source", owner))
+            row["owner"] = effective_owner
             level_turn = (int(row.get("level", 0)), int(row.get("turn_in_level", 0)))
-            row["sequence"] = (sequence_index or {}).get(level_turn, level_turn[1])
-            by_owner[owner].append(row)
+            if not isinstance(row.get("sequence"), int):
+                row["sequence"] = (sequence_index or {}).get(level_turn, level_turn[1])
+            by_owner.setdefault(effective_owner, []).append(row)
             if row.get("tool_call_id"):
                 by_id[str(row["tool_call_id"])] = row
     return by_id, by_owner
@@ -179,16 +187,25 @@ def _checkpoint_sequences(run_path: Path) -> dict[int, int]:
 def _join_llm_sequences(run_path: Path) -> tuple[list[dict[str, Any]], str]:
     """Attach each model call to a decision sequence without reading prompt text."""
     calls = read_jsonl(run_path / "llm-trace.jsonl")
-    exact = _checkpoint_sequences(run_path)
+    legacy_exact = _checkpoint_sequences(run_path)
     by_id, by_owner = _tool_sequence_maps(run_path, _sequence_index(run_path))
     cursors = defaultdict(int)
     last = defaultdict(int)
-    alignment = "exact_decision_checkpoint" if exact else "tool_call_join"
+    direct = bool(calls) and all(isinstance(call.get("sequence"), int) for call in calls)
+    alignment = (
+        "exact_llm_decision_point"
+        if direct
+        else "legacy_call_index_checkpoint"
+        if legacy_exact
+        else "tool_call_join"
+    )
 
     for call in calls:
         source = call.get("source", "actor")
         call_index = int(call.get("call_index", 0))
-        sequence = exact.get(call_index)
+        sequence = int(call["sequence"]) if isinstance(call.get("sequence"), int) else None
+        if sequence is None:
+            sequence = legacy_exact.get(call_index)
         if sequence is None:
             tool_rows = [by_id[x] for x in call.get("tool_call_ids", []) if x in by_id]
             if tool_rows:
@@ -271,10 +288,11 @@ def extract_run(spec: RunSpec, root: Path) -> dict[str, Any]:
 
     # Tool arguments are model-authored intent; results are mechanically produced evidence.
     for owner, rows in tool_by_owner.items():
-        path = spec.path / ("tool-trace.jsonl" if owner == "actor" else "builder-tool-trace.jsonl")
-        if path.exists():
-            input_files.add(path)
-        for row_number, row in enumerate(rows, 1):
+        for row in rows:
+            path = spec.path / str(row["_trace_name"])
+            row_number = int(row["_line_number"])
+            if path.exists():
+                input_files.add(path)
             sequence = int(row["sequence"])
             max_sequence = max(max_sequence, sequence)
             text = json.dumps({
@@ -300,7 +318,14 @@ def extract_run(spec: RunSpec, root: Path) -> dict[str, Any]:
                 actions[sequence]["selection_evidence_ref"] = f"{rel(path, root)}:{row_number}"
 
     spend_by_sequence: dict[int, dict[str, Any]] = defaultdict(
-        lambda: {"actor_usd": 0.0, "builder_usd": 0.0, "actor_calls": 0, "builder_calls": 0}
+        lambda: {
+            "actor_usd": 0.0,
+            "builder_usd": 0.0,
+            "scribe_usd": 0.0,
+            "actor_calls": 0,
+            "builder_calls": 0,
+            "scribe_calls": 0,
+        }
     )
     llm_path = spec.path / "llm-trace.jsonl"
     if llm_path.exists():
@@ -505,8 +530,8 @@ def build_decisions(
     for signal in signals:
         by_sequence[int(signal["sequence"])].append(signal)
     cumulative_stages: set[str] = set()
-    actor_spend = builder_spend = 0.0
-    actor_calls = builder_calls = 0
+    actor_spend = builder_spend = scribe_spend = 0.0
+    actor_calls = builder_calls = scribe_calls = 0
     rows = []
     for sequence in range(max_sequence + 1):
         current = by_sequence.get(sequence, [])
@@ -514,8 +539,10 @@ def build_decisions(
         spend = spend_by_sequence.get(sequence, {})
         actor_spend += float(spend.get("actor_usd", 0.0))
         builder_spend += float(spend.get("builder_usd", 0.0))
+        scribe_spend += float(spend.get("scribe_usd", 0.0))
         actor_calls += int(spend.get("actor_calls", 0))
         builder_calls += int(spend.get("builder_calls", 0))
+        scribe_calls += int(spend.get("scribe_calls", 0))
         action = actions.get(sequence, {})
         rows.append({
             "run_key": spec.key,
@@ -533,8 +560,10 @@ def build_decisions(
             ),
             "actor_calls_cumulative": actor_calls if spend_known else None,
             "builder_calls_cumulative": builder_calls if spend_known else None,
+            "scribe_calls_cumulative": scribe_calls if spend_known else None,
             "actor_spend_usd_cumulative": round(actor_spend, 8) if spend_known else None,
             "builder_spend_usd_cumulative": round(builder_spend, 8) if spend_known else None,
+            "scribe_spend_usd_cumulative": round(scribe_spend, 8) if spend_known else None,
         })
     return rows
 
@@ -618,8 +647,10 @@ def classify_run(run: dict[str, Any], horizon: int) -> dict[str, Any]:
         "spend": {
             "actor_usd": decision["actor_spend_usd_cumulative"],
             "builder_usd": decision["builder_spend_usd_cumulative"],
+            "scribe_usd": decision["scribe_spend_usd_cumulative"],
             "actor_calls": decision["actor_calls_cumulative"],
             "builder_calls": decision["builder_calls_cumulative"],
+            "scribe_calls": decision["scribe_calls_cumulative"],
         },
     })
     return episode
@@ -638,7 +669,9 @@ def positive_controls(horizon: int) -> list[dict[str, Any]]:
         decisions = [
             {"sequence": sequence, "selected_action": None, "host_executed": True,
              "actor_spend_usd_cumulative": 0.0, "builder_spend_usd_cumulative": 0.0,
-             "actor_calls_cumulative": 0, "builder_calls_cumulative": 0, "evidence_refs": []}
+             "scribe_spend_usd_cumulative": 0.0, "actor_calls_cumulative": 0,
+             "builder_calls_cumulative": 0, "scribe_calls_cumulative": 0,
+             "evidence_refs": []}
             for sequence in range(max_sequence + 1)
         ]
         if selected_without_host:
@@ -754,7 +787,7 @@ def mine(root: Path, horizon: int = 3) -> dict[str, Any]:
         for run in runs
     )
     return {
-        "schema": "tycho-nooa-epistemic-funnel-v1",
+        "schema": "tycho-nooa-epistemic-funnel-v2",
         "schema_version": SCHEMA_VERSION,
         "detector_version": DETECTOR_VERSION,
         "parameters": {
@@ -791,7 +824,8 @@ def write_csv(result: dict[str, Any], path: Path) -> None:
     fields = [
         "run_key", "sequence", "recorded_turn", "selected_action", "host_executed", "terminal",
         "stages_new", "stages_seen", "actor_calls_cumulative", "builder_calls_cumulative",
-        "actor_spend_usd_cumulative", "builder_spend_usd_cumulative", "evidence_refs",
+        "scribe_calls_cumulative", "actor_spend_usd_cumulative",
+        "builder_spend_usd_cumulative", "scribe_spend_usd_cumulative", "evidence_refs",
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:

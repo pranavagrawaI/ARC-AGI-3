@@ -4,8 +4,11 @@ import json
 from pathlib import Path
 
 from tools.epistemic_funnel_core import (
+    RunSpec,
+    _join_llm_sequences,
     classify_run,
     default_corpus,
+    extract_run,
     mine,
     positive_controls,
 )
@@ -51,6 +54,69 @@ def test_short_trace_is_censored_instead_of_counted_as_goal_null() -> None:
 
 def test_default_corpus_exists() -> None:
     assert all(spec.path.exists() for spec in default_corpus(ROOT))
+
+
+def test_shared_tool_trace_preserves_physical_scribe_line_number(
+    tmp_path: Path,
+) -> None:
+    run_path = tmp_path / "run"
+    run_path.mkdir()
+    (run_path / "summary.json").write_text(json.dumps({"game_id": "fake"}))
+    (run_path / "transcript.jsonl").write_text("")
+    rows = [
+        {"source": "actor", "name": "read_file", "turn_in_level": 0},
+        {"source": "scribe", "name": "write_file", "turn_in_level": 0},
+    ]
+    (run_path / "tool-trace.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows)
+    )
+
+    run = extract_run(
+        RunSpec(
+            key="lineage",
+            path=run_path,
+            label="lineage",
+            evidence_class="exact_checkpoint",
+        ),
+        tmp_path,
+    )
+    scribe = next(event for event in run["events"] if event["owner"] == "scribe")
+    assert scribe["evidence_ref"].endswith("tool-trace.jsonl:2")
+
+
+def test_direct_llm_sequence_survives_failed_checkpoint_counter_drift(
+    tmp_path: Path,
+) -> None:
+    run_path = tmp_path / "run"
+    call_path = run_path / "decision-checkpoints/calls/000002"
+    call_path.mkdir(parents=True)
+    (call_path / "request.json").write_text(
+        json.dumps(
+            {
+                "call_index": 2,
+                "decision_point": {"sequence": 99},
+            }
+        )
+    )
+    (run_path / "llm-trace.jsonl").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "call_index": 1,
+                "source": "actor",
+                "phase": "decision",
+                "sequence": 7,
+                "tool_calls": [],
+                "tool_call_ids": [],
+            }
+        )
+        + "\n"
+    )
+
+    calls, alignment = _join_llm_sequences(run_path)
+
+    assert alignment == "exact_llm_decision_point"
+    assert calls[0]["sequence"] == 7
 
 
 def test_development_census_is_zero_call_and_preserves_evidence_classes() -> None:

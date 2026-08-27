@@ -1,7 +1,7 @@
 """Read a tycho_nooa run as a thinking-aloud protocol.
 
 A run leaves four JSONL streams. Separately each is a log; together they are a
-record of what both agents thought, what they looked at, and what made them
+record of what the Actor, Builder, and Scribe thought, what they looked at, and what made them
 think at all:
 
     llm-trace.jsonl              per call: reasoning text, content, tokens, cost
@@ -17,6 +17,7 @@ Usage:
     python tools/read_protocol.py <run-dir> triggers
     python tools/read_protocol.py <run-dir> narrative --who actor
     python tools/read_protocol.py <run-dir> narrative --who builder --turn 4
+    python tools/read_protocol.py <run-dir> narrative --who scribe
     python tools/read_protocol.py <run-dir> summary
 """
 
@@ -42,7 +43,7 @@ def show_summary(run: Path, args: argparse.Namespace) -> None:
     """One screen: who spoke, how much it cost, how far context grew."""
     calls = _load(run / "llm-trace.jsonl")
     print(f"# {run.name}\n")
-    for who in ("actor", "builder"):
+    for who in ("actor", "builder", "scribe"):
         mine = [c for c in calls if c["source"] == who]
         if not mine:
             continue
@@ -109,7 +110,11 @@ def show_narrative(run: Path, args: argparse.Namespace) -> None:
     calls = [c for c in _load(run / "llm-trace.jsonl") if c["source"] == args.who]
     tools = _load(
         run
-        / ("tool-trace.jsonl" if args.who == "actor" else "builder-tool-trace.jsonl")
+        / (
+            "builder-tool-trace.jsonl"
+            if args.who == "builder"
+            else "tool-trace.jsonl"
+        )
     )
 
     for call, used in _pair_calls_with_tools(calls, tools):
@@ -188,7 +193,9 @@ def _parse_args() -> argparse.Namespace:
         nargs="?",
         default="summary",
     )
-    parser.add_argument("--who", choices=["actor", "builder"], default="actor")
+    parser.add_argument(
+        "--who", choices=["actor", "builder", "scribe"], default="actor"
+    )
     parser.add_argument("--turn", type=int, default=None)
     parser.add_argument(
         "--chars", type=int, default=2000, help="max reasoning chars per call"

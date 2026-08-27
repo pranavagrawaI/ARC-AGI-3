@@ -325,7 +325,7 @@ def _refresh_checkpoint_calls(root: Path) -> list[dict[str, Any]]:
         ):
             raise TypeError(f"checkpoint decision point missing: {call_dir}")
         source = request.get("source")
-        if source not in {"actor", "builder"}:
+        if source not in {"actor", "builder", "scribe"}:
             continue
         calls.append(
             {
