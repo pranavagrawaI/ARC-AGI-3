@@ -10,6 +10,7 @@ from tycho.agent.modes import ModeSpec
 
 from tycho_nooa import TychoNooaAgent
 from tycho_nooa.modes import DEFAULT_MODE, MODE_ENV, mode_from_env, served_mode
+from tycho_nooa.optionality import OPTIONALITY_PROMPT_BRIEF
 from tycho_nooa.planner import actor_world_model_paragraph
 from tycho_nooa.treatments import TREATMENT_ENV
 
@@ -70,6 +71,23 @@ def test_typed_goals_are_named_as_a_treatment_not_an_orchestrator_control(
     assert treatment._trigger_builder._builder_config.max_tool_steps == 10
     assert exact._trigger_builder is not None
     assert exact._trigger_builder._builder_config.max_tool_steps == 40
+
+
+def test_the_actor_packet_teaches_optionality_without_a_lecture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Definition only. The model already has the tools; this is the criterion."""
+    monkeypatch.setenv(MODE_ENV, "trigger")
+    prompt = _agent(tmp_path / "trigger")._resolve_system_prompt()
+    assert OPTIONALITY_PROMPT_BRIEF in prompt
+    assert prompt.count(OPTIONALITY_PROMPT_BRIEF) == 1
+    monkeypatch.setenv(MODE_ENV, "orchestrator")
+    monkeypatch.setenv(TREATMENT_ENV, "typed_candidate_goals")
+    typed = _agent(tmp_path / "typed")._resolve_system_prompt()
+    assert OPTIONALITY_PROMPT_BRIEF in typed
+    assert "What is the option?" not in prompt
+    assert "bounded downside" not in prompt
+    assert OPTIONALITY_PROMPT_BRIEF.count("\n") == 3
 
 
 def test_typed_goals_cannot_silently_change_another_source_mode(
