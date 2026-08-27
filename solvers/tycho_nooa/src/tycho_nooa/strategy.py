@@ -274,10 +274,16 @@ class NativeToolStrategy(GenerationStrategy):
                 tool,
                 arguments,
                 tool_call_id=tool_call.id,
+                raw_arguments=tool_call.arguments,
                 event_id=event_id,
             )
         try:
-            result = surface.dispatch(tool, arguments, tool_call_id=tool_call.id)
+            result = surface.dispatch(
+                tool,
+                arguments,
+                tool_call_id=tool_call.id,
+                raw_arguments=tool_call.arguments,
+            )
         except Exception as error:  # noqa: BLE001 - a model tool error is recoverable feedback
             runtime.event_manager.update(
                 event_id,
@@ -317,6 +323,8 @@ class NativeToolStrategy(GenerationStrategy):
                 {"raw_arguments": tool_call.arguments},
                 message,
                 tool_call_id=tool_call.id,
+                raw_arguments=tool_call.arguments,
+                rejection_stage="parse",
             )
             runtime.event_manager.add(Error(content=message))
             return None
@@ -329,6 +337,8 @@ class NativeToolStrategy(GenerationStrategy):
                 arguments,
                 message,
                 tool_call_id=tool_call.id,
+                raw_arguments=tool_call.arguments,
+                rejection_stage="availability",
             )
             runtime.event_manager.add(Error(content=message))
             return None
@@ -370,6 +380,8 @@ class NativeToolStrategy(GenerationStrategy):
             arguments,
             message,
             tool_call_id=tool_call.id,
+            raw_arguments=tool_call.arguments,
+            rejection_stage="policy",
         )
         runtime.event_manager.update(
             event_id,
@@ -388,12 +400,35 @@ class NativeToolStrategy(GenerationStrategy):
         arguments: dict[str, Any],
         *,
         tool_call_id: str,
+        raw_arguments: str,
         event_id: Any,
     ) -> None:
         model = tool.parameters_model
         assert model is not None
         try:
             validated = model.model_validate(arguments)
+        except Exception as error:  # noqa: BLE001 - model receives validation feedback
+            message = f"{type(error).__name__}: {error}"
+            surface.record_rejected_call(
+                tool.name,
+                arguments,
+                message,
+                tool_call_id=tool_call_id,
+                raw_arguments=raw_arguments,
+                rejection_stage="validation",
+            )
+            runtime.event_manager.update(
+                event_id,
+                result=ToolResult(
+                    tool_call_id=tool_call_id,
+                    content=message,
+                    result_status=ResultStatus.ERROR,
+                ),
+            )
+            return
+
+        normalized_arguments = validated.model_dump(exclude_none=True)
+        try:
             turn = surface.current_turn()
             if tool.name == "request_builder":
                 if not isinstance(validated, RequestBuilderArguments):
@@ -406,6 +441,8 @@ class NativeToolStrategy(GenerationStrategy):
                 arguments,
                 result,
                 tool_call_id=tool_call_id,
+                raw_arguments=raw_arguments,
+                validated_arguments=normalized_arguments,
             )
         except Exception as error:  # noqa: BLE001 - model receives builder failure
             message = f"{type(error).__name__}: {error}"
@@ -414,6 +451,9 @@ class NativeToolStrategy(GenerationStrategy):
                 arguments,
                 message,
                 tool_call_id=tool_call_id,
+                raw_arguments=raw_arguments,
+                rejection_stage="execution",
+                validated_arguments=normalized_arguments,
             )
             runtime.event_manager.update(
                 event_id,

@@ -116,7 +116,13 @@ Run evidence is separate from the ordinary tool trace:
 
 - `tool-trace.jsonl`: every attempted native tool call, including validation,
   policy, and execution failures, with the provider `tool_call_id` used to join
-  it to `llm-trace.jsonl`;
+  it to `llm-trace.jsonl` and the host `sequence` used to join the eventual
+  committed action to `transcript.jsonl`. Schema 2 rows preserve the provider's
+  raw argument string, parsed arguments, normalized schema-validated arguments,
+  parse/validation/execution outcomes, and explicit Actor/Builder/Scribe source
+  and decision/post-action phase. Promotion validation uses the complete captured
+  JSON Schema, requires every model-supplied value to survive normalization
+  unchanged, and permits omitted fields only when the schema declares them;
 - `planner-trace.jsonl`: planner invocations, validated artifacts, continuation
   hints, and model/frame/action invalidations.
 - `trigger-builder-trace.jsonl`: the mechanical trigger verdict, artifact
@@ -125,21 +131,28 @@ Run evidence is separate from the ordinary tool trace:
 - `builder-tool-trace.jsonl`: only the focused builder's workspace tool calls.
 - `llm-trace.jsonl`: one line per model round-trip, across the actor, the scribe
   and every per-fire builder — model, token counts (prompt, completion, cached,
-  reasoning), cost, tool names, returned prose, and returned reasoning. Live
+  reasoning), cost, tool names, returned prose, and returned reasoning. `source`
+  distinguishes `actor`, `builder`, and `scribe`; `phase` distinguishes a live
+  `decision` from `post_action` consolidation; host sequence, level, and turn
+  coordinates bind spend directly without relying on a separate call counter. Live
   research runs always request provider reasoning and retain the response text.
   `TYCHO_NOOA_REQUEST_REASONING=0` and
   `TYCHO_NOOA_CAPTURE_RESPONSE_TEXT=0` are rejected rather than silently
   producing an evidence-poor run. A provider may still return no exposed
   reasoning; `reasoning_tokens=0` plus an empty `reasoning` field records that
   provider limitation rather than manufacturing an explanation.
-- `decision-checkpoints/`: one ordered actor/builder directory per model call,
+- `decision-checkpoints/`: one ordered actor/builder/scribe directory per model call,
   containing the exact credential-free request at NOOA's `llm_call` boundary,
-  its SHA-256 commitment, the standardized response, and a pre-call workspace
-  manifest. Workspace bytes live in a shared content-addressed blob store, so
+  its SHA-256 commitment, the standardized response and its SHA-256 commitment,
+  and a pre-call workspace manifest. The response is NOOA's normalized model
+  response, not the provider's raw wire bytes. Workspace bytes live in a shared
+  content-addressed blob store, so
   unchanged files are not copied hundreds of times. Each request also records
   its host sequence, level, turn, and whether the call occurred while deciding
   or after the action result; offline packet mining only admits decision-phase
-  calls into a pre-decision packet.
+  calls into a pre-decision packet. Hermetic Gate and Shadow Eval require schema
+  2 for promotion-grade evidence; older checkpoint schemas remain readable but
+  are not accepted as equivalent evidence.
 
 Decision checkpoints support matched shadow requests and historical workspace
 restoration. They deliberately claim identity only at NOOA's model-call

@@ -60,6 +60,17 @@ def tool_response(tool: str, arguments: dict, call_id: str) -> LLMResponse:
     )
 
 
+def malformed_tool_response(tool: str, arguments: str, call_id: str) -> LLMResponse:
+    return LLMResponse(
+        raw_response=None,
+        content="",
+        tool_calls=[ToolCall(id=call_id, name=tool, arguments=arguments)],
+        finish_reason="tool_calls",
+        assistant_message={"role": "assistant", "content": None},
+        usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    )
+
+
 def tool_batch_response(calls: list[tuple[str, dict, str]]) -> LLMResponse:
     return LLMResponse(
         raw_response=None,
@@ -1443,15 +1454,30 @@ async def test_forced_report_call_offers_tools_but_ignores_attempted_tool_calls(
     ]
     assert builder_trace == [
         {
+            "schema_version": 2,
             "call_index": 1,
             "tool_call_id": "forced-attempt",
+            "source": "builder",
+            "phase": "decision",
+            "sequence": None,
             "level": 0,
             "turn_in_level": 1,
             "name": "write_file",
+            "raw_arguments": json.dumps(
+                {
+                    "path": "notes/world_model_report.md",
+                    "content": "sneaky",
+                }
+            ),
             "arguments": {
                 "path": "notes/world_model_report.md",
                 "content": "sneaky",
             },
+            "parse_status": "complete",
+            "validation_status": "not_attempted",
+            "validated_arguments": None,
+            "execution_status": "not_attempted",
+            "error_stage": "policy",
             "status": "error",
             "result": (
                 "Builder final-report phase accepts prose only; tool call was not "
@@ -1812,6 +1838,7 @@ async def test_host_completion_runs_checkpoint_without_requiring_another_actor_t
     assert len(captured) == 1
     assert captured[0].turn.turn_in_level == 20
     assert captured[0].outcome_evidence is not None
+    assert captured[0].phase == "post_action"
     assert loop._pending_outcome_evidence is None
     # The subsequent level-start pass is ordinary dynamics work, not a second
     # repair of completion evidence that the immediate checkpoint resolved.
@@ -1826,6 +1853,7 @@ async def test_host_completion_runs_checkpoint_without_requiring_another_actor_t
     )
     assert len(captured) == 2
     assert captured[1].outcome_evidence is None
+    assert captured[1].phase == "decision"
 
 
 @pytest.mark.asyncio
@@ -1897,6 +1925,53 @@ async def test_unresolved_completion_is_the_latest_builder_priority(
     assert len(llm.messages_per_call) == 4
     assert result.outcome_checkpoint_required is True
     assert result.outcome_checkpoint_resolved is False
+
+
+@pytest.mark.asyncio
+async def test_builder_malformed_arguments_preserve_parse_failure(
+    tmp_path: Path,
+) -> None:
+    llm = FakeLLMClient(
+        scripted_responses=[
+            malformed_tool_response("write_file", "{broken", "builder-bad-json"),
+            prose_response("recommended_action: none"),
+        ]
+    )
+    agent = TychoNooaAgent(
+        llm=llm,
+        trigger_builder=False,
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+    )
+    builder = FocusedBuilder(
+        llm=llm,
+        executor=agent._tool_executor,
+        trace_path=tmp_path / "builder-tool-trace.jsonl",
+        config=BuilderConfig(max_tool_steps=1),
+    )
+
+    await builder.build(
+        BuilderRequest(
+            turn=GameTurn(
+                grid=[[1, 2], [3, 4]],
+                available_actions=["UP", "DOWN"],
+                level=0,
+                turn_in_level=0,
+            ),
+            reason="test malformed arguments",
+        )
+    )
+
+    trace = json.loads(
+        (tmp_path / "builder-tool-trace.jsonl").read_text().splitlines()[0]
+    )
+    assert trace["source"] == "builder"
+    assert trace["raw_arguments"] == "{broken"
+    assert trace["parse_status"] == "error"
+    assert trace["validation_status"] == "not_attempted"
+    assert trace["execution_status"] == "not_attempted"
+    assert trace["error_stage"] == "parse"
 
 
 def test_builder_budget_commit_threshold_is_runtime_configurable(

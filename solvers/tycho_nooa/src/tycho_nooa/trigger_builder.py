@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
-from typing import Any
+from typing import Any, Literal
 
 from nooa.unifiedllm import UnifiedLLM
 from pydantic import ValidationError
@@ -729,6 +729,7 @@ class TriggerBuilderLoop:
             return await self._invoke_builder(
                 turn,
                 "repair host-confirmed completed-level outcome before continuing",
+                phase="post_action",
             )
         except Exception:  # noqa: BLE001 - preserve the completed game outcome
             return None
@@ -740,6 +741,7 @@ class TriggerBuilderLoop:
         *,
         focus: str | None = None,
         deadline_at: float | None = None,
+        phase: Literal["decision", "post_action"] = "decision",
     ) -> BuilderExposure:
         transaction = (
             TheoryTransaction.begin(
@@ -761,6 +763,7 @@ class TriggerBuilderLoop:
                     outcome_evidence=self._pending_outcome_evidence,
                     focus=focus,
                     deadline_at=deadline_at,
+                    phase=phase,
                 )
             )
         except BaseException as error:

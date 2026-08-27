@@ -212,6 +212,93 @@ async def test_files_and_conversation_survive_the_action_boundary(
 
 
 @pytest.mark.asyncio
+async def test_no_world_model_actor_can_dispatch_every_offered_tool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The complete control surface reaches the real Actor dispatch path."""
+    monkeypatch.setenv("TYCHO_MODE", "no_world_model")
+    monkeypatch.setenv("TYCHO_NOOA_TREATMENT", "control")
+    trace_path = tmp_path / "tool-trace.jsonl"
+    offered = [
+        "ls",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "run_python",
+        "set_verbosity",
+        "take_action",
+    ]
+    llm = ToolsRecordingFakeLLMClient(
+        scripted_responses=[
+            response(
+                "write_file",
+                {"path": "notes/access.txt", "content": "before"},
+                "write",
+            ),
+            response(
+                "edit_file",
+                {"path": "notes/access.txt", "old": "before", "new": "after"},
+                "edit",
+            ),
+            response("ls", {"path": "notes"}, "list"),
+            response("read_file", {"path": "notes/access.txt"}, "read"),
+            response(
+                "run_python",
+                {"code": "print('actor-tool-access')"},
+                "python",
+            ),
+            response(
+                "set_verbosity",
+                {"grid": "off", "diff": "summary"},
+                "verbosity",
+            ),
+            response("take_action", {"action": "UP"}, "action"),
+        ]
+    )
+    agent = TychoNooaAgent(
+        llm=llm,
+        trigger_builder=False,
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+        tool_trace_path=trace_path,
+    )
+
+    assert await agent.act(turn(0)) == ActionDecision(action="UP")
+    assert llm.tools_per_call == [offered] * 7
+    assert (agent.workspace_dir / "notes/access.txt").read_text() == "after"
+    assert agent._tool_surface.grid_verbosity == "off"
+    assert agent._tool_surface.diff_verbosity == "summary"
+
+    trace = [json.loads(line) for line in trace_path.read_text().splitlines()]
+    assert [record["name"] for record in trace] == [
+        "write_file",
+        "edit_file",
+        "ls",
+        "read_file",
+        "run_python",
+        "set_verbosity",
+        "take_action",
+    ]
+    assert all(
+        record["parse_status"] == "complete"
+        and record["validation_status"] == "complete"
+        and record["execution_status"] == "complete"
+        and record["status"] == "complete"
+        for record in trace
+    )
+    assert "access.txt" in trace[2]["result"]
+    assert trace[1]["validated_arguments"] == {
+        "path": "notes/access.txt",
+        "old": "before",
+        "new": "after",
+    }
+    assert trace[3]["result"] == "after"
+    assert "actor-tool-access" in trace[4]["result"]
+
+
+@pytest.mark.asyncio
 async def test_actor_beliefs_checkpoint_is_forced_when_turn_leaves_it_stale(
     tmp_path: Path,
 ) -> None:
@@ -329,7 +416,85 @@ async def test_malformed_native_arguments_are_feedback_not_a_host_action(
     records = [json.loads(line) for line in trace_path.read_text().splitlines()]
     assert records[0]["name"] == "take_action"
     assert records[0]["status"] == "error"
+    assert records[0]["raw_arguments"] == "{broken"
+    assert records[0]["parse_status"] == "error"
+    assert records[0]["validation_status"] == "not_attempted"
+    assert records[0]["execution_status"] == "not_attempted"
+    assert records[0]["error_stage"] == "parse"
     assert "Invalid native tool call" in records[0]["result"]
+    assert records[1]["parse_status"] == "complete"
+    assert records[1]["validation_status"] == "complete"
+    assert records[1]["execution_status"] == "complete"
+    assert records[1]["validated_arguments"] == {"action": "UP"}
+
+
+@pytest.mark.asyncio
+async def test_native_schema_validation_is_distinct_from_execution(
+    tmp_path: Path,
+) -> None:
+    trace_path = tmp_path / "tool-trace.jsonl"
+    llm = FakeLLMClient(
+        scripted_responses=[
+            response(
+                "take_action",
+                {"action": "UP", "unexpected": True},
+                "bad-schema",
+            ),
+            response("take_action", {"action": "UP"}, "good-action"),
+        ]
+    )
+    agent = TychoNooaAgent(
+        llm=llm,
+        trigger_builder=False,
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+        tool_trace_path=trace_path,
+    )
+
+    assert await agent.act(turn(0)) == ActionDecision(action="UP")
+    rejected = json.loads(trace_path.read_text().splitlines()[0])
+    assert rejected["parse_status"] == "complete"
+    assert rejected["validation_status"] == "error"
+    assert rejected["execution_status"] == "not_attempted"
+    assert rejected["validated_arguments"] is None
+    assert rejected["error_stage"] == "validation"
+
+
+@pytest.mark.asyncio
+async def test_native_execution_failure_is_distinct_from_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trace_path = tmp_path / "tool-trace.jsonl"
+    llm = FakeLLMClient(
+        scripted_responses=[
+            response("run_python", {"code": "raise"}, "execution-error"),
+            response("take_action", {"action": "UP"}, "good-action"),
+        ]
+    )
+    agent = TychoNooaAgent(
+        llm=llm,
+        trigger_builder=False,
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+        tool_trace_path=trace_path,
+    )
+
+    def fail_execution(code: str, timeout_s: int = 15) -> str:
+        del code, timeout_s
+        raise RuntimeError("execution failed")
+
+    monkeypatch.setattr(agent._tool_surface, "run_python", fail_execution)
+
+    assert await agent.act(turn(0)) == ActionDecision(action="UP")
+    rejected = json.loads(trace_path.read_text().splitlines()[0])
+    assert rejected["parse_status"] == "complete"
+    assert rejected["validation_status"] == "complete"
+    assert rejected["execution_status"] == "error"
+    assert rejected["error_stage"] == "execution"
+    assert rejected["result"] == "RuntimeError: execution failed"
 
 
 @pytest.mark.asyncio
@@ -913,6 +1078,7 @@ async def test_the_llm_trace_records_the_counters_for_every_round_trip(
     records = [json.loads(line) for line in lines]
     assert [record["call_index"] for record in records] == [1]
     assert {record["source"] for record in records} == {"actor"}
+    assert {record["phase"] for record in records} == {"decision"}
     assert records[0]["tool_calls"] == ["take_action"]
     assert records[0]["tool_call_ids"] == ["act-1"]
     tool_record = json.loads(trace_path.read_text().splitlines()[0])

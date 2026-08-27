@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
@@ -151,6 +152,7 @@ class WorkspaceToolSurface:
         mode_policy: ModePolicy | None = None,
         goal_tools: GoalToolSurface | None = None,
         trace_path: Path | None = None,
+        trace_source: str = "actor",
         planner_trace_path: Path | None = None,
         theory_transaction: TheoryTransaction | None = None,
     ):
@@ -159,6 +161,8 @@ class WorkspaceToolSurface:
         self._mode_policy = mode_policy
         self._goal_tools = goal_tools
         self._trace_path = trace_path
+        self._trace_source = trace_source
+        self._trace_phase = "decision"
         self._theory_transaction = theory_transaction
         if planner_trace_path is None and trace_path is not None:
             planner_trace_path = trace_path.with_name("planner-trace.jsonl")
@@ -170,6 +174,19 @@ class WorkspaceToolSurface:
         self._builder_report: str | None = None
         self.grid_verbosity = "on"
         self.diff_verbosity = "on"
+
+    @contextmanager
+    def trace_scope(self, *, source: str, phase: str) -> Iterator[None]:
+        """Attribute tool calls made by one bounded strategy invocation."""
+        previous_source = self._trace_source
+        previous_phase = self._trace_phase
+        self._trace_source = source
+        self._trace_phase = phase
+        try:
+            yield
+        finally:
+            self._trace_source = previous_source
+            self._trace_phase = previous_phase
 
     def begin_turn(self, turn: GameTurn) -> None:
         previous = self._turn
@@ -335,15 +352,12 @@ class WorkspaceToolSurface:
         arguments: dict[str, Any],
         *,
         tool_call_id: str | None = None,
+        raw_arguments: str | None = None,
     ) -> str | ActionDecision:
         model = tool.parameters_model
         assert model is not None
         try:
             validated = model.model_validate(arguments)
-            if self._goal_tools is not None and tool.name in self._goal_tools.TOOL_NAMES:
-                result = self._goal_tools.dispatch(tool, arguments)
-            else:
-                result = tool.callable(**validated.model_dump(exclude_none=True))
         except Exception as error:
             self._record_tool_call(
                 tool.name,
@@ -351,6 +365,29 @@ class WorkspaceToolSurface:
                 status="error",
                 result=f"{type(error).__name__}: {error}",
                 tool_call_id=tool_call_id,
+                raw_arguments=raw_arguments,
+                validation_status="error",
+                execution_status="not_attempted",
+                error_stage="validation",
+            )
+            raise
+        normalized_arguments = validated.model_dump(exclude_none=True)
+        try:
+            if self._goal_tools is not None and tool.name in self._goal_tools.TOOL_NAMES:
+                result = self._goal_tools.dispatch(tool, arguments)
+            else:
+                result = tool.callable(**normalized_arguments)
+        except Exception as error:
+            self._record_tool_call(
+                tool.name,
+                arguments,
+                status="error",
+                result=f"{type(error).__name__}: {error}",
+                tool_call_id=tool_call_id,
+                raw_arguments=raw_arguments,
+                validated_arguments=normalized_arguments,
+                execution_status="error",
+                error_stage="execution",
             )
             raise
         self._record_tool_call(
@@ -359,6 +396,8 @@ class WorkspaceToolSurface:
             status="complete",
             result=result,
             tool_call_id=tool_call_id,
+            raw_arguments=raw_arguments,
+            validated_arguments=normalized_arguments,
         )
         return result
 
@@ -369,6 +408,11 @@ class WorkspaceToolSurface:
         message: str,
         *,
         tool_call_id: str | None = None,
+        raw_arguments: str | None = None,
+        rejection_stage: Literal[
+            "parse", "availability", "policy", "validation", "execution"
+        ] = "policy",
+        validated_arguments: dict[str, Any] | None = None,
     ) -> None:
         """Keep malformed or unavailable model tool attempts in the durable trace."""
         self._record_tool_call(
@@ -377,6 +421,20 @@ class WorkspaceToolSurface:
             status="error",
             result=message,
             tool_call_id=tool_call_id,
+            raw_arguments=raw_arguments,
+            parse_status="error" if rejection_stage == "parse" else "complete",
+            validation_status=(
+                "error"
+                if rejection_stage == "validation"
+                else "complete"
+                if rejection_stage == "execution"
+                else "not_attempted"
+            ),
+            execution_status=(
+                "error" if rejection_stage == "execution" else "not_attempted"
+            ),
+            validated_arguments=validated_arguments,
+            error_stage=rejection_stage,
         )
 
     def record_external_result(
@@ -386,6 +444,8 @@ class WorkspaceToolSurface:
         result: str,
         *,
         tool_call_id: str | None = None,
+        raw_arguments: str | None = None,
+        validated_arguments: dict[str, Any] | None = None,
     ) -> None:
         """Record an async tool whose implementation lives above this surface."""
         self._record_tool_call(
@@ -394,6 +454,8 @@ class WorkspaceToolSurface:
             status="complete",
             result=result,
             tool_call_id=tool_call_id,
+            raw_arguments=raw_arguments,
+            validated_arguments=validated_arguments,
         )
 
     def current_turn(self) -> GameTurn:
@@ -412,16 +474,32 @@ class WorkspaceToolSurface:
         status: Literal["complete", "error"],
         result: str | ActionDecision,
         tool_call_id: str | None = None,
+        raw_arguments: str | None = None,
+        parse_status: Literal["complete", "error"] = "complete",
+        validation_status: Literal["complete", "error", "not_attempted"] = "complete",
+        execution_status: Literal["complete", "error", "not_attempted"] = "complete",
+        validated_arguments: dict[str, Any] | None = None,
+        error_stage: str | None = None,
     ) -> None:
         self._tool_call_index += 1
         turn = self._require_turn()
         record = {
+            "schema_version": 2,
             "call_index": self._tool_call_index,
             "tool_call_id": tool_call_id,
+            "source": self._trace_source,
+            "phase": self._trace_phase,
+            "sequence": turn.sequence,
             "level": turn.level,
             "turn_in_level": turn.turn_in_level,
             "name": name,
+            "raw_arguments": raw_arguments,
             "arguments": arguments,
+            "parse_status": parse_status,
+            "validation_status": validation_status,
+            "validated_arguments": validated_arguments,
+            "execution_status": execution_status,
+            "error_stage": error_stage,
             "status": status,
             "result": (
                 result.model_dump() if isinstance(result, ActionDecision) else result

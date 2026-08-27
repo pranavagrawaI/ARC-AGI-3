@@ -18,12 +18,13 @@ import json
 import os
 import shutil
 import stat
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import uuid4
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 REQUEST_BOUNDARY = "nooa.llm_call"
 
 
@@ -42,6 +43,7 @@ class DecisionCheckpointRecorder:
         self._llm = llm
         self._call_index = 0
         self._decision_point: dict[str, Any] | None = None
+        self._source_override: str | None = None
         if root is not None and _is_within(root.resolve(), self._workspace_dir):
             raise ValueError(
                 "decision checkpoint storage cannot be inside the workspace"
@@ -66,6 +68,16 @@ class DecisionCheckpointRecorder:
             "phase": phase,
         }
 
+    @contextmanager
+    def source_scope(self, source: str) -> Iterator[None]:
+        """Attribute one bounded strategy invocation and restore prior context."""
+        previous = self._source_override
+        self._source_override = source
+        try:
+            yield
+        finally:
+            self._source_override = previous
+
     def attach(self, event_manager: Any, *, source: str) -> None:
         """Capture calls on one agent stream while preserving a run-wide order."""
 
@@ -76,7 +88,11 @@ class DecisionCheckpointRecorder:
             call_index, call_dir = self._claim_call_directory()
             workspace, workspace_commitment = self._snapshot_workspace()
             _write_json(call_dir / "workspace.json", workspace)
-
+            decision_point = (
+                dict(self._decision_point)
+                if self._decision_point is not None
+                else None
+            )
             request_body = _request_body(
                 model=self._llm.model,
                 messages=ctx.messages,
@@ -85,7 +101,7 @@ class DecisionCheckpointRecorder:
             request = {
                 "schema_version": SCHEMA_VERSION,
                 "call_index": call_index,
-                "source": source,
+                "source": self._source_override or source,
                 "request_boundary": REQUEST_BOUNDARY,
                 "commitment_scope": (
                     "exact credential-free request at the NOOA llm_call boundary; "
@@ -93,9 +109,7 @@ class DecisionCheckpointRecorder:
                 ),
                 "request_payload_commitment": _commitment(request_body),
                 "workspace_commitment": workspace_commitment,
-                "decision_point": dict(self._decision_point)
-                if self._decision_point is not None
-                else None,
+                "decision_point": decision_point,
                 "replay_context": _replay_context(self._llm),
                 "request_body": request_body,
             }
@@ -104,18 +118,24 @@ class DecisionCheckpointRecorder:
             try:
                 result = await nxt(ctx)
             except BaseException as error:
-                _write_json(
-                    call_dir / "response.json",
+                response = _committed_response(
                     {
                         "schema_version": SCHEMA_VERSION,
                         "status": "error",
                         "error_type": type(error).__name__,
                         "message": str(error),
-                    },
+                    }
+                )
+                _write_json(
+                    call_dir / "response.json",
+                    response,
                 )
                 raise
 
-            _write_json(call_dir / "response.json", _response_record(result.response))
+            _write_json(
+                call_dir / "response.json",
+                _committed_response(_response_record(result.response)),
+            )
             return result
 
         event_manager.intercept("llm_call", capture)
@@ -307,6 +327,12 @@ def _response_record(response: Any) -> dict[str, Any]:
             ],
         }
     )
+
+
+def _committed_response(response: dict[str, Any]) -> dict[str, Any]:
+    committed = dict(response)
+    committed["response_payload_commitment"] = _commitment(response)
+    return committed
 
 
 def _jsonable(value: Any) -> Any:

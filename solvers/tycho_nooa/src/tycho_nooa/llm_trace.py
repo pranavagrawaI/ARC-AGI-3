@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +59,42 @@ class LLMTrace:
         self._path = path
         self._call_index = 0
         self._pending: dict[str, Any] | None = None
+        self._phase: str | None = None
+        self._sequence: int | None = None
+        self._level: int | None = None
+        self._turn_in_level: int | None = None
+        self._source_override: str | None = None
+
+    def set_decision_point(
+        self,
+        *,
+        sequence: int | None,
+        level: int,
+        turn_in_level: int,
+        phase: str,
+    ) -> None:
+        """Bind subsequent model calls directly to their host decision boundary."""
+        if phase not in {"decision", "post_action"}:
+            raise ValueError(f"invalid LLM trace phase: {phase}")
+        self._phase = phase
+        self._sequence = sequence
+        self._level = level
+        self._turn_in_level = turn_in_level
+
+    @contextmanager
+    def trace_scope(self, *, source: str, phase: str) -> Iterator[None]:
+        """Attribute one bounded strategy invocation and restore prior context."""
+        if phase not in {"decision", "post_action"}:
+            raise ValueError(f"invalid LLM trace phase: {phase}")
+        previous_source = self._source_override
+        previous_phase = self._phase
+        self._source_override = source
+        self._phase = phase
+        try:
+            yield
+        finally:
+            self._source_override = previous_source
+            self._phase = previous_phase
 
     def attach(self, event_manager: Any, *, source: str) -> None:
         """Subscribe to one agent's event stream, labelling its calls `source`.
@@ -72,8 +109,13 @@ class LLMTrace:
         """Stash the metrics; the prose arrives on the very next event."""
         self._call_index += 1
         record: dict[str, Any] = {
+            "schema_version": 2,
             "call_index": self._call_index,
-            "source": source,
+            "source": self._source_override or source,
+            "phase": self._phase,
+            "sequence": self._sequence,
+            "level": self._level,
+            "turn_in_level": self._turn_in_level,
             "model": event.model_name,
             "prompt_tokens": event.prompt_tokens,
             "completion_tokens": event.completion_tokens,

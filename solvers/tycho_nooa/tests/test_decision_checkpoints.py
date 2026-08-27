@@ -101,7 +101,7 @@ async def test_each_model_call_captures_a_committed_request_and_restorable_works
 
     request_bytes = (calls[0] / "request.json").read_bytes()
     request = json.loads(request_bytes)
-    assert request["schema_version"] == 1
+    assert request["schema_version"] == 2
     assert request["call_index"] == 1
     assert request["source"] == "actor"
     assert request["request_boundary"] == "nooa.llm_call"
@@ -153,6 +153,13 @@ async def test_each_model_call_captures_a_committed_request_and_restorable_works
             "name": "write_file",
         }
     ]
+    response_commitment = response_record.pop("response_payload_commitment")
+    response_bytes = json.dumps(
+        response_record, sort_keys=True, separators=(",", ":")
+    ).encode()
+    assert response_commitment == (
+        f"sha256:{hashlib.sha256(response_bytes).hexdigest()}"
+    )
 
     blob_files = [path for path in (root / "blobs" / "sha256").iterdir()]
     manifest_entries = sum(
