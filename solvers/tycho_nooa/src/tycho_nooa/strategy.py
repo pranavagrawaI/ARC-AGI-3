@@ -26,6 +26,7 @@ from tycho_nooa.models import ActionDecision, GameTurn
 from tycho_nooa.modes import mode_from_env
 from tycho_nooa.planner import actor_world_model_paragraph
 from tycho_nooa.tools import Observation, WorkspaceToolSurface, tool_by_name
+from tycho_nooa.treatments import treatment_from_env
 
 if TYPE_CHECKING:
     from nooa.strategies.current_call import CurrentCall
@@ -62,13 +63,18 @@ class NativeToolStrategy(GenerationStrategy):
         return "TYCHO_NATIVE_TOOLS"
 
     def get_block_overrides(self) -> dict[str, str]:
+        mode = mode_from_env()
+        treatment = treatment_from_env(mode)
         return {
             "strategy_prompt": (
                 "Work freely with the native workspace tools. Inspect the current and "
                 "past evidence, and test executable ideas with run_python. End this turn "
                 "only by calling take_action exactly once. The resulting observation will "
                 "arrive on the next call to this same agent.\n\n"
-                + actor_world_model_paragraph(mode_from_env().wm_variant)
+                + actor_world_model_paragraph(
+                    mode.wm_variant,
+                    request_builder_instead_of_invoke=treatment.typed_candidate_goals,
+                )
             )
         }
 

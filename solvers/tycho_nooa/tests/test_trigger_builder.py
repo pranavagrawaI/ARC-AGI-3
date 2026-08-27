@@ -27,6 +27,11 @@ from tycho_nooa.builder import (
     _builder_budget_notice,
 )
 from tycho_nooa.deadlines import DecisionDeadlineConfig
+from tycho_nooa.epistemic import (
+    CandidateGoalStatus,
+    RequestBuilderArguments,
+)
+from tycho_nooa.optionality import OPTIONALITY_PROMPT_BRIEF
 from tycho_nooa.runtime_notice import PROMPT_BRIEF
 from tycho_nooa.theory_evaluation import (
     EvaluationRunStatus,
@@ -674,6 +679,67 @@ async def test_typed_goal_request_preserves_hypothesis_and_builder_ownership(
     assert "cannot edit world_model.py" in rejected_promotion["result"]
 
 
+def test_typed_goal_ledger_is_inlined_on_the_next_actor_observation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TYCHO_MODE", "orchestrator")
+    monkeypatch.setenv("TYCHO_NOOA_TREATMENT", "typed_candidate_goals")
+    agent = TychoNooaAgent(
+        llm=FakeLLMClient(scripted_responses=[]),
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+        tool_trace_path=tmp_path / "tool-trace.jsonl",
+    )
+    evidence = agent.workspace_dir / "level_0" / "turn_000.txt"
+    evidence.parent.mkdir(parents=True, exist_ok=True)
+    evidence.write_text("host-authored frame")
+    assert agent._goal_ledger is not None
+    agent._goal_ledger.register_authoritative_evidence("level_0/turn_000.txt")
+    surface = agent._tool_surface.goal_tools
+    assert surface is not None
+    surface.begin_turn(turn(0))
+    proposed = json.loads(
+        surface.propose_goal(
+            predicate="contact between colours 4 and 11 completes the level",
+            evidence_refs=["level_0/turn_000.txt"],
+            falsifier="contact occurs while the level remains incomplete",
+        )
+    )
+    request = RequestBuilderArguments(
+        focus="objective",
+        evidence_refs=["level_0/turn_000.txt"],
+        candidate_goal_id=proposed["id"],
+    )
+    surface.builder_request(request)
+    surface.record_builder_review(
+        request,
+        report=(
+            "candidate_goal_assessment: supported\n"
+            "candidate_goal_reason: contact is the only congruent target\n"
+            "candidate_goal_route: DOWN x2\n"
+            "recommended_action: DOWN\n"
+        ),
+    )
+    surface.update_goal(
+        proposed["id"],
+        CandidateGoalStatus.SELECTED,
+        ["level_0/turn_000.txt"],
+        "builder evidence supports a direct contact test",
+    )
+
+    next_turn = turn(1, previous_action="DOWN")
+    agent._tool_surface.begin_turn(next_turn)
+    observation = agent._tool_surface.observation(next_turn)
+    assert "typed candidate goals" in observation.prompt
+    assert "typed candidate goals" in observation.elided
+    assert proposed["id"] in observation.prompt
+    assert "status=selected" in observation.prompt
+    assert "recommended_action=DOWN" in observation.prompt
+    assert "route=DOWN x2" in observation.prompt
+
+
 @pytest.mark.asyncio
 async def test_typed_objective_timeout_returns_a_resolvable_unavailable_review(
     tmp_path: Path,
@@ -1122,7 +1188,7 @@ async def test_trigger_builds_fresh_report_before_actor_and_traces_uptake(
             report_file=REPORT_FILE,
             meta_reflect=False,
         )
-        + f"\n\n{RETAINED_CANDIDATE_BRIEF}\n\n{PROMPT_BRIEF}"
+        + f"\n\n{RETAINED_CANDIDATE_BRIEF}\n\n{OPTIONALITY_PROMPT_BRIEF}\n\n{PROMPT_BRIEF}"
     )
     builder_events = agent._trigger_builder.builder.event_manager.values()
     builder_tasks = [event for event in builder_events if isinstance(event, Task)]

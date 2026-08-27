@@ -12,6 +12,7 @@ from tycho_nooa import TychoNooaAgent
 from tycho_nooa.modes import DEFAULT_MODE, MODE_ENV, mode_from_env, served_mode
 from tycho_nooa.optionality import OPTIONALITY_PROMPT_BRIEF
 from tycho_nooa.planner import actor_world_model_paragraph
+from tycho_nooa.strategy import NativeToolStrategy
 from tycho_nooa.treatments import TREATMENT_ENV
 
 
@@ -67,6 +68,13 @@ def test_typed_goals_are_named_as_a_treatment_not_an_orchestrator_control(
         "request_builder",
     } <= treatment_names
     assert "propose a falsifiable candidate goal" in treatment._resolve_system_prompt()
+    monkeypatch.setenv(TREATMENT_ENV, "control")
+    control_prompt = NativeToolStrategy().get_block_overrides()["strategy_prompt"]
+    monkeypatch.setenv(TREATMENT_ENV, "typed_candidate_goals")
+    treatment_prompt = NativeToolStrategy().get_block_overrides()["strategy_prompt"]
+    assert "invoke_builder" in control_prompt
+    assert "invoke_builder" not in treatment_prompt
+    assert "request_builder" in treatment_prompt
     assert treatment._trigger_builder is not None
     assert treatment._trigger_builder._builder_config.max_tool_steps == 10
     assert exact._trigger_builder is not None

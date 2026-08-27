@@ -35,7 +35,19 @@ _IMPLEMENTED_TRIGGERS_CLAIM = (
 )
 
 
-def actor_world_model_paragraph(wm_variant: str) -> str:
+_INVOKE_BUILDER_CLAUSE = (
+    "call `invoke_builder` and put your beliefs in the `reason`"
+)
+_REQUEST_BUILDER_CLAUSE = (
+    "call `request_builder` and put your beliefs in the focused request"
+)
+
+
+def actor_world_model_paragraph(
+    wm_variant: str,
+    *,
+    request_builder_instead_of_invoke: bool = False,
+) -> str:
     """Return the actor's world-model paragraph for one of Tycho's modes.
 
     `none` is the direct-reasoning baseline and carries wm_none.j2 alone.
@@ -50,7 +62,15 @@ def actor_world_model_paragraph(wm_variant: str) -> str:
     if wm_variant == "single":
         return render_prompt("wm_single").strip()
     if wm_variant == "orch":
-        return render_prompt("wm_orch").strip()
+        text = render_prompt("wm_orch").strip()
+        if not request_builder_instead_of_invoke:
+            return text
+        if _INVOKE_BUILDER_CLAUSE not in text:
+            raise RuntimeError(
+                "wm_orch.j2 no longer contains the invoke_builder clause; "
+                "re-check the typed-goal adaptation against the new text"
+            )
+        return text.replace(_INVOKE_BUILDER_CLAUSE, _REQUEST_BUILDER_CLAUSE)
     if wm_variant == "none":
         return render_prompt("wm_none").strip()
     raise NotImplementedError(

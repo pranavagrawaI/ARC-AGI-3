@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from enum import Enum
 from pathlib import Path
@@ -17,6 +18,7 @@ TYPED_GOAL_PROMPT_BRIEF = """Typed objective discipline (named local treatment):
 - Keep candidate goals separate from canonical `outcome()`. Selection means worth testing, not true.
 - A proposal creates a mandatory review loop. Immediately call `request_builder` with `focus="objective"`, the same authoritative evidence references, and its `candidate_goal_id`; do not take an environment action first.
 - After the structured objective review returns, call `update_goal` to select, reject, or retain the proposal with a note that answers the review. An environment action is unavailable until this review is acknowledged.
+- Later decisions inline the live ledger: any required next step, plus each unresolved or selected candidate with its last review. Selection means worth testing, not a write to `outcome()`.
 - Use `request_builder` for every focused construction request in this treatment. The legacy untyped builder interface is intentionally unavailable.
 """
 
@@ -102,6 +104,23 @@ class RequestBuilderArguments(_Arguments):
     candidate_goal_id: str | None = None
 
 
+class EvidenceCommitment(BaseModel):
+    """Content identity for one host-registered public evidence file."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    size_bytes: int = Field(ge=0)
+
+    @classmethod
+    def from_path(cls, path: Path) -> EvidenceCommitment:
+        payload = path.read_bytes()
+        return cls(
+            sha256=hashlib.sha256(payload).hexdigest(),
+            size_bytes=len(payload),
+        )
+
+
 class GoalLedger:
     """Durable candidate-goal state behind a small typed interface.
 
@@ -127,17 +146,26 @@ class GoalLedger:
         self._evidence_refs = self._load_evidence_refs()
 
     def register_authoritative_evidence(self, relative_path: str) -> None:
-        """Allow a host-owned workspace artifact to support model hypotheses."""
+        """Bind a host-owned workspace artifact to its current content."""
         normalized = self._normalized_workspace_file(relative_path)
         if not normalized.parts or not normalized.parts[0].startswith("level_"):
             raise ValueError(
                 f"{relative_path!r} is not authoritative public evidence"
             )
         ref = normalized.as_posix()
-        if ref in self._evidence_refs:
-            return
-        self._evidence_refs.add(ref)
-        self._write_json(self._evidence_path, sorted(self._evidence_refs))
+        self._evidence_refs[ref] = EvidenceCommitment.from_path(
+            self._workspace_dir / normalized
+        )
+        self._write_json(
+            self._evidence_path,
+            {
+                "schema_version": 1,
+                "files": {
+                    path: commitment.model_dump(mode="json")
+                    for path, commitment in sorted(self._evidence_refs.items())
+                },
+            },
+        )
 
     def propose_goal(
         self,
@@ -186,11 +214,10 @@ class GoalLedger:
                 raise ValueError(
                     f"candidate goal {selected[0]} is already selected; revise it first"
                 )
-        refs = tuple(
-            dict.fromkeys(
-                [*current.evidence_refs, *self.validate_evidence_refs(evidence_refs)]
-            )
-        )
+        added = self.validate_evidence_refs(evidence_refs) if evidence_refs else ()
+        refs = tuple(dict.fromkeys([*current.evidence_refs, *added]))
+        if not refs:
+            raise ValueError("candidate goals require authoritative public evidence")
         updated = current.model_copy(
             update={
                 "evidence_refs": refs,
@@ -275,8 +302,14 @@ class GoalLedger:
         for ref in refs:
             path = self._normalized_workspace_file(ref)
             canonical = path.as_posix()
-            if canonical not in self._evidence_refs:
+            commitment = self._evidence_refs.get(canonical)
+            if commitment is None:
                 raise ValueError(f"{ref!r} is not authoritative public evidence")
+            observed = EvidenceCommitment.from_path(self._workspace_dir / path)
+            if observed != commitment:
+                raise ValueError(
+                    f"authoritative public evidence changed after registration: {ref!r}"
+                )
             normalized.append(canonical)
         return tuple(dict.fromkeys(normalized))
 
@@ -299,10 +332,25 @@ class GoalLedger:
         goals = [CandidateGoal.model_validate(value) for value in values]
         return {goal.id: goal for goal in goals}
 
-    def _load_evidence_refs(self) -> set[str]:
+    def _load_evidence_refs(self) -> dict[str, EvidenceCommitment]:
         if not self._evidence_path.is_file():
-            return set()
-        return set(json.loads(self._evidence_path.read_text(encoding="utf-8")))
+            return {}
+        payload = json.loads(self._evidence_path.read_text(encoding="utf-8"))
+        if isinstance(payload, list):
+            raise TypeError(
+                "legacy path-only evidence index has no content identity; "
+                "re-register evidence from host-authored files"
+            )
+        if (
+            not isinstance(payload, dict)
+            or payload.get("schema_version") != 1
+            or not isinstance(payload.get("files"), dict)
+        ):
+            raise ValueError(f"invalid authoritative evidence index: {self._evidence_path}")
+        return {
+            reference: EvidenceCommitment.model_validate(commitment)
+            for reference, commitment in payload["files"].items()
+        }
 
     def _load_reviews(self) -> list[ObjectiveBuilderReview]:
         if not self._reviews_path.is_file():
@@ -517,6 +565,42 @@ class GoalToolSurface:
                     "call request_builder with focus='objective' before take_action"
                 )
         return None
+
+    def observation_advisory(self) -> list[str]:
+        """Compact live ledger for the next Actor observation; never canonical."""
+        goals = self._ledger.list_goals()
+        required = self.required_before_action()
+        visible = [
+            goal
+            for goal in goals
+            if goal.status is not CandidateGoalStatus.REJECTED
+            or self._ledger.pending_review(goal.id) is not None
+        ]
+        if required is None and not visible:
+            return []
+        lines = [
+            "",
+            "typed candidate goals (advisory; not canonical outcome()):",
+        ]
+        if required is not None:
+            lines.append(f"required_next_step: {required}")
+        for goal in visible:
+            review = self._ledger.latest_review(goal.id)
+            parts = [
+                goal.id,
+                f"status={goal.status.value}",
+                f"predicate={goal.predicate}",
+            ]
+            if review is not None:
+                parts.extend(
+                    [
+                        f"assessment={review.assessment.value}",
+                        f"recommended_action={review.recommended_action or 'none'}",
+                        f"route={review.recommended_route or 'none'}",
+                    ]
+                )
+            lines.append("- " + "; ".join(parts))
+        return lines
 
     def _require_turn(self) -> GameTurn:
         if self._turn is None:

@@ -292,6 +292,8 @@ class WorkspaceToolSurface:
                     self._builder_report,
                 ]
             )
+        if self._goal_tools is not None:
+            lines.extend(self._goal_tools.observation_advisory())
         return lines
 
     def native_tools(self) -> list[Tool]:
