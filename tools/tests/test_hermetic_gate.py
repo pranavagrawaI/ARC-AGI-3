@@ -123,6 +123,65 @@ def test_audit_run_recomputes_typed_goal_evidence_commitments(
     }
 
 
+def test_audit_run_rejects_invalid_typed_goal_authority_shapes(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+
+    malformed = workspace / "malformed" / "epistemic"
+    malformed.mkdir(parents=True)
+    (malformed / "authoritative-evidence.json").write_text("{")
+
+    unsafe = workspace / "unsafe" / "epistemic"
+    unsafe.mkdir(parents=True)
+    (unsafe / "authoritative-evidence.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "files": {
+                    "../../outside.txt": {"sha256": "0" * 64, "size_bytes": 0}
+                },
+            }
+        )
+    )
+
+    missing = workspace / "missing" / "epistemic"
+    missing.mkdir(parents=True)
+    (missing / "authoritative-evidence.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "files": {
+                    "absent.txt": {"sha256": "0" * 64, "size_bytes": 0}
+                },
+            }
+        )
+    )
+
+    invalid = workspace / "invalid" / "epistemic"
+    invalid.mkdir(parents=True)
+    evidence = workspace / "invalid" / "evidence.txt"
+    evidence.write_text("host frame")
+    (invalid / "authoritative-evidence.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "files": {
+                    "evidence.txt": {"sha256": "not-a-digest", "size_bytes": True}
+                },
+            }
+        )
+    )
+
+    result = audit_run(tmp_path)
+    codes = {violation["code"] for violation in result["violations"]}
+
+    assert "invalid_authoritative_evidence_index" in codes
+    assert "authoritative_evidence_reference_invalid" in codes
+    assert "invalid_authoritative_evidence_commitment" in codes
+    assert result["promotion_allowed"] is False
+
+
 def test_actor_only_mode_does_not_require_a_builder_outcome_checkpoint() -> None:
     bundle = synthetic_bundle()
     bundle.summary["mode"] = "no_world_model"
