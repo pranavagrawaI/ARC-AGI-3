@@ -28,6 +28,7 @@ from tycho_nooa.llm import generation_max_tokens
 from tycho_nooa.llm_trace import LLMTrace
 from tycho_nooa.models import ActionDecision, GameTurn
 from tycho_nooa.modes import ModePolicy, mode_from_env, world_model_enabled
+from tycho_nooa.optionality import OPTIONALITY_PROMPT_BRIEF
 from tycho_nooa.protocol import ActionResultMessage
 from tycho_nooa.runtime_notice import prompt_brief
 from tycho_nooa.scribe import ScribeConfig, ScribeStrategy
@@ -279,12 +280,10 @@ class TychoNooaAgent(Agent, context={"self": None, "state": None}):
         self._tool_surface.begin_turn(previous_turn)
 
     def _resolve_system_prompt(self) -> str:
-        """This class's docstring, plus the toolbox the docstring cannot mention.
+        """This class's docstring, plus the criterion and toolbox it cannot mention.
 
-        NOOA builds the actor's system prompt from the docstring above, which is written for a
-        reader of this file. `symmetry` is the one capability the actor has no other way to
-        learn about at the moment it needs it: the run_python description carries it too, but a
-        tool description is read when choosing a tool, not when forming a hypothesis.
+        Optionality is two lines. `symmetry` is named here because the tool description
+        is read when choosing a tool, not when forming a hypothesis.
         """
         treatment_prompt = (
             f"\n\n{TYPED_GOAL_PROMPT_BRIEF}"
@@ -292,7 +291,7 @@ class TychoNooaAgent(Agent, context={"self": None, "state": None}):
             else ""
         )
         return (
-            f"{super()._resolve_system_prompt()}"
+            f"{super()._resolve_system_prompt()}\n\n{OPTIONALITY_PROMPT_BRIEF}"
             f"{treatment_prompt}\n\n{prompt_brief(self._workspace.dir)}"
         )
 
@@ -348,6 +347,12 @@ class TychoNooaAgent(Agent, context={"self": None, "state": None}):
             else None
         )
         self._decision_checkpoints.set_decision_point(
+            sequence=turn.sequence,
+            level=turn.level,
+            turn_in_level=turn.turn_in_level,
+            phase="decision",
+        )
+        self._llm_trace.set_decision_point(
             sequence=turn.sequence,
             level=turn.level,
             turn_in_level=turn.turn_in_level,
@@ -487,6 +492,12 @@ class TychoNooaAgent(Agent, context={"self": None, "state": None}):
             turn_in_level=result.turn_in_level,
             phase="post_action",
         )
+        self._llm_trace.set_decision_point(
+            sequence=result.sequence,
+            level=result.level,
+            turn_in_level=result.turn_in_level,
+            phase="post_action",
+        )
         before = result.before
         after = result.after
         self._record_event_frames(result)
@@ -534,14 +545,23 @@ class TychoNooaAgent(Agent, context={"self": None, "state": None}):
         self._record_solved(result)
         await self._repair_completed_outcome(result, completion)
         # Scribe before new_level: it must see the level being completed.
-        await self._summarize_level(result.level)
+        await self._run_scribe(result.level)
         self._workspace.new_level()
 
     async def _record_win(self, result: ActionResultMessage) -> None:
         terminal = result.after.terminal_frame or result.after.grid
         self._record_terminal_evidence(result, terminal)
         self._record_solved(result)
-        await self._summarize_level(result.level)
+        await self._run_scribe(result.level)
+
+    async def _run_scribe(self, level: int) -> None:
+        """Run Scribe under bounded trace attribution, then restore Actor context."""
+        with (
+            self._llm_trace.trace_scope(source="scribe", phase="post_action"),
+            self._decision_checkpoints.source_scope("scribe"),
+            self._tool_surface.trace_scope(source="scribe", phase="post_action"),
+        ):
+            await self._summarize_level(level)
 
     def _record_terminal_evidence(
         self, result: ActionResultMessage, terminal: list[list[int]]

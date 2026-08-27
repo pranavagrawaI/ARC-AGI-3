@@ -24,6 +24,7 @@ from tycho.workspace.agent_tools import ToolExecutor, canonical
 
 from tycho_nooa.history import replayed_reasoning, retain_assistant_turn
 from tycho_nooa.models import GameTurn
+from tycho_nooa.optionality import OPTIONALITY_PROMPT_BRIEF
 from tycho_nooa.runtime_notice import prompt_brief
 from tycho_nooa.theory_transaction import TheoryTransaction
 from tycho_nooa.tools import BUILDER_TOOL_PROFILE, WorkspaceToolSurface, tool_by_name
@@ -136,6 +137,7 @@ class BuilderRequest:
     outcome_evidence: str | None = None
     focus: str | None = None
     deadline_at: float | None = None
+    phase: Literal["decision", "post_action"] = "decision"
 
 
 def _builder_budget_notice(
@@ -524,6 +526,8 @@ class BuilderStrategy(GenerationStrategy):
                 arguments,
                 "Builder final-report phase accepts prose only; tool call was not executed",
                 tool_call_id=tool_call.id,
+                raw_arguments=tool_call.arguments,
+                rejection_stage="policy",
             )
 
     async def _enforce_world_model_checkpoint(
@@ -614,6 +618,8 @@ class BuilderStrategy(GenerationStrategy):
                 arguments,
                 message,
                 tool_call_id=tool_call.id,
+                raw_arguments=tool_call.arguments,
+                rejection_stage="policy",
             )
             runtime.event_manager.update(
                 event_id,
@@ -625,7 +631,12 @@ class BuilderStrategy(GenerationStrategy):
             )
             return
         try:
-            result = surface.dispatch(tool, arguments, tool_call_id=tool_call.id)
+            result = surface.dispatch(
+                tool,
+                arguments,
+                tool_call_id=tool_call.id,
+                raw_arguments=tool_call.arguments,
+            )
         except Exception as error:  # noqa: BLE001 - tool failures are builder feedback
             runtime.event_manager.update(
                 event_id,
@@ -661,6 +672,8 @@ class BuilderStrategy(GenerationStrategy):
                 {"raw_arguments": tool_call.arguments},
                 message,
                 tool_call_id=tool_call.id,
+                raw_arguments=tool_call.arguments,
+                rejection_stage="parse",
             )
             runtime.event_manager.add(Error(content=message))
             return None
@@ -673,6 +686,8 @@ class BuilderStrategy(GenerationStrategy):
                 arguments,
                 message,
                 tool_call_id=tool_call.id,
+                raw_arguments=tool_call.arguments,
+                rejection_stage="availability",
             )
             runtime.event_manager.add(Error(content=message))
             return None
@@ -724,6 +739,7 @@ class FocusedBuilder(Agent, context={"self": None, "state": None}):
         )
         self._builder_system_prompt = (
             f"{system_prompt}\n\n{candidate_brief}\n\n"
+            f"{OPTIONALITY_PROMPT_BRIEF}\n\n"
             f"{prompt_brief(executor.ws.dir)}"
         )
         self._executor = executor
@@ -731,6 +747,7 @@ class FocusedBuilder(Agent, context={"self": None, "state": None}):
             executor,
             profile=BUILDER_TOOL_PROFILE,
             trace_path=trace_path,
+            trace_source="builder",
             planner_trace_path=(
                 trace_path.with_name("builder-planner-trace.jsonl")
                 if trace_path is not None
@@ -758,13 +775,14 @@ class FocusedBuilder(Agent, context={"self": None, "state": None}):
         self._world_model_before = _read_optional(
             self._executor.ws.dir, WORLD_MODEL_NOTES
         )
-        (
-            report,
-            forced,
-            checkpoint_forced,
-            outcome_required,
-            outcome_resolved,
-        ) = await self._construct(request)
+        with self._tool_surface.trace_scope(source="builder", phase=request.phase):
+            (
+                report,
+                forced,
+                checkpoint_forced,
+                outcome_required,
+                outcome_resolved,
+            ) = await self._construct(request)
         after = _workspace_hashes(self._executor.ws.dir)
         artifact_paths = set(ARTIFACT_PATHS)
         artifact_paths.update(
