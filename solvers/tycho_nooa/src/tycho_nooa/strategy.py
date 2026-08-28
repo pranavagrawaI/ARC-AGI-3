@@ -17,6 +17,9 @@ from tycho_nooa.epistemic import RequestBuilderArguments
 from tycho_nooa.history import (
     ELIDED_OBSERVATION,
     OBSERVATION_REF,
+    bounded_context_text,
+    bounded_observation,
+    bounded_tool_arguments,
     collapse_old_actor_turns,
     evict_old_grids,
     replayed_reasoning,
@@ -25,8 +28,16 @@ from tycho_nooa.history import (
 from tycho_nooa.models import ActionDecision, GameTurn
 from tycho_nooa.modes import mode_from_env
 from tycho_nooa.planner import actor_world_model_paragraph
-from tycho_nooa.tools import Observation, WorkspaceToolSurface, tool_by_name
-from tycho_nooa.treatments import treatment_from_env
+from tycho_nooa.tools import (
+    ModelToolError,
+    Observation,
+    WorkspaceToolSurface,
+    tool_by_name,
+)
+from tycho_nooa.treatments import (
+    DECISION_DISCIPLINE_STRATEGY_PROMPT,
+    treatment_from_env,
+)
 
 if TYPE_CHECKING:
     from nooa.strategies.current_call import CurrentCall
@@ -42,12 +53,67 @@ ACTION_DEMAND_REQUEST = (
 _ACTION_TOOL_NAMES = {"take_action", "submit_action"}
 
 
+def _visible_tool_error(
+    surface: WorkspaceToolSurface,
+    *,
+    stage: str,
+    code: str,
+    message: str,
+) -> str:
+    return json.dumps(
+        {
+            "available_actions": surface.current_turn().available_actions,
+            "code": code,
+            "message": message,
+            "stage": stage,
+            "turn_consumed": False,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _decision_cue_prompt(*, used: int, total: int, final: bool) -> str:
+    if final:
+        return (
+            "EXPLORATION CLOSED\n"
+            "Commit the best legal action supported by current evidence. Uncertainty is "
+            "allowed. Its consequence will become new evidence."
+        )
+    remaining = max(0, total - used)
+    if used == 0:
+        return (
+            "DECISION CLOCK\n"
+            f"Exploration calls used: {used} of {total}. Current obligation: choose one "
+            "ARC action. Investigate only for a result that could change that action."
+        )
+    if remaining == 1:
+        return (
+            "COMMITMENT PRESSURE\n"
+            "One exploratory call remains. Use it only to resolve a decision-reversing "
+            "uncertainty. Incomplete understanding is not a reason to delay by itself."
+        )
+    if used >= max(2, total // 2):
+        return (
+            "METACOGNITIVE CHECK\n"
+            "What action is currently favored? What specific uncertainty blocks it? What "
+            "result from the next operation would change it? If none, act now."
+        )
+    return (
+        "DECISION CLOCK\n"
+        f"Exploration calls used: {used} of {total}. Investigate only for a result that "
+        "could change the currently favored action."
+    )
+
+
 @dataclass(frozen=True)
 class NativeToolConfig:
     max_tool_steps: int = 25
     # Tycho's TYCHO_GRID_KEEP default: how many recent turns keep their inlined grid.
     grid_keep: int = 3
     history_keep_turns: int = 3
+    max_observation_bytes: int = 16_384
+    max_context_value_bytes: int = 2_048
     max_tokens: int = 16_000
     temperature: float | None = None
 
@@ -65,12 +131,19 @@ class NativeToolStrategy(GenerationStrategy):
     def get_block_overrides(self) -> dict[str, str]:
         mode = mode_from_env()
         treatment = treatment_from_env(mode)
-        return {
-            "strategy_prompt": (
+        strategy_prompt = (
+            DECISION_DISCIPLINE_STRATEGY_PROMPT
+            if treatment.decision_discipline
+            else (
                 "Work freely with the native workspace tools. Inspect the current and "
                 "past evidence, and test executable ideas with run_python. End this turn "
                 "only by calling take_action exactly once. The resulting observation will "
-                "arrive on the next call to this same agent.\n\n"
+                "arrive on the next call to this same agent."
+            )
+        )
+        return {
+            "strategy_prompt": (
+                f"{strategy_prompt}\n\n"
                 + actor_world_model_paragraph(
                     mode.wm_variant,
                     request_builder_instead_of_invoke=treatment.typed_candidate_goals,
@@ -90,10 +163,15 @@ class NativeToolStrategy(GenerationStrategy):
         tools_by_name = tool_by_name(tools)
         actor_beliefs_before = _read_optional(workspace.dir, ACTOR_BELIEFS_NOTES)
         observation = self._observation(call, surface)
+        prompt = bounded_observation(
+            observation.prompt,
+            observation.elided,
+            limit=config.max_observation_bytes,
+        )
         turn = surface.current_turn()
         runtime.event_manager.add(
             Task(
-                prompt=observation.prompt,
+                prompt=prompt,
                 metadata={
                     ELIDED_OBSERVATION: observation.elided,
                     OBSERVATION_REF: {
@@ -109,12 +187,23 @@ class NativeToolStrategy(GenerationStrategy):
             keep=config.history_keep_turns,
         )
 
-        for _ in range(config.max_tool_steps):
+        for step in range(config.max_tool_steps):
+            self._update_decision_cue(
+                runtime,
+                used=step,
+                total=config.max_tool_steps,
+            )
             response, event_id = await runtime.generate(
                 tools=tools,
                 max_tokens=config.max_tokens,
                 temperature=config.temperature,
                 tool_choice="auto",
+            )
+            retain_assistant_turn(
+                runtime.event_manager,
+                event_id,
+                response,
+                max_bytes=config.max_context_value_bytes,
             )
             if not response.tool_calls:
                 runtime.event_manager.add(
@@ -127,7 +216,6 @@ class NativeToolStrategy(GenerationStrategy):
                 )
                 continue
 
-            retain_assistant_turn(runtime.event_manager, event_id, response)
             feedback_in_batch = self._feedback_in_batch(response.tool_calls, surface)
             for index, tool_call in enumerate(response.tool_calls):
                 decision = await self._execute_tool_call(
@@ -135,7 +223,14 @@ class NativeToolStrategy(GenerationStrategy):
                     surface,
                     tools_by_name,
                     tool_call,
-                    reasoning=replayed_reasoning(response) if index == 0 else None,
+                    reasoning=(
+                        replayed_reasoning(
+                            response,
+                            max_bytes=config.max_context_value_bytes,
+                        )
+                        if index == 0
+                        else None
+                    ),
                     block_action=feedback_in_batch,
                 )
                 if decision is not None:
@@ -144,6 +239,12 @@ class NativeToolStrategy(GenerationStrategy):
                     )
                     return decision
 
+        self._update_decision_cue(
+            runtime,
+            used=config.max_tool_steps,
+            total=config.max_tool_steps,
+            final=True,
+        )
         decision = await self._demand_action(runtime, surface, tools, config)
         if decision is None:
             raise GenerationError(
@@ -155,6 +256,26 @@ class NativeToolStrategy(GenerationStrategy):
             workspace, actor_beliefs_before, decision
         )
         return decision
+
+    @staticmethod
+    def _update_decision_cue(
+        runtime: RuntimeServices,
+        *,
+        used: int,
+        total: int,
+        final: bool = False,
+    ) -> None:
+        treatment = runtime.agent._treatment
+        if not treatment.decision_discipline:
+            return
+        prompt = _decision_cue_prompt(used=used, total=total, final=final)
+        event_id = runtime.agent._decision_cue_event_id
+        if event_id is None or event_id not in runtime.event_manager:
+            runtime.agent._decision_cue_event_id = runtime.event_manager.add(
+                Task(prompt=prompt)
+            )
+            return
+        runtime.event_manager.update(event_id, prompt=prompt)
 
     async def _demand_action(
         self,
@@ -186,17 +307,28 @@ class NativeToolStrategy(GenerationStrategy):
             temperature=config.temperature,
             tool_choice="auto",
         )
+        retain_assistant_turn(
+            runtime.event_manager,
+            event_id,
+            response,
+            max_bytes=config.max_context_value_bytes,
+        )
         if not response.tool_calls:
             return
-
-        retain_assistant_turn(runtime.event_manager, event_id, response)
         for index, tool_call in enumerate(response.tool_calls):
             decision = await self._execute_tool_call(
                 runtime,
                 surface,
                 tool_by_name(action_tools),
                 tool_call,
-                reasoning=replayed_reasoning(response) if index == 0 else None,
+                reasoning=(
+                    replayed_reasoning(
+                        response,
+                        max_bytes=config.max_context_value_bytes,
+                    )
+                    if index == 0
+                    else None
+                ),
             )
             if decision is not None:
                 return decision
@@ -263,7 +395,11 @@ class NativeToolStrategy(GenerationStrategy):
             ToolCallEvent(
                 tool_call_id=tool_call.id,
                 name=tool_call.name,
-                arguments=arguments,
+                arguments=self._provider_tool_arguments(
+                    runtime,
+                    tool_call.name,
+                    arguments,
+                ),
                 reasoning=reasoning,
             )
         )
@@ -291,18 +427,43 @@ class NativeToolStrategy(GenerationStrategy):
                 raw_arguments=tool_call.arguments,
             )
         except Exception as error:  # noqa: BLE001 - a model tool error is recoverable feedback
+            if isinstance(error, ModelToolError):
+                stage = error.stage
+                code = error.code
+                message = error.message
+            else:
+                stage = "execution"
+                code = "execution_failed"
+                message = str(error)
             runtime.event_manager.update(
                 event_id,
                 result=ToolResult(
                     tool_call_id=tool_call.id,
-                    content=f"{type(error).__name__}: {error}",
+                    content=self._provider_tool_result(
+                        runtime,
+                        tool_call.name,
+                        _visible_tool_error(
+                            surface,
+                            stage=stage,
+                            code=code,
+                            message=message,
+                        ),
+                    ),
                     result_status=ResultStatus.ERROR,
                 ),
             )
             return None
 
         action = result if isinstance(result, ActionDecision) else None
-        content = "Action accepted; this turn is complete." if action else str(result)
+        content = (
+            "Action accepted; this turn is complete."
+            if action
+            else self._provider_tool_result(
+                runtime,
+                tool_call.name,
+                str(result),
+            )
+        )
         runtime.event_manager.update(
             event_id,
             result=ToolResult(
@@ -312,6 +473,32 @@ class NativeToolStrategy(GenerationStrategy):
             ),
         )
         return action
+
+    def _provider_tool_result(
+        self,
+        runtime: RuntimeServices,
+        tool_name: str,
+        value: str,
+    ) -> str:
+        config = getattr(runtime.agent, "_native_tool_config", self.config)
+        return bounded_context_text(
+            value,
+            limit=config.max_context_value_bytes,
+            kind=f"{tool_name} result",
+        )
+
+    def _provider_tool_arguments(
+        self,
+        runtime: RuntimeServices,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        config = getattr(runtime.agent, "_native_tool_config", self.config)
+        return bounded_tool_arguments(
+            arguments,
+            limit=config.max_context_value_bytes,
+            tool_name=tool_name,
+        )
 
     @staticmethod
     def _validated_tool_call(
@@ -332,7 +519,16 @@ class NativeToolStrategy(GenerationStrategy):
                 raw_arguments=tool_call.arguments,
                 rejection_stage="parse",
             )
-            runtime.event_manager.add(Error(content=message))
+            runtime.event_manager.add(
+                Error(
+                    content=_visible_tool_error(
+                        surface,
+                        stage="parse",
+                        code="invalid_json",
+                        message="Tool arguments are not valid JSON.",
+                    )
+                )
+            )
             return None
         try:
             return arguments, tools_by_name[tool_call.name]
@@ -346,7 +542,16 @@ class NativeToolStrategy(GenerationStrategy):
                 raw_arguments=tool_call.arguments,
                 rejection_stage="availability",
             )
-            runtime.event_manager.add(Error(content=message))
+            runtime.event_manager.add(
+                Error(
+                    content=_visible_tool_error(
+                        surface,
+                        stage="availability",
+                        code="unavailable_tool",
+                        message="That tool is not available in the current phase.",
+                    )
+                )
+            )
             return None
 
     @staticmethod
@@ -393,7 +598,12 @@ class NativeToolStrategy(GenerationStrategy):
             event_id,
             result=ToolResult(
                 tool_call_id=tool_call.id,
-                content=message,
+                content=_visible_tool_error(
+                    surface,
+                    stage="policy",
+                    code="policy_denied",
+                    message=message,
+                ),
                 result_status=ResultStatus.ERROR,
             ),
         )

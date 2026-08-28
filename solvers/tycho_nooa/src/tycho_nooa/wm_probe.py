@@ -27,6 +27,9 @@ import ast
 import hashlib
 import inspect
 import shutil
+import sys
+import tempfile
+from contextvars import ContextVar
 from pathlib import Path
 
 from tycho.workspace.agent_tools import ToolExecutor
@@ -103,37 +106,132 @@ class ReadOnlyWorkspacePythonSandbox(PythonSandbox):
 
 
 class TrustedRuntimePythonSandbox(PythonSandbox):
-    """Keep the workspace writable while mounting declared runtime files read-only."""
+    """Expose exact workspace values without granting publication authority."""
+
+    _GENERATED_SOURCE_ROOT = "/tycho-generated"
+    _GENERATED_SOURCE_PATH = f"{_GENERATED_SOURCE_ROOT}/source.py"
+    _GENERATED_SOURCE_RUNNER = (
+        "import runpy,sys;"
+        f"sys.argv[0]={_GENERATED_SOURCE_PATH!r};"
+        f"runpy.run_path({_GENERATED_SOURCE_PATH!r},run_name='__main__')"
+    )
+
+    def __init__(
+        self,
+        runtime: str | None = None,
+        image: str | None = None,
+        *,
+        workspace_read_only: bool = True,
+    ) -> None:
+        super().__init__(runtime=runtime, image=image)
+        self.workspace_read_only = workspace_read_only
+        self._generated_source: ContextVar[Path | None] = ContextVar(
+            "tycho_nooa_generated_source", default=None
+        )
+
+    def run_source(self, workspace, source, *, timeout, args=()):
+        """Run generated source outside the actor-visible evidence namespace."""
+        root = self._workspace(workspace)
+        with tempfile.TemporaryDirectory(prefix="tycho-generated-source-") as directory:
+            script = Path(directory) / "source.py"
+            script.write_text(source, encoding="utf-8")
+            token = self._generated_source.set(script.resolve(strict=True))
+            try:
+                return self.run_script(root, script, timeout=timeout, args=args)
+            finally:
+                self._generated_source.reset(token)
 
     def command(self, workspace, script, *, name, args=()):
-        command = super().command(workspace, script, name=name, args=args)
-        runtime = inspect_runtime(Path(workspace)).runtime
-        if runtime is None:
-            return command
         root = Path(workspace).resolve()
+        generated_source = self._generated_source.get()
+        script_path = Path(script).resolve(strict=True)
+        if generated_source is not None and script_path == generated_source:
+            command = self._generated_source_command(root, name=name, args=args)
+        else:
+            command = super().command(root, script_path, name=name, args=args)
+        runtime = inspect_runtime(root).runtime
         paths = (
-            root / MANIFEST_PATH,
-            *(root / module.path for module in runtime.modules),
+            ()
+            if runtime is None
+            else (
+                root / MANIFEST_PATH,
+                *(root / module.path for module in runtime.modules),
+            )
         )
         if self.runtime == "host":
-            return _host_runtime_command(root, paths, command)
-        return _container_runtime_command(self.image, paths, command)
+            return _host_runtime_command(
+                root,
+                paths,
+                command,
+                workspace_read_only=self.workspace_read_only,
+                generated_source=generated_source,
+            )
+        return _container_runtime_command(
+            self.image,
+            paths,
+            command,
+            workspace_read_only=self.workspace_read_only,
+            generated_source=generated_source,
+        )
+
+    def _generated_source_command(
+        self, workspace: Path, *, name: str, args: tuple[str, ...]
+    ) -> list[str]:
+        """Build upstream's command without leaving its placeholder in the workspace."""
+        with tempfile.NamedTemporaryFile(
+            suffix=".py", prefix=".tycho-command-", dir=workspace
+        ) as handle:
+            placeholder = Path(handle.name)
+            command = super().command(
+                workspace, placeholder, name=name, args=args
+            )
+        placeholder_argument = (
+            str(placeholder)
+            if self.runtime == "host"
+            else f"/workspace/{placeholder.name}"
+        )
+        argument_index = command.index(placeholder_argument)
+        command[argument_index : argument_index + 1] = [
+            "-c",
+            self._GENERATED_SOURCE_RUNNER,
+        ]
+        return command
 
 
 def _host_runtime_command(
-    workspace: Path, protected_paths: tuple[Path, ...], command: list[str]
+    workspace: Path,
+    protected_paths: tuple[Path, ...],
+    command: list[str],
+    *,
+    workspace_read_only: bool = True,
+    generated_source: Path | None = None,
 ) -> list[str]:
     bwrap = shutil.which("bwrap")
     if bwrap is None:
         raise SandboxError(
             "host run_python requires bubblewrap to protect the trusted runtime"
         )
-    return _bubblewrap_command(bwrap, workspace, protected_paths, command)
+    return _bubblewrap_command(
+        bwrap,
+        workspace,
+        protected_paths,
+        command,
+        workspace_read_only=workspace_read_only,
+        generated_source=generated_source,
+    )
 
 
 def _container_runtime_command(
-    image: str, protected_paths: tuple[Path, ...], command: list[str]
+    image: str,
+    protected_paths: tuple[Path, ...],
+    command: list[str],
+    *,
+    workspace_read_only: bool = True,
+    generated_source: Path | None = None,
 ) -> list[str]:
+    if workspace_read_only and "--mount" in command:
+        workspace_mount = command.index("--mount") + 1
+        command[workspace_mount] = command[workspace_mount] + ",readonly"
     image_index = command.index(image)
     mounts = [
         argument
@@ -143,6 +241,17 @@ def _container_runtime_command(
             f"type=bind,src={path},dst=/workspace/{path.name},readonly",
         )
     ]
+    if generated_source is not None:
+        mounts.extend(
+            (
+                "--mount",
+                (
+                    "type=bind,"
+                    f"src={generated_source.parent},"
+                    f"dst={TrustedRuntimePythonSandbox._GENERATED_SOURCE_ROOT},readonly"
+                ),
+            )
+        )
     command[image_index:image_index] = mounts
     return command
 
@@ -152,32 +261,106 @@ def _bubblewrap_command(
     workspace: Path,
     protected_paths: tuple[Path, ...],
     command: list[str],
+    *,
+    workspace_read_only: bool = True,
+    generated_source: Path | None = None,
 ) -> list[str]:
+    venv = Path(sys.prefix).resolve(strict=True)
+    directories = _mount_parent_directories(workspace, venv)
     mounts = [
         argument
         for path in protected_paths
         for argument in ("--ro-bind", str(path), str(path))
     ]
+    generated_source_mount = (
+        []
+        if generated_source is None
+        else [
+            "--dir",
+            TrustedRuntimePythonSandbox._GENERATED_SOURCE_ROOT,
+            "--ro-bind",
+            str(generated_source.parent),
+            TrustedRuntimePythonSandbox._GENERATED_SOURCE_ROOT,
+        ]
+    )
     return [
         bwrap,
         "--die-with-parent",
+        "--new-session",
+        "--unshare-user",
+        "--unshare-pid",
         "--unshare-net",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--unshare-cgroup-try",
+        "--disable-userns",
+        "--clearenv",
+        *directories,
         "--ro-bind",
-        "/",
-        "/",
+        "/usr",
+        "/usr",
+        "--symlink",
+        "usr/bin",
+        "/bin",
+        "--symlink",
+        "usr/lib",
+        "/lib",
+        "--symlink",
+        "usr/lib64",
+        "/lib64",
+        "--ro-bind",
+        str(venv),
+        str(venv),
         "--dev",
         "/dev",
         "--proc",
         "/proc",
         "--tmpfs",
         "/tmp",
-        "--bind",
+        "--ro-bind" if workspace_read_only else "--bind",
         str(workspace),
         str(workspace),
         *mounts,
+        *generated_source_mount,
+        "--setenv",
+        "HOME",
+        "/tmp",
+        "--setenv",
+        "PATH",
+        f"{venv}/bin:/usr/bin",
+        "--setenv",
+        "PYTHONDONTWRITEBYTECODE",
+        "1",
+        "--setenv",
+        "PYTHONNOUSERSITE",
+        "1",
+        "--setenv",
+        "OMP_NUM_THREADS",
+        "1",
+        "--setenv",
+        "OPENBLAS_NUM_THREADS",
+        "1",
+        "--setenv",
+        "MKL_NUM_THREADS",
+        "1",
+        "--chdir",
+        str(workspace),
         "--",
         *command,
     ]
+
+
+def _mount_parent_directories(*paths: Path) -> list[str]:
+    parents = {
+        parent
+        for path in paths
+        for parent in path.parents
+        if parent != Path("/")
+    }
+    arguments: list[str] = []
+    for parent in sorted(parents, key=lambda value: (len(value.parts), str(value))):
+        arguments.extend(("--dir", str(parent)))
+    return arguments
 
 
 def gated_probe_source() -> str:

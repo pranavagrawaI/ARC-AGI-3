@@ -98,6 +98,29 @@ def test_the_actor_packet_teaches_optionality_without_a_lecture(
     assert OPTIONALITY_PROMPT_BRIEF.count("\n") == 3
 
 
+@pytest.mark.parametrize(
+    ("mode", "fact"),
+    [
+        ("trigger", "The Builder owns world_model.py and fires automatically"),
+        ("orchestrator", "The Builder owns world_model.py and runs only when you request it"),
+        ("single", "You own world_model.py; there is no Builder"),
+        ("no_world_model", "There is no executable world model and no Builder"),
+    ],
+)
+def test_actor_prompt_names_the_active_mode_and_its_ownership_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    fact: str,
+) -> None:
+    monkeypatch.setenv(MODE_ENV, mode)
+
+    prompt = _agent(tmp_path / mode)._resolve_system_prompt()
+
+    assert f"ACTIVE SOLVER MODE: {mode}" in prompt
+    assert fact in prompt
+
+
 def test_typed_goals_cannot_silently_change_another_source_mode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -105,6 +128,37 @@ def test_typed_goals_cannot_silently_change_another_source_mode(
     monkeypatch.setenv(TREATMENT_ENV, "typed_candidate_goals")
 
     with pytest.raises(ValueError, match="requires TYCHO_MODE='orchestrator'"):
+        _agent(tmp_path)
+
+
+def test_decision_discipline_replaces_investigator_identity_only_in_named_treatment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(MODE_ENV, "trigger")
+    control = _agent(tmp_path / "control")
+    control_prompt = control._resolve_system_prompt()
+
+    monkeypatch.setenv(TREATMENT_ENV, "decision_discipline")
+    treatment = _agent(tmp_path / "treatment")
+    treatment_prompt = treatment._resolve_system_prompt()
+    strategy_prompt = NativeToolStrategy().get_block_overrides()["strategy_prompt"]
+
+    assert treatment.treatment_name == "decision_discipline"
+    assert "persistent investigator" in control_prompt
+    assert "bounded decision-maker" not in control_prompt
+    assert "bounded decision-maker" in treatment_prompt
+    assert "persistent investigator" not in treatment_prompt
+    assert "Work freely" not in strategy_prompt
+    assert "best timely consequential decision" in strategy_prompt
+
+
+def test_decision_discipline_cannot_silently_change_another_source_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(MODE_ENV, "single")
+    monkeypatch.setenv(TREATMENT_ENV, "decision_discipline")
+
+    with pytest.raises(ValueError, match="requires TYCHO_MODE='trigger'"):
         _agent(tmp_path)
 
 

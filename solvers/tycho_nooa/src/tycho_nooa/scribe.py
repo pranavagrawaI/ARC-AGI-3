@@ -23,7 +23,12 @@ from tycho.prompts.render import render_prompt
 from tycho.workspace.agent_tools import canonical
 from tycho.workspace.workspace import GameWorkspace
 
-from tycho_nooa.history import replayed_reasoning, retain_assistant_turn
+from tycho_nooa.history import (
+    bounded_context_text,
+    bounded_tool_arguments,
+    replayed_reasoning,
+    retain_assistant_turn,
+)
 from tycho_nooa.modes import mode_from_env
 from tycho_nooa.tools import WorkspaceToolSurface, tool_by_name
 
@@ -47,6 +52,7 @@ _FALLBACK_REASON = "summary pass did not create the requested note"
 class ScribeConfig:
     max_tokens: int = 16_000
     temperature: float | None = None
+    max_context_value_bytes: int = 2_048
 
 
 class ScribeStrategy(GenerationStrategy):
@@ -93,14 +99,27 @@ class ScribeStrategy(GenerationStrategy):
             if not response.tool_calls:
                 runtime.event_manager.remove(event_id)
                 break
-            retain_assistant_turn(runtime.event_manager, event_id, response)
+            retain_assistant_turn(
+                runtime.event_manager,
+                event_id,
+                response,
+                max_bytes=config.max_context_value_bytes,
+            )
             for index, tool_call in enumerate(response.tool_calls):
                 self._execute_tool_call(
                     runtime,
                     surface,
                     tools_by_name,
                     tool_call,
-                    reasoning=replayed_reasoning(response) if index == 0 else None,
+                    reasoning=(
+                        replayed_reasoning(
+                            response,
+                            max_bytes=config.max_context_value_bytes,
+                        )
+                        if index == 0
+                        else None
+                    ),
+                    max_context_value_bytes=config.max_context_value_bytes,
                 )
 
         _write_level_insight_fallback(workspace, level, _FALLBACK_REASON)
@@ -113,6 +132,7 @@ class ScribeStrategy(GenerationStrategy):
         tool_call: Any,
         *,
         reasoning: str | None = None,
+        max_context_value_bytes: int = 2_048,
     ) -> None:
         try:
             arguments = json.loads(tool_call.arguments)
@@ -147,7 +167,11 @@ class ScribeStrategy(GenerationStrategy):
             ToolCallEvent(
                 tool_call_id=tool_call.id,
                 name=tool_call.name,
-                arguments=arguments,
+                arguments=bounded_tool_arguments(
+                    arguments,
+                    limit=max_context_value_bytes,
+                    tool_name=tool_call.name,
+                ),
                 reasoning=reasoning,
             )
         )
@@ -181,7 +205,11 @@ class ScribeStrategy(GenerationStrategy):
                 event_id,
                 result=ToolResult(
                     tool_call_id=tool_call.id,
-                    content=f"{type(error).__name__}: {error}",
+                    content=bounded_context_text(
+                        f"{type(error).__name__}: {error}",
+                        limit=max_context_value_bytes,
+                        kind=f"{tool_call.name} result",
+                    ),
                     result_status=ResultStatus.ERROR,
                 ),
             )
@@ -190,7 +218,11 @@ class ScribeStrategy(GenerationStrategy):
             event_id,
             result=ToolResult(
                 tool_call_id=tool_call.id,
-                content=str(result),
+                content=bounded_context_text(
+                    str(result),
+                    limit=max_context_value_bytes,
+                    kind=f"{tool_call.name} result",
+                ),
                 result_status=ResultStatus.COMPLETE,
             ),
         )

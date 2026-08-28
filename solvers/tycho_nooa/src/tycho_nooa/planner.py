@@ -5,17 +5,22 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
 import re
 import shlex
+import stat
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from tycho.agent.colors import COLORMAP
 from tycho.prompts.render import render_prompt
-from tycho.workspace.workspace import GameWorkspace
+from tycho.workspace import wm_templates
+from tycho.workspace.workspace import GameWorkspace, _parse_grid_text
 
-from tycho_nooa.models import GameTurn
+from tycho_nooa.models import GameTurn, tycho_workspace_available_actions
 
 # wm_trigger.j2's own words claim all three of Tycho's real trigger paths
 # (divergence, level start, GAME_OVER reset). This slice's TriggerBuilderLoop
@@ -41,6 +46,17 @@ _INVOKE_BUILDER_CLAUSE = (
 _REQUEST_BUILDER_CLAUSE = (
     "call `request_builder` and put your beliefs in the focused request"
 )
+HOST_OWNED_PLANNER_PATHS = frozenset(
+    {
+        "plan.py",
+        "verify.py",
+        "notes/validated_plan.json",
+        "notes/validated_plan_expected.npz",
+    }
+)
+_SEEDED_PLAN_BYTES = wm_templates.PLAN.encode("utf-8")
+_MAX_PLAN_ARTIFACT_BYTES = 1_000_000
+_PLAN_METHODS = frozenset({"auto", "astar", "bfs", "subgoals"})
 
 
 def actor_world_model_paragraph(
@@ -195,6 +211,93 @@ class PlannerIntegration:
             }
         )
 
+    def publish_candidate(self, candidate_workspace: Path, result: str) -> str:
+        """Validate a disposable planner artifact before publishing it atomically."""
+        candidate = candidate_workspace / "notes" / "validated_plan.json"
+        canonical = self._artifact_path()
+        try:
+            payload = self._validated_candidate(candidate, result)
+        except (OSError, TypeError, ValueError) as error:
+            canonical.unlink(missing_ok=True)
+            return f"PLANNER_PUBLICATION: rejected ({error})"
+
+        canonical.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=canonical.parent,
+            prefix=".validated_plan.",
+            suffix=".tmp",
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, canonical)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return "PLANNER_PUBLICATION: accepted by T1"
+
+    def _validated_candidate(self, candidate: Path, result: str) -> bytes:
+        if _planner_status(result) != "plan_found":
+            raise ValueError("planner did not produce plan_found")
+        payload = _read_bounded_regular_file(candidate, _MAX_PLAN_ARTIFACT_BYTES)
+        try:
+            artifact = json.loads(payload)
+        except json.JSONDecodeError as error:
+            raise ValueError("validated artifact is not JSON") from error
+        self._validate_artifact_value(artifact)
+        return json.dumps(artifact, separators=(",", ":")).encode("utf-8")
+
+    def seeded_plan_bytes(self) -> bytes:
+        """Return pinned seed bytes only while canonical plan.py is unchanged."""
+        plan = self.workspace.dir / "plan.py"
+        observed = _read_bounded_regular_file(plan, len(_SEEDED_PLAN_BYTES))
+        if observed != _SEEDED_PLAN_BYTES:
+            raise ValueError("canonical plan.py differs from the pinned seeded planner")
+        return _SEEDED_PLAN_BYTES
+
+    def _validate_artifact_value(self, artifact: Any) -> None:
+        if not isinstance(artifact, dict):
+            raise TypeError("validated artifact must be an object")
+        _validate_artifact_header(artifact)
+        frame = self._current_frame()
+        _validate_start_anchor(artifact.get("start"), frame)
+        model_hash = hashlib.sha256(
+            (self.workspace.dir / "world_model.py").read_bytes()
+        ).hexdigest()
+        _validate_model_commitment(artifact.get("world_model_sha256"), model_hash)
+        _validate_plan_payload(artifact, frame["available_actions"])
+
+    def _current_frame(self) -> dict[str, Any]:
+        try:
+            pointer = json.loads(
+                (self.workspace.dir / ".current_frame.json").read_text(encoding="utf-8")
+            )
+            relative = Path(str(pointer["path"]))
+            if relative.is_absolute() or ".." in relative.parts:
+                raise ValueError
+            rows = _parse_grid_text(
+                (self.workspace.dir / relative).read_text(encoding="utf-8")
+            )
+            grid = np.asarray(rows, dtype=np.int16)
+            if grid.ndim != 2 or grid.size == 0:
+                raise ValueError
+            metadata = json.loads(
+                (self.workspace.dir / relative.with_suffix(".json")).read_text(
+                    encoding="utf-8"
+                )
+            )
+            available_actions = tycho_workspace_available_actions(metadata)
+            return {
+                "level": int(pointer["level"]),
+                "turn": int(pointer["turn"]),
+                "grid_sha256": hashlib.sha256(grid.tobytes()).hexdigest(),
+                "available_actions": frozenset(available_actions),
+            }
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise ValueError("current frame is unavailable") from error
+
     def _artifact_sha256(self) -> str | None:
         try:
             data = self._artifact_path().read_bytes()
@@ -244,16 +347,24 @@ def planner_command(code: str) -> str | None:
     source = code.strip()
     if not source:
         return None
-    if "\n" not in source:
-        try:
-            parts = shlex.split(source)
-        except ValueError:
-            parts = []
-        if parts and parts[0] in {"python", "python3"}:
-            parts = parts[1:]
-        if parts and Path(parts[0]).name == "plan.py":
-            return shlex.join(["python", *parts])
+    direct = _direct_planner_command(source)
+    if direct is not None:
+        return direct
     return _python_wrapped_planner_command(source)
+
+
+def _direct_planner_command(source: str) -> str | None:
+    try:
+        parts = shlex.split(source)
+    except ValueError:
+        return None
+    if parts and parts[0] in {"python", "python3"}:
+        parts = parts[1:]
+    if parts == ["plan.py"]:
+        return "python plan.py"
+    if len(parts) == 2 and parts[0] == "plan.py" and parts[1] in _PLAN_METHODS:
+        return shlex.join(["python", *parts])
+    return None
 
 
 def _python_wrapped_planner_command(source: str) -> str | None:
@@ -272,14 +383,13 @@ def _python_wrapped_planner_command(source: str) -> str | None:
         "subprocess.Popen",
         "subprocess.run",
     }
-    methods = {"auto", "astar", "bfs", "subgoals"}
     for node in ast.walk(tree):
         strings = _runner_strings(node, runners)
         if strings is None:
             continue
-        if not any(Path(value).name == "plan.py" for value in strings):
+        if "plan.py" not in strings:
             continue
-        method = next((value for value in strings if value in methods), None)
+        method = next((value for value in strings if value in _PLAN_METHODS), None)
         return shlex.join(["python", "plan.py", *([method] if method else [])])
     return None
 
@@ -322,6 +432,131 @@ def _planner_status(result: str) -> str:
     if "error" in result.lower() or "traceback" in result.lower():
         return "error"
     return "unknown"
+
+
+def _validate_artifact_header(artifact: dict[str, Any]) -> None:
+    if (
+        type(artifact.get("schema_version")) is not int
+        or artifact.get("schema_version") != 1
+        or artifact.get("status") != "validated"
+    ):
+        raise ValueError("validated artifact has the wrong schema or status")
+    if artifact.get("method") not in {"astar", "bfs", "subgoals", "planner.py"}:
+        raise ValueError("validated artifact has an unknown planning method")
+    if artifact.get("validation") != (
+        "canonical world_model replay reached level_complete"
+    ):
+        raise ValueError("validated artifact has no canonical replay claim")
+
+
+def _validate_start_anchor(start: Any, frame: dict[str, Any]) -> None:
+    if not isinstance(start, dict):
+        raise TypeError("validated artifact has no start anchor")
+    if type(start.get("level")) is not int or type(start.get("turn")) is not int:
+        raise ValueError("validated artifact has a malformed start anchor")
+    if (start.get("level"), start.get("turn")) != (
+        frame["level"],
+        frame["turn"],
+    ):
+        raise ValueError("validated artifact is not anchored to the current frame")
+    if start.get("grid_sha256") != frame["grid_sha256"]:
+        raise ValueError("validated artifact has the wrong current-grid hash")
+
+
+def _validate_model_commitment(value: Any, expected: str) -> None:
+    if value != expected:
+        raise ValueError("validated artifact has the wrong world-model hash")
+
+
+def _validate_plan_payload(
+    artifact: dict[str, Any], available: frozenset[str]
+) -> None:
+    actions, expected = _plan_sequences(artifact)
+    _validate_plan_actions(actions, available)
+    _validate_expected_grids(expected)
+
+
+def _plan_sequences(artifact: dict[str, Any]) -> tuple[list[Any], list[Any]]:
+    actions = artifact.get("actions")
+    expected = artifact.get("expected_grid_sha256")
+    length = artifact.get("plan_length")
+    if (
+        type(length) is not int
+        or length <= 0
+        or length > 10_000
+        or not isinstance(actions, list)
+        or not isinstance(expected, list)
+        or length != len(actions)
+        or length != len(expected)
+    ):
+        raise ValueError("validated artifact has inconsistent plan lengths")
+    return actions, expected
+
+
+def _validate_plan_actions(actions: list[Any], available: frozenset[str]) -> None:
+    if not all(_valid_action(action, available) for action in actions):
+        raise ValueError("validated artifact contains an invalid action")
+
+
+def _validate_expected_grids(expected: list[Any]) -> None:
+    if not all(_is_sha256(value) for value in expected):
+        raise ValueError("validated artifact contains an invalid grid hash")
+
+
+def _is_sha256(value: Any) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _valid_action(value: Any, available: frozenset[str]) -> bool:
+    if not isinstance(value, dict) or not isinstance(value.get("action"), str):
+        return False
+    action = value["action"]
+    if not action or action not in available:
+        return False
+    row = value.get("row")
+    col = value.get("col")
+    if action in {"CLICK", "ACTION6"}:
+        return _valid_click_coordinates(row, col)
+    return row is None and col is None
+
+
+def _valid_click_coordinates(row: Any, col: Any) -> bool:
+    return (
+        type(row) is int
+        and type(col) is int
+        and 0 <= row <= 63
+        and 0 <= col <= 63
+    )
+
+
+def is_host_owned_planner_path(workspace: Path, requested: str) -> bool:
+    """Return whether a file operation targets the host-owned planner namespace."""
+    raw = Path(requested.replace("\\", "/"))
+    root = workspace.resolve()
+    candidate = raw.resolve() if raw.is_absolute() else (root / raw).resolve()
+    protected = {(root / path).resolve() for path in HOST_OWNED_PLANNER_PATHS}
+    if candidate in protected:
+        return True
+    notes = (root / "notes").resolve()
+    return candidate.parent == notes and candidate.name.startswith(".validated_plan.")
+
+
+def _read_bounded_regular_file(path: Path, limit: int) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"{path.name} is not a regular file")
+        if metadata.st_size > limit:
+            raise ValueError(f"{path.name} exceeds {limit} bytes")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            payload = stream.read(limit + 1)
+        if len(payload) > limit:
+            raise ValueError(f"{path.name} exceeds {limit} bytes")
+        return payload
+    finally:
+        os.close(descriptor)
 
 
 def _hint_status(hint: str) -> str:

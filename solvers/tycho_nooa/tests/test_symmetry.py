@@ -292,7 +292,11 @@ def test_run_python_cannot_downgrade_the_manifest_then_edit_a_helper(tmp_path):
         "open('symmetry.py', 'w').write('# model-authored\\n')"
     )
 
-    assert "PermissionError" in deletion or "Device or resource busy" in deletion
+    assert (
+        "PermissionError" in deletion
+        or "Device or resource busy" in deletion
+        or "Read-only file system" in deletion
+    )
     assert "PermissionError" in mutation or "Read-only file system" in mutation
     assert inspect_runtime(agent.workspace_dir).runtime == declared
 

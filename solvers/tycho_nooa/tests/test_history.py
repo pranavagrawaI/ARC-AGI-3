@@ -11,6 +11,9 @@ from nooa.runtime.event_manager import EventManager
 from tycho_nooa.history import (
     ELIDED_OBSERVATION,
     OBSERVATION_REF,
+    bounded_context_text,
+    bounded_observation,
+    bounded_tool_arguments,
     collapse_old_actor_turns,
     replayed_reasoning,
     retain_assistant_turn,
@@ -62,6 +65,69 @@ def test_reasoning_is_replayed_and_falls_back_to_prose() -> None:
     assert replayed_reasoning(_Response(content="", reasoning="because")) == "because"
     assert replayed_reasoning(_Response(content="prose")) == "prose"
     assert replayed_reasoning(_Response(content="")) is None
+
+
+def test_large_context_values_become_bounded_identity_receipts() -> None:
+    exact = "é" * 2_000
+
+    visible = bounded_context_text(exact, limit=512, kind="tool result")
+
+    assert len(visible.encode("utf-8")) <= 512
+    assert "tool result externalized: 4000 bytes" in visible
+    assert "sha256=" in visible
+    assert bounded_context_text("small", limit=512, kind="tool result") == "small"
+
+
+def test_large_tool_arguments_become_a_valid_structural_receipt() -> None:
+    arguments = {"code": "x" * 4_000, "timeout_s": 15}
+
+    visible = bounded_tool_arguments(arguments, limit=512, tool_name="run_python")
+
+    encoded = json.dumps(visible, separators=(",", ":")).encode()
+    receipt = visible["_provider_projection"]
+    assert len(encoded) <= 512
+    assert receipt["schema"] == "externalized_tool_arguments.v1"
+    assert receipt["key_count"] == 2
+    assert receipt["bytes"] > 4_000
+    assert arguments["code"] == "x" * 4_000
+
+
+def test_tool_argument_receipt_does_not_replay_adversarial_key_names() -> None:
+    adversarial_key = "k" * 16_000
+
+    visible = bounded_tool_arguments(
+        {"code": "print(1)", adversarial_key: True},
+        limit=256,
+        tool_name="run_python",
+    )
+
+    encoded = json.dumps(visible, separators=(",", ":")).encode()
+    assert len(encoded) <= 256
+    assert adversarial_key.encode() not in encoded
+    assert visible["_provider_projection"]["key_count"] == 2
+
+
+def test_large_observation_falls_back_to_external_frame_pointer() -> None:
+    visible = bounded_observation(
+        "full-grid:" + "x" * 4_000,
+        "frame on disk = level_0/turn_003.json",
+        limit=512,
+    )
+
+    assert len(visible.encode("utf-8")) <= 512
+    assert "frame on disk = level_0/turn_003.json" in visible
+    assert "observation payload externalized" in visible
+
+
+def test_replayed_reasoning_is_bounded_without_mutating_the_response() -> None:
+    response = _Response(content="", reasoning="r" * 4_000)
+
+    visible = replayed_reasoning(response, max_bytes=512)
+
+    assert visible is not None
+    assert len(visible.encode("utf-8")) <= 512
+    assert "assistant reasoning externalized" in visible
+    assert response.reasoning == "r" * 4_000
 
 
 def test_old_actor_turns_collapse_to_structural_facts_without_deleting_history() -> (

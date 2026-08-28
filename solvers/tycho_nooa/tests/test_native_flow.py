@@ -8,13 +8,17 @@ import numpy as np
 import pytest
 from nooa.context_blocks import ToolCallEvent
 from nooa.errors import GenerationError
-from nooa.events import Summary, Task
+from nooa.events import Error, Summary, Task
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 from tycho.agent.colors import COLORMAP
 from tycho.prompts.render import render_prompt
 
 from tycho_nooa import ActionDecision, GameTurn, TychoNooaAgent
 from tycho_nooa.llm_trace import CAPTURE_RESPONSE_TEXT_ENV
+from tycho_nooa.models import (
+    TYCHO_WORKSPACE_TURN_SCHEMA,
+    tycho_workspace_available_actions,
+)
 from tycho_nooa.strategy import NativeToolConfig
 
 
@@ -117,6 +121,28 @@ def turn(number: int, previous_action: str = "") -> GameTurn:
         turn_in_level=number,
         previous_action=previous_action,
     )
+
+
+def test_tycho_workspace_turn_v1_projects_available_actions_once(
+    tmp_path: Path,
+) -> None:
+    agent = TychoNooaAgent(
+        llm=FakeLLMClient(),
+        trigger_builder=False,
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+    )
+
+    agent._begin_decision(turn(0), None)
+
+    metadata = json.loads(
+        (agent.workspace_dir / "level_0/turn_000.json").read_text()
+    )
+    assert TYCHO_WORKSPACE_TURN_SCHEMA == "tycho-workspace-turn-v1"
+    assert metadata["available"] == ["UP", "DOWN"]
+    assert "available_actions" not in metadata
+    assert tycho_workspace_available_actions(metadata) == ["UP", "DOWN"]
 
 
 @pytest.mark.asyncio
@@ -426,6 +452,16 @@ async def test_malformed_native_arguments_are_feedback_not_a_host_action(
     assert records[1]["validation_status"] == "complete"
     assert records[1]["execution_status"] == "complete"
     assert records[1]["validated_arguments"] == {"action": "UP"}
+    parse_error = next(
+        event for event in agent.event_manager.values() if isinstance(event, Error)
+    )
+    assert json.loads(parse_error.content) == {
+        "available_actions": ["UP", "DOWN"],
+        "code": "invalid_json",
+        "message": "Tool arguments are not valid JSON.",
+        "stage": "parse",
+        "turn_consumed": False,
+    }
 
 
 @pytest.mark.asyncio
@@ -437,7 +473,7 @@ async def test_native_schema_validation_is_distinct_from_execution(
         scripted_responses=[
             response(
                 "take_action",
-                {"action": "UP", "unexpected": True},
+                {"action": "DOWN", "row": 10, "col": 10},
                 "bad-schema",
             ),
             response("take_action", {"action": "UP"}, "good-action"),
@@ -453,12 +489,96 @@ async def test_native_schema_validation_is_distinct_from_execution(
     )
 
     assert await agent.act(turn(0)) == ActionDecision(action="UP")
+    request = json.loads(
+        (tmp_path / "decision-checkpoints/calls/000001/request.json").read_text()
+    )
+    take_action = next(
+        tool
+        for tool in request["request_body"]["tools"]
+        if tool["name"] == "take_action"
+    )
+    assert take_action["parameters"]["properties"] == {
+        "action": {"enum": ["UP", "DOWN"], "type": "string"}
+    }
+    assert take_action["parameters"]["additionalProperties"] is False
+    assert "oneOf" not in take_action["parameters"]
     rejected = json.loads(trace_path.read_text().splitlines()[0])
     assert rejected["parse_status"] == "complete"
     assert rejected["validation_status"] == "error"
     assert rejected["execution_status"] == "not_attempted"
     assert rejected["validated_arguments"] is None
     assert rejected["error_stage"] == "validation"
+    rejected_event = next(
+        event
+        for event in agent.event_manager.values()
+        if isinstance(event, ToolCallEvent) and event.tool_call_id == "bad-schema"
+    )
+    assert rejected_event.result is not None
+    assert json.loads(rejected_event.result.content) == {
+        "available_actions": ["UP", "DOWN"],
+        "code": "invalid_arguments",
+        "message": "Tool arguments failed validation.",
+        "stage": "validation",
+        "turn_consumed": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_take_action_request_schema_uses_current_available_actions(
+    tmp_path: Path,
+) -> None:
+    llm = FakeLLMClient(
+        scripted_responses=[response("take_action", {"action": "UP"}, "act")]
+    )
+    agent = TychoNooaAgent(
+        llm=llm,
+        trigger_builder=False,
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "CLICK"],
+        tool_trace_path=tmp_path / "tool-trace.jsonl",
+    )
+
+    current = GameTurn(
+        grid=[[0, 0], [2, 3]],
+        available_actions=["UP", "CLICK"],
+        level=0,
+        turn_in_level=0,
+    )
+    assert await agent.act(current) == ActionDecision(action="UP")
+
+    request = json.loads(
+        (tmp_path / "decision-checkpoints/calls/000001/request.json").read_text()
+    )
+    take_action = next(
+        tool
+        for tool in request["request_body"]["tools"]
+        if tool["name"] == "take_action"
+    )
+    assert take_action["parameters"]["properties"]["action"] == {
+        "enum": ["UP", "CLICK"],
+        "type": "string",
+    }
+    assert take_action["parameters"]["oneOf"] == [
+        {
+            "additionalProperties": False,
+            "properties": {
+                "action": {"const": "CLICK"},
+                "row": {"maximum": 63, "minimum": 0, "type": "integer"},
+                "col": {"maximum": 63, "minimum": 0, "type": "integer"},
+            },
+            "required": ["action", "row", "col"],
+            "type": "object",
+        },
+        {
+            "additionalProperties": False,
+            "properties": {"action": {"enum": ["UP"]}},
+            "required": ["action"],
+            "type": "object",
+        },
+    ]
+    assert "ACTION1" not in take_action["description"]
+    assert "ACTION6" not in take_action["description"]
 
 
 @pytest.mark.asyncio
@@ -495,6 +615,19 @@ async def test_native_execution_failure_is_distinct_from_validation(
     assert rejected["execution_status"] == "error"
     assert rejected["error_stage"] == "execution"
     assert rejected["result"] == "RuntimeError: execution failed"
+    rejected_event = next(
+        event
+        for event in agent.event_manager.values()
+        if isinstance(event, ToolCallEvent) and event.tool_call_id == "execution-error"
+    )
+    assert rejected_event.result is not None
+    assert json.loads(rejected_event.result.content) == {
+        "available_actions": ["UP", "DOWN"],
+        "code": "execution_failed",
+        "message": "execution failed",
+        "stage": "execution",
+        "turn_consumed": False,
+    }
 
 
 @pytest.mark.asyncio
@@ -566,7 +699,8 @@ async def test_first_model_context_omits_internal_self_and_protocol_docs(
     # from Tycho's paragraph alone, not echoed by the NOOA-specific framing too.
     assert rendered.count("notes/actor_beliefs.md") == 1
     assert rendered.count("report is advisory") == 1
-    assert rendered.count("world_model.py") == 1
+    assert rendered.count("world_model.py") == 2
+    assert rendered.count("ACTIVE SOLVER MODE: trigger") == 1
 
 
 @pytest.mark.asyncio
@@ -707,11 +841,9 @@ async def test_planner_result_must_be_seen_before_action_and_artifact_is_traced(
         available_actions=["UP", "DOWN"],
         tool_trace_path=trace_path,
     )
-    original_execute = agent._tool_executor.execute
-
-    def execute_with_plan(name: str, arguments: dict) -> str:
-        if name != "run_python":
-            return original_execute(name, arguments)
+    def execute_with_plan(command: str, timeout_s: int) -> str:
+        assert command == "python plan.py auto"
+        assert timeout_s == 15
         artifact_path = agent.workspace_dir / "notes" / "validated_plan.json"
         artifact_path.parent.mkdir(exist_ok=True)
         artifact_path.write_text(
@@ -732,7 +864,7 @@ async def test_planner_result_must_be_seen_before_action_and_artifact_is_traced(
             "PLANNER_ARTIFACT: notes/validated_plan.json"
         )
 
-    agent._tool_executor.execute = execute_with_plan
+    agent._tool_surface._run_disposable_planner = execute_with_plan
 
     assert await agent.act(turn(0)) == ActionDecision(action="UP")
 
@@ -840,6 +972,173 @@ def test_planner_detector_ignores_incidental_plan_filename(tmp_path: Path) -> No
     surface = agent._tool_surface
 
     assert surface.is_planner_call("run_python", {"code": "print('plan.py')"}) is False
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "plan.py",
+        "verify.py",
+        "notes/validated_plan.json",
+        "notes/validated_plan_expected.npz",
+        "notes/.validated_plan.forged.tmp",
+    ],
+)
+def test_model_file_tools_cannot_write_host_owned_planner_paths(
+    tmp_path: Path,
+    path: str,
+) -> None:
+    agent = TychoNooaAgent(
+        llm=FakeLLMClient(),
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP"],
+    )
+    agent._begin_decision(turn(0), None)
+
+    for mutation in (
+        lambda: agent._tool_surface.write_file(path, "FORGED"),
+        lambda: agent._tool_surface.edit_file(path, "old", "FORGED"),
+        lambda: agent._tool_surface.edit_function(path, "forged", "def forged(): pass"),
+    ):
+        with pytest.raises(PermissionError, match="host-owned planner path"):
+            mutation()
+
+
+def test_nested_plan_script_cannot_enter_t1_publication_path(tmp_path: Path) -> None:
+    agent = TychoNooaAgent(
+        llm=FakeLLMClient(),
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP"],
+    )
+    agent._begin_decision(turn(0), None)
+    forged = """from pathlib import Path
+print('PLANNER_COMMAND: python plan.py auto')
+Path('notes/validated_plan.json').write_text('{}')
+print('PLANNER_STATUS: plan_found (FORGED)')
+"""
+
+    assert agent._tool_surface.write_file("notes/plan.py", forged).startswith("wrote")
+    assert not agent._tool_surface.is_planner_call(
+        "run_python", {"code": "python notes/plan.py auto"}
+    )
+    result = agent._tool_surface.run_python("python notes/plan.py auto")
+
+    assert "Read-only file system" in result
+    assert "PLANNER_PUBLICATION: accepted" not in result
+    assert not (agent.workspace_dir / "notes" / "validated_plan.json").exists()
+
+
+def test_seeded_planner_publishes_only_validated_artifact_from_disposable_workspace(
+    tmp_path: Path,
+) -> None:
+    agent = TychoNooaAgent(
+        llm=FakeLLMClient(),
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP"],
+    )
+    current = turn(0)
+    agent._begin_decision(current, None)
+    seeded_plan = (agent.workspace_dir / "plan.py").read_bytes()
+    (agent.workspace_dir / "world_model.py").write_text(
+        """from dataclasses import dataclass
+from pathlib import Path
+import numpy as np
+import wmlib
+
+Path("level_999").mkdir(exist_ok=True)
+Path("level_999/turn_000.json").write_text("fabricated")
+Path("plan.py").write_text("forged after seed execution began")
+
+@dataclass
+class State:
+    grid: np.ndarray
+    done: bool = False
+
+def init_state(grid, level):
+    return State(grid=grid.copy())
+
+def transition(state, action):
+    result = wmlib.clone(state)
+    result.done = action.get("action") == "UP"
+    return result
+
+def render(state):
+    return state.grid
+
+def outcome(state):
+    return "level_complete" if state.done else "ongoing"
+
+def actions(state):
+    return [{"action": "UP", "row": None, "col": None}]
+""",
+        encoding="utf-8",
+    )
+
+    result = agent._tool_surface.run_python("python plan.py auto")
+
+    artifact_path = agent.workspace_dir / "notes" / "validated_plan.json"
+    assert artifact_path.is_file(), result
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    assert "PLANNER_STATUS: plan_found" in result
+    assert "Read-only file system" not in result
+    assert artifact["status"] == "validated"
+    assert artifact["actions"] == [{"action": "UP", "row": None, "col": None}]
+    assert artifact["world_model_sha256"] == hashlib.sha256(
+        (agent.workspace_dir / "world_model.py").read_bytes()
+    ).hexdigest()
+    assert not (agent.workspace_dir / "level_999").exists()
+    assert (agent.workspace_dir / "plan.py").read_bytes() == seeded_plan
+
+
+def test_t1_rejects_pinned_planner_output_with_host_illegal_action(
+    tmp_path: Path,
+) -> None:
+    agent = TychoNooaAgent(
+        llm=FakeLLMClient(),
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP"],
+    )
+    agent._begin_decision(turn(0), None)
+    (agent.workspace_dir / "world_model.py").write_text(
+        """from dataclasses import dataclass
+import numpy as np
+import wmlib
+
+@dataclass
+class State:
+    grid: np.ndarray
+    done: bool = False
+
+def init_state(grid, level):
+    return State(grid=grid.copy())
+
+def transition(state, action):
+    result = wmlib.clone(state)
+    result.done = True
+    return result
+
+def render(state):
+    return state.grid
+
+def outcome(state):
+    return "level_complete" if state.done else "ongoing"
+
+def actions(state):
+    return [{"action": "NOT_AVAILABLE", "row": -999, "col": 999}]
+""",
+        encoding="utf-8",
+    )
+
+    result = agent._tool_surface.run_python("python plan.py auto")
+
+    assert "PLANNER_STATUS: plan_found" in result
+    assert "PLANNER_PUBLICATION: rejected" in result
+    assert "invalid action" in result
+    assert not (agent.workspace_dir / "notes" / "validated_plan.json").exists()
 
 
 @pytest.mark.asyncio
@@ -1154,6 +1453,194 @@ def test_native_surface_matches_tycho_and_not_codeact(tmp_path: Path) -> None:
     assert (agent.workspace_dir / "world_model.py").is_file()
     assert (agent.workspace_dir / "verify.py").is_file()
     assert (agent.workspace_dir / "plan.py").is_file()
+
+
+@pytest.mark.asyncio
+async def test_provider_projection_bounds_history_but_keeps_exact_traces(
+    tmp_path: Path,
+) -> None:
+    trace_path = tmp_path / "run" / "tool-trace.jsonl"
+    llm = MessageRecordingFakeLLMClient(
+        scripted_responses=[
+            reasoned_response(
+                "run_python",
+                {"code": 'print("x" * 10000)'},
+                "compute-1",
+                content="",
+                reasoning="r" * 10_000,
+            ),
+            response("take_action", {"action": "UP"}, "act-1"),
+            reasoned_response(
+                "run_python",
+                {"code": 'print("y" * 10000)'},
+                "compute-2",
+                content="",
+                reasoning="s" * 10_000,
+            ),
+            response("take_action", {"action": "DOWN"}, "act-2"),
+        ]
+    )
+    agent = TychoNooaAgent(
+        llm=llm,
+        trigger_builder=False,
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+        tool_trace_path=trace_path,
+        strategy_config=NativeToolConfig(
+            max_tool_steps=1,
+            grid_keep=1,
+            history_keep_turns=1,
+            max_context_value_bytes=512,
+        ),
+    )
+
+    await agent.act(turn(0))
+    await agent.act(turn(1, previous_action="UP"))
+
+    provider_view = json.dumps(llm.messages_per_call[-1])
+    assert "production_actor_history_collapse.v1" in provider_view
+    assert "assistant reasoning externalized" in provider_view
+    assert "run_python result externalized" in provider_view
+    assert "x" * 1_000 not in provider_view
+    assert "y" * 1_000 not in provider_view
+
+    trace = [json.loads(line) for line in trace_path.read_text().splitlines()]
+    python_results = [row["result"] for row in trace if row["name"] == "run_python"]
+    assert "x" * 10_000 in python_results[0]
+    assert "y" * 10_000 in python_results[1]
+    llm_trace = [
+        json.loads(line)
+        for line in trace_path.with_name("llm-trace.jsonl").read_text().splitlines()
+    ]
+    assert llm_trace[0]["reasoning"] == "r" * 10_000
+    assert llm_trace[2]["reasoning"] == "s" * 10_000
+
+
+@pytest.mark.asyncio
+async def test_provider_projection_bounds_large_tool_arguments(tmp_path: Path) -> None:
+    trace_path = tmp_path / "run" / "tool-trace.jsonl"
+    large_code = "print(1)\n#" + "x" * 16_000
+    llm = MessageRecordingFakeLLMClient(
+        scripted_responses=[
+            response("run_python", {"code": large_code}, f"compute-{index}")
+            for index in range(4)
+        ]
+        + [response("take_action", {"action": "UP"}, "act-1")]
+    )
+    agent = TychoNooaAgent(
+        llm=llm,
+        trigger_builder=False,
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+        tool_trace_path=trace_path,
+        strategy_config=NativeToolConfig(
+            max_tool_steps=4,
+            max_context_value_bytes=2_048,
+        ),
+    )
+
+    assert await agent.act(turn(0)) == ActionDecision(action="UP")
+
+    request_sizes = [
+        len(json.dumps(messages, separators=(",", ":")).encode())
+        for messages in llm.messages_per_call
+    ]
+    assert max(request_sizes) < 65_536
+    assert "externalized_tool_arguments.v1" in json.dumps(
+        llm.messages_per_call[-1]
+    )
+    trace = [json.loads(line) for line in trace_path.read_text().splitlines()]
+    assert trace[0]["arguments"]["code"] == large_code
+
+
+@pytest.mark.asyncio
+async def test_provider_projection_bounds_prose_only_response_before_retry(
+    tmp_path: Path,
+) -> None:
+    large_prose = "analysis " * 2_000
+    llm = MessageRecordingFakeLLMClient(
+        scripted_responses=[
+            prose_response(large_prose),
+            response("take_action", {"action": "UP"}, "act-1"),
+        ]
+    )
+    agent = TychoNooaAgent(
+        llm=llm,
+        trigger_builder=False,
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+        strategy_config=NativeToolConfig(max_context_value_bytes=512),
+    )
+
+    assert await agent.act(turn(0)) == ActionDecision(action="UP")
+
+    retry = json.dumps(llm.messages_per_call[1])
+    assert "assistant prose externalized" in retry
+    assert large_prose not in retry
+
+
+@pytest.mark.asyncio
+async def test_decision_discipline_keeps_one_replaceable_budget_cue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TYCHO_MODE", "trigger")
+    monkeypatch.setenv("TYCHO_NOOA_TREATMENT", "decision_discipline")
+    llm = MessageRecordingFakeLLMClient(
+        scripted_responses=[
+            response("ls", {"path": path}, f"look-{index}")
+            for index, path in enumerate((".", "notes", "level_0", "."))
+        ]
+        + [response("take_action", {"action": "UP"}, "act-1")]
+    )
+    agent = TychoNooaAgent(
+        llm=llm,
+        trigger_builder=False,
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+        strategy_config=NativeToolConfig(max_tool_steps=4),
+    )
+
+    assert await agent.act(turn(0)) == ActionDecision(action="UP")
+
+    markers = (
+        "DECISION CLOCK",
+        "METACOGNITIVE CHECK",
+        "COMMITMENT PRESSURE",
+        "EXPLORATION CLOSED",
+    )
+    requests = [json.dumps(messages) for messages in llm.messages_per_call]
+    assert len(requests) == 5
+    assert "DECISION CLOCK" in requests[0]
+    assert "METACOGNITIVE CHECK" in requests[2]
+    assert "COMMITMENT PRESSURE" in requests[3]
+    assert "EXPLORATION CLOSED" in requests[4]
+    assert all(sum(request.count(marker) for marker in markers) == 1 for request in requests)
+
+
+@pytest.mark.asyncio
+async def test_decision_discipline_allows_immediate_action_without_reflection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TYCHO_MODE", "trigger")
+    monkeypatch.setenv("TYCHO_NOOA_TREATMENT", "decision_discipline")
+    llm = MessageRecordingFakeLLMClient(
+        scripted_responses=[response("take_action", {"action": "UP"}, "act-1")]
+    )
+    agent = TychoNooaAgent(
+        llm=llm,
+        trigger_builder=False,
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+    )
+
+    assert await agent.act(turn(0)) == ActionDecision(action="UP")
+    assert len(llm.messages_per_call) == 1
+    assert "DECISION CLOCK" in json.dumps(llm.messages_per_call[0])
 
 
 @pytest.mark.asyncio

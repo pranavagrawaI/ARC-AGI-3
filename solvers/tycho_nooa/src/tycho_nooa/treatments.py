@@ -12,6 +12,23 @@ TREATMENT_ENV = "TYCHO_NOOA_TREATMENT"
 CONTROL = "control"
 TYPED_CANDIDATE_GOALS = "typed_candidate_goals"
 TRANSACTIONAL_BUILDER = "transactional_builder"
+DECISION_DISCIPLINE = "decision_discipline"
+INVESTIGATOR_IDENTITY = (
+    "You are one persistent investigator playing an unfamiliar grid game."
+)
+DECISION_MAKER_IDENTITY = (
+    "You are a bounded decision-maker acting in an unfamiliar grid game."
+)
+DECISION_DISCIPLINE_STRATEGY_PROMPT = (
+    "Your objective each turn is the best timely consequential decision, not complete "
+    "understanding. Time, provider calls, and environment actions are different scarce "
+    "resources. Before another investigation, identify the action currently favored, "
+    "the uncertainty preventing commitment, and the result that could change that action. "
+    "If you cannot name such a result, act. Legal survivable actions are also experiments: "
+    "predict the observable consequence, act, observe, and revise. Investigate further "
+    "when an action may be fatal or irreversible and one available computation can "
+    "materially reduce that risk. End the turn only by calling take_action exactly once."
+)
 
 
 @dataclass(frozen=True)
@@ -21,6 +38,7 @@ class TreatmentPolicy:
     name: str
     typed_candidate_goals: bool = False
     transactional_builder: bool = False
+    decision_discipline: bool = False
     builder_max_tool_steps: int | None = None
 
 
@@ -42,6 +60,10 @@ TREATMENTS = {
         # the source control, so transactions can finish or fail closed.
         builder_max_tool_steps=12,
     ),
+    DECISION_DISCIPLINE: TreatmentPolicy(
+        DECISION_DISCIPLINE,
+        decision_discipline=True,
+    ),
 }
 
 
@@ -51,12 +73,23 @@ def treatment_from_env(
 ) -> TreatmentPolicy:
     env = os.environ if environment is None else environment
     name = env.get(TREATMENT_ENV) or CONTROL
+    treatment = _resolve_treatment(name)
+    _validate_treatment_mode(treatment, mode, name)
+    return treatment
+
+
+def _resolve_treatment(name: str) -> TreatmentPolicy:
     try:
-        treatment = TREATMENTS[name]
+        return TREATMENTS[name]
     except KeyError as error:
         raise ValueError(
             f"unknown {TREATMENT_ENV}={name!r}; choose one of {sorted(TREATMENTS)}"
         ) from error
+
+
+def _validate_treatment_mode(
+    treatment: TreatmentPolicy, mode: ModePolicy, name: str
+) -> None:
     if treatment.typed_candidate_goals and mode.name != "orchestrator":
         raise ValueError(
             f"{TREATMENT_ENV}={name!r} requires TYCHO_MODE='orchestrator'; "
@@ -67,4 +100,8 @@ def treatment_from_env(
             f"{TREATMENT_ENV}={name!r} requires a Builder-owned source mode; "
             "it does not add a Builder to single or no_world_model controls"
         )
-    return treatment
+    if treatment.decision_discipline and mode.name != "trigger":
+        raise ValueError(
+            f"{TREATMENT_ENV}={name!r} requires TYCHO_MODE='trigger'; "
+            "its first comparison is against the ordinary incumbent"
+        )

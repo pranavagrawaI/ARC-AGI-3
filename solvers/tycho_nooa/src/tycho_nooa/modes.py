@@ -79,6 +79,14 @@ MODE_POLICIES: dict[str, ModePolicy] = {
     )
     for name, spec in MODES.items()
 }
+_MODE_PROMPT_FACTS = {
+    "trigger": "The Builder owns world_model.py and fires automatically on supported triggers.",
+    "orchestrator": (
+        "The Builder owns world_model.py and runs only when you request it."
+    ),
+    "single": "You own world_model.py; there is no Builder.",
+    "no_world_model": "There is no executable world model and no Builder.",
+}
 
 
 def _is_world_model_path(path: str) -> bool:
@@ -108,6 +116,11 @@ def served_mode(name: str) -> ModePolicy:
             f"implement — {missing}. Served modes: {sorted(_AUDITED_MODES)}."
         )
     return policy
+
+
+def mode_prompt_brief(policy: ModePolicy) -> str:
+    """Name the active mode and its ownership rule in model-visible language."""
+    return f"ACTIVE SOLVER MODE: {policy.name}\n{_MODE_PROMPT_FACTS[policy.name]}"
 
 
 def world_model_enabled(spec: ModePolicy | ModeSpec) -> bool:

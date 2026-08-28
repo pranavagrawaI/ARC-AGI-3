@@ -26,8 +26,17 @@ from tycho_nooa.epistemic import (
 )
 from tycho_nooa.llm import generation_max_tokens
 from tycho_nooa.llm_trace import LLMTrace
-from tycho_nooa.models import ActionDecision, GameTurn
-from tycho_nooa.modes import ModePolicy, mode_from_env, world_model_enabled
+from tycho_nooa.models import (
+    ActionDecision,
+    GameTurn,
+    tycho_workspace_turn_record,
+)
+from tycho_nooa.modes import (
+    ModePolicy,
+    mode_from_env,
+    mode_prompt_brief,
+    world_model_enabled,
+)
 from tycho_nooa.optionality import OPTIONALITY_PROMPT_BRIEF
 from tycho_nooa.protocol import ActionResultMessage
 from tycho_nooa.runtime_notice import prompt_brief
@@ -36,7 +45,12 @@ from tycho_nooa.strategy import NativeToolConfig, NativeToolStrategy
 from tycho_nooa.theory_evaluation import SandboxTheoryEvaluator
 from tycho_nooa.theory_transaction import TheoryEvaluator
 from tycho_nooa.tools import WorkspaceToolSurface, actor_tool_profile
-from tycho_nooa.treatments import TreatmentPolicy, treatment_from_env
+from tycho_nooa.treatments import (
+    DECISION_MAKER_IDENTITY,
+    INVESTIGATOR_IDENTITY,
+    TreatmentPolicy,
+    treatment_from_env,
+)
 from tycho_nooa.trigger_builder import BuilderExposure, TriggerBuilderLoop
 from tycho_nooa.trusted_runtime import TrustedRuntime, current_runtime, inspect_runtime
 from tycho_nooa.wm_probe import (
@@ -162,6 +176,7 @@ class TychoNooaAgent(Agent, context={"self": None, "state": None}):
     _deadline_config: Annotated[DecisionDeadlineConfig, hidden_field]
     _active_deadline: Annotated[DecisionDeadline | None, hidden_field]
     _actor_requested_exposures: Annotated[list[BuilderExposure], hidden_field]
+    _decision_cue_event_id: Annotated[Any | None, hidden_field]
 
     def __init__(
         self,
@@ -267,6 +282,7 @@ class TychoNooaAgent(Agent, context={"self": None, "state": None}):
         )
         self._active_deadline = None
         self._actor_requested_exposures = []
+        self._decision_cue_event_id = None
         self._resume_previous_turn(previous_turn, resume_workspace)
 
     def _resume_previous_turn(
@@ -290,8 +306,18 @@ class TychoNooaAgent(Agent, context={"self": None, "state": None}):
             if self._treatment.typed_candidate_goals
             else ""
         )
+        base_prompt = super()._resolve_system_prompt()
+        if self._treatment.decision_discipline:
+            if base_prompt.count(INVESTIGATOR_IDENTITY) != 1:
+                raise RuntimeError("Actor identity changed; re-audit decision discipline")
+            base_prompt = base_prompt.replace(
+                INVESTIGATOR_IDENTITY,
+                DECISION_MAKER_IDENTITY,
+                1,
+            )
         return (
-            f"{super()._resolve_system_prompt()}\n\n{OPTIONALITY_PROMPT_BRIEF}"
+            f"{base_prompt}\n\n{mode_prompt_brief(self._mode)}"
+            f"\n\n{OPTIONALITY_PROMPT_BRIEF}"
             f"{treatment_prompt}\n\n{prompt_brief(self._workspace.dir)}"
         )
 
@@ -360,13 +386,7 @@ class TychoNooaAgent(Agent, context={"self": None, "state": None}):
         )
         self._workspace.record(
             turn.grid,
-            level=turn.level,
-            turn_in_level=turn.turn_in_level,
-            action=turn.previous_action,
-            row=turn.previous_row,
-            col=turn.previous_col,
-            state=turn.state,
-            available=turn.available_actions,
+            **tycho_workspace_turn_record(turn),
         )
         self._register_evidence(f"level_{turn.level}/turn_{turn.turn_in_level:03d}.txt")
         self._register_evidence(f"level_{turn.level}/turn_{turn.turn_in_level:03d}.json")

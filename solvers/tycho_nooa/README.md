@@ -15,11 +15,13 @@ ARC host -> GameTurn -> TychoNooaAgent
                            |
              +-------------+-------------+
              |             |             |
-        workspace       run Python   take_action
-       (Tycho exact)    (Tycho exact)  (turn boundary)
+        workspace       run Python      take_action
+       (Tycho exact)  (read-only view)  (turn boundary)
              |             |
-             +------> validated planner
-                       (guarded hint)
+             +------> disposable planner
+                       | host validates and publishes
+                       v
+                  guarded plan hint
 
 Builder authority depends on the frozen Tycho mode:
 
@@ -37,15 +39,37 @@ The workspace and tool executor are imported from pinned Tycho rather than
 adapted into an experiment folder. The model sees ordinary native tools named
 `ls`, `read_file`, `write_file`, `edit_file`, `run_python`,
 `set_verbosity`, and `take_action`. `take_action` returns the sole decision for
-the turn; the next observation is passed to the same agent instance.
+the turn; its request schema enumerates only the actions available on that
+turn. Parse, validation, policy, and execution failures return one small
+structured model-visible error while the lossless trace keeps the underlying
+exception and stage. The next observation is passed to the same agent instance.
 
 Except in `no_world_model`, Tycho seeds `world_model.py`, `verify.py`, and
 `plan.py` in the workspace. The actor can revise the executable model only in
 `single`; writes are mechanically rejected in the builder-owned modes. Each
-mode receives its pinned Tycho world-model paragraph. A successful planner call
-writes `notes/validated_plan.json`; subsequent observations expose Tycho's
-guarded continuation only while the model hash, observed trajectory, and action
-availability still agree. The actor continues to commit one action at a time.
+mode receives its pinned Tycho world-model paragraph plus a two-line active-mode
+ownership notice. Generated Python sees the canonical workspace read-only, in a
+cleared environment with no credential or unrelated host-file access; its source
+is mounted at a sandbox-only path rather than written into the actor workspace,
+and `/tmp` is disposable scratch. A recognized planner call runs in a writable
+copy. The host accepts `notes/validated_plan.json` only after validating its
+frame, model, actions, hashes, and lengths, then publishes it atomically. Subsequent
+observations expose Tycho's guarded continuation only while the model hash,
+observed trajectory, and action availability still agree.
+
+Live turns call the action vocabulary `available_actions`. Tycho workspace turn
+schema v1 predates that host name and stores the same value as `available` in
+`turn_NNN.json`. `tycho_nooa.models` owns the only write/read projection between
+those names; the durable record does not duplicate the value under both keys.
+
+Provider-visible observations, tool arguments/results, prose, and reasoning are
+bounded. Large values become byte-counted SHA-256 receipts. Exact values remain
+in the workspace and schema-2 tool, LLM, and checkpoint evidence.
+
+`tycho-nooa-worker` reaches only the modules recorded in
+`MODULE-DISPOSITION.json`; `tests/test_architecture.py` recomputes that closure.
+Matched-actor, parity, compatibility, sterile execution, and other research
+modules remain importable for their own tests but are outside production reach.
 
 ### Sterile CodeAct execution vertical slice
 
@@ -293,6 +317,15 @@ objective-review passes are mechanically prevented from editing `world_model.py`
 In this treatment the untyped `invoke_builder` tool is replaced, not supplemented,
 and an objective request requires a candidate-goal ID so evidence validation
 cannot be bypassed.
+
+`trigger / decision_discipline` is a separate challenger, not the ordinary
+incumbent. It replaces the persistent-investigator framing with a bounded
+decision responsibility and keeps one model-visible budget cue that is updated,
+not appended, through `DECISION CLOCK`, `METACOGNITIVE CHECK`, `COMMITMENT
+PRESSURE`, and `EXPLORATION CLOSED`. The cue reports only calls used and
+remaining. It does not decide which uncertainty matters, require a reflection
+tool, or infer an action from prose. Only typed `take_action` can end the turn.
+This treatment requires its own matched evaluation before promotion.
 
 A packet prepared from a legacy run is a **matched fresh-actor warm restart**,
 not an exact continuation: runs that predate decision checkpoints do not retain

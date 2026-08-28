@@ -64,6 +64,10 @@ _Avoid_: Bundled architecture rebuild, development comparison
 A bundled implementation change intended to establish whether a whole capability path can function. It may establish feasibility and failure surfaces, but it does not identify the effect of any included mechanism without a later Mechanism Test.
 _Avoid_: Ablation, single-factor estimate
 
+**Behavioral Resolution Band**:
+A descriptive noise threshold estimated from repeated runs of one unchanged Solver Candidate under a frozen regime. Differences inside the band remain unresolved rather than being called improvements or regressions. It is not a formal significance test, and it must be re-estimated when the candidate, model, budgets, environment, scorer, or observed serving behavior materially changes.
+_Avoid_: Significance threshold, one-run tolerance, provider-name reset
+
 **Program Identification Experiment**:
 A falsifiable contestant experiment that tests whether admissible interaction can recover an executable theory sufficient for a specified decision. It establishes feasibility for one bounded claim rather than specifying or building a complete agent architecture.
 _Avoid_: Full agent, source-code recovery, world-model manifesto

@@ -9,6 +9,7 @@ from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
 from tycho_nooa import GameTurn, TychoNooaAgent
 from tycho_nooa import scribe as scribe_module
+from tycho_nooa.scribe import ScribeConfig
 
 
 def tool_response(tool: str, arguments: dict, call_id: str) -> LLMResponse:
@@ -39,9 +40,11 @@ class RecordingFakeLLMClient(FakeLLMClient):
     def __init__(self, scripted_responses: list[LLMResponse]) -> None:
         super().__init__(scripted_responses=scripted_responses)
         self.tools_per_call: list[list[str]] = []
+        self.messages_per_call: list[list[dict]] = []
 
     async def acall(self, messages, tools=None, output_model=None, **kwargs):
         self.tools_per_call.append([tool.name for tool in tools] if tools else [])
+        self.messages_per_call.append(messages)
         return await super().acall(
             messages, tools=tools, output_model=output_model, **kwargs
         )
@@ -164,6 +167,60 @@ async def test_scribe_fallback_writes_deterministic_note_when_model_writes_nothi
     assert scribe_module._FALLBACK_REASON in insights
     assert "solved.json:" in insights
     assert "terminal.json:" in insights
+
+
+@pytest.mark.asyncio
+async def test_scribe_projects_large_computation_without_losing_trace(
+    tmp_path: Path,
+) -> None:
+    large_code = 'print("x" * 10000)\n#' + "y" * 10_000
+    llm = RecordingFakeLLMClient(
+        scripted_responses=[
+            tool_response("take_action", {"action": "UP"}, "actor-0"),
+            LLMResponse(
+                raw_response=None,
+                content="",
+                reasoning="r" * 10_000,
+                tool_calls=[
+                    ToolCall(
+                        id="scribe-python",
+                        name="run_python",
+                        arguments=json.dumps({"code": large_code}),
+                    )
+                ],
+                finish_reason="tool_calls",
+                assistant_message={"role": "assistant", "content": None},
+                usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            ),
+            prose_response("done"),
+        ]
+    )
+    trace_path = tmp_path / "tool-trace.jsonl"
+    agent = TychoNooaAgent(
+        llm=llm,
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+        tool_trace_path=trace_path,
+        trigger_builder=False,
+        scribe_config=ScribeConfig(
+            max_tokens=4_096,
+            max_context_value_bytes=512,
+        ),
+    )
+
+    await agent.act(turn(0))
+    await agent._summarize_level(0)
+
+    provider_view = json.dumps(llm.messages_per_call[-1])
+    assert "externalized_tool_arguments.v1" in provider_view
+    assert "assistant reasoning externalized" in provider_view
+    assert "run_python result externalized" in provider_view
+    assert large_code not in provider_view
+    trace = [json.loads(line) for line in trace_path.read_text().splitlines()]
+    scribe = next(row for row in trace if row["tool_call_id"] == "scribe-python")
+    assert scribe["arguments"]["code"] == large_code
+    assert "x" * 10_000 in scribe["result"]
 
 
 @pytest.mark.asyncio

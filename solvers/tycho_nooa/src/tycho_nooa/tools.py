@@ -2,25 +2,33 @@
 
 from __future__ import annotations
 
+import copy
 import json
+import shutil
+import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from nooa.unifiedllm import Tool
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, create_model, model_validator
 from tycho.workspace.agent_tools import ToolExecutor, canonical, tool_specs
 from tycho.workspace.workspace import diff_text, grid_text
 
 from tycho_nooa.epistemic import GoalToolSurface
 from tycho_nooa.models import ActionDecision, GameTurn
 from tycho_nooa.modes import ModePolicy
-from tycho_nooa.planner import PlannerIntegration, planner_command
+from tycho_nooa.planner import (
+    PlannerIntegration,
+    is_host_owned_planner_path,
+    planner_command,
+)
 from tycho_nooa.runtime_notice import tool_note
 from tycho_nooa.theory_transaction import TheoryTransaction
 from tycho_nooa.trusted_runtime import TRUSTED_PATHS
+from tycho_nooa.wm_probe import TrustedRuntimePythonSandbox
 
 
 class _Arguments(BaseModel):
@@ -66,10 +74,99 @@ class _InvokeBuilderArguments(_Arguments):
     reason: str = ""
 
 
+def _action_schema_extra(schema: dict[str, Any]) -> None:
+    """Expose the same action-dependent shape that request validation enforces."""
+    properties = schema["properties"]
+    actions = properties["action"].get("enum")
+    if not isinstance(actions, list):
+        return
+    coordinate = {"maximum": 63, "minimum": 0, "type": "integer"}
+    non_click_actions = [action for action in actions if action != "CLICK"]
+    if "CLICK" in actions and non_click_actions:
+        schema["oneOf"] = [
+            {
+                "additionalProperties": False,
+                "properties": {
+                    "action": {"const": "CLICK"},
+                    "row": coordinate,
+                    "col": coordinate,
+                },
+                "required": ["action", "row", "col"],
+                "type": "object",
+            },
+            {
+                "additionalProperties": False,
+                "properties": {"action": {"enum": non_click_actions}},
+                "required": ["action"],
+                "type": "object",
+            },
+        ]
+    elif actions == ["CLICK"]:
+        properties["row"] = coordinate
+        properties["col"] = coordinate
+        schema["required"] = ["action", "row", "col"]
+    else:
+        properties.pop("row", None)
+        properties.pop("col", None)
+
+
 class _ActionArguments(_Arguments):
+    model_config = ConfigDict(extra="forbid", json_schema_extra=_action_schema_extra)
+
     action: str
     row: int | None = Field(default=None, ge=0, le=63)
     col: int | None = Field(default=None, ge=0, le=63)
+
+    @model_validator(mode="after")
+    def validate_action_shape(self) -> _ActionArguments:
+        supplied_coordinates = self.model_fields_set.intersection({"row", "col"})
+        if self.action == "CLICK":
+            if self.row is None or self.col is None:
+                raise ValueError("CLICK requires integer row and col")
+        elif supplied_coordinates:
+            raise ValueError(f"{self.action} does not accept row or col")
+        return self
+
+
+class _ActionTool(Tool):
+    """Retain action-shape composition that NOOA's generic cleaner discards."""
+
+    def get_parameter_schema(self, *, strict: bool = False) -> dict[str, Any]:
+        model = self.parameters_model
+        assert model is not None
+        raw_schema = model.model_json_schema()
+        branches = raw_schema.get("oneOf")
+        schema = super().get_parameter_schema(
+            strict=False if isinstance(branches, list) else strict
+        )
+        if raw_schema.get("additionalProperties") is False:
+            schema["additionalProperties"] = False
+        if isinstance(branches, list):
+            schema["oneOf"] = branches
+        return schema
+
+
+class ModelToolError(RuntimeError):
+    """A stable model-visible rejection backed by a detailed raw trace."""
+
+    def __init__(self, *, stage: str, code: str, message: str) -> None:
+        super().__init__(message)
+        self.stage = stage
+        self.code = code
+        self.message = message
+
+
+def _current_action_arguments(actions: list[str]) -> type[BaseModel]:
+    """Bind the request schema to the current turn's action vocabulary."""
+    values = tuple(dict.fromkeys(actions))
+    if not values:
+        raise RuntimeError("current turn advertises no available actions")
+    action_type = cast(Any, Literal)[values]
+    return create_model(
+        "_CurrentActionArguments",
+        __base__=_ActionArguments,
+        action=(action_type, ...),
+    )
 
 
 class _CheckoutTheoryArguments(_Arguments):
@@ -323,12 +420,24 @@ class WorkspaceToolSurface:
             include_set_verbosity=self._profile.include_set_verbosity,
         ):
             name = spec["name"]
+            parameters_model = _ARGUMENT_MODELS[name]
+            description = spec["description"] + runtime_note.get(name, "")
+            if name == "take_action" and self._turn is not None:
+                turn = self._turn
+                parameters_model = _current_action_arguments(turn.available_actions)
+                description = (
+                    "Commit exactly one environment action from the current turn's "
+                    f"available_actions: {turn.available_actions}. Pass row and col only "
+                    "when that action is a click. This ends the turn; the successor "
+                    "arrives on the next call."
+                )
+            tool_type = _ActionTool if name == "take_action" else Tool
             tools.append(
-                Tool(
+                tool_type(
                     name=name,
-                    description=spec["description"] + runtime_note.get(name, ""),
+                    description=description,
                     callable=dispatch[name],
-                    parameters_model=_ARGUMENT_MODELS[name],
+                    parameters_model=parameters_model,
                 )
             )
         if self._goal_tools is not None:
@@ -372,13 +481,32 @@ class WorkspaceToolSurface:
                 execution_status="not_attempted",
                 error_stage="validation",
             )
-            raise
+            raise ModelToolError(
+                stage="validation",
+                code="invalid_arguments",
+                message="Tool arguments failed validation.",
+            ) from error
         normalized_arguments = validated.model_dump(exclude_none=True)
         try:
             if self._goal_tools is not None and tool.name in self._goal_tools.TOOL_NAMES:
                 result = self._goal_tools.dispatch(tool, arguments)
             else:
                 result = tool.callable(**normalized_arguments)
+        except ModelToolError as error:
+            self._record_tool_call(
+                tool.name,
+                arguments,
+                status="error",
+                result=error.message,
+                tool_call_id=tool_call_id,
+                raw_arguments=raw_arguments,
+                validated_arguments=normalized_arguments,
+                execution_status=(
+                    "not_attempted" if error.stage == "policy" else "error"
+                ),
+                error_stage=error.stage,
+            )
+            raise
         except Exception as error:
             self._record_tool_call(
                 tool.name,
@@ -522,6 +650,7 @@ class WorkspaceToolSurface:
 
     def write_file(self, path: str, content: str) -> str:
         self._authorize_transactional_builder_write(path)
+        self._authorize_planner_write(path)
         self._authorize_trusted_runtime_write(path)
         self._authorize_actor_write(path)
         return self._execute_theory_edit(
@@ -534,6 +663,7 @@ class WorkspaceToolSurface:
 
     def edit_file(self, path: str, old: str, new: str) -> str:
         self._authorize_transactional_builder_write(path)
+        self._authorize_planner_write(path)
         self._authorize_trusted_runtime_write(path)
         self._authorize_actor_write(path)
         return self._execute_theory_edit(
@@ -546,6 +676,7 @@ class WorkspaceToolSurface:
 
     def edit_function(self, path: str, name: str, code: str) -> str:
         self._authorize_transactional_builder_write(path)
+        self._authorize_planner_write(path)
         self._authorize_trusted_runtime_write(path)
         self._authorize_actor_write(path)
         return self._execute_theory_edit(
@@ -555,6 +686,13 @@ class WorkspaceToolSurface:
                 "edit_function", {"path": path, "name": name, "code": code}
             ),
         )
+
+    def _authorize_planner_write(self, path: str) -> None:
+        if is_host_owned_planner_path(self._executor.ws.dir, path):
+            raise PermissionError(
+                f"cannot modify host-owned planner path {path!r}; "
+                "the seeded planner and validated artifacts are host-owned"
+            )
 
     def _authorize_trusted_runtime_write(self, path: str) -> None:
         requested = Path(path.replace("\\", "/"))
@@ -609,11 +747,40 @@ class WorkspaceToolSurface:
 
     def run_python(self, code: str, timeout_s: int = 15) -> str:
         invocation = self._planner.begin_invocation(code)
-        result = self._executor.execute(
-            "run_python", {"code": code, "timeout_s": timeout_s}
-        )
+        if invocation.command is None:
+            result = self._executor.execute(
+                "run_python", {"code": code, "timeout_s": timeout_s}
+            )
+        else:
+            result = self._run_disposable_planner(invocation.command, timeout_s)
         self._planner.finish_invocation(invocation, result)
         return result
+
+    def _run_disposable_planner(self, command: str, timeout_s: int) -> str:
+        """Run seeded planner code in writable scratch, then validate its output."""
+        canonical_workspace = self._executor.ws
+        canonical = canonical_workspace.dir.resolve()
+        seeded_plan = self._planner.seeded_plan_bytes()
+        with tempfile.TemporaryDirectory(prefix="tycho-plan-") as temporary_root:
+            candidate = Path(temporary_root) / canonical.name
+            shutil.copytree(canonical, candidate, symlinks=True)
+            candidate_plan = candidate / "plan.py"
+            candidate_plan.unlink(missing_ok=True)
+            candidate_plan.write_bytes(seeded_plan)
+
+            candidate_workspace = copy.copy(canonical_workspace)
+            candidate_workspace.dir = candidate
+            candidate_executor = copy.copy(self._executor)
+            candidate_executor.ws = candidate_workspace
+            candidate_executor._python_sandbox = TrustedRuntimePythonSandbox(
+                workspace_read_only=False
+            )
+            result = candidate_executor.execute(
+                "run_python",
+                {"code": command, "timeout_s": timeout_s},
+            )
+            publication = self._planner.publish_candidate(candidate, result)
+        return f"{result.rstrip()}\n{publication}"
 
     @staticmethod
     def is_planner_call(name: str, arguments: dict[str, Any]) -> bool:

@@ -20,6 +20,66 @@ ELIDED_OBSERVATION = "tycho_nooa.elided_observation"
 OBSERVATION_REF = "tycho_nooa.observation_ref"
 
 
+def bounded_context_text(value: str, *, limit: int, kind: str) -> str:
+    """Bound one provider-visible value while retaining its external identity."""
+    if limit < 256:
+        raise ValueError("provider context value limit must be at least 256 bytes")
+    encoded = value.encode("utf-8")
+    if len(encoded) <= limit:
+        return value
+    label = kind.encode("utf-8")[:64].decode("utf-8", errors="ignore")
+    digest = hashlib.sha256(encoded).hexdigest()
+    marker = (
+        f"\n<{label} externalized: {len(encoded)} bytes; sha256={digest}; "
+        "exact value retained in host trace/workspace>"
+    )
+    marker_bytes = marker.encode("utf-8")
+    prefix = encoded[: max(0, limit - len(marker_bytes))]
+    return prefix.decode("utf-8", errors="ignore") + marker
+
+
+def bounded_tool_arguments(
+    arguments: dict[str, Any], *, limit: int, tool_name: str
+) -> dict[str, Any]:
+    """Replace bulky replay-only arguments with a valid structural receipt."""
+    if limit < 256:
+        raise ValueError("provider context value limit must be at least 256 bytes")
+    encoded = json.dumps(
+        arguments,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(encoded) <= limit:
+        return arguments
+    receipt = {
+        "_provider_projection": {
+            "schema": "externalized_tool_arguments.v1",
+            "bytes": len(encoded),
+            "sha256": "sha256:" + hashlib.sha256(encoded).hexdigest(),
+            "key_count": len(arguments),
+            "tool": tool_name,
+            "exact": "host tool trace",
+        }
+    }
+    if len(json.dumps(receipt, separators=(",", ":")).encode("utf-8")) > limit:
+        raise ValueError("tool argument receipt exceeds provider context limit")
+    return receipt
+
+
+def bounded_observation(prompt: str, elided: str, *, limit: int) -> str:
+    """Inline one bounded current view or fall back to its evidence receipt."""
+    if len(prompt.encode("utf-8")) <= limit:
+        return prompt
+    digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    receipt = (
+        f"{elided}\n\n"
+        f"<observation payload externalized: sha256={digest}; "
+        "use the named workspace frame or run_python for the exact value>"
+    )
+    return bounded_context_text(receipt, limit=limit, kind="observation receipt")
+
+
 def collapse_old_actor_turns(event_manager: Any, *, keep: int) -> None:
     """Keep recent cognition exact and replace older turns with host facts.
 
@@ -98,7 +158,13 @@ def _prior_actor_summary(items: list[tuple[str, Any]]) -> dict[str, Any]:
     return {}
 
 
-def retain_assistant_turn(event_manager: Any, event_id: Any, response: Any) -> None:
+def retain_assistant_turn(
+    event_manager: Any,
+    event_id: Any,
+    response: Any,
+    *,
+    max_bytes: int | None = None,
+) -> None:
     """Keep the assistant's own message only when it carries prose.
 
     NOOA's `LLMOutput` is the only event that renders as a plain assistant message
@@ -123,11 +189,26 @@ def retain_assistant_turn(event_manager: Any, event_id: Any, response: Any) -> N
     committing 0 actions where the same code had committed 20 the run before.
     """
     if response.content:
+        if max_bytes is not None:
+            updates = {
+                "content": bounded_context_text(
+                    str(response.content),
+                    limit=max_bytes,
+                    kind="assistant prose",
+                )
+            }
+            if getattr(response, "reasoning", None):
+                updates["reasoning"] = bounded_context_text(
+                    str(response.reasoning),
+                    limit=max_bytes,
+                    kind="assistant reasoning",
+                )
+            event_manager.update(event_id, **updates)
         return
     event_manager.remove(event_id)
 
 
-def replayed_reasoning(response: Any) -> str | None:
+def replayed_reasoning(response: Any, *, max_bytes: int | None = None) -> str | None:
     """The model's own words, to ride on the tool call rather than beside it.
 
     `ToolCallEvent.reasoning` is replayed on the tool-call message itself, which
@@ -136,7 +217,14 @@ def replayed_reasoning(response: Any) -> str | None:
     reasoning channel; see [[retain_assistant_turn]] for why prose alone decides
     whether the assistant event survives.
     """
-    return getattr(response, "reasoning", None) or str(response.content) or None
+    value = getattr(response, "reasoning", None) or str(response.content) or None
+    if value is None or max_bytes is None:
+        return value
+    return bounded_context_text(
+        str(value),
+        limit=max_bytes,
+        kind="assistant reasoning",
+    )
 
 
 def evict_old_grids(event_manager: Any, *, keep: int) -> None:
