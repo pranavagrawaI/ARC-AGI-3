@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import ast
 import json
+import tomllib
 from pathlib import Path
 
 SOURCE = Path(__file__).parents[1] / "src"
 PACKAGE = SOURCE / "tycho_nooa"
 DISPOSITIONS = Path(__file__).parents[1] / "MODULE-DISPOSITION.json"
+PYPROJECT = Path(__file__).parents[1] / "pyproject.toml"
 
 
 def test_solver_does_not_import_experiments() -> None:
@@ -40,7 +42,7 @@ def test_worker_runtime_closure_is_explicit_and_research_free() -> None:
         for module in members
     }
 
-    assert document["schema"] == "tycho-nooa-module-disposition-v1"
+    assert document["schema"] == "tycho-nooa-module-disposition-v2"
     assert sum(len(members) for members in groups.values()) == len(dispositions)
     assert set(dispositions) == set(modules)
     assert set(document["runtime_closure"]) == closure
@@ -48,9 +50,14 @@ def test_worker_runtime_closure_is_explicit_and_research_free() -> None:
         dispositions[module] in {"kernel", "incumbent", "challenger"}
         for module in closure
     )
+    runtime_file_modules = {
+        Path(item["path"]).stem
+        for item in document["runtime_files"]
+        if item["path"].endswith(".py")
+    }
     assert all(
         dispositions[module] in {"research", "historical"}
-        for module in set(modules) - closure
+        for module in set(modules) - closure - runtime_file_modules
     )
     assert set(document["group_metadata"]) == set(groups)
     assert all(
@@ -58,6 +65,53 @@ def test_worker_runtime_closure_is_explicit_and_research_free() -> None:
         for group in groups
         for field in ("reason", "evidence_owner")
     )
+
+
+def test_wheel_allowlist_equals_declared_runtime_closure() -> None:
+    document = json.loads(DISPOSITIONS.read_text())
+    pyproject = tomllib.loads(PYPROJECT.read_text())
+    wheel = pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]
+    runtime_files = document["runtime_files"]
+    module_dispositions = {
+        module: disposition
+        for disposition, members in document["groups"].items()
+        for module in members
+    }
+    expected_modules = {
+        f"src/tycho_nooa/{module}.py"
+        for module in document["runtime_closure"]
+    }
+    expected_files = {
+        f"src/tycho_nooa/{item['path']}"
+        for item in runtime_files
+    }
+
+    assert document["schema"] == "tycho-nooa-module-disposition-v2"
+    assert len({item["path"] for item in runtime_files}) == len(runtime_files)
+    assert all(
+        item[field]
+        for item in runtime_files
+        for field in ("path", "disposition", "reason", "evidence_owner")
+    )
+    assert all(
+        not Path(item["path"]).is_absolute()
+        and ".." not in Path(item["path"]).parts
+        and (PACKAGE / item["path"]).is_file()
+        for item in runtime_files
+    )
+    assert all(
+        item["disposition"] in {"kernel", "incumbent", "challenger"}
+        for item in runtime_files
+    )
+    assert all(
+        module_dispositions[Path(item["path"]).stem] == item["disposition"]
+        for item in runtime_files
+        if item["path"].endswith(".py")
+    )
+    assert "packages" not in wheel
+    assert wheel["sources"] == ["src"]
+    assert len(wheel["only-include"]) == len(expected_modules | expected_files)
+    assert set(wheel["only-include"]) == expected_modules | expected_files
 
 
 def _transitive_internal_imports(
