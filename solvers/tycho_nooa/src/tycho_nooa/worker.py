@@ -9,8 +9,20 @@ import sys
 from pathlib import Path
 from typing import Any, TextIO
 
+from tycho_nooa.action_batch import MAX_ACTIONS_PER_BATCH
 from tycho_nooa.agent import TychoNooaAgent
-from tycho_nooa.llm import build_llm
+from tycho_nooa.llm import (
+    build_llm,
+    generation_action_demand_disable_thinking,
+    generation_action_demand_max_tokens,
+    generation_force_action_tool,
+    generation_max_actor_calls,
+    generation_max_actor_calls_after_initial,
+    generation_max_tokens,
+    generation_max_tokens_after_initial,
+    generation_retries,
+    generation_timeout_seconds,
+)
 from tycho_nooa.models import ActionDecision, GameTurn
 from tycho_nooa.protocol import (
     HOST_PREFIX,
@@ -55,9 +67,30 @@ class WorkerSession:
             "metadata": {
                 "agent": "tycho_nooa.TychoNooaAgent",
                 "client_kind": self.client_kind,
+                "decision_envelope": {
+                    "force_action_tool": generation_force_action_tool(),
+                    "max_actor_calls": generation_max_actor_calls(),
+                    "max_actor_calls_after_initial": (
+                        generation_max_actor_calls_after_initial()
+                    ),
+                    "max_output_tokens_per_call": generation_max_tokens(),
+                    "max_output_tokens_per_call_after_initial": (
+                        generation_max_tokens_after_initial()
+                    ),
+                    "action_demand_max_output_tokens": (
+                        generation_action_demand_max_tokens()
+                    ),
+                    "action_demand_disable_thinking": (
+                        generation_action_demand_disable_thinking()
+                    ),
+                    "model_retries": generation_retries(),
+                    "model_timeout_seconds": generation_timeout_seconds(),
+                    "max_actions_per_batch": MAX_ACTIONS_PER_BATCH,
+                },
                 "workspace": str(self.agent.workspace_dir),
                 "mode": self.agent.mode_name,
                 "treatment": self.agent.treatment_name,
+                "level_boundary_policy": self.agent.level_boundary_policy,
                 "sandbox_runtime": os.environ.get("TYCHO_SANDBOX_RUNTIME", "auto"),
             },
         }
@@ -99,6 +132,10 @@ class WorkerSession:
                 grid=observation.grid,
                 available_actions=observation.available_actions,
                 sequence=message.sequence,
+                action_limit=message.action_limit,
+                actions_used=message.actions_used,
+                actions_remaining=message.actions_remaining,
+                final_permitted_action=message.final_permitted_action,
                 level=message.level,
                 turn_in_level=message.turn_in_level,
                 levels_completed=observation.levels_completed,

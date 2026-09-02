@@ -11,10 +11,12 @@ from typing import Annotated, Any
 from nooa import hidden, strategy
 from nooa.agent import Agent
 from nooa.agentdoc import hidden as hidden_field
+from nooa.events import Task
 from nooa.unifiedllm import UnifiedLLM
 from tycho.workspace.agent_tools import ToolExecutor
 from tycho.workspace.workspace import GameWorkspace
 
+from tycho_nooa.action_batch import ActionBatchDecision, PendingActionBatch
 from tycho_nooa.builder import BuilderConfig
 from tycho_nooa.deadlines import DecisionDeadline, DecisionDeadlineConfig
 from tycho_nooa.decision_checkpoints import DecisionCheckpointRecorder
@@ -24,7 +26,22 @@ from tycho_nooa.epistemic import (
     GoalToolSurface,
     RequestBuilderArguments,
 )
-from tycho_nooa.llm import generation_max_tokens
+from tycho_nooa.history import (
+    ELIDED_OBSERVATION,
+    OBSERVATION_REF,
+    bounded_observation,
+    collapse_old_actor_turns,
+    evict_old_grids,
+)
+from tycho_nooa.llm import (
+    generation_action_demand_disable_thinking,
+    generation_action_demand_max_tokens,
+    generation_force_action_tool,
+    generation_max_actor_calls,
+    generation_max_actor_calls_after_initial,
+    generation_max_tokens,
+    generation_max_tokens_after_initial,
+)
 from tycho_nooa.llm_trace import LLMTrace
 from tycho_nooa.models import (
     ActionDecision,
@@ -40,13 +57,18 @@ from tycho_nooa.modes import (
 from tycho_nooa.optionality import OPTIONALITY_PROMPT_BRIEF
 from tycho_nooa.protocol import ActionResultMessage
 from tycho_nooa.runtime_notice import prompt_brief
-from tycho_nooa.scribe import ScribeConfig, ScribeStrategy
+from tycho_nooa.scribe import (
+    ScribeConfig,
+    ScribeStrategy,
+    _write_level_insight_fallback,
+)
 from tycho_nooa.strategy import NativeToolConfig, NativeToolStrategy
 from tycho_nooa.theory_evaluation import SandboxTheoryEvaluator
 from tycho_nooa.theory_transaction import TheoryEvaluator
 from tycho_nooa.tools import WorkspaceToolSurface, actor_tool_profile
 from tycho_nooa.treatments import (
     DECISION_MAKER_IDENTITY,
+    DETERMINISTIC_LEVEL_CHECKPOINT,
     INVESTIGATOR_IDENTITY,
     TreatmentPolicy,
     treatment_from_env,
@@ -60,6 +82,11 @@ from tycho_nooa.wm_probe import (
 )
 
 LEVEL_COMPLETE_RECORD = "level_{level}/level_complete.json"
+LEVEL_BOUNDARY_CHECKPOINT = "level_{level}/level_boundary_checkpoint.json"
+DETERMINISTIC_LEVEL_INSIGHT_REASON = (
+    "TYCHO_NOOA_TREATMENT=single_decision_discipline selected the "
+    "deterministic level checkpoint; the model-backed Scribe was not invoked"
+)
 
 
 def _builder_runtime(
@@ -158,8 +185,8 @@ class TychoNooaAgent(Agent, context={"self": None, "state": None}):
 
     Work in one durable game workspace and one growing conversation. Use the
     native file and Python tools to inspect evidence and preserve what you
-    learn. Commit exactly one legal environment action per turn with
-    take_action.
+    learn. Commit through take_actions: pass one legal environment action, or a
+    bounded sequence when later actions need no new judgment.
     """
 
     _workspace: Annotated[GameWorkspace, hidden_field]
@@ -177,6 +204,9 @@ class TychoNooaAgent(Agent, context={"self": None, "state": None}):
     _active_deadline: Annotated[DecisionDeadline | None, hidden_field]
     _actor_requested_exposures: Annotated[list[BuilderExposure], hidden_field]
     _decision_cue_event_id: Annotated[Any | None, hidden_field]
+    _pending_action_batch: Annotated[PendingActionBatch | None, hidden_field]
+    _last_action_result: Annotated[ActionResultMessage | None, hidden_field]
+    _action_batch_trace_path: Annotated[Path | None, hidden_field]
 
     def __init__(
         self,
@@ -250,7 +280,20 @@ class TychoNooaAgent(Agent, context={"self": None, "state": None}):
         )
         max_tokens = generation_max_tokens()
         self._native_tool_config = strategy_config or NativeToolConfig(
-            max_tokens=max_tokens
+            # NativeToolStrategy makes these exploration requests and then one
+            # final action-only request. Express the runtime contract in total
+            # Actor calls so the operational ceiling cannot be off by one.
+            force_action_tool=generation_force_action_tool(),
+            max_tool_steps=generation_max_actor_calls() - 1,
+            max_tool_steps_after_initial=(
+                generation_max_actor_calls_after_initial() - 1
+            ),
+            max_tokens=max_tokens,
+            max_tokens_after_initial=generation_max_tokens_after_initial(),
+            action_demand_max_tokens=generation_action_demand_max_tokens(),
+            action_demand_disable_thinking=(
+                generation_action_demand_disable_thinking()
+            ),
         )
         self._scribe_config = scribe_config or ScribeConfig(max_tokens=max_tokens)
         builder_config = _builder_config(builder_config, self._treatment, max_tokens)
@@ -283,6 +326,11 @@ class TychoNooaAgent(Agent, context={"self": None, "state": None}):
         self._active_deadline = None
         self._actor_requested_exposures = []
         self._decision_cue_event_id = None
+        self._pending_action_batch = None
+        self._last_action_result = None
+        self._action_batch_trace_path = _sibling_trace(
+            trace_path, "action-batch-trace.jsonl"
+        )
         self._resume_previous_turn(previous_turn, resume_workspace)
 
     def _resume_previous_turn(
@@ -337,6 +385,11 @@ class TychoNooaAgent(Agent, context={"self": None, "state": None}):
     def treatment_name(self) -> str:
         return self._treatment.name
 
+    @property
+    @hidden
+    def level_boundary_policy(self) -> str:
+        return self._treatment.level_boundary_policy
+
     async def act(
         self,
         turn: GameTurn,
@@ -345,14 +398,19 @@ class TychoNooaAgent(Agent, context={"self": None, "state": None}):
     ) -> ActionDecision:
         """Record one observation and obtain one environment commitment."""
         deadline = self._begin_decision(turn, decision_timeout_seconds)
-        exposure = await self._automatic_builder_exposure(turn, deadline)
-        self._tool_surface.set_builder_report(
-            exposure.delivered_report if exposure is not None else None
-        )
         self._active_deadline = deadline
         self._actor_requested_exposures = []
+        exposure = None
         try:
-            decision = await self._choose_action(turn)
+            decision = self._continue_action_batch(turn)
+            if decision is None:
+                exposure = await self._automatic_builder_exposure(turn, deadline)
+                self._tool_surface.set_builder_report(
+                    exposure.delivered_report if exposure is not None else None
+                )
+                decision = await self._choose_action(turn)
+            else:
+                self._tool_surface.set_builder_report(None)
         except Exception as error:
             self._record_actor_error(turn, exposure, error)
             raise
@@ -360,6 +418,132 @@ class TychoNooaAgent(Agent, context={"self": None, "state": None}):
             self._active_deadline = None
         self._record_actor_result(turn, exposure, decision)
         return decision
+
+    def _stage_action_batch(
+        self, batch: ActionBatchDecision, turn: GameTurn
+    ) -> ActionDecision:
+        """Retain the tail while returning the first ordinary host decision."""
+        if self._pending_action_batch is not None:
+            raise RuntimeError("cannot stage a new action batch over a pending batch")
+        pending = PendingActionBatch(
+            batch=batch,
+            anchor_sequence=turn.sequence,
+            anchor_level=turn.level,
+            anchor_turn_in_level=turn.turn_in_level,
+        )
+        first = batch.actions[0].decision()
+        self._pending_action_batch = None if pending.exhausted else pending
+        self._record_action_batch_event(
+            "submitted",
+            turn,
+            pending,
+            batch_length=len(batch.actions),
+            rationale=batch.rationale,
+            stop_on_no_change=batch.stop_on_no_change,
+        )
+        self._record_action_batch_event(
+            "released", turn, pending, offset=0, action=first.model_dump()
+        )
+        if pending.exhausted:
+            self._record_action_batch_event(
+                "exhausted", turn, pending, model_calls_avoided=0
+            )
+        return first
+
+    def _continue_action_batch(self, turn: GameTurn) -> ActionDecision | None:
+        pending = self._pending_action_batch
+        if pending is None:
+            return None
+        offset = pending.next_offset
+        decision, reason = pending.release(turn, self._last_action_result)
+        if decision is None:
+            self._record_action_batch_event(
+                "invalidated", turn, pending, offset=offset, reason=reason
+            )
+            self._pending_action_batch = None
+            return None
+        self._record_action_batch_event(
+            "released", turn, pending, offset=offset, action=decision.model_dump()
+        )
+        self._retain_batch_observation(turn, pending, offset, decision)
+        if pending.exhausted:
+            self._record_action_batch_event(
+                "exhausted",
+                turn,
+                pending,
+                model_calls_avoided=pending.model_calls_avoided,
+            )
+            self._pending_action_batch = None
+        return decision
+
+    def _retain_batch_observation(
+        self,
+        turn: GameTurn,
+        pending: PendingActionBatch,
+        offset: int,
+        decision: ActionDecision,
+    ) -> None:
+        """Keep zero-call public evidence in the same persistent Actor history."""
+        observation = self._tool_surface.observation(turn)
+        receipt = (
+            "\n\nBATCH CONTINUATION RECEIPT\n"
+            f"Batch {pending.batch_id[:12]} matched its guards through offset "
+            f"{offset}; the host is releasing queued action {decision.model_dump()} "
+            "without another model call. This observation remains evidence for the "
+            "next model decision."
+        )
+        prompt = bounded_observation(
+            observation.prompt + receipt,
+            observation.elided + receipt,
+            limit=self._native_tool_config.max_observation_bytes,
+        )
+        self.event_manager.add(
+            Task(
+                prompt=prompt,
+                metadata={
+                    ELIDED_OBSERVATION: observation.elided + receipt,
+                    OBSERVATION_REF: {
+                        "level": turn.level,
+                        "turn": turn.turn_in_level,
+                    },
+                    "action_batch": {
+                        "batch_id": pending.batch_id,
+                        "offset": offset,
+                    },
+                },
+            )
+        )
+        evict_old_grids(
+            self.event_manager,
+            keep=self._native_tool_config.grid_keep,
+        )
+        collapse_old_actor_turns(
+            self.event_manager,
+            keep=self._native_tool_config.history_keep_turns,
+        )
+
+    def _record_action_batch_event(
+        self,
+        event: str,
+        turn: GameTurn,
+        pending: PendingActionBatch,
+        **fields: Any,
+    ) -> None:
+        path = self._action_batch_trace_path
+        if path is None:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "schema_version": 1,
+            "event": event,
+            "batch_id": pending.batch_id,
+            "sequence": turn.sequence,
+            "level": turn.level,
+            "turn_in_level": turn.turn_in_level,
+            **fields,
+        }
+        with path.open("a", encoding="utf-8") as trace:
+            trace.write(json.dumps(record, separators=(",", ":")) + "\n")
 
     def _begin_decision(
         self, turn: GameTurn, decision_timeout_seconds: float | None
@@ -529,6 +713,7 @@ class TychoNooaAgent(Agent, context={"self": None, "state": None}):
             await self._record_win(result)
         elif after.full_reset:
             self._workspace.reset_level(result.level, reason="public_full_reset")
+        self._last_action_result = result
 
     def _record_game_over(self, result: ActionResultMessage) -> None:
         self._workspace.record_game_over(
@@ -564,15 +749,22 @@ class TychoNooaAgent(Agent, context={"self": None, "state": None}):
         self._register_evidence(record_path)
         self._record_solved(result)
         await self._repair_completed_outcome(result, completion)
-        # Scribe before new_level: it must see the level being completed.
-        await self._run_scribe(result.level)
+        # Carry evidence forward before new_level changes the workspace lifecycle.
+        await self._handle_level_boundary(result.level)
         self._workspace.new_level()
 
     async def _record_win(self, result: ActionResultMessage) -> None:
         terminal = result.after.terminal_frame or result.after.grid
         self._record_terminal_evidence(result, terminal)
         self._record_solved(result)
-        await self._run_scribe(result.level)
+        await self._handle_level_boundary(result.level)
+
+    async def _handle_level_boundary(self, level: int) -> None:
+        """Apply the named treatment's carry-forward policy before the next level."""
+        if self._treatment.level_boundary_policy == DETERMINISTIC_LEVEL_CHECKPOINT:
+            self._record_deterministic_level_boundary(level)
+            return
+        await self._run_scribe(level)
 
     async def _run_scribe(self, level: int) -> None:
         """Run Scribe under bounded trace attribution, then restore Actor context."""
@@ -582,6 +774,30 @@ class TychoNooaAgent(Agent, context={"self": None, "state": None}):
             self._tool_surface.trace_scope(source="scribe", phase="post_action"),
         ):
             await self._summarize_level(level)
+
+    def _record_deterministic_level_boundary(self, level: int) -> None:
+        """Carry level evidence forward without opening another model lane."""
+        if self._treatment.level_boundary_policy != DETERMINISTIC_LEVEL_CHECKPOINT:
+            raise RuntimeError(
+                "deterministic level checkpoint requires its named treatment policy"
+            )
+        record_path = LEVEL_BOUNDARY_CHECKPOINT.format(level=level)
+        record = {
+            "schema_version": 1,
+            "source": "tycho_nooa host treatment",
+            "treatment": self._treatment.name,
+            "policy": DETERMINISTIC_LEVEL_CHECKPOINT,
+            "model_scribe_invoked": False,
+            "level": level,
+            "carry_forward_note": f"notes/level_{level}_insights.md",
+        }
+        self._workspace.write_file(record_path, json.dumps(record, indent=2))
+        self._register_evidence(record_path)
+        _write_level_insight_fallback(
+            self._workspace,
+            level,
+            DETERMINISTIC_LEVEL_INSIGHT_REASON,
+        )
 
     def _record_terminal_evidence(
         self, result: ActionResultMessage, terminal: list[list[int]]

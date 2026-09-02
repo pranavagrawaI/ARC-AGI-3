@@ -11,6 +11,38 @@ TYCHO_WORKSPACE_TURN_SCHEMA = "tycho-workspace-turn-v1"
 _TYCHO_WORKSPACE_AVAILABLE_ACTIONS_FIELD = "available"
 
 
+def _exclude_when_none(value: object) -> bool:
+    return value is None
+
+
+def _validate_action_horizon(
+    *,
+    sequence: int | None,
+    action_limit: int | None,
+    actions_used: int | None,
+    actions_remaining: int | None,
+    final_permitted_action: bool | None,
+) -> None:
+    values = (
+        action_limit,
+        actions_used,
+        actions_remaining,
+        final_permitted_action,
+    )
+    if all(value is None for value in values):
+        return
+    if any(value is None for value in values):
+        raise ValueError("action horizon fields must be supplied together")
+    if sequence is None or actions_used != sequence:
+        raise ValueError("actions_used must equal the turn sequence")
+    if actions_used >= action_limit:
+        raise ValueError("actions_used must be less than action_limit")
+    if actions_remaining != action_limit - actions_used:
+        raise ValueError("actions_remaining must equal action_limit - actions_used")
+    if final_permitted_action is not (actions_remaining == 1):
+        raise ValueError("final_permitted_action must match actions_remaining == 1")
+
+
 class GameTurn(BaseModel):
     """One public observation delivered to the persistent solver."""
 
@@ -19,6 +51,18 @@ class GameTurn(BaseModel):
     grid: list[list[int]]
     available_actions: list[str]
     sequence: int | None = Field(default=None, ge=0)
+    action_limit: int | None = Field(
+        default=None, strict=True, gt=0, exclude_if=_exclude_when_none
+    )
+    actions_used: int | None = Field(
+        default=None, strict=True, ge=0, exclude_if=_exclude_when_none
+    )
+    actions_remaining: int | None = Field(
+        default=None, strict=True, gt=0, exclude_if=_exclude_when_none
+    )
+    final_permitted_action: bool | None = Field(
+        default=None, strict=True, exclude_if=_exclude_when_none
+    )
     level: int
     turn_in_level: int
     levels_completed: int = 0
@@ -26,6 +70,17 @@ class GameTurn(BaseModel):
     previous_action: str = ""
     previous_row: int | None = None
     previous_col: int | None = None
+
+    @model_validator(mode="after")
+    def action_horizon_is_exact(self) -> GameTurn:
+        _validate_action_horizon(
+            sequence=self.sequence,
+            action_limit=self.action_limit,
+            actions_used=self.actions_used,
+            actions_remaining=self.actions_remaining,
+            final_permitted_action=self.final_permitted_action,
+        )
+        return self
 
 
 def tycho_workspace_turn_record(turn: GameTurn) -> dict[str, Any]:

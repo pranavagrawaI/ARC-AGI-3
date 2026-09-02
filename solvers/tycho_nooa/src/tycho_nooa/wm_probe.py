@@ -36,6 +36,8 @@ from tycho.workspace.agent_tools import ToolExecutor
 from tycho.workspace.sandbox import PythonSandbox, SandboxError
 
 from tycho_nooa import probe_gate
+from tycho_nooa.hardened_host import command as hardened_host_command
+from tycho_nooa.hardened_host import enabled as hardened_host_enabled
 from tycho_nooa.trusted_runtime import MANIFEST_PATH, inspect_runtime
 
 # Upstream's planner configuration block: the last statement before the probe's
@@ -206,6 +208,14 @@ def _host_runtime_command(
     workspace_read_only: bool = True,
     generated_source: Path | None = None,
 ) -> list[str]:
+    if hardened_host_enabled():
+        return hardened_host_command(
+            workspace,
+            protected_paths,
+            command,
+            workspace_read_only=workspace_read_only,
+            generated_source=generated_source,
+        )
     bwrap = shutil.which("bwrap")
     if bwrap is None:
         raise SandboxError(
@@ -285,6 +295,11 @@ def _bubblewrap_command(
     )
     return [
         bwrap,
+        # Make generated Python PID 1 rather than leaving bubblewrap as PID 1.
+        # `--clearenv` scrubs the generated process, not bubblewrap itself; when
+        # bubblewrap remains visible as /proc/1, model-authored code can read its
+        # inherited host environment through /proc/1/environ.
+        "--as-pid-1",
         "--die-with-parent",
         "--new-session",
         "--unshare-user",

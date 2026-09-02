@@ -18,6 +18,11 @@ from tycho_nooa.trigger_builder import TriggerDecision
 
 
 def response(tool: str, arguments: dict, call_id: str) -> LLMResponse:
+    if tool == "take_actions" and "actions" not in arguments:
+        arguments = {
+            "actions": [arguments],
+            "rationale": "test one-action commitment",
+        }
     return LLMResponse(
         raw_response=None,
         content="",
@@ -143,11 +148,11 @@ async def test_matched_warm_restart_exercises_all_three_authority_arms(
             "builder-report",
         ),
         prose("builder done"),
-        response("take_action", {"action": "DOWN"}, "action"),
+        response("take_actions", {"action": "DOWN"}, "action"),
     ]
     llms = {
         "trigger": FakeLLMClient(
-            scripted_responses=[response("take_action", {"action": "UP"}, "action")]
+            scripted_responses=[response("take_actions", {"action": "UP"}, "action")]
         ),
         "exact_orchestrator": FakeLLMClient(
             scripted_responses=[
@@ -252,7 +257,7 @@ async def test_transactional_replay_matches_control_and_treatment_on_one_packet(
             "builder-report",
         ),
         prose("builder complete"),
-        response("take_action", {"action": "UP"}, "actor-action"),
+        response("take_actions", {"action": "UP"}, "actor-action"),
     ]
     llms = {
         arm.name: FakeLLMClient(scripted_responses=list(builder_turn))

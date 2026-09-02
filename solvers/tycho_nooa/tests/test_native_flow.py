@@ -22,7 +22,17 @@ from tycho_nooa.models import (
 from tycho_nooa.strategy import NativeToolConfig
 
 
+def action_arguments(tool: str, arguments: dict) -> dict:
+    if tool == "take_actions" and "actions" not in arguments:
+        return {
+            "actions": [arguments],
+            "rationale": "test one-action commitment",
+        }
+    return arguments
+
+
 def response(tool: str, arguments: dict, call_id: str) -> LLMResponse:
+    arguments = action_arguments(tool, arguments)
     return LLMResponse(
         raw_response=None,
         content="",
@@ -49,7 +59,11 @@ def batched_response(calls: list[tuple[str, dict, str]]) -> LLMResponse:
         raw_response=None,
         content="",
         tool_calls=[
-            ToolCall(id=call_id, name=tool, arguments=json.dumps(arguments))
+            ToolCall(
+                id=call_id,
+                name=tool,
+                arguments=json.dumps(action_arguments(tool, arguments)),
+            )
             for tool, arguments, call_id in calls
         ],
         finish_reason="tool_calls",
@@ -62,6 +76,7 @@ def reasoned_response(
     tool: str, arguments: dict, call_id: str, *, content: str, reasoning: str
 ) -> LLMResponse:
     """A tool call the model narrated, in both channels a provider can fill."""
+    arguments = action_arguments(tool, arguments)
     return LLMResponse(
         raw_response=None,
         content=content,
@@ -91,9 +106,13 @@ class ToolsRecordingFakeLLMClient(FakeLLMClient):
     def __init__(self, scripted_responses: list[LLMResponse]) -> None:
         super().__init__(scripted_responses=scripted_responses)
         self.tools_per_call: list[list[str]] = []
+        self.tool_choices: list[object] = []
+        self.max_tokens_per_call: list[int | None] = []
 
     async def acall(self, messages, tools=None, output_model=None, **kwargs):
         self.tools_per_call.append([tool.name for tool in tools] if tools else [])
+        self.tool_choices.append(kwargs.get("tool_choice"))
+        self.max_tokens_per_call.append(kwargs.get("max_tokens"))
         return await super().acall(
             messages, tools=tools, output_model=output_model, **kwargs
         )
@@ -108,6 +127,30 @@ class MessageRecordingFakeLLMClient(FakeLLMClient):
 
     async def acall(self, messages, tools=None, output_model=None, **kwargs):
         self.messages_per_call.append(messages)
+        return await super().acall(
+            messages, tools=tools, output_model=output_model, **kwargs
+        )
+
+
+class RequestRecordingFakeLLMClient(FakeLLMClient):
+    """Record the complete model-facing request contract for each call."""
+
+    def __init__(self, scripted_responses: list[LLMResponse]) -> None:
+        super().__init__(scripted_responses=scripted_responses)
+        self.requests: list[dict[str, object]] = []
+
+    async def acall(self, messages, tools=None, output_model=None, **kwargs):
+        self.requests.append(
+            {
+                "messages": messages,
+                "tools": [tool.name for tool in tools] if tools else [],
+                "tool_descriptions": {
+                    tool.name: tool.description for tool in tools or []
+                },
+                "tool_choice": kwargs.get("tool_choice"),
+                "max_tokens": kwargs.get("max_tokens"),
+            }
+        )
         return await super().acall(
             messages, tools=tools, output_model=output_model, **kwargs
         )
@@ -155,7 +198,7 @@ async def test_accepted_action_does_not_wait_for_post_action_llm_call(
     work left before it can return the decision to the host.
     """
     llm = ToolsRecordingFakeLLMClient(
-        scripted_responses=[response("take_action", {"action": "UP"}, "act-1")]
+        scripted_responses=[response("take_actions", {"action": "UP"}, "act-1")]
     )
     agent = TychoNooaAgent(
         llm=llm,
@@ -184,9 +227,9 @@ async def test_files_and_conversation_survive_the_action_boundary(
                 },
                 "write-1",
             ),
-            response("take_action", {"action": "UP"}, "act-1"),
+            response("take_actions", {"action": "UP"}, "act-1"),
             response("read_file", {"path": "notes/world_model.md"}, "read-2"),
-            response("take_action", {"action": "DOWN"}, "act-2"),
+            response("take_actions", {"action": "DOWN"}, "act-2"),
         ]
     )
     agent = TychoNooaAgent(
@@ -216,9 +259,9 @@ async def test_files_and_conversation_survive_the_action_boundary(
     ]
     assert [event.name for event in calls] == [
         "write_file",
-        "take_action",
+        "take_actions",
         "read_file",
-        "take_action",
+        "take_actions",
     ]
     assert calls[2].result is not None
     assert calls[2].result.content == "UP may move the blue cell."
@@ -228,9 +271,9 @@ async def test_files_and_conversation_survive_the_action_boundary(
     trace = [json.loads(line) for line in trace_path.read_text().splitlines()]
     assert [record["name"] for record in trace] == [
         "write_file",
-        "take_action",
+        "take_actions",
         "read_file",
-        "take_action",
+        "take_actions",
     ]
     assert [record["turn_in_level"] for record in trace] == [0, 0, 1, 1]
     assert trace[0]["arguments"]["content"] == "UP may move the blue cell."
@@ -253,7 +296,7 @@ async def test_no_world_model_actor_can_dispatch_every_offered_tool(
         "edit_file",
         "run_python",
         "set_verbosity",
-        "take_action",
+        "take_actions",
     ]
     llm = ToolsRecordingFakeLLMClient(
         scripted_responses=[
@@ -279,7 +322,7 @@ async def test_no_world_model_actor_can_dispatch_every_offered_tool(
                 {"grid": "off", "diff": "summary"},
                 "verbosity",
             ),
-            response("take_action", {"action": "UP"}, "action"),
+            response("take_actions", {"action": "UP"}, "action"),
         ]
     )
     agent = TychoNooaAgent(
@@ -305,7 +348,7 @@ async def test_no_world_model_actor_can_dispatch_every_offered_tool(
         "read_file",
         "run_python",
         "set_verbosity",
-        "take_action",
+        "take_actions",
     ]
     assert all(
         record["parse_status"] == "complete"
@@ -330,7 +373,7 @@ async def test_actor_beliefs_checkpoint_is_forced_when_turn_leaves_it_stale(
 ) -> None:
     """A stale hand-off gets a factual local breadcrumb after the action."""
     llm = ToolsRecordingFakeLLMClient(
-        scripted_responses=[response("take_action", {"action": "UP"}, "act-1")]
+        scripted_responses=[response("take_actions", {"action": "UP"}, "act-1")]
     )
     agent = TychoNooaAgent(
         llm=llm,
@@ -372,7 +415,7 @@ async def test_actor_beliefs_written_before_action_is_preserved_without_fallback
                 },
                 "beliefs-write",
             ),
-            response("take_action", {"action": "UP"}, "act-1"),
+            response("take_actions", {"action": "UP"}, "act-1"),
         ]
     )
     agent = TychoNooaAgent(
@@ -394,8 +437,8 @@ async def test_actor_beliefs_written_before_action_is_preserved_without_fallback
 async def test_illegal_action_is_feedback_not_a_host_action(tmp_path: Path) -> None:
     llm = FakeLLMClient(
         scripted_responses=[
-            response("take_action", {"action": "LEFT"}, "bad-action"),
-            response("take_action", {"action": "UP"}, "good-action"),
+            response("take_actions", {"action": "LEFT"}, "bad-action"),
+            response("take_actions", {"action": "UP"}, "good-action"),
         ]
     )
     agent = TychoNooaAgent(
@@ -425,8 +468,8 @@ async def test_malformed_native_arguments_are_feedback_not_a_host_action(
     trace_path = tmp_path / "tool-trace.jsonl"
     llm = FakeLLMClient(
         scripted_responses=[
-            malformed_response("take_action", "{broken", "bad-json"),
-            response("take_action", {"action": "UP"}, "good-action"),
+            malformed_response("take_actions", "{broken", "bad-json"),
+            response("take_actions", {"action": "UP"}, "good-action"),
         ]
     )
     agent = TychoNooaAgent(
@@ -440,7 +483,7 @@ async def test_malformed_native_arguments_are_feedback_not_a_host_action(
 
     assert await agent.act(turn(0)) == ActionDecision(action="UP")
     records = [json.loads(line) for line in trace_path.read_text().splitlines()]
-    assert records[0]["name"] == "take_action"
+    assert records[0]["name"] == "take_actions"
     assert records[0]["status"] == "error"
     assert records[0]["raw_arguments"] == "{broken"
     assert records[0]["parse_status"] == "error"
@@ -451,7 +494,11 @@ async def test_malformed_native_arguments_are_feedback_not_a_host_action(
     assert records[1]["parse_status"] == "complete"
     assert records[1]["validation_status"] == "complete"
     assert records[1]["execution_status"] == "complete"
-    assert records[1]["validated_arguments"] == {"action": "UP"}
+    assert records[1]["validated_arguments"] == {
+        "actions": [{"action": "UP"}],
+        "rationale": "test one-action commitment",
+        "stop_on_no_change": True,
+    }
     parse_error = next(
         event for event in agent.event_manager.values() if isinstance(event, Error)
     )
@@ -472,11 +519,11 @@ async def test_native_schema_validation_is_distinct_from_execution(
     llm = FakeLLMClient(
         scripted_responses=[
             response(
-                "take_action",
+                "take_actions",
                 {"action": "DOWN", "row": 10, "col": 10},
                 "bad-schema",
             ),
-            response("take_action", {"action": "UP"}, "good-action"),
+            response("take_actions", {"action": "UP"}, "good-action"),
         ]
     )
     agent = TychoNooaAgent(
@@ -492,16 +539,25 @@ async def test_native_schema_validation_is_distinct_from_execution(
     request = json.loads(
         (tmp_path / "decision-checkpoints/calls/000001/request.json").read_text()
     )
-    take_action = next(
+    take_actions = next(
         tool
         for tool in request["request_body"]["tools"]
-        if tool["name"] == "take_action"
+        if tool["name"] == "take_actions"
     )
-    assert take_action["parameters"]["properties"] == {
-        "action": {"enum": ["UP", "DOWN"], "type": "string"}
+    assert [
+        tool["name"]
+        for tool in request["request_body"]["tools"]
+        if tool["name"].startswith("take_action")
+    ] == ["take_actions"]
+    parameters = take_actions["parameters"]
+    assert parameters["properties"]["actions"]["minItems"] == 1
+    assert parameters["properties"]["actions"]["maxItems"] == 4
+    item = parameters["properties"]["actions"]["items"]
+    assert item["properties"]["action"] == {
+        "enum": ["UP", "DOWN"],
+        "type": "string",
     }
-    assert take_action["parameters"]["additionalProperties"] is False
-    assert "oneOf" not in take_action["parameters"]
+    assert parameters["additionalProperties"] is False
     rejected = json.loads(trace_path.read_text().splitlines()[0])
     assert rejected["parse_status"] == "complete"
     assert rejected["validation_status"] == "error"
@@ -524,11 +580,11 @@ async def test_native_schema_validation_is_distinct_from_execution(
 
 
 @pytest.mark.asyncio
-async def test_take_action_request_schema_uses_current_available_actions(
+async def test_take_actions_request_schema_uses_current_available_actions(
     tmp_path: Path,
 ) -> None:
     llm = FakeLLMClient(
-        scripted_responses=[response("take_action", {"action": "UP"}, "act")]
+        scripted_responses=[response("take_actions", {"action": "UP"}, "act")]
     )
     agent = TychoNooaAgent(
         llm=llm,
@@ -550,35 +606,23 @@ async def test_take_action_request_schema_uses_current_available_actions(
     request = json.loads(
         (tmp_path / "decision-checkpoints/calls/000001/request.json").read_text()
     )
-    take_action = next(
+    take_actions = next(
         tool
         for tool in request["request_body"]["tools"]
-        if tool["name"] == "take_action"
+        if tool["name"] == "take_actions"
     )
-    assert take_action["parameters"]["properties"]["action"] == {
-        "enum": ["UP", "CLICK"],
-        "type": "string",
-    }
-    assert take_action["parameters"]["oneOf"] == [
-        {
-            "additionalProperties": False,
-            "properties": {
-                "action": {"const": "CLICK"},
-                "row": {"maximum": 63, "minimum": 0, "type": "integer"},
-                "col": {"maximum": 63, "minimum": 0, "type": "integer"},
-            },
-            "required": ["action", "row", "col"],
-            "type": "object",
-        },
-        {
-            "additionalProperties": False,
-            "properties": {"action": {"enum": ["UP"]}},
-            "required": ["action"],
-            "type": "object",
-        },
-    ]
-    assert "ACTION1" not in take_action["description"]
-    assert "ACTION6" not in take_action["description"]
+    item = take_actions["parameters"]["properties"]["actions"]["items"]
+    click, non_click = item["oneOf"]
+    assert click["properties"]["action"] == {"const": "CLICK"}
+    assert click["required"] == ["action", "row", "col"]
+    assert non_click["properties"]["action"] == {"enum": ["UP"]}
+    assert non_click["required"] == ["action"]
+    assert all(
+        "expected_before_grid_sha256" in branch["properties"]
+        for branch in item["oneOf"]
+    )
+    assert "ACTION1" not in take_actions["description"]
+    assert "ACTION6" not in take_actions["description"]
 
 
 @pytest.mark.asyncio
@@ -590,7 +634,7 @@ async def test_native_execution_failure_is_distinct_from_validation(
     llm = FakeLLMClient(
         scripted_responses=[
             response("run_python", {"code": "raise"}, "execution-error"),
-            response("take_action", {"action": "UP"}, "good-action"),
+            response("take_actions", {"action": "UP"}, "good-action"),
         ]
     )
     agent = TychoNooaAgent(
@@ -635,7 +679,7 @@ async def test_first_model_context_omits_internal_self_and_protocol_docs(
     tmp_path: Path,
 ) -> None:
     llm = MessageRecordingFakeLLMClient(
-        scripted_responses=[response("take_action", {"action": "UP"}, "act-1")]
+        scripted_responses=[response("take_actions", {"action": "UP"}, "act-1")]
     )
     agent = TychoNooaAgent(
         llm=llm,
@@ -708,8 +752,8 @@ async def test_validated_plan_hint_is_injected_and_traced(tmp_path: Path) -> Non
     trace_path = tmp_path / "tool-trace.jsonl"
     llm = FakeLLMClient(
         scripted_responses=[
-            response("take_action", {"action": "UP"}, "act-1"),
-            response("take_action", {"action": "DOWN"}, "act-2"),
+            response("take_actions", {"action": "UP"}, "act-1"),
+            response("take_actions", {"action": "DOWN"}, "act-2"),
         ]
     )
     agent = TychoNooaAgent(
@@ -773,7 +817,7 @@ async def test_click_plan_hint_preserves_validated_coordinates(tmp_path: Path) -
     llm = FakeLLMClient(
         scripted_responses=[
             response(
-                "take_action",
+                "take_actions",
                 {"action": "CLICK", "row": 1, "col": 0},
                 "click-1",
             )
@@ -827,10 +871,10 @@ async def test_planner_result_must_be_seen_before_action_and_artifact_is_traced(
             batched_response(
                 [
                     ("run_python", {"code": "python plan.py auto"}, "plan-1"),
-                    ("take_action", {"action": "UP"}, "blocked-act"),
+                    ("take_actions", {"action": "UP"}, "blocked-act"),
                 ]
             ),
-            response("take_action", {"action": "UP"}, "act-2"),
+            response("take_actions", {"action": "UP"}, "act-2"),
         ]
     )
     agent = TychoNooaAgent(
@@ -916,10 +960,10 @@ async def test_subprocess_planner_call_is_traced_and_blocks_same_batch_action(
             batched_response(
                 [
                     ("run_python", {"code": observed_code}, "plan-subprocess"),
-                    ("take_action", {"action": "UP"}, "blocked-act"),
+                    ("take_actions", {"action": "UP"}, "blocked-act"),
                 ]
             ),
-            response("take_action", {"action": "UP"}, "act-2"),
+            response("take_actions", {"action": "UP"}, "act-2"),
         ]
     )
     agent = TychoNooaAgent(
@@ -1153,7 +1197,7 @@ async def test_planner_output_fallback_traces_indirect_unrecognized_execution(
                 {"code": "custom_runner()"},
                 "opaque-plan",
             ),
-            response("take_action", {"action": "UP"}, "act-1"),
+            response("take_actions", {"action": "UP"}, "act-1"),
         ]
     )
     agent = TychoNooaAgent(
@@ -1194,8 +1238,8 @@ async def test_verbosity_changes_the_next_observation_payload(tmp_path: Path) ->
                 {"grid": "off", "diff": "summary"},
                 "verbosity-1",
             ),
-            response("take_action", {"action": "UP"}, "act-1"),
-            response("take_action", {"action": "DOWN"}, "act-2"),
+            response("take_actions", {"action": "UP"}, "act-1"),
+            response("take_actions", {"action": "DOWN"}, "act-2"),
         ]
     )
     agent = TychoNooaAgent(
@@ -1229,10 +1273,10 @@ async def test_only_the_last_three_observations_keep_their_inlined_grid(
     """
     llm = FakeLLMClient(
         scripted_responses=[
-            response("take_action", {"action": "UP"}, "act-1"),
-            response("take_action", {"action": "DOWN"}, "act-2"),
-            response("take_action", {"action": "UP"}, "act-3"),
-            response("take_action", {"action": "DOWN"}, "act-4"),
+            response("take_actions", {"action": "UP"}, "act-1"),
+            response("take_actions", {"action": "DOWN"}, "act-2"),
+            response("take_actions", {"action": "UP"}, "act-3"),
+            response("take_actions", {"action": "DOWN"}, "act-4"),
         ]
     )
     agent = TychoNooaAgent(
@@ -1293,14 +1337,14 @@ async def test_the_actor_sees_its_own_prose_and_reasoning_on_the_next_turn(
     llm = MessageRecordingFakeLLMClient(
         scripted_responses=[
             reasoned_response(
-                "take_action",
+                "take_actions",
                 {"action": "UP"},
                 "act-1",
                 content="The blue cell moved with me, so it is the player.",
                 reasoning="cell (0,1) tracks every UP",
             ),
-            response("take_action", {"action": "DOWN"}, "act-2"),
-            response("take_action", {"action": "UP"}, "act-3"),
+            response("take_actions", {"action": "DOWN"}, "act-2"),
+            response("take_actions", {"action": "UP"}, "act-3"),
         ]
     )
     agent = TychoNooaAgent(
@@ -1354,7 +1398,7 @@ async def test_the_llm_trace_records_the_counters_for_every_round_trip(
     llm = ToolsRecordingFakeLLMClient(
         scripted_responses=[
             reasoned_response(
-                "take_action",
+                "take_actions",
                 {"action": "UP"},
                 "act-1",
                 content="The blue cell moved with me.",
@@ -1378,7 +1422,7 @@ async def test_the_llm_trace_records_the_counters_for_every_round_trip(
     assert [record["call_index"] for record in records] == [1]
     assert {record["source"] for record in records} == {"actor"}
     assert {record["phase"] for record in records} == {"decision"}
-    assert records[0]["tool_calls"] == ["take_action"]
+    assert records[0]["tool_calls"] == ["take_actions"]
     assert records[0]["tool_call_ids"] == ["act-1"]
     tool_record = json.loads(trace_path.read_text().splitlines()[0])
     assert tool_record["tool_call_id"] == "act-1"
@@ -1403,7 +1447,7 @@ async def test_the_llm_trace_records_the_raw_response_when_explicitly_enabled(
     llm = ToolsRecordingFakeLLMClient(
         scripted_responses=[
             reasoned_response(
-                "take_action",
+                "take_actions",
                 {"action": "UP"},
                 "act-1",
                 content="The blue cell moved with me.",
@@ -1446,7 +1490,7 @@ def test_native_surface_matches_tycho_and_not_codeact(tmp_path: Path) -> None:
         "edit_file",
         "run_python",
         "set_verbosity",
-        "take_action",
+        "take_actions",
     ]
     assert "execute_python" not in names
     assert "return_result" not in names
@@ -1469,7 +1513,7 @@ async def test_provider_projection_bounds_history_but_keeps_exact_traces(
                 content="",
                 reasoning="r" * 10_000,
             ),
-            response("take_action", {"action": "UP"}, "act-1"),
+            response("take_actions", {"action": "UP"}, "act-1"),
             reasoned_response(
                 "run_python",
                 {"code": 'print("y" * 10000)'},
@@ -1477,7 +1521,7 @@ async def test_provider_projection_bounds_history_but_keeps_exact_traces(
                 content="",
                 reasoning="s" * 10_000,
             ),
-            response("take_action", {"action": "DOWN"}, "act-2"),
+            response("take_actions", {"action": "DOWN"}, "act-2"),
         ]
     )
     agent = TychoNooaAgent(
@@ -1526,7 +1570,7 @@ async def test_provider_projection_bounds_large_tool_arguments(tmp_path: Path) -
             response("run_python", {"code": large_code}, f"compute-{index}")
             for index in range(4)
         ]
-        + [response("take_action", {"action": "UP"}, "act-1")]
+        + [response("take_actions", {"action": "UP"}, "act-1")]
     )
     agent = TychoNooaAgent(
         llm=llm,
@@ -1563,7 +1607,7 @@ async def test_provider_projection_bounds_prose_only_response_before_retry(
     llm = MessageRecordingFakeLLMClient(
         scripted_responses=[
             prose_response(large_prose),
-            response("take_action", {"action": "UP"}, "act-1"),
+            response("take_actions", {"action": "UP"}, "act-1"),
         ]
     )
     agent = TychoNooaAgent(
@@ -1588,12 +1632,13 @@ async def test_decision_discipline_keeps_one_replaceable_budget_cue(
 ) -> None:
     monkeypatch.setenv("TYCHO_MODE", "trigger")
     monkeypatch.setenv("TYCHO_NOOA_TREATMENT", "decision_discipline")
+    monkeypatch.setenv("TYCHO_SANDBOX_RUNTIME", "host")
     llm = MessageRecordingFakeLLMClient(
         scripted_responses=[
             response("ls", {"path": path}, f"look-{index}")
             for index, path in enumerate((".", "notes", "level_0", "."))
         ]
-        + [response("take_action", {"action": "UP"}, "act-1")]
+        + [response("take_actions", {"action": "UP"}, "act-1")]
     )
     agent = TychoNooaAgent(
         llm=llm,
@@ -1618,6 +1663,8 @@ async def test_decision_discipline_keeps_one_replaceable_budget_cue(
     assert "METACOGNITIVE CHECK" in requests[2]
     assert "COMMITMENT PRESSURE" in requests[3]
     assert "EXPLORATION CLOSED" in requests[4]
+    assert "Model calls used: 4 of 5" in requests[4]
+    assert "If this response lacks one valid take_actions tool call" in requests[4]
     assert all(sum(request.count(marker) for marker in markers) == 1 for request in requests)
 
 
@@ -1628,7 +1675,7 @@ async def test_decision_discipline_allows_immediate_action_without_reflection(
     monkeypatch.setenv("TYCHO_MODE", "trigger")
     monkeypatch.setenv("TYCHO_NOOA_TREATMENT", "decision_discipline")
     llm = MessageRecordingFakeLLMClient(
-        scripted_responses=[response("take_action", {"action": "UP"}, "act-1")]
+        scripted_responses=[response("take_actions", {"action": "UP"}, "act-1")]
     )
     agent = TychoNooaAgent(
         llm=llm,
@@ -1650,14 +1697,14 @@ async def test_a_spent_tool_budget_demands_the_action_instead_of_ending_the_epis
     """The live failure this guard exists for: exploration eats every step.
 
     `runs/tycho-nooa-goal-gate-ar25-20260819T120904Z` spent all 25 steps reading
-    the grid, never called take_action, and lost the episode's other 19 actions
+        the grid, never committed an action, and lost the episode's other 19 actions
     to a ProtocolError at action 0.
     """
     llm = ToolsRecordingFakeLLMClient(
         scripted_responses=[
             response("ls", {"path": "."}, "look-1"),
             response("ls", {"path": "notes"}, "look-2"),
-            response("take_action", {"action": "UP"}, "act-1"),
+            response("take_actions", {"action": "UP"}, "act-1"),
         ]
     )
     agent = TychoNooaAgent(
@@ -1672,8 +1719,171 @@ async def test_a_spent_tool_budget_demands_the_action_instead_of_ending_the_epis
     assert await agent.act(turn(0)) == ActionDecision(action="UP")
 
     demand_call_tools = llm.tools_per_call[2]
-    assert demand_call_tools == ["take_action"]
+    assert demand_call_tools == ["take_actions"]
     assert len(llm.tools_per_call) == 3
+
+
+@pytest.mark.asyncio
+async def test_final_action_demand_can_force_the_only_tool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TYCHO_SANDBOX_RUNTIME", "host")
+    llm = ToolsRecordingFakeLLMClient(
+        scripted_responses=[
+            response("ls", {"path": "."}, "look-1"),
+            response("take_actions", {"action": "UP"}, "act-1"),
+        ]
+    )
+    agent = TychoNooaAgent(
+        llm=llm,
+        trigger_builder=False,
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+        strategy_config=NativeToolConfig(
+            max_tool_steps=1,
+            force_action_tool=True,
+        ),
+    )
+
+    assert await agent.act(turn(0)) == ActionDecision(action="UP")
+    assert llm.tool_choices == ["auto", "required"]
+
+
+@pytest.mark.asyncio
+async def test_zero_exploration_budget_is_one_required_action_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The direct-action lane must be one request, not one plus a final request."""
+    monkeypatch.setenv("TYCHO_SANDBOX_RUNTIME", "host")
+    llm = ToolsRecordingFakeLLMClient(
+        scripted_responses=[
+            response("take_actions", {"action": "UP"}, "act-1"),
+        ]
+    )
+    agent = TychoNooaAgent(
+        llm=llm,
+        trigger_builder=False,
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+        strategy_config=NativeToolConfig(
+            max_tool_steps=0,
+            force_action_tool=True,
+        ),
+    )
+
+    assert await agent.act(turn(0)) == ActionDecision(action="UP")
+    assert llm.tools_per_call == [["take_actions"]]
+    assert llm.tool_choices == ["required"]
+
+
+@pytest.mark.asyncio
+async def test_successor_turn_uses_its_smaller_required_action_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Initial cognition is ample; every later turn has one terminal request."""
+    monkeypatch.setenv("TYCHO_SANDBOX_RUNTIME", "host")
+    llm = ToolsRecordingFakeLLMClient(
+        scripted_responses=[
+            response("ls", {"path": "."}, "look-1"),
+            response("ls", {"path": "notes"}, "look-2"),
+            response("take_actions", {"action": "UP"}, "act-1"),
+            response("take_actions", {"action": "DOWN"}, "act-2"),
+        ]
+    )
+    agent = TychoNooaAgent(
+        llm=llm,
+        trigger_builder=False,
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+        strategy_config=NativeToolConfig(
+            max_tool_steps=2,
+            max_tool_steps_after_initial=0,
+            max_tokens=16_000,
+            max_tokens_after_initial=4_096,
+            force_action_tool=True,
+        ),
+    )
+
+    initial = turn(0).model_copy(update={"sequence": 0})
+    successor = turn(1, previous_action="UP").model_copy(update={"sequence": 1})
+    assert await agent.act(initial) == ActionDecision(action="UP")
+    assert await agent.act(successor) == ActionDecision(action="DOWN")
+    assert llm.tool_choices == ["auto", "auto", "required", "required"]
+    assert llm.max_tokens_per_call == [16_000, 16_000, 16_000, 4_096]
+    assert llm.tools_per_call[-1] == ["take_actions"]
+
+
+@pytest.mark.parametrize(
+    ("action_limit", "actions_used", "actions_remaining", "final"),
+    (
+        (32, 30, 2, False),
+        (32, 31, 1, True),
+        (80, 78, 2, False),
+        (80, 79, 1, True),
+    ),
+)
+@pytest.mark.asyncio
+async def test_successor_request_exposes_exact_environment_action_horizon(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    action_limit: int,
+    actions_used: int,
+    actions_remaining: int,
+    final: bool,
+) -> None:
+    monkeypatch.setenv("TYCHO_MODE", "single")
+    monkeypatch.setenv("TYCHO_NOOA_TREATMENT", "single_decision_discipline")
+    monkeypatch.setenv("TYCHO_SANDBOX_RUNTIME", "host")
+    llm = RequestRecordingFakeLLMClient(
+        scripted_responses=[response("take_actions", {"action": "UP"}, "act")]
+    )
+    agent = TychoNooaAgent(
+        llm=llm,
+        game_id="test-game",
+        workspace_root=tmp_path,
+        available_actions=["UP", "DOWN"],
+        strategy_config=NativeToolConfig(
+            max_tool_steps=5,
+            max_tool_steps_after_initial=0,
+            max_tokens=16_000,
+            max_tokens_after_initial=16_000,
+            force_action_tool=True,
+        ),
+    )
+    current = GameTurn(
+        grid=[[0]],
+        available_actions=["UP", "DOWN"],
+        sequence=actions_used,
+        level=0,
+        turn_in_level=actions_used,
+        previous_action="UP",
+        action_limit=action_limit,
+        actions_used=actions_used,
+        actions_remaining=actions_remaining,
+        final_permitted_action=final,
+    )
+
+    assert await agent.act(current) == ActionDecision(action="UP")
+    assert len(llm.requests) == 1
+    request = llm.requests[0]
+    assert request["tool_choice"] == "required"
+    assert request["max_tokens"] == 16_000
+    assert request["tools"] == ["take_actions"]
+    model_view = json.dumps(request, sort_keys=True)
+    assert (
+        f"Action horizon: {actions_used} of {action_limit} permitted environment "
+        f"actions have been used; {actions_remaining} remain including this decision."
+        in model_view
+    )
+    terminal_notice = (
+        "This is the final permitted environment action. Its result will be recorded, "
+        "but no next model decision is guaranteed."
+    )
+    assert (terminal_notice in model_view) is final
+    assert ("the successor arrives on the next call" in model_view.lower()) is False
 
 
 @pytest.mark.asyncio
@@ -1696,5 +1906,5 @@ async def test_a_model_that_declines_the_demand_still_ends_the_episode(
     )
     agent._native_tool_config = NativeToolConfig(max_tool_steps=1)
 
-    with pytest.raises(GenerationError, match="take_action was the only tool left"):
+    with pytest.raises(GenerationError, match="take_actions was the only tool left"):
         await agent.act(turn(0))

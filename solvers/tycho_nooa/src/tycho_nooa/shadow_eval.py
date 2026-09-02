@@ -37,6 +37,8 @@ SUPPORTED_EFFECTS = {
     "semantic_response",
     "content",
     "first_tool_call",
+    "take_actions",
+    # Historical packets recorded the former singular action surface.
     "take_action",
 }
 
@@ -602,7 +604,13 @@ def _paired_changes(
 def _pair_changes(
     pair_index: int, rows: dict[str, dict[str, Any]]
 ) -> dict[str, Any]:
-    fields = ("semantic_response", "content", "first_tool_call", "take_action")
+    fields = (
+        "semantic_response",
+        "content",
+        "first_tool_call",
+        "take_actions",
+        "take_action",
+    )
     return {
         "pair_index": pair_index,
         **{
@@ -634,6 +642,7 @@ def _paired_change_rates(pairs: list[dict[str, Any]]) -> dict[str, float | None]
         "semantic_response_changed",
         "content_changed",
         "first_tool_call_changed",
+        "take_actions_changed",
         "take_action_changed",
     )
     return {
@@ -677,9 +686,9 @@ def _effect_signature(response: dict[str, Any], effect: str) -> str:
         value: Any = response.get("content")
     elif effect == "first_tool_call":
         value = tools[0] if tools else None
-    elif effect == "take_action":
+    elif effect in {"take_actions", "take_action"}:
         value = next(
-            (tool for tool in tools if tool.get("name") == "take_action"), None
+            (tool for tool in tools if tool.get("name") == effect), None
         )
     else:
         value = {

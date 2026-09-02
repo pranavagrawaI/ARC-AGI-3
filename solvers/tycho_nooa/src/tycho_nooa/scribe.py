@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 
 LEVEL_INSIGHTS_NOTES = "notes/level_{level}_insights.md"
 SCRIBE_MAX_ROUNDS = 3  # tycho/agent/agent.py::_summarize_level's `for _ in range(3)`
-_NON_SCRIBE_TOOL_NAMES = {"take_action", "submit_action"}
+_NON_SCRIBE_TOOL_NAMES = {"take_actions"}
 _WORLD_MODEL_BASENAMES = {"world_model.py", "worldmodel.py"}
 _WORLD_MODEL_EDIT_BLOCK_MESSAGE = (
     "(blocked: in this mode world_model.py is builder-owned. Write level insights "
@@ -73,8 +73,8 @@ class ScribeStrategy(GenerationStrategy):
         if not isinstance(level, int):
             raise TypeError("ScribeStrategy requires an int argument named 'level'")
 
-        # Tycho itself offers take_action here and replaces its execution with a
-        # skip message; tycho_nooa withholds it structurally instead.
+        # Tycho itself offers an action tool here and replaces its execution with
+        # a skip message; tycho_nooa withholds it structurally instead.
         tools = [
             tool
             for tool in surface.native_tools()

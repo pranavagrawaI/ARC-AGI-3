@@ -54,7 +54,17 @@ from tycho_nooa.trigger_builder import (
 from tycho_nooa.wm_probe import AST_UNCHANGED_NOTICE
 
 
+def action_arguments(tool: str, arguments: dict) -> dict:
+    if tool == "take_actions" and "actions" not in arguments:
+        return {
+            "actions": [arguments],
+            "rationale": "test one-action commitment",
+        }
+    return arguments
+
+
 def tool_response(tool: str, arguments: dict, call_id: str) -> LLMResponse:
+    arguments = action_arguments(tool, arguments)
     return LLMResponse(
         raw_response=None,
         content="",
@@ -81,7 +91,11 @@ def tool_batch_response(calls: list[tuple[str, dict, str]]) -> LLMResponse:
         raw_response=None,
         content="",
         tool_calls=[
-            ToolCall(id=call_id, name=tool, arguments=json.dumps(arguments))
+            ToolCall(
+                id=call_id,
+                name=tool,
+                arguments=json.dumps(action_arguments(tool, arguments)),
+            )
             for tool, arguments, call_id in calls
         ],
         finish_reason="tool_calls",
@@ -465,7 +479,7 @@ async def test_orchestrator_actor_pulls_a_fresh_builder_before_committing_action
                         {"reason": "infer the objective from level_0/turn_000.txt"},
                         "actor-build",
                     ),
-                    ("take_action", {"action": "UP"}, "stale-action"),
+                    ("take_actions", {"action": "UP"}, "stale-action"),
                 ]
             ),
             tool_response(
@@ -485,7 +499,7 @@ async def test_orchestrator_actor_pulls_a_fresh_builder_before_committing_action
                 "builder-report",
             ),
             prose_response("builder complete"),
-            tool_response("take_action", {"action": "DOWN"}, "fresh-action"),
+            tool_response("take_actions", {"action": "DOWN"}, "fresh-action"),
         ]
     )
     agent = TychoNooaAgent(
@@ -536,7 +550,7 @@ async def test_typed_goal_request_preserves_hypothesis_and_builder_ownership(
                 "goal-proposal",
             ),
             tool_response(
-                "take_action",
+                "take_actions",
                 {"action": "UP"},
                 "blocked-before-review",
             ),
@@ -594,7 +608,7 @@ async def test_typed_goal_request_preserves_hypothesis_and_builder_ownership(
             ),
             prose_response("builder complete"),
             tool_response(
-                "take_action",
+                "take_actions",
                 {"action": "UP"},
                 "blocked-before-resolution",
             ),
@@ -608,7 +622,7 @@ async def test_typed_goal_request_preserves_hypothesis_and_builder_ownership(
                 },
                 "goal-selection",
             ),
-            tool_response("take_action", {"action": "DOWN"}, "fresh-action"),
+            tool_response("take_actions", {"action": "DOWN"}, "fresh-action"),
         ]
     )
     agent = TychoNooaAgent(
@@ -645,7 +659,7 @@ async def test_typed_goal_request_preserves_hypothesis_and_builder_ownership(
     blocked = [
         record
         for record in tool_records
-        if record["name"] == "take_action" and record["status"] == "error"
+        if record["name"] == "take_actions" and record["status"] == "error"
     ]
     assert len(blocked) == 2
     assert "request_builder" in blocked[0]["result"]
@@ -777,7 +791,7 @@ async def test_typed_objective_timeout_returns_a_resolvable_unavailable_review(
                         },
                         "acknowledge-unavailable",
                     ),
-                    tool_response("take_action", {"action": "UP"}, "fresh-action"),
+                    tool_response("take_actions", {"action": "UP"}, "fresh-action"),
                 ]
             )
             self.calls = 0
@@ -851,8 +865,8 @@ async def test_builder_deadline_preserves_the_actor_reserve(
         def __init__(self) -> None:
             super().__init__(
                 scripted_responses=[
-                    tool_response("take_action", {"action": "UP"}, "actor-0"),
-                    tool_response("take_action", {"action": "DOWN"}, "actor-1"),
+                    tool_response("take_actions", {"action": "UP"}, "actor-0"),
+                    tool_response("take_actions", {"action": "DOWN"}, "actor-1"),
                 ]
             )
             self.calls = 0
@@ -932,7 +946,7 @@ async def test_actor_requested_builder_timeout_is_truthful_and_transactional(
                         },
                         "partial-write",
                     ),
-                    tool_response("take_action", {"action": "UP"}, "commit"),
+                    tool_response("take_actions", {"action": "UP"}, "commit"),
                 ]
             )
             self.calls = 0
@@ -1051,7 +1065,7 @@ async def test_the_llm_trace_covers_the_builder_as_well_as_the_actor(
     """
     llm = FakeLLMClient(
         scripted_responses=[
-            tool_response("take_action", {"action": "UP"}, "actor-0"),
+            tool_response("take_actions", {"action": "UP"}, "actor-0"),
             tool_response(
                 "write_file",
                 {"path": "notes/world_model.md", "content": "Observed: UP moves it."},
@@ -1063,7 +1077,7 @@ async def test_the_llm_trace_covers_the_builder_as_well_as_the_actor(
                 "builder-report",
             ),
             prose_response("done"),
-            tool_response("take_action", {"action": "UP"}, "actor-1"),
+            tool_response("take_actions", {"action": "UP"}, "actor-1"),
             prose_response("actor checkpoint after turn 1"),
         ]
     )
@@ -1123,7 +1137,7 @@ async def test_trigger_builds_fresh_report_before_actor_and_traces_uptake(
     )
     llm = FakeLLMClient(
         scripted_responses=[
-            tool_response("take_action", {"action": "UP"}, "actor-0"),
+            tool_response("take_actions", {"action": "UP"}, "actor-0"),
             tool_response(
                 "write_file",
                 {
@@ -1143,7 +1157,7 @@ async def test_trigger_builds_fresh_report_before_actor_and_traces_uptake(
                 {"path": "notes/world_model_report.md"},
                 "actor-read-report",
             ),
-            tool_response("take_action", {"action": "UP"}, "actor-1"),
+            tool_response("take_actions", {"action": "UP"}, "actor-1"),
         ]
     )
     monkeypatch.setattr(
@@ -1176,7 +1190,7 @@ async def test_trigger_builds_fresh_report_before_actor_and_traces_uptake(
     assert (agent.workspace_dir / "notes/world_model_report.md").read_text() == report
 
     builder_tools = agent._trigger_builder.builder._tool_surface.native_tools()
-    assert "take_action" not in {tool.name for tool in builder_tools}
+    assert "take_actions" not in {tool.name for tool in builder_tools}
     assert "edit_function" in {tool.name for tool in builder_tools}
     assert agent._trigger_builder.builder.agent_id != agent.agent_id
     # Upstream's prompt, unchanged, plus our local capability briefs. The retained
@@ -1207,7 +1221,7 @@ async def test_trigger_builds_fresh_report_before_actor_and_traces_uptake(
         event.name
         for event in agent.event_manager.values()
         if isinstance(event, ToolCallEvent)
-    ] == ["take_action", "read_file", "take_action"]
+    ] == ["take_actions", "read_file", "take_actions"]
     actor_tasks = [
         event for event in agent.event_manager.values() if isinstance(event, Task)
     ]
@@ -1255,7 +1269,7 @@ async def test_malformed_builder_click_recommendation_does_not_end_episode(
     )
     llm = FakeLLMClient(
         scripted_responses=[
-            tool_response("take_action", {"action": "UP"}, "actor-0"),
+            tool_response("take_actions", {"action": "UP"}, "actor-0"),
             tool_response(
                 "write_file",
                 {"path": "notes/world_model.md", "content": "UP changed the grid."},
@@ -1267,7 +1281,7 @@ async def test_malformed_builder_click_recommendation_does_not_end_episode(
                 "builder-report",
             ),
             prose_response("done"),
-            tool_response("take_action", {"action": "DOWN"}, "actor-1"),
+            tool_response("take_actions", {"action": "DOWN"}, "actor-1"),
         ]
     )
     monkeypatch.setattr(
@@ -1341,11 +1355,11 @@ async def test_stale_or_missing_report_is_replaced_by_tool_free_final_report(
     )
     llm = FakeLLMClient(
         scripted_responses=[
-            tool_response("take_action", {"action": "UP"}, "actor-0"),
+            tool_response("take_actions", {"action": "UP"}, "actor-0"),
             prose_response("done"),
             prose_response("nothing new yet"),
             prose_response(fallback),
-            tool_response("take_action", {"action": "DOWN"}, "actor-1"),
+            tool_response("take_actions", {"action": "DOWN"}, "actor-1"),
         ]
     )
     monkeypatch.setattr(
@@ -1398,11 +1412,11 @@ async def test_forced_report_identical_to_prior_report_is_not_fresh(
     was learned; only an actual content change should count as fresh."""
     llm = FakeLLMClient(
         scripted_responses=[
-            tool_response("take_action", {"action": "UP"}, "actor-0"),
+            tool_response("take_actions", {"action": "UP"}, "actor-0"),
             prose_response("done"),
             prose_response("nothing new yet"),
             prose_response("done"),
-            tool_response("take_action", {"action": "DOWN"}, "actor-1"),
+            tool_response("take_actions", {"action": "DOWN"}, "actor-1"),
         ]
     )
     monkeypatch.setattr(
@@ -1459,7 +1473,7 @@ async def test_forced_report_call_offers_tools_but_ignores_attempted_tool_calls(
     report template while retaining a terminal error row for the attempt."""
     llm = RecordingFakeLLMClient(
         scripted_responses=[
-            tool_response("take_action", {"action": "UP"}, "actor-0"),
+            tool_response("take_actions", {"action": "UP"}, "actor-0"),
             prose_response("still exploring"),
             prose_response("nothing new yet"),
             tool_response(
@@ -1467,7 +1481,7 @@ async def test_forced_report_call_offers_tools_but_ignores_attempted_tool_calls(
                 {"path": "notes/world_model_report.md", "content": "sneaky"},
                 "forced-attempt",
             ),
-            tool_response("take_action", {"action": "DOWN"}, "actor-1"),
+            tool_response("take_actions", {"action": "DOWN"}, "actor-1"),
         ]
     )
     monkeypatch.setattr(
@@ -1499,11 +1513,11 @@ async def test_forced_report_call_offers_tools_but_ignores_attempted_tool_calls(
     # checkpoint enforcement, builder forced final call, actor turn 1.
     checkpoint_call_tools = llm.tools_per_call[2]
     assert checkpoint_call_tools, "checkpoint call must offer tools too"
-    assert "take_action" not in checkpoint_call_tools
+    assert "take_actions" not in checkpoint_call_tools
 
     forced_call_tools = llm.tools_per_call[3]
     assert forced_call_tools, "forced call must still offer tools, like Tycho does"
-    assert "take_action" not in forced_call_tools
+    assert "take_actions" not in forced_call_tools
 
     report_path = agent.workspace_dir / "notes/world_model_report.md"
     assert report_path.read_text() == FALLBACK_REPORT
@@ -1578,11 +1592,11 @@ async def test_world_model_checkpoint_is_forced_when_pass_leaves_it_stale(
     )
     llm = FakeLLMClient(
         scripted_responses=[
-            tool_response("take_action", {"action": "UP"}, "actor-0"),
+            tool_response("take_actions", {"action": "UP"}, "actor-0"),
             prose_response("done"),
             prose_response("nothing new yet"),
             prose_response(fallback_report),
-            tool_response("take_action", {"action": "DOWN"}, "actor-1"),
+            tool_response("take_actions", {"action": "DOWN"}, "actor-1"),
         ]
     )
     monkeypatch.setattr(
@@ -1643,7 +1657,7 @@ async def test_world_model_checkpoint_executes_a_genuine_model_edit(
     would apply, and that write must actually land."""
     llm = FakeLLMClient(
         scripted_responses=[
-            tool_response("take_action", {"action": "UP"}, "actor-0"),
+            tool_response("take_actions", {"action": "UP"}, "actor-0"),
             prose_response("done"),
             tool_response(
                 "write_file",
@@ -1654,7 +1668,7 @@ async def test_world_model_checkpoint_executes_a_genuine_model_edit(
                 "checkpoint-write",
             ),
             prose_response("done"),
-            tool_response("take_action", {"action": "DOWN"}, "actor-1"),
+            tool_response("take_actions", {"action": "DOWN"}, "actor-1"),
         ]
     )
     monkeypatch.setattr(
@@ -2167,7 +2181,7 @@ async def test_host_builder_allocation_reaches_the_model_visible_request(
     agent = TychoNooaAgent(
         llm=FakeLLMClient(
             scripted_responses=[
-                tool_response("take_action", {"action": "UP"}, "commit")
+                tool_response("take_actions", {"action": "UP"}, "commit")
             ]
         ),
         game_id="test-game",
@@ -2323,8 +2337,8 @@ async def test_unavailable_sandbox_degrades_the_trigger_instead_of_ending_the_ep
     )
     llm = FakeLLMClient(
         scripted_responses=[
-            tool_response("take_action", {"action": "UP"}, "actor-0"),
-            tool_response("take_action", {"action": "DOWN"}, "actor-1"),
+            tool_response("take_actions", {"action": "UP"}, "actor-0"),
+            tool_response("take_actions", {"action": "DOWN"}, "actor-1"),
             prose_response("actor checkpoint after turn 1"),
         ]
     )
@@ -2359,8 +2373,8 @@ async def test_clean_signal_does_not_dispatch_builder(
 ) -> None:
     llm = FakeLLMClient(
         scripted_responses=[
-            tool_response("take_action", {"action": "UP"}, "actor-0"),
-            tool_response("take_action", {"action": "DOWN"}, "actor-1"),
+            tool_response("take_actions", {"action": "UP"}, "actor-0"),
+            tool_response("take_actions", {"action": "DOWN"}, "actor-1"),
         ]
     )
     monkeypatch.setattr(

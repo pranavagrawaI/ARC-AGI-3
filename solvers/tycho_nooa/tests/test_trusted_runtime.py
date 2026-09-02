@@ -161,6 +161,15 @@ def test_host_sandbox_exposes_workspace_values_without_host_authority(
 import json, os
 from pathlib import Path
 
+parent_environment_readable = None
+parent_environment_secret = None
+try:
+    parent_environment = Path(f"/proc/{{os.getppid()}}/environ").read_bytes()
+    parent_environment_readable = True
+    parent_environment_secret = b"ARC_LLM_API_KEY=" in parent_environment
+except Exception:
+    parent_environment_readable = False
+
 protected_write = None
 try:
     Path("symmetry.py").write_text("corrupted")
@@ -190,6 +199,10 @@ except Exception as error:
 Path("/tmp/scratch.txt").write_text("allowed")
 print(json.dumps({{
     "environment_secret": os.getenv("ARC_LLM_API_KEY"),
+    "pid": os.getpid(),
+    "ppid": os.getppid(),
+    "parent_environment_readable": parent_environment_readable,
+    "parent_environment_secret": parent_environment_secret,
     "generated_sources": sorted(
         path.name for path in Path(".").glob(".tycho-run-*.py")
     ),
@@ -211,6 +224,10 @@ print(json.dumps({{
     report = json.loads(result.stdout)
     assert result.returncode == 0
     assert report["environment_secret"] is None
+    assert report["pid"] == 1
+    assert report["ppid"] == 0
+    assert report["parent_environment_readable"] is False
+    assert report["parent_environment_secret"] is None
     assert report["generated_sources"] == []
     assert report["outside_visible"] is False
     assert len(report["pids"]) <= 2
@@ -242,6 +259,7 @@ def test_host_sandbox_command_builds_an_empty_filesystem(tmp_path: Path) -> None
 
     for flag in (
         "--new-session",
+        "--as-pid-1",
         "--unshare-user",
         "--unshare-pid",
         "--unshare-net",
@@ -264,6 +282,40 @@ def test_host_sandbox_command_builds_an_empty_filesystem(tmp_path: Path) -> None
     assert ["--ro-bind", workspace_text, workspace_text] in [
         command[index : index + 3] for index in range(len(command) - 2)
     ]
+
+
+def test_explicit_hardened_host_routes_around_bubblewrap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tycho_nooa.hardened_host import (
+        GAME_GID_ENV,
+        GAME_UID_ENV,
+        HARDENED_HOST_ENV,
+    )
+    from tycho_nooa.wm_probe import _host_runtime_command
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    protected = workspace / "world_model.py"
+    protected.write_text("VALUE = 1\n")
+    monkeypatch.setenv(HARDENED_HOST_ENV, "1")
+    monkeypatch.setenv(GAME_UID_ENV, "60001")
+    monkeypatch.setenv(GAME_GID_ENV, "60001")
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+
+    command = _host_runtime_command(
+        workspace,
+        (protected,),
+        [sys.executable, "-B", str(protected)],
+    )
+
+    assert command[:3] == [
+        sys.executable,
+        "-B",
+        str(Path(__file__).parents[1] / "src/tycho_nooa/hardened_host.py"),
+    ]
+    assert command[command.index("--uid") + 1] == "60001"
+    assert str(protected) in command
 
 
 def manifest_module(manifest: dict[str, object], path: str) -> dict[str, str]:

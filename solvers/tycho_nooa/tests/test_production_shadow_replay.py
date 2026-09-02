@@ -17,8 +17,13 @@ def trusted_test_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
 def response(action: str, call_id: str) -> LLMResponse:
     call = ToolCall(
         id=call_id,
-        name="take_action",
-        arguments=json.dumps({"action": action}),
+        name="take_actions",
+        arguments=json.dumps(
+            {
+                "actions": [{"action": action}],
+                "rationale": "test one-action commitment",
+            }
+        ),
     )
     return LLMResponse(
         raw_response=None,

@@ -13,6 +13,11 @@ from tycho_nooa.scribe import ScribeConfig
 
 
 def tool_response(tool: str, arguments: dict, call_id: str) -> LLMResponse:
+    if tool == "take_actions" and "actions" not in arguments:
+        arguments = {
+            "actions": [arguments],
+            "rationale": "test one-action commitment",
+        }
     return LLMResponse(
         raw_response=None,
         content="",
@@ -81,7 +86,7 @@ async def test_scribe_blocks_world_model_edit(tmp_path: Path) -> None:
     _is_builder_owned_world_model_edit path."""
     llm = FakeLLMClient(
         scripted_responses=[
-            tool_response("take_action", {"action": "UP"}, "actor-0"),
+            tool_response("take_actions", {"action": "UP"}, "actor-0"),
             tool_response(
                 "write_file",
                 {"path": "world_model.py", "content": "sneaky"},
@@ -131,7 +136,7 @@ async def test_scribe_withholds_take_action_from_offered_tools(tmp_path: Path) -
     execution — tycho_nooa withholds it structurally instead."""
     llm = RecordingFakeLLMClient(
         scripted_responses=[
-            tool_response("take_action", {"action": "UP"}, "actor-0"),
+            tool_response("take_actions", {"action": "UP"}, "actor-0"),
             prose_response("done"),
         ]
     )
@@ -142,7 +147,7 @@ async def test_scribe_withholds_take_action_from_offered_tools(tmp_path: Path) -
 
     scribe_call_tools = llm.tools_per_call[1]
     assert scribe_call_tools, "scribe call must still offer non-action tools"
-    assert "take_action" not in scribe_call_tools
+    assert "take_actions" not in scribe_call_tools
     assert "submit_action" not in scribe_call_tools
     assert "write_file" in scribe_call_tools
 
@@ -153,7 +158,7 @@ async def test_scribe_fallback_writes_deterministic_note_when_model_writes_nothi
 ) -> None:
     llm = FakeLLMClient(
         scripted_responses=[
-            tool_response("take_action", {"action": "UP"}, "actor-0"),
+            tool_response("take_actions", {"action": "UP"}, "actor-0"),
             prose_response("done"),
         ]
     )
@@ -176,7 +181,7 @@ async def test_scribe_projects_large_computation_without_losing_trace(
     large_code = 'print("x" * 10000)\n#' + "y" * 10_000
     llm = RecordingFakeLLMClient(
         scripted_responses=[
-            tool_response("take_action", {"action": "UP"}, "actor-0"),
+            tool_response("take_actions", {"action": "UP"}, "actor-0"),
             LLMResponse(
                 raw_response=None,
                 content="",
@@ -231,7 +236,7 @@ async def test_scribe_genuine_note_is_not_overwritten_by_fallback(tmp_path: Path
     genuine = "Level 0: UP wins by moving to the corner."
     llm = FakeLLMClient(
         scripted_responses=[
-            tool_response("take_action", {"action": "UP"}, "actor-0"),
+            tool_response("take_actions", {"action": "UP"}, "actor-0"),
             tool_response(
                 "write_file",
                 {"path": "notes/level_0_insights.md", "content": genuine},

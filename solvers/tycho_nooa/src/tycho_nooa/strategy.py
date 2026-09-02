@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from nooa.context_blocks import ResultStatus, ToolCallEvent, ToolResult
@@ -13,6 +13,7 @@ from nooa.strategies.base import GenerationStrategy, RuntimeServices
 from tycho.workspace.agent_tools import canonical
 from tycho.workspace.workspace import GameWorkspace
 
+from tycho_nooa.action_batch import ActionBatchDecision
 from tycho_nooa.epistemic import RequestBuilderArguments
 from tycho_nooa.history import (
     ELIDED_OBSERVATION,
@@ -45,12 +46,16 @@ if TYPE_CHECKING:
 
 ACTOR_BELIEFS_NOTES = "notes/actor_beliefs.md"
 ACTION_DEMAND_REQUEST = (
-    "Your workspace tool budget for this turn is spent. take_action is the only "
-    "tool left. Commit the single best action the evidence you already gathered "
-    "can justify, by calling take_action exactly once now."
+    "FINAL MODEL CALL FOR THIS TURN. There is no later request and no opportunity "
+    "to continue reasoning after this response. take_actions is the only tool left and "
+    "the only way to commit environment actions. Its actions array may contain one action. "
+    "If this response lacks one valid take_actions tool call, the current game thread "
+    "fails without an environment action. Incomplete understanding is allowed. Stop "
+    "investigating and commit the best legal action or bounded action sequence the "
+    "evidence already gathered can justify."
 )
 # The turn-ending tools are the only ones offered by the final demand.
-_ACTION_TOOL_NAMES = {"take_action", "submit_action"}
+_ACTION_TOOL_NAMES = {"take_actions"}
 
 
 def _visible_tool_error(
@@ -74,34 +79,45 @@ def _visible_tool_error(
 
 
 def _decision_cue_prompt(*, used: int, total: int, final: bool) -> str:
+    total_calls = total + 1
     if final:
         return (
             "EXPLORATION CLOSED\n"
-            "Commit the best legal action supported by current evidence. Uncertainty is "
-            "allowed. Its consequence will become new evidence."
+            f"Model calls used: {used} of {total_calls}. This is the final model call "
+            "for the turn; no later request exists. If this response lacks one valid "
+            "take_actions tool call, the game thread fails without acting. Its actions "
+            "array may contain one action. "
+            "Commit the best legal action or bounded action sequence supported by current "
+            "evidence now. Uncertainty is allowed; each released action's consequence "
+            "will become new evidence."
         )
     remaining = max(0, total - used)
+    clock = (
+        f"Model calls used: {used} of {total_calls}; {total_calls - used} remain, "
+        "including one final action-only call. "
+    )
     if used == 0:
         return (
             "DECISION CLOCK\n"
-            f"Exploration calls used: {used} of {total}. Current obligation: choose one "
-            "ARC action. Investigate only for a result that could change that action."
+            f"{clock}Current obligation: commit one ARC action, or a bounded sequence "
+            "whose later steps need no new judgment. Investigate only for a result that "
+            "could change that commitment."
         )
     if remaining == 1:
         return (
             "COMMITMENT PRESSURE\n"
-            "One exploratory call remains. Use it only to resolve a decision-reversing "
+            f"{clock}One exploratory call remains. Use it only to resolve a decision-reversing "
             "uncertainty. Incomplete understanding is not a reason to delay by itself."
         )
     if used >= max(2, total // 2):
         return (
             "METACOGNITIVE CHECK\n"
-            "What action is currently favored? What specific uncertainty blocks it? What "
+            f"{clock}What action is currently favored? What specific uncertainty blocks it? What "
             "result from the next operation would change it? If none, act now."
         )
     return (
         "DECISION CLOCK\n"
-        f"Exploration calls used: {used} of {total}. Investigate only for a result that "
+        f"{clock}Investigate only for a result that "
         "could change the currently favored action."
     )
 
@@ -109,13 +125,39 @@ def _decision_cue_prompt(*, used: int, total: int, final: bool) -> str:
 @dataclass(frozen=True)
 class NativeToolConfig:
     max_tool_steps: int = 25
+    max_tool_steps_after_initial: int | None = None
     # Tycho's TYCHO_GRID_KEEP default: how many recent turns keep their inlined grid.
     grid_keep: int = 3
     history_keep_turns: int = 3
     max_observation_bytes: int = 16_384
     max_context_value_bytes: int = 2_048
     max_tokens: int = 16_000
+    max_tokens_after_initial: int | None = None
+    action_demand_max_tokens: int | None = None
+    action_demand_disable_thinking: bool = False
     temperature: float | None = None
+    force_action_tool: bool = False
+
+
+def _config_for_sequence(
+    config: NativeToolConfig, sequence: int | None
+) -> NativeToolConfig:
+    """Apply explicit later-turn ceilings without changing the initial contract."""
+    if sequence is None or sequence <= 0:
+        return config
+    return replace(
+        config,
+        max_tool_steps=(
+            config.max_tool_steps
+            if config.max_tool_steps_after_initial is None
+            else config.max_tool_steps_after_initial
+        ),
+        max_tokens=(
+            config.max_tokens
+            if config.max_tokens_after_initial is None
+            else config.max_tokens_after_initial
+        ),
+    )
 
 
 class NativeToolStrategy(GenerationStrategy):
@@ -137,7 +179,10 @@ class NativeToolStrategy(GenerationStrategy):
             else (
                 "Work freely with the native workspace tools. Inspect the current and "
                 "past evidence, and test executable ideas with run_python. End this turn "
-                "only by calling take_action exactly once. The resulting observation will "
+                "only by calling take_actions exactly once. Pass one action when only one "
+                "step is justified; include later steps only when they need no new judgment. "
+                "Every public successor is "
+                "still observed and can stop the queue. The resulting observation will "
                 "arrive on the next call to this same agent."
             )
         )
@@ -169,6 +214,7 @@ class NativeToolStrategy(GenerationStrategy):
             limit=config.max_observation_bytes,
         )
         turn = surface.current_turn()
+        config = _config_for_sequence(config, turn.sequence)
         runtime.event_manager.add(
             Task(
                 prompt=prompt,
@@ -209,7 +255,7 @@ class NativeToolStrategy(GenerationStrategy):
                 runtime.event_manager.add(
                     Error(
                         content=(
-                            "A workspace or take_action tool call is required. "
+                            "A workspace or take_actions tool call is required. "
                             "Do not finish the turn with prose alone."
                         )
                     )
@@ -249,7 +295,7 @@ class NativeToolStrategy(GenerationStrategy):
         if decision is None:
             raise GenerationError(
                 f"No action was committed within {config.max_tool_steps} native "
-                "tool steps, and none was committed when take_action was the only "
+                "tool steps, and none was committed when take_actions was the only "
                 "tool left"
             )
         self._checkpoint_actor_beliefs_after_action(
@@ -289,23 +335,30 @@ class NativeToolStrategy(GenerationStrategy):
         Exhausting `max_tool_steps` is not the same failure as a model that will
         not act. `runs/tycho-nooa-goal-gate-ar25-20260819T120904Z` died here at
         action 0 with all 25 steps spent reading the grid and never a
-        `take_action`; the episode's remaining 19 actions went with it. An ARC
+        action; the episode's remaining 19 actions went with it. An ARC
         episode has no "no action" branch, so a turn that ends in silence throws
         the run either way. Restrict the offered tools to the one that must be
         called, then let the raise stand if the model still declines.
-        `tool_choice` stays "auto" because
-        "required" draws 500s from some gateways (nooa's own codeact says so).
+        `tool_choice` remains provider-configurable because some gateways have
+        historically stalled on "required". The qualified local SGLang route
+        supports the explicit required choice and enables it at runtime.
         """
         action_tools = [tool for tool in tools if tool.name in _ACTION_TOOL_NAMES]
         if not action_tools:
             return
 
         runtime.event_manager.add(Task(prompt=ACTION_DEMAND_REQUEST))
+        generation_options: dict[str, Any] = {}
+        if config.action_demand_disable_thinking:
+            generation_options["extra_body"] = {
+                "chat_template_kwargs": {"enable_thinking": False}
+            }
         response, event_id = await runtime.generate(
             tools=action_tools,
-            max_tokens=config.max_tokens,
+            max_tokens=config.action_demand_max_tokens or config.max_tokens,
             temperature=config.temperature,
-            tool_choice="auto",
+            tool_choice="required" if config.force_action_tool else "auto",
+            **generation_options,
         )
         retain_assistant_turn(
             runtime.event_manager,
@@ -345,7 +398,7 @@ class NativeToolStrategy(GenerationStrategy):
         Real Tycho never forces this file: it is a voluntary actor scratchpad
         that the builder treats as a disposable starting hypothesis. We retain
         the local invariant introduced after DIAGNOSIS.md found stale notes, but
-        never buy it with another provider call after `take_action`: the live
+        never buy it with another provider call after an action commitment: the live
         reasoning-capture run had an accepted action with 27.6 seconds left and
         lost it while this post-action call took 29.9 seconds. A factual,
         provenance-marked breadcrumb is bounded local I/O and keeps stale model
@@ -454,9 +507,18 @@ class NativeToolStrategy(GenerationStrategy):
             )
             return None
 
-        action = result if isinstance(result, ActionDecision) else None
+        if isinstance(result, ActionBatchDecision):
+            action = runtime.agent._stage_action_batch(result, surface.current_turn())
+        else:
+            action = result if isinstance(result, ActionDecision) else None
         content = (
-            "Action accepted; this turn is complete."
+            (
+                f"Action batch accepted; releasing its first of {len(result.actions)} "
+                "actions now. Each later action remains conditional on its public "
+                "successor."
+                if isinstance(result, ActionBatchDecision)
+                else "Action accepted; this turn is complete."
+            )
             if action
             else self._provider_tool_result(
                 runtime,
@@ -558,7 +620,7 @@ class NativeToolStrategy(GenerationStrategy):
     def _tool_block_reason(
         surface: WorkspaceToolSurface, name: str, block_action: bool
     ) -> str | None:
-        action_names = {"take_action", "submit_action"}
+        action_names = {"take_actions"}
         if name in action_names and surface.goal_tools is not None:
             required = surface.goal_tools.required_before_action()
             if required is not None:
@@ -572,7 +634,8 @@ class NativeToolStrategy(GenerationStrategy):
         if block_action and name in action_names:
             return (
                 "A builder request, world-model edit, or planner call cannot share "
-                "one tool batch with take_action. Inspect that feedback, then choose "
+                "one tool batch with take_actions. Inspect that feedback, "
+                "then choose "
                 "an action in the next step."
             )
         return None

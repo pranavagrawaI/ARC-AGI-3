@@ -162,6 +162,27 @@ def test_decision_discipline_cannot_silently_change_another_source_mode(
         _agent(tmp_path)
 
 
+def test_single_decision_discipline_is_explicit_and_has_no_builder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(MODE_ENV, "single")
+    monkeypatch.setenv(TREATMENT_ENV, "single_decision_discipline")
+
+    treatment = _agent(tmp_path / "single-treatment")
+    treatment_prompt = treatment._resolve_system_prompt()
+    strategy_prompt = NativeToolStrategy().get_block_overrides()["strategy_prompt"]
+
+    assert treatment.treatment_name == "single_decision_discipline"
+    assert (
+        treatment._treatment.level_boundary_policy
+        == "deterministic_level_checkpoint"
+    )
+    assert treatment._trigger_builder is None
+    assert "You own world_model.py; there is no Builder" in treatment_prompt
+    assert "bounded decision-maker" in treatment_prompt
+    assert "best timely consequential decision" in strategy_prompt
+
+
 def test_transactional_builder_is_a_named_treatment_not_the_trigger_control(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -85,6 +85,59 @@ def test_protocol_preserves_the_complete_frame_evidence_envelope() -> None:
     assert evidence.provenance.terminal_reason == "level_advanced"
 
 
+@pytest.mark.parametrize(
+    ("change", "message"),
+    (
+        ({"actions_remaining": None}, "supplied together"),
+        ({"actions_used": 30}, "equal the turn sequence"),
+        ({"actions_remaining": 2}, "action_limit - actions_used"),
+        ({"final_permitted_action": False}, "actions_remaining == 1"),
+        ({"action_limit": True}, "valid integer"),
+    ),
+)
+def test_protocol_rejects_an_inexact_action_horizon(
+    change: dict[str, object],
+    message: str,
+) -> None:
+    payload = {
+        "protocol_version": PROTOCOL_VERSION,
+        "type": "turn",
+        "sequence": 31,
+        "action_limit": 32,
+        "actions_used": 31,
+        "actions_remaining": 1,
+        "final_permitted_action": True,
+        "level": 0,
+        "turn_in_level": 31,
+        "decision_timeout_seconds": 600,
+        "observation": observation(0),
+        "previous_decision": None,
+        **change,
+    }
+
+    with pytest.raises(ValidationError, match=message):
+        TurnMessage(**payload)  # type: ignore[arg-type]
+
+
+def test_horizonless_turn_keeps_the_existing_protocol_v3_wire_shape() -> None:
+    message = TurnMessage(
+        protocol_version=PROTOCOL_VERSION,
+        type="turn",
+        sequence=0,
+        level=0,
+        turn_in_level=0,
+        decision_timeout_seconds=600,
+        observation=observation(0),
+        previous_decision=None,
+    )
+
+    payload = message.model_dump(mode="json")
+    assert "action_limit" not in payload
+    assert "actions_used" not in payload
+    assert "actions_remaining" not in payload
+    assert "final_permitted_action" not in payload
+
+
 @pytest.mark.asyncio
 async def test_worker_passes_the_host_decision_timeout_to_the_agent() -> None:
     act = AsyncMock(return_value=ActionDecision(action="UP"))
@@ -107,6 +160,53 @@ async def test_worker_passes_the_host_decision_timeout_to_the_agent() -> None:
     )
 
     assert act.await_args.kwargs == {"decision_timeout_seconds": 600.0}
+
+
+@pytest.mark.parametrize(
+    ("action_limit", "actions_used", "actions_remaining", "final"),
+    (
+        (32, 30, 2, False),
+        (32, 31, 1, True),
+        (80, 78, 2, False),
+        (80, 79, 1, True),
+    ),
+)
+@pytest.mark.asyncio
+async def test_worker_passes_the_exact_action_horizon_to_the_agent(
+    action_limit: int,
+    actions_used: int,
+    actions_remaining: int,
+    final: bool,
+) -> None:
+    act = AsyncMock(return_value=ActionDecision(action="UP"))
+    session = WorkerSession()
+    session.agent = SimpleNamespace(act=act)  # type: ignore[assignment]
+    first = observation(0)
+    session.initial_observation = first
+    session.next_sequence = actions_used
+
+    await session.decide(
+        TurnMessage(
+            protocol_version=PROTOCOL_VERSION,
+            type="turn",
+            sequence=actions_used,
+            action_limit=action_limit,
+            actions_used=actions_used,
+            actions_remaining=actions_remaining,
+            final_permitted_action=final,
+            level=0,
+            turn_in_level=actions_used,
+            decision_timeout_seconds=600,
+            observation=first,
+            previous_decision=None,
+        )
+    )
+
+    turn = act.await_args.args[0]
+    assert turn.action_limit == action_limit
+    assert turn.actions_used == actions_used
+    assert turn.actions_remaining == actions_remaining
+    assert turn.final_permitted_action is final
 
 
 @pytest.mark.asyncio
@@ -291,6 +391,172 @@ async def test_worker_accepts_a_cleared_previous_decision_at_a_boundary(
 
 
 @pytest.mark.asyncio
+async def test_single_decision_discipline_crosses_a_level_without_scribe_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Kaggle treatment keeps boundary evidence without a hidden model lane."""
+    monkeypatch.setenv("TYCHO_SANDBOX_RUNTIME", "host")
+    monkeypatch.setenv("TYCHO_MODE", "single")
+    monkeypatch.setenv("TYCHO_NOOA_TREATMENT", "single_decision_discipline")
+    monkeypatch.setenv("ARC_LLM_MAX_ACTOR_CALLS", "1")
+    monkeypatch.setenv("ARC_LLM_MAX_ACTOR_CALLS_AFTER_INITIAL", "1")
+    monkeypatch.setenv("ARC_LLM_MAX_TOKENS", "16000")
+    monkeypatch.setenv("ARC_LLM_MAX_TOKENS_AFTER_INITIAL", "4096")
+    monkeypatch.setenv("ARC_LLM_FORCE_ACTION_TOOL", "1")
+    monkeypatch.setenv(
+        SCRIPTED_TOOL_CALLS_ENV,
+        json.dumps(
+            [
+                {
+                    "tool": "take_actions",
+                    "arguments": {
+                        "actions": [{"action": "UP"}],
+                        "rationale": "test one-action commitment",
+                    },
+                },
+                {
+                    "tool": "take_actions",
+                    "arguments": {
+                        "actions": [{"action": "DOWN"}],
+                        "rationale": "test one-action commitment",
+                    },
+                },
+            ]
+        ),
+    )
+    workspace_root = tmp_path / "workspaces"
+    before = observation(0)
+    after = ObservationPayload(
+        decision_frame=[[4, 5], [6, 7]],
+        terminal_frame=[[9, 9], [9, 9]],
+        event_frames=[],
+        provenance={
+            "raw_frame_count": 2,
+            "decision_frame_index": 1,
+            "terminal_frame_index": 0,
+            "event_frame_indices": [],
+            "terminal_reason": "level_advanced",
+        },
+        available_actions=["UP", "DOWN"],
+        levels_completed=1,
+        state="NOT_FINISHED",
+        full_reset=False,
+    )
+    session = WorkerSession()
+    ready = session.start_game(
+        StartGameMessage(
+            protocol_version=PROTOCOL_VERSION,
+            type="start_game",
+            game_id="fake-game",
+            seed=0,
+            workspace_root=str(workspace_root),
+            initial_observation=before,
+        )
+    )
+
+    first = await session.decide(
+        TurnMessage(
+            protocol_version=PROTOCOL_VERSION,
+            type="turn",
+            sequence=0,
+            level=0,
+            turn_in_level=0,
+            decision_timeout_seconds=600,
+            observation=before,
+            previous_decision=None,
+        )
+    )
+    first_decision = ActionDecision.model_validate(first["decision"])
+    await session.observe(
+        ActionResultMessage(
+            protocol_version=PROTOCOL_VERSION,
+            type="action_result",
+            sequence=0,
+            level=0,
+            turn_in_level=0,
+            decision=first_decision,
+            before=before,
+            after=after,
+        )
+    )
+    second = await session.decide(
+        TurnMessage(
+            protocol_version=PROTOCOL_VERSION,
+            type="turn",
+            sequence=1,
+            level=1,
+            turn_in_level=0,
+            decision_timeout_seconds=600,
+            observation=after,
+            previous_decision=None,
+        )
+    )
+
+    assert first_decision == ActionDecision(action="UP")
+    assert ready["metadata"]["level_boundary_policy"] == (
+        "deterministic_level_checkpoint"
+    )
+    assert ActionDecision.model_validate(second["decision"]) == ActionDecision(
+        action="DOWN"
+    )
+    agent = session.agent
+    assert agent is not None
+    assert json.loads(
+        (agent.workspace_dir / "level_0/level_complete.json").read_text()
+    )["outcome"] == "level_complete"
+    assert json.loads(
+        (agent.workspace_dir / "level_0/solved.json").read_text()
+    ) == {"action": "UP", "row": None, "col": None}
+    assert json.loads(
+        (agent.workspace_dir / "level_0/terminal.json").read_text()
+    )["terminal_grid"] == [[9, 9], [9, 9]]
+    insights = (agent.workspace_dir / "notes/level_0_insights.md").read_text()
+    assert "single_decision_discipline" in insights
+    assert "model-backed Scribe was not invoked" in insights
+    assert json.loads(
+        (agent.workspace_dir / "level_0/level_boundary_checkpoint.json").read_text()
+    ) == {
+        "schema_version": 1,
+        "source": "tycho_nooa host treatment",
+        "treatment": "single_decision_discipline",
+        "policy": "deterministic_level_checkpoint",
+        "model_scribe_invoked": False,
+        "level": 0,
+        "carry_forward_note": "notes/level_0_insights.md",
+    }
+
+    llm_trace = [
+        json.loads(line)
+        for line in (tmp_path / "llm-trace.jsonl").read_text().splitlines()
+    ]
+    assert [row["source"] for row in llm_trace] == ["actor", "actor"]
+    assert [row["phase"] for row in llm_trace] == ["decision", "decision"]
+    assert [row["sequence"] for row in llm_trace] == [0, 1]
+    checkpoints = sorted((tmp_path / "decision-checkpoints/calls").iterdir())
+    assert [path.name for path in checkpoints] == ["000001", "000002"]
+    requests = [
+        json.loads((path / "request.json").read_text()) for path in checkpoints
+    ]
+    assert [request["source"] for request in requests] == ["actor", "actor"]
+    assert [request["decision_point"] for request in requests] == [
+        {"sequence": 0, "level": 0, "turn_in_level": 0, "phase": "decision"},
+        {"sequence": 1, "level": 1, "turn_in_level": 0, "phase": "decision"},
+    ]
+    assert [
+        request["request_body"]["parameters"]["max_tokens"]
+        for request in requests
+    ] == [16_000, 4_096]
+    assert [
+        request["request_body"]["parameters"]["tool_choice"]
+        for request in requests
+    ] == ["required", "required"]
+    assert [
+        [tool["name"] for tool in request["request_body"]["tools"]]
+        for request in requests
+    ] == [["take_actions"], ["take_actions"]]
+
+
+@pytest.mark.asyncio
 async def test_worker_requires_the_previous_decision_without_a_boundary() -> None:
     decision = ActionDecision(action="UP")
     agent = SimpleNamespace(
@@ -390,11 +656,22 @@ async def test_worker_keeps_one_agent_and_observes_level_boundary(
                         "content": "UP changed the public grid.",
                     },
                 },
-                {"tool": "take_action", "arguments": {"action": "UP"}},
+                {
+                    "tool": "take_actions",
+                    "arguments": {
+                        "actions": [{"action": "UP"}],
+                        "rationale": "test one-action commitment",
+                    },
+                },
             ]
         ),
     )
     monkeypatch.setenv("ARC_LLM_MAX_TOKENS", "8000")
+    monkeypatch.setenv("ARC_LLM_MAX_TOKENS_AFTER_INITIAL", "4096")
+    monkeypatch.setenv("ARC_LLM_MAX_ACTOR_CALLS", "4")
+    monkeypatch.setenv("ARC_LLM_MAX_ACTOR_CALLS_AFTER_INITIAL", "1")
+    monkeypatch.setenv("ARC_LLM_FORCE_ACTION_TOOL", "1")
+    monkeypatch.setenv("TYCHO_NOOA_TREATMENT", "decision_discipline")
     session = WorkerSession()
     ready = session.start_game(
         StartGameMessage(
@@ -500,13 +777,32 @@ async def test_worker_keeps_one_agent_and_observes_level_boundary(
 
     assert session.agent is agent
     assert agent._native_tool_config.max_tokens == 8_000
+    assert agent._native_tool_config.max_tokens_after_initial == 4_096
+    assert agent._native_tool_config.action_demand_max_tokens is None
+    assert agent._native_tool_config.action_demand_disable_thinking is False
+    # NativeToolStrategy reserves its last request for the action-only demand.
+    assert agent._native_tool_config.max_tool_steps == 3
+    assert agent._native_tool_config.max_tool_steps_after_initial == 0
     assert agent._scribe_config.max_tokens == 8_000
     assert agent._trigger_builder is not None
     assert agent._trigger_builder._builder_config is not None
     assert agent._trigger_builder._builder_config.max_tokens == 8_000
     assert ready["metadata"]["client_kind"] == "scripted"
+    assert ready["metadata"]["decision_envelope"] == {
+        "force_action_tool": True,
+        "max_actor_calls": 4,
+        "max_actor_calls_after_initial": 1,
+        "max_output_tokens_per_call": 8_000,
+        "max_output_tokens_per_call_after_initial": 4_096,
+        "action_demand_max_output_tokens": None,
+        "action_demand_disable_thinking": False,
+        "model_retries": None,
+        "model_timeout_seconds": 180.0,
+        "max_actions_per_batch": 4,
+    }
     assert ready["metadata"]["mode"] == "trigger"
-    assert ready["metadata"]["treatment"] == "control"
+    assert ready["metadata"]["treatment"] == "decision_discipline"
+    assert ready["metadata"]["level_boundary_policy"] == "model_scribe"
     assert ready["metadata"]["sandbox_runtime"] == "host"
     assert (agent.workspace_dir / "notes/first-contact.md").read_text() == (
         "UP changed the public grid."
@@ -515,7 +811,7 @@ async def test_worker_keeps_one_agent_and_observes_level_boundary(
         json.loads(line)
         for line in (tmp_path.parent / "tool-trace.jsonl").read_text().splitlines()
     ]
-    assert [record["name"] for record in trace] == ["write_file", "take_action"]
+    assert [record["name"] for record in trace] == ["write_file", "take_actions"]
     assert [record["sequence"] for record in trace] == [0, 0]
     assert json.loads((agent.workspace_dir / "level_0/solved.json").read_text()) == {
         "action": "UP",
@@ -565,7 +861,13 @@ async def test_worker_protocol_routes_a_complete_game_and_reports_bad_input(
                         "content": "served through the process boundary",
                     },
                 },
-                {"tool": "take_action", "arguments": {"action": "UP"}},
+                {
+                    "tool": "take_actions",
+                    "arguments": {
+                        "actions": [{"action": "UP"}],
+                        "rationale": "test one-action commitment",
+                    },
+                },
             ]
         ),
     )

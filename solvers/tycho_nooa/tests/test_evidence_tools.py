@@ -36,7 +36,7 @@ def test_protocol_pairs_by_tool_call_id_without_shifting_after_an_unexecuted_cal
 ):
     protocol = _load_tool("read_protocol")
     calls = [
-        {"call_index": 1, "tool_call_ids": ["blocked"], "tool_calls": ["take_action"]},
+        {"call_index": 1, "tool_call_ids": ["blocked"], "tool_calls": ["take_actions"]},
         {"call_index": 2, "tool_call_ids": ["read-2"], "tool_calls": ["read_file"]},
     ]
     tools = [

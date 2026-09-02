@@ -38,8 +38,13 @@ def _response(action: str, call_id: str) -> LLMResponse:
         tool_calls=[
             ToolCall(
                 id=call_id,
-                name="take_action",
-                arguments=json.dumps({"action": action}),
+                name="take_actions",
+                arguments=json.dumps(
+                    {
+                        "actions": [{"action": action}],
+                        "rationale": "test one-action commitment",
+                    }
+                ),
             )
         ],
         finish_reason="tool_calls",

@@ -17,6 +17,11 @@ from pydantic import BaseModel, ConfigDict, Field, create_model, model_validator
 from tycho.workspace.agent_tools import ToolExecutor, canonical, tool_specs
 from tycho.workspace.workspace import diff_text, grid_text
 
+from tycho_nooa.action_batch import (
+    MAX_ACTIONS_PER_BATCH,
+    ActionBatchDecision,
+    grid_sha256,
+)
 from tycho_nooa.epistemic import GoalToolSurface
 from tycho_nooa.models import ActionDecision, GameTurn
 from tycho_nooa.modes import ModePolicy
@@ -74,6 +79,22 @@ class _InvokeBuilderArguments(_Arguments):
     reason: str = ""
 
 
+def _action_horizon_prompt(turn: GameTurn) -> str:
+    if turn.action_limit is None:
+        return ""
+    prompt = (
+        f"Action horizon: {turn.actions_used} of {turn.action_limit} permitted "
+        f"environment actions have been used; {turn.actions_remaining} remain "
+        "including this decision."
+    )
+    if turn.final_permitted_action:
+        prompt += (
+            " This is the final permitted environment action. Its result will be "
+            "recorded, but no next model decision is guaranteed."
+        )
+    return prompt
+
+
 def _action_schema_extra(schema: dict[str, Any]) -> None:
     """Expose the same action-dependent shape that request validation enforces."""
     properties = schema["properties"]
@@ -81,6 +102,11 @@ def _action_schema_extra(schema: dict[str, Any]) -> None:
     if not isinstance(actions, list):
         return
     coordinate = {"maximum": 63, "minimum": 0, "type": "integer"}
+    shared = {
+        name: value
+        for name, value in properties.items()
+        if name not in {"action", "row", "col"}
+    }
     non_click_actions = [action for action in actions if action != "CLICK"]
     if "CLICK" in actions and non_click_actions:
         schema["oneOf"] = [
@@ -90,13 +116,17 @@ def _action_schema_extra(schema: dict[str, Any]) -> None:
                     "action": {"const": "CLICK"},
                     "row": coordinate,
                     "col": coordinate,
+                    **shared,
                 },
                 "required": ["action", "row", "col"],
                 "type": "object",
             },
             {
                 "additionalProperties": False,
-                "properties": {"action": {"enum": non_click_actions}},
+                "properties": {
+                    "action": {"enum": non_click_actions},
+                    **shared,
+                },
                 "required": ["action"],
                 "type": "object",
             },
@@ -128,6 +158,22 @@ class _ActionArguments(_Arguments):
         return self
 
 
+class _BatchActionArguments(_ActionArguments):
+    expected_before_grid_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+
+
+class _BatchArguments(_Arguments):
+    actions: list[_BatchActionArguments] = Field(
+        min_length=1,
+        max_length=MAX_ACTIONS_PER_BATCH,
+    )
+    rationale: str = Field(min_length=1, max_length=2_000)
+    stop_on_no_change: bool = True
+
+
 class _ActionTool(Tool):
     """Retain action-shape composition that NOOA's generic cleaner discards."""
 
@@ -156,16 +202,28 @@ class ModelToolError(RuntimeError):
         self.message = message
 
 
-def _current_action_arguments(actions: list[str]) -> type[BaseModel]:
-    """Bind the request schema to the current turn's action vocabulary."""
+def _current_batch_arguments(
+    actions: list[str], *, max_actions: int
+) -> type[BaseModel]:
+    """Bind every step and the batch length to this public turn."""
     values = tuple(dict.fromkeys(actions))
     if not values:
         raise RuntimeError("current turn advertises no available actions")
     action_type = cast(Any, Literal)[values]
-    return create_model(
-        "_CurrentActionArguments",
-        __base__=_ActionArguments,
+    step_model = create_model(
+        "_CurrentBatchActionArguments",
+        __base__=_BatchActionArguments,
         action=(action_type, ...),
+    )
+    return create_model(
+        "_CurrentBatchArguments",
+        __base__=_Arguments,
+        actions=(
+            list[step_model],  # type: ignore[valid-type]
+            Field(min_length=1, max_length=max_actions),
+        ),
+        rationale=(str, Field(min_length=1, max_length=2_000)),
+        stop_on_no_change=(bool, True),
     )
 
 
@@ -182,7 +240,7 @@ _ARGUMENT_MODELS: dict[str, type[BaseModel]] = {
     "run_python": _RunPythonArguments,
     "set_verbosity": _VerbosityArguments,
     "invoke_builder": _InvokeBuilderArguments,
-    "take_action": _ActionArguments,
+    "take_actions": _BatchArguments,
 }
 
 
@@ -192,7 +250,7 @@ class ToolProfile:
 
     include_edit_function: bool = False
     include_builder: bool = False
-    include_take_action: bool = True
+    include_take_actions: bool = True
     include_set_verbosity: bool = True
 
 
@@ -213,7 +271,7 @@ class Observation:
 ACTOR_TOOL_PROFILE = ToolProfile()
 BUILDER_TOOL_PROFILE = ToolProfile(
     include_edit_function=True,
-    include_take_action=False,
+    include_take_actions=False,
     include_set_verbosity=False,
 )
 
@@ -322,7 +380,7 @@ class WorkspaceToolSurface:
 
     def _observation_head(self, turn: GameTurn, frame: str) -> list[str]:
         metadata = turn.model_dump(exclude={"grid"})
-        return [
+        lines = [
             (
                 "Investigate the following new public observation. It has already "
                 "been recorded in the durable Tycho workspace."
@@ -338,6 +396,9 @@ class WorkspaceToolSurface:
                 "the full grid and exact transition remain available through run_python"
             ),
         ]
+        if horizon := _action_horizon_prompt(turn):
+            lines.extend(("", horizon))
+        return lines
 
     def _observation_payload(self, turn: GameTurn) -> list[str]:
         lines: list[str] = []
@@ -395,9 +456,10 @@ class WorkspaceToolSurface:
 
     def native_tools(self) -> list[Tool]:
         """Return Tycho's generic tool names/descriptions as NOOA tools."""
-        tools: list[Tool] = []
         runtime_note = tool_note(self._executor.ws.dir)
-        dispatch: dict[str, Callable[..., str | ActionDecision]] = {
+        dispatch: dict[
+            str, Callable[..., str | ActionDecision | ActionBatchDecision]
+        ] = {
             "ls": self.ls,
             "read_file": self.read_file,
             "write_file": self.write_file,
@@ -406,56 +468,101 @@ class WorkspaceToolSurface:
             "run_python": self.run_python,
             "set_verbosity": self.set_verbosity,
             "invoke_builder": self.invoke_builder,
-            "take_action": self.take_action,
+            "take_actions": self.take_actions,
         }
-        for spec in tool_specs(
-            "generic",
-            # The named typed-goal treatment replaces the untyped actor request;
-            # leaving both visible lets the model bypass evidence validation.
-            include_builder=(
-                self._profile.include_builder and self._goal_tools is None
-            ),
-            include_edit_func=self._profile.include_edit_function,
-            include_take_action=self._profile.include_take_action,
-            include_set_verbosity=self._profile.include_set_verbosity,
-        ):
-            name = spec["name"]
-            parameters_model = _ARGUMENT_MODELS[name]
-            description = spec["description"] + runtime_note.get(name, "")
-            if name == "take_action" and self._turn is not None:
-                turn = self._turn
-                parameters_model = _current_action_arguments(turn.available_actions)
-                description = (
-                    "Commit exactly one environment action from the current turn's "
-                    f"available_actions: {turn.available_actions}. Pass row and col only "
-                    "when that action is a click. This ends the turn; the successor "
-                    "arrives on the next call."
-                )
-            tool_type = _ActionTool if name == "take_action" else Tool
-            tools.append(
-                tool_type(
-                    name=name,
-                    description=description,
-                    callable=dispatch[name],
-                    parameters_model=parameters_model,
-                )
-            )
+        tools = [
+            self._native_tool(spec, dispatch, runtime_note)
+            for spec in self._generic_tool_specs()
+        ]
+        if self._profile.include_take_actions:
+            tools.append(self._take_actions_tool(dispatch["take_actions"]))
         if self._goal_tools is not None:
             tools.extend(self._goal_tools.native_tools())
         if self._theory_transaction is not None:
-            tools.append(
-                Tool(
-                    name="checkout_theory_candidate",
-                    description=(
-                        "Checkout an immutable retained theory by record ID. The host "
-                        "re-evaluates it against the current frozen frontier and working "
-                        "incumbent; checkout never grants publication authority."
-                    ),
-                    callable=self.checkout_theory_candidate,
-                    parameters_model=_CheckoutTheoryArguments,
-                )
-            )
+            tools.append(self._checkout_theory_tool())
         return tools
+
+    def _generic_tool_specs(self) -> list[dict[str, Any]]:
+        # The named typed-goal treatment replaces the untyped actor request;
+        # leaving both visible lets the model bypass evidence validation.
+        include_builder = self._profile.include_builder and self._goal_tools is None
+        specs = tool_specs(
+            "generic",
+            include_builder=include_builder,
+            include_edit_func=self._profile.include_edit_function,
+            # Pinned Tycho couples invoke_builder to its singular action spec.
+            # Request it only when needed to obtain invoke_builder, then remove
+            # the action spec before it reaches the model.
+            include_take_action=include_builder,
+            include_set_verbosity=self._profile.include_set_verbosity,
+        )
+        return [spec for spec in specs if spec["name"] != "take_action"]
+
+    def _native_tool(
+        self,
+        spec: dict[str, Any],
+        dispatch: dict[str, Callable[..., str | ActionDecision | ActionBatchDecision]],
+        runtime_note: dict[str, str],
+    ) -> Tool:
+        name = spec["name"]
+        parameters_model = _ARGUMENT_MODELS[name]
+        description = spec["description"] + runtime_note.get(name, "")
+        return Tool(
+            name=name,
+            description=description,
+            callable=dispatch[name],
+            parameters_model=parameters_model,
+        )
+
+    def _take_actions_tool(
+        self,
+        callable: Callable[..., str | ActionDecision | ActionBatchDecision],
+    ) -> Tool:
+        turn = self._turn
+        available_actions = (
+            turn.available_actions if turn is not None else self._executor.available
+        )
+        horizon_cap = (
+            turn.actions_remaining
+            if turn is not None and turn.actions_remaining is not None
+            else MAX_ACTIONS_PER_BATCH
+        )
+        batch_cap = min(MAX_ACTIONS_PER_BATCH, horizon_cap)
+        parameters_model = (
+            _current_batch_arguments(available_actions, max_actions=batch_cap)
+            if available_actions
+            else _BatchArguments
+        )
+        return _ActionTool(
+            name="take_actions",
+            description=(
+                f"The only action-commitment tool. Commit 1-{batch_cap} ordered "
+                "environment actions from the current "
+                f"available_actions {available_actions} in one model call. The Solver "
+                "returns only the first action now, observes its public result, then "
+                "releases each successor without another model call while the queue guards "
+                "hold. By default a no-change result stops the queue. A later step may add "
+                "expected_before_grid_sha256, computed as SHA-256 of the compact JSON grid "
+                "(json.dumps(grid,separators=(',',':'))), to require an exact predicted "
+                "frame. Boundaries, terminal states, resets, action illegality, horizon "
+                "exhaustion, or failed guards return control to the Actor. Pass row and col "
+                "only for CLICK. State a short predicted effect in rationale."
+            ),
+            callable=callable,
+            parameters_model=parameters_model,
+        )
+
+    def _checkout_theory_tool(self) -> Tool:
+        return Tool(
+            name="checkout_theory_candidate",
+            description=(
+                "Checkout an immutable retained theory by record ID. The host re-evaluates "
+                "it against the current frozen frontier and working incumbent; checkout "
+                "never grants publication authority."
+            ),
+            callable=self.checkout_theory_candidate,
+            parameters_model=_CheckoutTheoryArguments,
+        )
 
     def dispatch(
         self,
@@ -464,7 +571,7 @@ class WorkspaceToolSurface:
         *,
         tool_call_id: str | None = None,
         raw_arguments: str | None = None,
-    ) -> str | ActionDecision:
+    ) -> str | ActionDecision | ActionBatchDecision:
         model = tool.parameters_model
         assert model is not None
         try:
@@ -602,7 +709,7 @@ class WorkspaceToolSurface:
         arguments: dict[str, Any],
         *,
         status: Literal["complete", "error"],
-        result: str | ActionDecision,
+        result: str | ActionDecision | ActionBatchDecision,
         tool_call_id: str | None = None,
         raw_arguments: str | None = None,
         parse_status: Literal["complete", "error"] = "complete",
@@ -632,7 +739,9 @@ class WorkspaceToolSurface:
             "error_stage": error_stage,
             "status": status,
             "result": (
-                result.model_dump() if isinstance(result, ActionDecision) else result
+                result.model_dump()
+                if isinstance(result, (ActionDecision, ActionBatchDecision))
+                else result
             ),
         }
         self._turn_tool_calls.append(record)
@@ -819,18 +928,40 @@ class WorkspaceToolSurface:
             "invoke_builder must be dispatched by NativeToolStrategy"
         )
 
-    def take_action(
+    def take_actions(
         self,
-        action: str,
-        row: int | None = None,
-        col: int | None = None,
-    ) -> ActionDecision:
+        actions: list[dict[str, Any]],
+        rationale: str,
+        stop_on_no_change: bool = True,
+    ) -> ActionBatchDecision:
+        """Validate one bounded batch against the current public turn."""
         turn = self._require_turn()
-        if action not in turn.available_actions:
+        batch = ActionBatchDecision.model_validate(
+            {
+                "actions": actions,
+                "rationale": rationale,
+                "stop_on_no_change": stop_on_no_change,
+            }
+        )
+        if turn.actions_remaining is not None and len(batch.actions) > turn.actions_remaining:
             raise ValueError(
-                f"illegal action {action!r}; available actions: {turn.available_actions}"
+                f"batch length {len(batch.actions)} exceeds the "
+                f"{turn.actions_remaining} remaining environment actions"
             )
-        return ActionDecision(action=action, row=row, col=col)
+        illegal = [
+            step.action
+            for step in batch.actions
+            if step.action not in turn.available_actions
+        ]
+        if illegal:
+            raise ValueError(
+                f"illegal batch actions {illegal!r}; available actions: "
+                f"{turn.available_actions}"
+            )
+        first_guard = batch.actions[0].expected_before_grid_sha256
+        if first_guard is not None and first_guard != grid_sha256(turn.grid):
+            raise ValueError("first batch action's expected frame does not match this turn")
+        return batch
 
     def _require_turn(self) -> GameTurn:
         if self._turn is None:

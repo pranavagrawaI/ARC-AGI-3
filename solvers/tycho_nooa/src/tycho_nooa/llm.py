@@ -7,14 +7,30 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
-from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall, UnifiedLLM
+from nooa.unifiedllm import (
+    FakeLLMClient,
+    LLMResponse,
+    RetryConfig,
+    ToolCall,
+    UnifiedLLM,
+)
 from nooa.unifiedllm.registry import get_llm_client
 
 from tycho_nooa.llm_trace import request_reasoning
 
 SCRIPTED_TOOL_CALLS_ENV = "TYCHO_NOOA_SCRIPTED_TOOL_CALLS"
 MAX_TOKENS_ENV = "ARC_LLM_MAX_TOKENS"
+MAX_TOKENS_AFTER_INITIAL_ENV = "ARC_LLM_MAX_TOKENS_AFTER_INITIAL"
+ACTION_DEMAND_MAX_TOKENS_ENV = "ARC_LLM_ACTION_DEMAND_MAX_TOKENS"
+ACTION_DEMAND_DISABLE_THINKING_ENV = "ARC_LLM_ACTION_DEMAND_DISABLE_THINKING"
 DEFAULT_MAX_TOKENS = 16_000
+MAX_ACTOR_CALLS_ENV = "ARC_LLM_MAX_ACTOR_CALLS"
+MAX_ACTOR_CALLS_AFTER_INITIAL_ENV = "ARC_LLM_MAX_ACTOR_CALLS_AFTER_INITIAL"
+DEFAULT_MAX_ACTOR_CALLS = 26
+TIMEOUT_SECONDS_ENV = "ARC_LLM_TIMEOUT_SECONDS"
+DEFAULT_TIMEOUT_SECONDS = 180.0
+RETRIES_ENV = "ARC_LLM_RETRIES"
+FORCE_ACTION_TOOL_ENV = "ARC_LLM_FORCE_ACTION_TOOL"
 PROVIDER_ENDPOINT_ENV = "ARC_LLM_PROVIDER_ENDPOINT"
 
 
@@ -35,6 +51,124 @@ def generation_max_tokens(
     return value
 
 
+def generation_max_tokens_after_initial(
+    environment: Mapping[str, str] | None = None,
+) -> int:
+    """Return the later-turn output ceiling, defaulting to the main ceiling."""
+    env = os.environ if environment is None else environment
+    return _positive_integer(
+        env,
+        MAX_TOKENS_AFTER_INITIAL_ENV,
+        generation_max_tokens(env),
+    )
+
+
+def generation_action_demand_max_tokens(
+    environment: Mapping[str, str] | None = None,
+) -> int | None:
+    """Return an explicit final action-only response ceiling, when configured."""
+    env = os.environ if environment is None else environment
+    if ACTION_DEMAND_MAX_TOKENS_ENV not in env:
+        return None
+    return _positive_integer(env, ACTION_DEMAND_MAX_TOKENS_ENV, 1)
+
+
+def generation_action_demand_disable_thinking(
+    environment: Mapping[str, str] | None = None,
+) -> bool:
+    """Whether the final action-only request suppresses model reasoning."""
+    env = os.environ if environment is None else environment
+    return _binary_flag(env, ACTION_DEMAND_DISABLE_THINKING_ENV, default=False)
+
+
+def generation_max_actor_calls(
+    environment: Mapping[str, str] | None = None,
+) -> int:
+    """Return the exact Actor request ceiling, including the final demand."""
+    env = os.environ if environment is None else environment
+    return _positive_integer(env, MAX_ACTOR_CALLS_ENV, DEFAULT_MAX_ACTOR_CALLS)
+
+
+def generation_max_actor_calls_after_initial(
+    environment: Mapping[str, str] | None = None,
+) -> int:
+    """Return the later-turn Actor ceiling, including its final demand."""
+    env = os.environ if environment is None else environment
+    return _positive_integer(
+        env,
+        MAX_ACTOR_CALLS_AFTER_INITIAL_ENV,
+        generation_max_actor_calls(env),
+    )
+
+
+def generation_timeout_seconds(
+    environment: Mapping[str, str] | None = None,
+) -> float:
+    """Return the timeout applied to each model request."""
+    env = os.environ if environment is None else environment
+    raw = env.get(TIMEOUT_SECONDS_ENV)
+    if raw is None:
+        return DEFAULT_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError as error:
+        raise ValueError(f"{TIMEOUT_SECONDS_ENV} must be a positive number") from error
+    if value <= 0:
+        raise ValueError(f"{TIMEOUT_SECONDS_ENV} must be a positive number")
+    return value
+
+
+def generation_retries(
+    environment: Mapping[str, str] | None = None,
+) -> int | None:
+    """Return an explicit retry ceiling, or None to preserve NOOA defaults."""
+    env = os.environ if environment is None else environment
+    raw = env.get(RETRIES_ENV)
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise ValueError(f"{RETRIES_ENV} must be a non-negative integer") from error
+    if value < 0:
+        raise ValueError(f"{RETRIES_ENV} must be a non-negative integer")
+    return value
+
+
+def generation_force_action_tool(
+    environment: Mapping[str, str] | None = None,
+) -> bool:
+    """Whether the final action-only request must select its sole tool."""
+    env = os.environ if environment is None else environment
+    return _binary_flag(env, FORCE_ACTION_TOOL_ENV, default=False)
+
+
+def _binary_flag(env: Mapping[str, str], name: str, *, default: bool) -> bool:
+    raw = env.get(name)
+    if raw is None:
+        return default
+    if raw == "0":
+        return False
+    if raw == "1":
+        return True
+    raise ValueError(f"{name} must be exactly 0 or 1")
+
+
+def _positive_integer(
+    env: Mapping[str, str], name: str, default: int
+) -> int:
+    raw = env.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise ValueError(f"{name} must be a positive integer") from error
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
 def build_llm(environment: Mapping[str, str] | None = None) -> tuple[UnifiedLLM, str]:
     """Build a live client, or an explicit scripted client for hermetic tests."""
     env = os.environ if environment is None else environment
@@ -45,7 +179,16 @@ def build_llm(environment: Mapping[str, str] | None = None) -> tuple[UnifiedLLM,
         raise RuntimeError(
             "ARC_LLM_MODEL is required unless TYCHO_NOOA_SCRIPTED_TOOL_CALLS is set"
         )
-    overrides: dict[str, Any] = {"timeout": 180.0}
+    overrides: dict[str, Any] = {"timeout": generation_timeout_seconds(env)}
+    if (retries := generation_retries(env)) is not None:
+        # NOOA owns an outer retry loop and LiteLLM owns an inner one. Both
+        # must share the same explicit ceiling or one logical generation can
+        # silently multiply endpoint attempts and wall time.
+        overrides["retry_config"] = RetryConfig(
+            max_retries=retries,
+            rate_limit_extra_retries=0,
+        )
+        overrides["num_retries"] = retries
     model = _apply_gateway(env, model, overrides)
     _apply_optional_overrides(env, overrides)
     use_responses = env.get(

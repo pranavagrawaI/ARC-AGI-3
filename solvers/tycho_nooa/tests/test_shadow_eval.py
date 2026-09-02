@@ -112,8 +112,13 @@ def action_response(action: str) -> LLMResponse:
         tool_calls=[
             ToolCall(
                 id=f"dynamic-{action}",
-                name="take_action",
-                arguments=json.dumps({"action": action}),
+                name="take_actions",
+                arguments=json.dumps(
+                    {
+                        "actions": [{"action": action}],
+                        "rationale": "test one-action commitment",
+                    }
+                ),
             )
         ],
         finish_reason="tool_calls",
@@ -174,12 +179,24 @@ def write_checkpoint(root: Path, *, output_model: object = None) -> dict[str, An
         ],
         "tools": [
             {
-                "name": "take_action",
-                "description": "commit one action",
+                "name": "take_actions",
+                "description": "commit one or more actions",
                 "parameters": {
                     "type": "object",
-                    "properties": {"action": {"type": "string"}},
-                    "required": ["action"],
+                    "properties": {
+                        "actions": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {"action": {"type": "string"}},
+                                "required": ["action"],
+                            },
+                            "minItems": 1,
+                            "maxItems": 4,
+                        },
+                        "rationale": {"type": "string"},
+                    },
+                    "required": ["actions", "rationale"],
                     "additionalProperties": False,
                 },
             }
@@ -219,8 +236,13 @@ def write_checkpoint(root: Path, *, output_model: object = None) -> dict[str, An
         "tool_calls": [
             {
                 "id": "recorded-id",
-                "name": "take_action",
-                "arguments": json.dumps({"action": "UP"}),
+                "name": "take_actions",
+                "arguments": json.dumps(
+                    {
+                        "actions": [{"action": "UP"}],
+                        "rationale": "test one-action commitment",
+                    }
+                ),
             }
         ],
     }
@@ -236,13 +258,13 @@ def write_checkpoint(root: Path, *, output_model: object = None) -> dict[str, An
     return request
 
 
-def perturbation(request: dict[str, Any], *, effect: str = "take_action") -> dict:
+def perturbation(request: dict[str, Any], *, effect: str = "take_actions") -> dict:
     target = request["request_body"]["messages"][1]["content"]
     return {
         "schema": SPEC_SCHEMA,
         "id": "remove-builder-report",
         "question": "Does the actor's immediate action depend on builder advice?",
-        "hypothesis": "Removing the advice changes take_action.",
+        "hypothesis": "Removing the advice changes take_actions.",
         "expected_effect": effect,
         "invalid_if": "Any request leaf besides the target message changes.",
         "source_request_payload_commitment": request["request_payload_commitment"],
@@ -256,7 +278,7 @@ def perturbation(request: dict[str, Any], *, effect: str = "take_action") -> dic
     }
 
 
-def prepared_packet(tmp_path: Path, *, effect: str = "take_action") -> Path:
+def prepared_packet(tmp_path: Path, *, effect: str = "take_actions") -> Path:
     root = tmp_path / "checkpoints"
     request = write_checkpoint(root)
     packet = tmp_path / "packet"
@@ -395,7 +417,7 @@ async def test_stable_paired_difference_supports_immediate_dependence(
     assert report["executed_calls"] == 4
     assert report["assessment"]["judgment"] == "supported"
     assert report["promotion_allowed"] is True
-    assert report["assessment"]["paired_change_rates"]["take_action_changed"] == 1
+    assert report["assessment"]["paired_change_rates"]["take_actions_changed"] == 1
     assert report["assessment"]["control_recorded_response_match_rate"] == 1
     assert all(call["output_model"] is None for call in client.calls)
 

@@ -563,7 +563,7 @@ class GoalToolSurface:
             if pending is not None:
                 return (
                     f"candidate goal {goal.id} has objective review {pending.id}; "
-                    "call update_goal to select, reject, or retain it before take_action"
+                    "call update_goal to select, reject, or retain it before take_actions"
                 )
             if (
                 goal.status is CandidateGoalStatus.PROPOSED
@@ -571,7 +571,7 @@ class GoalToolSurface:
             ):
                 return (
                     f"candidate goal {goal.id} has not been independently reviewed; "
-                    "call request_builder with focus='objective' before take_action"
+                    "call request_builder with focus='objective' before take_actions"
                 )
         return None
 

@@ -15,6 +15,11 @@ from tycho_nooa.decision_checkpoints import (
 
 
 def response(tool: str, arguments: dict, call_id: str) -> LLMResponse:
+    if tool == "take_actions" and "actions" not in arguments:
+        arguments = {
+            "actions": [arguments],
+            "rationale": "test one-action commitment",
+        }
     return LLMResponse(
         raw_response=None,
         content="",
@@ -76,7 +81,7 @@ async def test_each_model_call_captures_a_committed_request_and_restorable_works
                 {"path": "notes/probe.md", "content": "first hypothesis"},
                 "write-1",
             ),
-            response("take_action", {"action": "UP"}, "act-1"),
+            response("take_actions", {"action": "UP"}, "act-1"),
         ]
     )
     llm.config.update(
@@ -126,7 +131,7 @@ async def test_each_model_call_captures_a_committed_request_and_restorable_works
         "edit_file",
         "run_python",
         "set_verbosity",
-        "take_action",
+        "take_actions",
     }
     committed = request["request_payload_commitment"]
     body_bytes = json.dumps(

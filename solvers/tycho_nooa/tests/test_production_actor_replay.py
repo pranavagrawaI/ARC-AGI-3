@@ -23,6 +23,11 @@ def trusted_test_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def response(tool: str, arguments: dict, call_id: str) -> LLMResponse:
+    if tool == "take_actions" and "actions" not in arguments:
+        arguments = {
+            "actions": [arguments],
+            "rationale": "test one-action commitment",
+        }
     return LLMResponse(
         raw_response=None,
         content="",
@@ -127,7 +132,7 @@ async def test_actual_production_controller_stops_at_replay_consequence_boundary
                 {"path": "level_0/turn_000.json"},
                 "read-old",
             ),
-            response("take_action", {"action": "DOWN"}, "terminal"),
+            response("take_actions", {"action": "DOWN"}, "terminal"),
         ]
     )
 
@@ -169,7 +174,7 @@ async def test_python_history_access_is_reported_as_partial_not_inferred(
                 {"code": ("import wmlib\nprint(sorted(wmlib.frames()))\n")},
                 "python",
             ),
-            response("take_action", {"action": "DOWN"}, "terminal"),
+            response("take_actions", {"action": "DOWN"}, "terminal"),
         ]
     )
 

@@ -266,7 +266,7 @@ def _evaluate(
     reacquisitions = len(acquisitions) - len(set(acquisitions))
     sufficiency_call = _first_sufficiency_call(disclosures, oracle)
     terminal_record = next(
-        (row for row in reversed(tool_records) if row.get("name") == "take_action"),
+        (row for row in reversed(tool_records) if row.get("name") == "take_actions"),
         None,
     )
     terminal_call = terminal_record.get("call_index") if terminal_record else None

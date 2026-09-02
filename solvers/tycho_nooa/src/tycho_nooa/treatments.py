@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Literal
 
 from tycho_nooa.modes import ModePolicy
 
@@ -13,6 +14,13 @@ CONTROL = "control"
 TYPED_CANDIDATE_GOALS = "typed_candidate_goals"
 TRANSACTIONAL_BUILDER = "transactional_builder"
 DECISION_DISCIPLINE = "decision_discipline"
+SINGLE_DECISION_DISCIPLINE = "single_decision_discipline"
+MODEL_SCRIBE = "model_scribe"
+DETERMINISTIC_LEVEL_CHECKPOINT = "deterministic_level_checkpoint"
+LevelBoundaryPolicy = Literal[
+    "model_scribe",
+    "deterministic_level_checkpoint",
+]
 INVESTIGATOR_IDENTITY = (
     "You are one persistent investigator playing an unfamiliar grid game."
 )
@@ -27,7 +35,9 @@ DECISION_DISCIPLINE_STRATEGY_PROMPT = (
     "If you cannot name such a result, act. Legal survivable actions are also experiments: "
     "predict the observable consequence, act, observe, and revise. Investigate further "
     "when an action may be fatal or irreversible and one available computation can "
-    "materially reduce that risk. End the turn only by calling take_action exactly once."
+    "materially reduce that risk. End the turn only by calling take_actions exactly once. "
+    "Pass one action when only one step is justified; add later actions only when they need "
+    "no new judgment. Each public successor is still observed and can stop the queue."
 )
 
 
@@ -40,6 +50,7 @@ class TreatmentPolicy:
     transactional_builder: bool = False
     decision_discipline: bool = False
     builder_max_tool_steps: int | None = None
+    level_boundary_policy: LevelBoundaryPolicy = MODEL_SCRIBE
 
 
 TREATMENTS = {
@@ -63,6 +74,11 @@ TREATMENTS = {
     DECISION_DISCIPLINE: TreatmentPolicy(
         DECISION_DISCIPLINE,
         decision_discipline=True,
+    ),
+    SINGLE_DECISION_DISCIPLINE: TreatmentPolicy(
+        SINGLE_DECISION_DISCIPLINE,
+        decision_discipline=True,
+        level_boundary_policy=DETERMINISTIC_LEVEL_CHECKPOINT,
     ),
 }
 
@@ -100,8 +116,11 @@ def _validate_treatment_mode(
             f"{TREATMENT_ENV}={name!r} requires a Builder-owned source mode; "
             "it does not add a Builder to single or no_world_model controls"
         )
-    if treatment.decision_discipline and mode.name != "trigger":
+    required_mode = (
+        "single" if name == SINGLE_DECISION_DISCIPLINE else "trigger"
+    )
+    if treatment.decision_discipline and mode.name != required_mode:
         raise ValueError(
-            f"{TREATMENT_ENV}={name!r} requires TYCHO_MODE='trigger'; "
+            f"{TREATMENT_ENV}={name!r} requires TYCHO_MODE={required_mode!r}; "
             "its first comparison is against the ordinary incumbent"
         )
