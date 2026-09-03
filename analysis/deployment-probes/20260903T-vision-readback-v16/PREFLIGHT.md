@@ -65,3 +65,15 @@ Kernel 1 died in 62 s at argument parsing (`--request-timeout-s 600` against the
 180); see `TERMINAL-RESULT-kernel1.md`. The probe now takes its own `--vision-request-timeout-s`
 (600), and two tests parse the **built notebook's** command list through `parse_args`.
 Reintroducing the defect fails exactly those two tests with the exact Kaggle error message.
+
+## Push procedure (do not omit)
+
+`kernel-metadata.json`'s `machine_shape` does **not** bind the accelerator. Push with:
+
+```
+kaggle kernels push -p deployment/kaggle/s0-vision-readback-v16-candidate \
+  --accelerator NvidiaRtxPro6000 --timeout 9000
+```
+
+Kernel 2 was allocated a Tesla P100 without the flag and the preflight refused it; see
+`TERMINAL-RESULT-kernel2.md` and board thread #124 reply #129.
