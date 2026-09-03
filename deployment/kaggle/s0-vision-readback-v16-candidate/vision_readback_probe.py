@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import struct
 import sys
 import time
@@ -57,6 +58,8 @@ PALETTE_16 = (
 )
 
 RENDER_SCALES = (6, 16, 32)
+# Serving stacks wrap an image in a couple of delimiter tokens; see measure_visual_tokens.
+VISUAL_FRAMING_TOKEN_ALLOWANCE = 8
 CELL_SAMPLE_SIZE = 12
 
 
@@ -311,6 +314,7 @@ def build_request(
     condition: Condition,
     grid: list[list[int]],
     task: str,
+    thinking_control: str = "chat_template_kwargs",
 ) -> dict[str, Any]:
     content: list[dict[str, Any]] = [{"type": "text", "text": task_instruction(task, grid)}]
     if condition.show_text:
@@ -335,14 +339,34 @@ def build_request(
         "temperature": 0.0,
     }
     if condition.disable_thinking:
-        request["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+        request.update(THINKING_CONTROLS[thinking_control])
     return request
+
+
+# How to suppress reasoning, per route. `extra_body` is an OpenAI *SDK* concept: the SDK
+# flattens it into the top-level body before sending, so a raw HTTP client that ships a
+# literal "extra_body" key sends something no server reads. Measured against
+# qwen/qwen3.8-27b on OpenRouter: nested extra_body and top-level chat_template_kwargs
+# both left reasoning on (43 completion tokens, 129 reasoning chars, identical to
+# baseline); `reasoning: {enabled: false}` cut it to 3 tokens and no reasoning.
+THINKING_CONTROLS: dict[str, dict[str, Any]] = {
+    # SGLang serving Qwen3.x honours this at the top level; V15's Solver reached it
+    # through LiteLLM, which flattens extra_body for the same effect.
+    "chat_template_kwargs": {"chat_template_kwargs": {"enable_thinking": False}},
+    # OpenRouter's own control, needed because upstream providers ignore the above.
+    "openrouter_reasoning": {"reasoning": {"enabled": False}},
+}
 
 
 REQUESTS_ISSUED = Counter()
 
 
-def post_json(url: str, payload: dict[str, Any], timeout_s: float) -> dict[str, Any]:
+def post_json(
+    url: str,
+    payload: dict[str, Any],
+    timeout_s: float,
+    headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """POST one chat completion, counting every attempt.
 
     The outer runtime reconciles this count against SGLang's own access log, so an
@@ -351,7 +375,10 @@ def post_json(url: str, payload: dict[str, Any], timeout_s: float) -> dict[str, 
     REQUESTS_ISSUED["attempted"] += 1
     body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
-        url, data=body, headers={"Content-Type": "application/json"}, method="POST"
+        url,
+        data=body,
+        headers={"Content-Type": "application/json", **(headers or {})},
+        method="POST",
     )
     with urllib.request.urlopen(request, timeout=timeout_s) as response:
         parsed = json.loads(response.read().decode("utf-8"))
@@ -448,7 +475,13 @@ def box_iou(a: list[int], b: list[int]) -> float:
 
 
 def measure_visual_tokens(
-    url: str, model: str, grid: list[list[int]], timeout_s: float
+    url: str,
+    model: str,
+    grid: list[list[int]],
+    timeout_s: float,
+    *,
+    headers: dict[str, str] | None = None,
+    thinking_control: str = "chat_template_kwargs",
 ) -> dict[str, Any]:
     """Difference identical prompts with and without the image to price each render scale.
 
@@ -476,9 +509,10 @@ def measure_visual_tokens(
                 "tool_choice": "required",
                 "max_tokens": 16,
                 "temperature": 0.0,
-                "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+                **THINKING_CONTROLS[thinking_control],
             },
             timeout_s,
+            headers,
         )
         usage = response.get("usage") or {}
         return {"prompt_tokens": usage.get("prompt_tokens")}
@@ -501,7 +535,16 @@ def measure_visual_tokens(
                 "prompt_tokens": prompt_tokens,
                 "observed_visual_tokens": observed,
                 "expected_visual_tokens_if_lossless": expected,
-                "one_token_per_cell": (observed == 4096) if scale == 32 else None,
+                # Allow a few tokens of image framing: measured against
+                # qwen/qwen3.8-27b, scale 6/16/32 cost 146/1026/4098 tokens for an
+                # expected 144/1024/4096, i.e. exactly one merged visual token per ARC
+                # cell plus two delimiters. Demanding == 4096 called that a downscale.
+                "framing_token_allowance": VISUAL_FRAMING_TOKEN_ALLOWANCE,
+                "one_token_per_cell": (
+                    None
+                    if scale != 32 or observed is None
+                    else 0 <= observed - 4096 <= VISUAL_FRAMING_TOKEN_ALLOWANCE
+                ),
             }
         )
     return {"text_only_prompt_tokens": baseline, "scales": measurements}
@@ -513,6 +556,9 @@ def run_readback_tasks(
     frames: list[dict[str, Any]],
     timeout_s: float,
     deadline: float,
+    *,
+    headers: dict[str, str] | None = None,
+    thinking_control: str = "chat_template_kwargs",
 ) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for condition in CONDITIONS:
@@ -531,7 +577,10 @@ def run_readback_tasks(
                     )
                     continue
                 records.append(
-                    run_one(url, model, condition, frame, task, grid, timeout_s)
+                    run_one(
+                        url, model, condition, frame, task, grid, timeout_s,
+                        headers=headers, thinking_control=thinking_control,
+                    )
                 )
     return records
 
@@ -544,8 +593,11 @@ def run_one(
     task: str,
     grid: list[list[int]],
     timeout_s: float,
+    *,
+    headers: dict[str, str] | None = None,
+    thinking_control: str = "chat_template_kwargs",
 ) -> dict[str, Any]:
-    request = build_request(model, condition, grid, task)
+    request = build_request(model, condition, grid, task, thinking_control)
     truth = truth_for(grid, task)
     started = time.monotonic()
     record: dict[str, Any] = {
@@ -560,7 +612,7 @@ def run_one(
         "truth": truth,
     }
     try:
-        response = post_json(url, request, timeout_s)
+        response = post_json(url, request, timeout_s, headers)
     except (urllib.error.URLError, TimeoutError, OSError) as error:
         record["error"] = f"{type(error).__name__}: {error}"
         record["score"] = {"answered": False, "exact": False, "accuracy": 0.0}
@@ -575,6 +627,16 @@ def run_one(
     record["reasoning_tokens"] = completion_details.get("reasoning_tokens")
     record["finish_reason"] = (response.get("choices") or [{}])[0].get("finish_reason")
     record["score"] = score(task, truth, parse_tool_arguments(response))
+    # Assume nothing about the wire format taking effect: a "no thinking" condition that
+    # still spends reasoning tokens is not the condition it claims to be, and comparing
+    # it against the incumbent would be comparing two thinking arms.
+    if condition.disable_thinking:
+        reasoning = record["reasoning_tokens"]
+        record["thinking_suppression_verified"] = reasoning == 0
+        if reasoning:
+            record["contract_violation"] = (
+                f"disable_thinking condition spent {reasoning} reasoning tokens"
+            )
     return record
 
 
@@ -619,6 +681,15 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--request-timeout-s", type=float, default=600.0)
     parser.add_argument("--probe-timeout-s", type=float, default=5400.0)
+    # Read the credential from the environment, never from argv: argv is visible in the
+    # preserved command record and in any process listing.
+    parser.add_argument("--api-key-env", help="env var holding a bearer token")
+    parser.add_argument(
+        "--thinking-control",
+        choices=sorted(THINKING_CONTROLS),
+        default="chat_template_kwargs",
+        help="how this route suppresses reasoning; see THINKING_CONTROLS",
+    )
     args = parser.parse_args()
 
     started = time.monotonic()
@@ -628,6 +699,12 @@ def main() -> int:
         raise RuntimeError("pinned frame asset has an unexpected schema")
     frames = frames_doc["frames"]
     url = args.base_url.rstrip("/") + "/chat/completions"
+    headers: dict[str, str] = {}
+    if args.api_key_env:
+        token = os.environ.get(args.api_key_env)
+        if not token:
+            raise RuntimeError(f"{args.api_key_env} is unset or empty")
+        headers["Authorization"] = f"Bearer {token}"
 
     result: dict[str, Any] = {
         "schema": PROBE_SCHEMA,
@@ -638,13 +715,17 @@ def main() -> int:
             {"record_index": f["record_index"], "level": f["level"]} for f in frames
         ],
         "conditions": [c.name for c in CONDITIONS],
+        "thinking_control": args.thinking_control,
+        "base_url": args.base_url,
     }
     try:
         result["visual_token_measurement"] = measure_visual_tokens(
-            url, args.model, frames[0]["grid"], args.request_timeout_s
+            url, args.model, frames[0]["grid"], args.request_timeout_s,
+            headers=headers, thinking_control=args.thinking_control,
         )
         records = run_readback_tasks(
-            url, args.model, frames, args.request_timeout_s, deadline
+            url, args.model, frames, args.request_timeout_s, deadline,
+            headers=headers, thinking_control=args.thinking_control,
         )
         result["records"] = records
         result["summary"] = aggregate(records)

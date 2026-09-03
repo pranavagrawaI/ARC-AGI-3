@@ -186,11 +186,9 @@ def test_request_shape_follows_its_condition(condition, grid):
     assert request["max_tokens"] == condition.max_tokens
     assert [t["function"]["name"] for t in request["tools"]] == ["report_cells"]
     if condition.disable_thinking:
-        assert request["extra_body"] == {
-            "chat_template_kwargs": {"enable_thinking": False}
-        }
+        assert request["chat_template_kwargs"] == {"enable_thinking": False}
     else:
-        assert "extra_body" not in request
+        assert "chat_template_kwargs" not in request
 
 
 def test_image_conditions_send_a_png_data_url(grid):
@@ -394,7 +392,7 @@ def test_a_downscaling_server_is_reported_as_such(grid, tmp_path, monkeypatch):
     """If SGLang shrinks the render, the probe must say so rather than pass quietly."""
     calls = {"n": 0}
 
-    def fake_post(url, payload, timeout):
+    def fake_post(url, payload, timeout, headers=None):
         calls["n"] += 1
         has_image = any(
             p["type"] == "image_url" for p in payload["messages"][-1]["content"]
@@ -424,3 +422,66 @@ def test_transport_failure_is_recorded_not_raised(grid, monkeypatch):
     record = probe.run_one("http://x/v1", "m", condition, frame, "cells", grid, 1)
     assert record["score"]["answered"] is False
     assert "connection refused" in record["error"]
+
+
+# --- the wire format, which a raw HTTP client gets wrong by default ----------------
+
+
+def test_no_condition_ever_ships_an_extra_body_key(grid):
+    """`extra_body` is an OpenAI SDK concept, not a wire field.
+
+    The SDK flattens it into the top-level body before sending. A raw HTTP client that
+    ships a literal "extra_body" key sends something no server reads, so a "no thinking"
+    arm would silently run with thinking on. Measured on qwen/qwen3.8-27b via OpenRouter:
+    nested extra_body left reasoning at 129 chars / 43 completion tokens, identical to
+    baseline.
+    """
+    for condition in probe.CONDITIONS:
+        for control in probe.THINKING_CONTROLS:
+            request = probe.build_request("m", condition, grid, "cells", control)
+            assert "extra_body" not in request, (condition.name, control)
+
+
+@pytest.mark.parametrize("control", sorted(probe.THINKING_CONTROLS))
+def test_each_route_control_lands_at_the_top_level(grid, control):
+    condition = next(c for c in probe.CONDITIONS if c.disable_thinking)
+    request = probe.build_request("m", condition, grid, "cells", control)
+    for key, value in probe.THINKING_CONTROLS[control].items():
+        assert request[key] == value
+
+
+def test_thinking_arm_never_carries_a_suppression_control(grid):
+    incumbent = next(c for c in probe.CONDITIONS if not c.disable_thinking)
+    for control in probe.THINKING_CONTROLS:
+        request = probe.build_request("m", incumbent, grid, "cells", control)
+        for key in probe.THINKING_CONTROLS[control]:
+            assert key not in request
+
+
+def test_unsuppressed_reasoning_is_recorded_as_a_contract_violation(grid, monkeypatch):
+    """A no-thinking arm that still reasons must be flagged, not quietly scored."""
+    def fake_post(url, payload, timeout, headers=None):
+        return {
+            "choices": [{"finish_reason": "tool_calls", "message": {"tool_calls": [
+                {"function": {"name": "report_cells", "arguments": json.dumps(
+                    {"values": probe.truth_for(grid, "cells")})}}
+            ]}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 900,
+                      "completion_tokens_details": {"reasoning_tokens": 850}},
+        }
+
+    monkeypatch.setattr(probe, "post_json", fake_post)
+    condition = next(c for c in probe.CONDITIONS if c.disable_thinking)
+    record = probe.run_one(
+        "http://x/v1", "m", condition, {"record_index": 0, "level": 0},
+        "cells", grid, 5,
+    )
+    assert record["score"]["accuracy"] == 1.0, "the answer itself was right"
+    assert record["thinking_suppression_verified"] is False
+    assert "850 reasoning tokens" in record["contract_violation"]
+
+
+def test_api_key_is_taken_from_the_environment_not_argv():
+    source = (CANDIDATE / "vision_readback_probe.py").read_text()
+    assert "--api-key-env" in source
+    assert "--api-key" not in source.replace("--api-key-env", "")
