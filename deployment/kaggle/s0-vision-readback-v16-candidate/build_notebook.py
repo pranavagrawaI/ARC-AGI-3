@@ -108,7 +108,7 @@ command = [
     '--model-source', 'jakobbrggen/qwen3-8-27b-fp8-hf-snapshot/versions/1',
     '--runtime-provenance', str(runtime_provenance),
     '--startup-timeout-s', '1200',
-    '--request-timeout-s', '600',
+    '--request-timeout-s', '180',
     '--attention-backend', 'triton',
     '--sampling-backend', 'pytorch',
     '--profile-imports',
@@ -116,6 +116,7 @@ command = [
     '--vision-readback-probe', '/tmp/vision_readback_probe.py',
     '--vision-frames', '/tmp/vision-readback-frames.json',
     '--vision-probe-timeout-s', '5400',
+    '--vision-request-timeout-s', '600',
 ]
 subprocess.run(command, check=True)
 

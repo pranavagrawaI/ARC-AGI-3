@@ -106,6 +106,60 @@ def test_vision_mode_keeps_the_qualified_backend_requirement(runtime, monkeypatc
         runtime.parse_args()
 
 
+def test_the_notebooks_actual_command_line_parses(runtime, monkeypatch):
+    """The test kernel version 1 needed and did not have.
+
+    V16 kernel 1 died in 62 s because the notebook passed `--request-timeout-s 600`
+    while the R8-L3B guard pins it to 180. Every other test here parsed an argument list
+    written by hand in this file, so all of them passed while the run could not start.
+    Extract the command the builder actually emits and feed that through parse_args.
+    """
+    command = notebook_command()
+    assert command[0] == "sys.executable"
+    monkeypatch.setattr(sys, "argv", ["runtime", *command[2:]])
+    args = runtime.parse_args()
+    assert args.r8_l3b is True
+    assert args.vision_readback_probe is not None
+    assert args.vision_frames is not None
+
+
+def test_the_notebook_gives_the_probe_room_for_the_incumbent_arm(runtime, monkeypatch):
+    """text_think decodes up to 16,000 tokens at ~41 tok/s, so ~390 s per request."""
+    monkeypatch.setattr(sys, "argv", ["runtime", *notebook_command()[2:]])
+    args = runtime.parse_args()
+    assert args.request_timeout_s == 180, "R8-L3B pins the frozen one-shot request"
+    assert args.vision_request_timeout_s >= 400, "the probe needs its own ceiling"
+    assert args.vision_request_timeout_s <= args.vision_probe_timeout_s
+
+
+def notebook_command() -> list[str]:
+    """The argument list the built notebook runs, read out of the run cell."""
+    import ast
+    import json
+
+    notebook = json.loads((CANDIDATE / "s0_vision_readback.ipynb").read_text())
+    run_cell = "".join(notebook["cells"][3]["source"])
+    tree = ast.parse(run_cell)
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Assign)
+            and any(getattr(t, "id", None) == "command" for t in node.targets)
+            and isinstance(node.value, ast.List)
+        ):
+            out = []
+            for element in node.value.elts:
+                if isinstance(element, ast.Constant):
+                    out.append(element.value)
+                elif isinstance(element, ast.Attribute):
+                    out.append(f"{element.value.id}.{element.attr}")  # sys.executable
+                elif isinstance(element, ast.Call):
+                    out.append("/kaggle/working/placeholder")  # str(output_dir) etc.
+                else:  # pragma: no cover - the builder emits nothing else
+                    raise AssertionError(f"unhandled command element {ast.dump(element)}")
+            return out
+    raise AssertionError("run cell has no `command` list")
+
+
 def test_claim_ceiling_refuses_gameplay_and_rhae(runtime):
     source = (CANDIDATE / "exact_request_outer_runtime.py").read_text()
     start = source.index('if args.vision_readback_probe:\n        claim_ceiling = (')

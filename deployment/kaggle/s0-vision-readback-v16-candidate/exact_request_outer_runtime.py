@@ -2185,7 +2185,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
                     "--output",
                     str(probe_result_path),
                     "--request-timeout-s",
-                    str(args.request_timeout_s),
+                    str(args.vision_request_timeout_s),
                     "--probe-timeout-s",
                     str(args.vision_probe_timeout_s),
                 ],
@@ -2640,6 +2640,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vision-readback-probe", type=Path)
     parser.add_argument("--vision-frames", type=Path)
     parser.add_argument("--vision-probe-timeout-s", type=float, default=5400.0)
+    # The probe needs its own per-request ceiling. R8-L3B pins --request-timeout-s to
+    # 180 s for the frozen one-shot request, but the incumbent text_think arm decodes up
+    # to 16,000 tokens at ~41 tok/s (~390 s), so inheriting 180 would time it out and
+    # silently delete the arm the comparison exists to make.
+    parser.add_argument("--vision-request-timeout-s", type=float, default=600.0)
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
     if args.self_test and args.readiness_only:
@@ -2671,6 +2676,15 @@ def parse_args() -> argparse.Namespace:
         )
     if args.vision_readback_probe and args.vision_probe_timeout_s <= 0:
         parser.error("--vision-probe-timeout-s must be positive")
+    if args.vision_readback_probe and args.vision_request_timeout_s <= 0:
+        parser.error("--vision-request-timeout-s must be positive")
+    if (
+        args.vision_readback_probe
+        and args.vision_request_timeout_s > args.vision_probe_timeout_s
+    ):
+        parser.error(
+            "--vision-request-timeout-s must not exceed --vision-probe-timeout-s"
+        )
     if args.r8_l3b and args.port != R8_L3B_PORT:
         parser.error(f"--r8-l3b requires --port {R8_L3B_PORT}")
     if args.r8_l3b and (

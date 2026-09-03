@@ -3,15 +3,15 @@
 ## Frozen candidate hashes
 
 ```
-be463cbc60b4569c5218ee4489150bf58f98442eff8928d8b678d20a63f805cd  exact_request_outer_runtime.py
+0040f7cd9a6cedbd173a66166d885f0b5ef4beae703d0914ebeb1d5212a8d1eb  exact_request_outer_runtime.py
 fd4031afec63975cd5bc98e8cc32445f54b510ac927aa486708447ca02b2d21d  frames.json
-18aa8d5e2de6b973f16f1abb212164bfa5e9a85705a8944273ae69b2c44da12e  s0_vision_readback.ipynb
+b9bba3cedc1939a0982e974bc244c63f9b610c7ef99e9e35b05ec4eb000ebb91  s0_vision_readback.ipynb
 a52cdbbde7b2870205afdcf6ba2a72ab0f27899335b4877cd76ad2cdb4e5afca  vision_readback_probe.py
 ```
 
 ## Local verification
 
-- Candidate tests: **39 passed** (`deployment/kaggle/s0-vision-readback-v16-candidate/tests/`).
+- Candidate tests: **41 passed** (`deployment/kaggle/s0-vision-readback-v16-candidate/tests/`).
 - Ruff clean on `vision_readback_probe.py` and `build_notebook.py`.
 - Notebook builder validates its own output: four cells, all code cells compile, the asset cell
   writes all three V16 assets, the run cell keeps `--r8-l3b` / `--vision-readback-probe` /
@@ -55,6 +55,13 @@ therefore structural. The two numbers the card turns on — the measured visual-
 scale-32 render, and readback accuracy against the greyscale-heavy ls20 palette — are only
 obtainable on the Kaggle route.
 
-## Status
+## Status (kernel 2)
 
 Frozen and ready to push. Not pushed.
+
+## Kernel 1 defect and its regression test
+
+Kernel 1 died in 62 s at argument parsing (`--request-timeout-s 600` against the R8-L3B pin of
+180); see `TERMINAL-RESULT-kernel1.md`. The probe now takes its own `--vision-request-timeout-s`
+(600), and two tests parse the **built notebook's** command list through `parse_args`.
+Reintroducing the defect fails exactly those two tests with the exact Kaggle error message.
