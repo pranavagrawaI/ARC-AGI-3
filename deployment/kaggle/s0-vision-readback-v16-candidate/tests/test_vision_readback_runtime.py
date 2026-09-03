@@ -155,7 +155,9 @@ def notebook_command() -> list[str]:
                 elif isinstance(element, ast.Call):
                     out.append("/kaggle/working/placeholder")  # str(output_dir) etc.
                 else:  # pragma: no cover - the builder emits nothing else
-                    raise AssertionError(f"unhandled command element {ast.dump(element)}")
+                    raise AssertionError(  # noqa: TRY004 - a test guard, not a type check
+                        f"unhandled command element {ast.dump(element)}"
+                    )
             return out
     raise AssertionError("run cell has no `command` list")
 

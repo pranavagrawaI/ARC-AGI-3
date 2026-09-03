@@ -15,13 +15,14 @@ import threading
 from collections import Counter
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
 CANDIDATE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(CANDIDATE))
 
-import vision_readback_probe as probe  # noqa: E402
+import vision_readback_probe as probe
 
 REFERENCE_WORKSPACE = Path(
     "/home/pranav/projects/arc-agi-3-reference/tycho/tycho/workspace/workspace.py"
@@ -64,7 +65,9 @@ def test_grid_text_matches_reference_spaced_grid8(grid):
     start = source.index("def grid_text(")
     end = source.index("def grid_hex(")
     namespace: dict = {"GRID_FORMAT": "spaced_grid8"}
-    exec(compile(source[start:end], str(REFERENCE_WORKSPACE), "exec"), namespace)
+    # exec, not import: pulling in Tycho would drag its whole dependency tree into a
+    # test whose only job is to compare one pure function's output byte for byte.
+    exec(compile(source[start:end], str(REFERENCE_WORKSPACE), "exec"), namespace)  # noqa: S102
     assert probe.grid_text(grid) == namespace["grid_text"](grid)
 
 
@@ -251,7 +254,7 @@ def test_bbox_scoring_reports_exactness_and_iou():
 class _PerfectHandler(BaseHTTPRequestHandler):
     """Answers every task correctly, so a passing run exercises the whole path."""
 
-    grid: list[list[int]] = []
+    grid: ClassVar[list[list[int]]] = []
 
     def log_message(self, *args):  # keep the test output clean
         pass
