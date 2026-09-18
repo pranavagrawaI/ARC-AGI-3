@@ -970,6 +970,18 @@ class ToolAgent:
         request, self._critic_request = self._critic_request, ""
         return request
 
+    def critic_context(self) -> dict[str, Any]:
+        """Read-only view of the actor state a critic packet freezes (beliefs, last step, last result)."""
+        return {
+            "summarized_knowledge": dict(self._summarized_knowledge),
+            "last_step_summary": dict(self._last_step_summary) if self._last_step_summary else None,
+            "last_action_result": dict(self._last_action_result) if self._last_action_result else None,
+        }
+
+    def model_config(self) -> tuple[str, str, str, str]:
+        """(provider, base_url, model_id, api_key) so a critic can share the actor's endpoint."""
+        return self._model.provider, self._model.base_url, self._model.model_id, self._api_key
+
     def _headers(self) -> dict[str, str]:
         api_key = (
             self._api_key

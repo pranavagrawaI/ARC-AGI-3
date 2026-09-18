@@ -35,6 +35,7 @@ from inference.agent.runtime_state import (
     write_runtime_state,
 )
 from inference.agent.tool_agent import ToolAgent
+from inference.critic.runner import CriticRunner, critic_enabled
 from inference.framework.kaggle import (
     DEFAULT_QWEN_MODEL_DATASET_SOURCE,
     DEFAULT_SERVED_MODEL_NAME,
@@ -182,6 +183,7 @@ class _HarnessGameSession:
     analysis_step: int = 0
     last_engine_action: str | None = None
     token_baseline: int = 0
+    critic: CriticRunner | None = None
     _viewer_events_flushed: int = field(default=0, init=False, repr=False)
 
     def current_frame(self) -> Frame:
@@ -288,6 +290,7 @@ class _HarnessGameSession:
                     analysis_step = retry_analysis_step
 
                 self.write_runtime_state()
+                self._run_critic_if_triggered()
                 transcript_before = self._read_transcript_bytes()
                 try:
                     result = self.analyzer.analyze(
@@ -336,6 +339,50 @@ class _HarnessGameSession:
             self.state_path.unlink(missing_ok=True)
             self._write_analysis_html()
             self.write_viewer_payload()
+
+    def _run_critic_if_triggered(self) -> None:
+        """Advisory critic, charged to this game's clock. No-op unless a runner is attached."""
+        critic = self.critic
+        if critic is None:
+            return
+        try:
+            request = self.analyzer.take_critic_request()
+            decision = critic.decide(
+                history=self.history_entries,
+                level=_level_number(self.game),
+                action_num=self.action_count,
+                critic_request=request,
+            )
+            if not decision.fired:
+                return
+            firing = critic.fire(
+                decision,
+                current_frame=self.current_frame(),
+                history=self.history_entries,
+                valid_actions=_engine_action_names(self.game),
+                actor_context=self.analyzer.critic_context(),
+            )
+            self.analyzer.set_critic_report(firing.report)
+            self.viewer_events.append(
+                {
+                    **self._base_viewer_event(self.current_frame()),
+                    "type": "critic",
+                    "title": f"Critic ({decision.cause})",
+                    "action_num": self.action_count,
+                    "analysis_step": self.analysis_step,
+                    "cause": decision.cause,
+                    "packet_id": firing.packet_id,
+                    "seconds": firing.seconds,
+                    "model_calls": firing.model_calls,
+                    "tool_calls": firing.tool_calls,
+                    "parsed": firing.parsed,
+                    "recommended_actions": list(firing.report.recommended_actions),
+                    "report_text": firing.report_text,
+                }
+            )
+            self.write_viewer_payload()
+        except Exception as exc:  # noqa: BLE001 - the critic is advisory; never end the game
+            print(f"critic: failed at action {self.action_count}: {type(exc).__name__}: {exc}", flush=True)
 
     def _finish_if_needed(self) -> None:
         run = self.game.game_run
@@ -1221,6 +1268,7 @@ class HarnessSolver(Solver):
             transcript_path = self._transcripts_dir() / f"{run_stem}.txt"
             analysis_relpath = f"solver_analysis/{run_stem}.html"
             analyzer = self._make_analyzer(game, index, local_server)
+            critic = self._make_critic(analyzer, run_stem)
             session = _HarnessGameSession(
                 solver=self,
                 game=game,
@@ -1232,10 +1280,19 @@ class HarnessSolver(Solver):
                 analysis_html_relpath=analysis_relpath,
                 stop_event=self._stop_event,
                 viewer_data_path=viewer_data_path,
+                critic=critic,
             )
             session.play()
         except Exception as exc:
             self._finish_after_error(game, exc)
+
+    def _make_critic(self, analyzer: Any, run_stem: str) -> CriticRunner | None:
+        if not critic_enabled() or not hasattr(analyzer, "model_config"):
+            return None
+        return CriticRunner.from_env(
+            analyzer.model_config(),
+            trace_path=self._transcripts_dir() / f"{run_stem}_critic.jsonl",
+        )
 
     def _artifacts_dir(self) -> Path:
         root = self.job_dir or Path.cwd() / "taaf_harness_artifacts"
