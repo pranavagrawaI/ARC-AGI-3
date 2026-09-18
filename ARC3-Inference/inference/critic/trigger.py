@@ -5,10 +5,13 @@ Duck's world model is prose, so there is no executable model to verify against
 
 (a) level start: once per new level, unconditionally;
 (b) actor request: a `Critic:` labeled line in the actor's assistant text;
-(c) stall: `stall_no_change` consecutive executed actions with no board change,
-    or `stall_no_progress` executed actions without a level completion.
+(c) stall: a run of `stall_no_change` consecutive executed actions with no board
+    change, or `stall_no_progress` executed actions without a level completion.
 
-Stall counters re-arm (reset) after any firing and after a level completion.
+Stall counters re-arm (reset) after any firing and after a level completion. The
+no-change condition is latched: Duck batches actions, so a qualifying run that starts
+and ends inside one batch must still count at the next turn start even though the
+batch's last action changed the board.
 """
 from __future__ import annotations
 
@@ -52,6 +55,7 @@ class DuckTriggerPolicy:
         self._fired_levels: set[int] = set()
         self._last_observed_action_num = 0
         self._no_change_streak = 0
+        self._longest_no_change_run = 0
         self._actions_since_progress = 0
         self._last_fired_action_num: int | None = None
 
@@ -64,15 +68,20 @@ class DuckTriggerPolicy:
             self._last_observed_action_num = record.action_num
             consumed += 1
             if record.level_completed:
-                self._no_change_streak = 0
-                self._actions_since_progress = 0
+                self._rearm()
                 continue
             self._actions_since_progress += 1
             if record.board_changed:
                 self._no_change_streak = 0
             else:
                 self._no_change_streak += 1
+                self._longest_no_change_run = max(self._longest_no_change_run, self._no_change_streak)
         return consumed
+
+    def _rearm(self) -> None:
+        self._no_change_streak = 0
+        self._longest_no_change_run = 0
+        self._actions_since_progress = 0
 
     def decide(self, *, level: int, action_num: int, critic_request: str = "") -> TriggerDecision:
         """Evaluate at a turn start (before Duck builds its user prompt)."""
@@ -80,8 +89,7 @@ class DuckTriggerPolicy:
         if decision.fired:
             self._fired_levels.add(int(level))
             self._last_fired_action_num = int(action_num)
-            self._no_change_streak = 0
-            self._actions_since_progress = 0
+            self._rearm()
         return decision
 
     def _evaluate(self, *, level: int, action_num: int, critic_request: str) -> TriggerDecision:
@@ -90,11 +98,12 @@ class DuckTriggerPolicy:
         request = " ".join(str(critic_request or "").split())
         if request:
             return TriggerDecision(True, CAUSE_ACTOR_REQUEST, f"actor wrote `Critic:` {request}")
-        if self._no_change_streak >= self.stall_no_change:
+        if self._longest_no_change_run >= self.stall_no_change:
             return TriggerDecision(
                 True,
                 CAUSE_STALL_NO_CHANGE,
-                f"{self._no_change_streak} consecutive executed actions without a board change (threshold {self.stall_no_change})",
+                f"a run of {self._longest_no_change_run} consecutive executed actions without a board change "
+                f"since the last critic call (threshold {self.stall_no_change})",
             )
         if self._actions_since_progress >= self.stall_no_progress:
             return TriggerDecision(
@@ -103,7 +112,7 @@ class DuckTriggerPolicy:
                 f"{self._actions_since_progress} executed actions without level progress (threshold {self.stall_no_progress})",
             )
         return TriggerDecision.silent(
-            f"no-change streak {self._no_change_streak}/{self.stall_no_change}, "
+            f"longest no-change run {self._longest_no_change_run}/{self.stall_no_change}, "
             f"since progress {self._actions_since_progress}/{self.stall_no_progress}"
         )
 
@@ -113,6 +122,7 @@ class DuckTriggerPolicy:
             "fired_levels": sorted(self._fired_levels),
             "last_observed_action_num": self._last_observed_action_num,
             "no_change_streak": self._no_change_streak,
+            "longest_no_change_run": self._longest_no_change_run,
             "actions_since_progress": self._actions_since_progress,
             "last_fired_action_num": self._last_fired_action_num,
         }

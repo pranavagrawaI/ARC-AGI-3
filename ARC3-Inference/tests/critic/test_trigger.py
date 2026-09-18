@@ -53,6 +53,19 @@ def test_stall_no_change_arms_and_rearms() -> None:
     assert not policy.decide(level=1, action_num=10).fired
 
 
+def test_stall_no_change_is_latched_across_a_batch() -> None:
+    # Duck executes batches; a no-change run inside a batch whose last action changed
+    # the board must still fire at the next turn start.
+    policy = DuckTriggerPolicy(stall_no_change=3, stall_no_progress=100)
+    policy.decide(level=1, action_num=0)
+    policy.observe([_t(1, changed=False), _t(2, changed=False), _t(3, changed=False), _t(4, changed=True)])
+    decision = policy.decide(level=1, action_num=4)
+    assert decision.fired and decision.cause == CAUSE_STALL_NO_CHANGE
+    assert "run of 3" in decision.reason
+    policy.observe([_t(5, changed=True)])
+    assert not policy.decide(level=1, action_num=5).fired
+
+
 def test_stall_no_progress_counts_actions_and_resets_on_level() -> None:
     policy = DuckTriggerPolicy(stall_no_change=100, stall_no_progress=5)
     policy.decide(level=1, action_num=0)
