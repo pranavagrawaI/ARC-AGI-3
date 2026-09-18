@@ -30,6 +30,7 @@ from inference.agent.vision_context import (
 )
 
 from inference.agent.python_tool_sandbox import run_sandboxed_python
+from inference.critic.report import CriticReport, render_report_block
 from inference.agent.runtime_state import Frame, HistoryEntry, RUNTIME_STATE_FILENAME, load_runtime_state
 from inference.utils.openai_compat import build_chat_payload, build_headers
 
@@ -276,6 +277,7 @@ def _extract_scientist_note(content: str) -> dict[str, str]:
             "Hypothesis",
             "History check",
             "Next test",
+            "Critic",
         ],
     )
     result = {
@@ -286,6 +288,7 @@ def _extract_scientist_note(content: str) -> dict[str, str]:
         "open_questions": extracted.get("Open questions", ""),
         "current_plan": extracted.get("Plan", ""),
         "cross_level_notes": extracted.get("Cross-level notes", ""),
+        "critic_request": extracted.get("Critic", ""),
     }
     if not result["world_model"]:
         result["world_model"] = extracted.get("Hypothesis", "")
@@ -955,6 +958,17 @@ class ToolAgent:
         self._last_step_summary: dict[str, Any] | None = None
         self._last_action_result: dict[str, Any] | None = None
         self._summarized_knowledge = _empty_world_model()
+        self._pending_critic_report: CriticReport | None = None
+        self._critic_request = ""
+
+    def set_critic_report(self, report: CriticReport | None) -> None:
+        """Queue an advisory critic report for the next user prompt (consumed once)."""
+        self._pending_critic_report = report
+
+    def take_critic_request(self) -> str:
+        """Return and clear the actor's latest `Critic:` request line, if any."""
+        request, self._critic_request = self._critic_request, ""
+        return request
 
     def _headers(self) -> dict[str, str]:
         api_key = (
@@ -1107,6 +1121,10 @@ class ToolAgent:
         if not note:
             return
         for key, value in note.items():
+            if key == "critic_request":
+                if value:
+                    self._critic_request = value
+                continue
             if value:
                 self._summarized_knowledge[key] = value
 
@@ -1235,6 +1253,9 @@ class ToolAgent:
         )
         lines.extend(self._summarized_knowledge_lines())
         lines.append("end of world model. ")
+        if self._pending_critic_report is not None:
+            lines.extend(render_report_block(self._pending_critic_report))
+            self._pending_critic_report = None
         if action_num == 0:
             lines.append(
                 "Ground yourself in `current_frame` before acting, but start with a compact structural summary rather than restating the full frame."
@@ -1724,6 +1745,7 @@ class ToolAgent:
         analyzer_log = transcript_path or (state_path.parent / f"{state_path.stem}_analyzer.txt")
         prompt_log = _resolve_prompt_log_path(state_path)
         current_frame, history_entries = load_runtime_state(state_path)
+        injected_critic_report = self._pending_critic_report
         user_prompt = self._build_user_prompt(
             action_num,
             valid_actions=valid_actions,
@@ -1750,6 +1772,8 @@ class ToolAgent:
 
         append_transcript("SYSTEM PROMPT", self._system_prompt)
         append_transcript("USER PROMPT", user_prompt)
+        if injected_critic_report is not None:
+            append_transcript("CRITIC REPORT", injected_critic_report.to_json(indent=2))
 
         previous_history_messages = list(self._history_messages)
         preserve_history = True
