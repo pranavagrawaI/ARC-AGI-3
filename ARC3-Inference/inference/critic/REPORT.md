@@ -1,0 +1,182 @@
+# Duck critic adapter, first half (model-free)
+
+Branch `step2-duck-critic-adapter` on top of upstream `7652836`. Everything here is
+mechanical: packet, investigation-only sandbox, trigger policy, report contract, the
+prompt-injection hook, and a replay harness. No model is called anywhere.
+
+## Packet schema (`packet.py`, `schema_version: 1`)
+
+| field | type | source |
+|---|---|---|
+| `packet_id` | 16 hex chars | sha256 of the canonical JSON of every other field |
+| `level`, `action_num` | int | `current_frame.level`, `current_frame.step` |
+| `trigger_cause`, `trigger_reason` | str | `TriggerDecision` |
+| `current_frame`, `previous_frame` | `{grid:int[][], step, level}` or null | `tool_runtime_state.json` (Duck's `frame_to_payload`); previous = `history[-2].frame` |
+| `history` | last H=12 `{action, frame}` | runtime-state history, bounded; `history_total` keeps the full length |
+| `transitions` | last M=25 `{action, action_num, level, board_changed, level_completed}` | derived from consecutive runtime-state frames (`board_changed` = grid inequality, `level_completed` = level strictly increased, both exactly the solver's definitions); `transitions_total` keeps the full count |
+| `valid_actions` | tuple[str] | Duck's `_current_valid_actions` (model names) |
+| `last_action_result` | dict | Duck's compact action payload |
+| `actor_beliefs` | dict[str,str] | `ToolAgent._summarized_knowledge` verbatim (seven keys) |
+| `step_summary` | dict or null | `ToolAgent._last_step_summary` |
+
+`build_packet(state_path, *, summarized_knowledge, last_step_summary, last_action_result,
+valid_actions, trigger)` reads the state file via Duck's `load_runtime_state`;
+`build_packet_from_state(...)` is the pure core. `to_json()`/`from_json()` round-trip and
+`from_json` rejects a tampered `packet_id`. The packet is frozen: nothing built later can
+reach the critic through it.
+
+Size: 64x64 int grids cost ~12 KB each, so a steady-state packet with 12 history frames is
+~150-180 KB (max seen 230 KB); the first packet of a game is ~25 KB. That is fine for disk
+and for feeding the sandbox; it is not something to paste into an LLM prompt.
+
+## Sandbox (`sandbox.py`)
+
+`run_investigation_python(packet, code, timeout_seconds=30)` calls Duck's
+`run_sandboxed_python` with `initial_state = packet_to_initial_state(packet)` (built with
+Duck's own `_ascii_frame_view_payload` / `_ascii_history_view_payload`, so the critic sees
+the same `current_frame`, `previous_frame`, `history`, `transitions`, `last_transition`,
+`valid_actions`, `last_action_result` objects the actor sees) and an `action_handler` that
+raises. Inside the sandbox `action(...)` raises `RuntimeError: action failed in sandbox
+host.`; the result dict is Duck's plus `refused_action_calls`.
+
+## Trigger policy (`trigger.py`)
+
+`DuckTriggerPolicy(stall_no_change=3, stall_no_progress=25)`; feed
+`observe(transitions_from_history(history))` (idempotent by `action_num`), then at each
+turn start `decide(level=, action_num=, critic_request=)` -> `TriggerDecision(fired, cause,
+reason)`. Evaluation order and bookkeeping:
+
+1. `level_start`: level not yet fired -> fire. Any firing marks the current level as fired,
+   so a request or stall on a level's first turn does not cause a second level-start firing.
+2. `actor_request`: non-blank `Critic:` text -> always fires.
+3. `stall_no_change`: a run of >= N executed actions without a board change since the last
+   re-arm. **Latched, not a live streak**: Duck batches (ls20 p0 has a 32-action batch
+   containing a 12-action no-change run that ends with changes); a plain streak counter
+   never fired on it. Deviation from the plan, made on evidence.
+4. `stall_no_progress`: >= K executed actions since the last level completion / re-arm.
+
+Re-arm (all stall counters to zero) happens on any firing and on any level completion.
+No `wm_signal` port: Duck has no executable world model.
+
+## Hook in `tool_agent.py` (+24 lines, 0 deletions)
+
+- `ToolAgent._pending_critic_report`, `set_critic_report(report)`, `_critic_request`,
+  `take_critic_request()`.
+- `_build_user_prompt`: when a report is pending, `render_report_block(report)` is
+  appended immediately after `"end of world model. "` and the report is cleared.
+- `analyze()`: if a report was injected, a `[CRITIC REPORT]` transcript section (the
+  report JSON) is appended right after `[USER PROMPT]`, so uptake can be measured from
+  transcripts.
+- `_extract_scientist_note` parses a `Critic:` label into `critic_request`;
+  `_update_summarized_knowledge_from_assistant` routes it to `_critic_request` and never
+  into the seven world-model keys.
+- Byte identity: `tests/critic/fixtures/prompt_*.txt` were generated from the unmodified
+  upstream function (commit `9cc865f`, before the hook existed) for three input sets; the
+  patched function reproduces them byte for byte when no report is pending.
+
+## Report block (`report.py`)
+
+```
+Critic report (advisory, from a separate investigator; not part of your world model):
+- Packet: <packet_id>
+- Summary: ...
+- Confidence: ...
+- Evidence:
+  - ...
+- Recommended actions (in `action(...)` format; verify before use): [{"action": "UP"}, {"action": "MOUSE", "col": 4, "row": 3}]
+- Open questions:
+  - ...
+end of critic report.
+```
+
+## Replay (`replay.py`)
+
+`python -m inference.critic.replay <events.jsonl>... [--stall-n 3 --stall-k 25]
+[--dump-dir D] [--no-sandbox] [--no-log]`. Facts about the trace format that shaped it:
+
+- `*_events.jsonl` is the viewer log: `initial`, then `action` events (one per executed
+  action, with `board` already as an int grid and `board_ascii`), and one `analysis`
+  event per `analyze()` call, emitted *after* that call's actions, carrying the whole
+  transcript of that call (not a delta relative to earlier calls). Retried / yielded
+  calls produce their own `analysis` event with the same `analysis_step`.
+- Auto-`RESET` after GAME_OVER is issued by the solver before the next `analyze()` and
+  carries the previous `analysis_step`; the replay groups it as a pre-turn action.
+- `board` and `board_ascii` agree on every event checked (0 mismatches across 500 files,
+  via `ARC_COLOR_CHARS.index`). Derived `board_changed` matched the event flag on all
+  68,680 actions.
+- Valid actions are not in action events; they are read from the turn's `USER PROMPT`
+  line `Valid actions right now: ...`.
+- Beliefs: for each turn, ASSISTANT sections are fed through `_extract_scientist_note`
+  in order (THINKING sections are ignored, as Duck ignores them), then the six per-level
+  keys are wiped if that turn's actions include a level transition / game over / run
+  complete, matching `_update_summarized_knowledge_from_step_summary`.
+
+## Results on real traces (defaults N=3, K=25; sandbox snippet = segmentation node count + previous->current cell diff)
+
+| file | turns | actions | levels done | level_start | actor_request | stall_no_change | stall_no_progress | packets | sandbox ok/err | mean KB | max KB | mean sandbox s | ASSISTANT sections | updating beliefs | turns with beliefs |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| lp85-305b61c3_p0 | 33 | 58 | 1 | 2 | 0 | 0 | 2 | 4 | 4/0 | 126 | 177 | 0.082 | 0 | 0 | 0 |
+| lf52-271a04aa_p0 | 77 | 131 | 1 | 2 | 0 | 0 | 4 | 6 | 6/0 | 180 | 211 | 0.079 | 0 | 0 | 0 |
+| ls20-9607627b_p0 | 53 | 132 | 0 | 1 | 0 | 1 | 3 | 5 | 5/0 | 145 | 175 | 0.049 | 0 | 0 | 0 |
+| sb26-7fbdac44_p0 | 53 | 171 | 1 | 2 | 0 | 0 | 5 | 7 | 7/0 | 156 | 178 | 0.066 | 0 | 0 | 0 |
+| lp85-305b61c3_p1 | 31 | 79 | 1 | 2 | 0 | 2 | 1 | 5 | 5/0 | 139 | 177 | 0.084 | 20 | 20 | 28 |
+| wa30-ee6fef47_p11 | 75 | 170 | 0 | 1 | 0 | 0 | 6 | 7 | 7/0 | 153 | 175 | 0.042 | 75 | 73 | 74 |
+| ft09-0d8bbf25_p0 | 39 | 85 | 3 | 4 | 0 | 0 | 1 | 5 | 5/0 | 147 | 180 | 0.070 | 41 | 22 | 18 |
+
+Firing positions (turn, action_num, level, cause), e.g. ls20 p0:
+`(1,0,1,level_start) (3,32,1,stall_no_change) (13,58,1,stall_no_progress) (24,84,1,stall_no_progress) (40,110,1,stall_no_progress)`.
+
+All 500 example-run files (25 games x 20 passes), same defaults:
+
+| files | turns | actions | levels | level_start | actor_request | stall_no_change | stall_no_progress | firings / 100 actions | sandbox ok / err | mean packet KB | mean sandbox s |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 500 | 23,073 | 68,680 | 309 | 808 | 0 | 259 | 1,851 | 4.2 | 2918 / 0 | 151 | 0.066 |
+
+### Surprises
+
+- **The four requested traces have zero ASSISTANT sections.** The model answered every
+  turn with THINKING + a tool call and no assistant text, so Duck's carried world model
+  was empty for the whole game and the `Working world model carried from earlier turns:`
+  block never appeared in a prompt. Across all 500 files: 282 contain ASSISTANT sections;
+  6,031 ASSISTANT sections total, 4,655 of which update at least one belief key; only
+  6,956 of 23,073 turns (30%) started with any non-empty belief. `actor_beliefs` will
+  often be empty in production packets.
+- ASSISTANT sections are fully recoverable from the `transcript` field (each analysis
+  event carries its own call's full transcript).
+- Labeled lines also appear inside THINKING sections; Duck ignores those, and so does
+  the replay (tested).
+- No real transcript contains `Critic:` (0 of 500 files), so the new label has no
+  false-positive history.
+- `stall_no_progress` dominates (63% of firings) and re-fires every 25 actions on a
+  stuck level; `stall_no_change` is rare because Duck's actions almost always change
+  something (often HUD only).
+
+## Verification
+
+```
+$ uv run --no-sync ruff check inference/critic tests/critic
+All checks passed!
+$ uv run --no-sync pytest tests/critic -q --basetemp=/tmp/duck-critic-pytest -p no:cacheprovider
+..............................                                           [100%]
+30 passed in 0.17s
+```
+
+(`--basetemp` only sidesteps stale pytest temp dirs from other projects in `/tmp`.)
+
+## Open questions for the second half
+
+1. Packet cost vs. prompt: frames should stay in the sandbox; the critic prompt should
+   carry `actor_beliefs`, `transitions`, `last_action_result`, and sandbox output, not
+   the packet JSON. Should frames be stored as letter ASCII (3x smaller) instead of
+   Duck's int-grid payload?
+2. With beliefs empty in 70% of turns, what does the critic critique? Probably the
+   transition record and the actor's tool code (also recoverable from `TOOL CALL: python`
+   sections) rather than prose beliefs.
+3. `stall_no_progress` re-firing every K actions is a budget decision: one critic call per
+   25 actions on a stuck level, ~4 per 100 actions overall. Wall clock binds in the
+   competition, so K may need to scale with remaining time.
+4. Wiring: the trigger must be evaluated in the solver loop (or a `ToolAgent` subclass)
+   before `analyze()`, after the auto-reset, with `take_critic_request()` from the
+   previous turn; `set_critic_report()` before `analyze()`. Not wired here on purpose.
+5. Uptake metric: the `[CRITIC REPORT]` section plus the next `[TOOL CALL: python]`
+   gives a direct measure of whether recommended actions were executed.
