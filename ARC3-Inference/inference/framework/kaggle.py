@@ -118,6 +118,9 @@ def duck_kaggle_setup_command(config: DuckKaggleVllmConfig | None = None) -> str
         "__LOCAL_ANALYZER_ENABLE_THINKING__": repr(os.environ.get("LOCAL_ANALYZER_ENABLE_THINKING", "1")),
         "__MULTIMODAL_CONTEXT__": repr(os.environ.get("MULTIMODAL_CONTEXT", "current_grid")),
         "__MULTIMODAL_UPSCALE__": repr(os.environ.get("MULTIMODAL_UPSCALE", "4")),
+        # Critic arm: every DUCK_CRITIC_* set on the launcher is carried into the
+        # runner env verbatim; unset means the incumbent (critic off) arm.
+        "__DUCK_CRITIC_ENV__": repr({key: value for key, value in os.environ.items() if key.startswith("DUCK_CRITIC_")}),
         "__VLLM_TENSOR_PARALLEL_SIZE__": repr(int(cfg.tensor_parallel_size)),
         "__WHEELHOUSE_STAMP_TEXT__": repr(cfg.wheelhouse_stamp_text),
     }
@@ -390,6 +393,7 @@ setup_env = {
     'LOCAL_ANALYZER_ENABLE_THINKING': __LOCAL_ANALYZER_ENABLE_THINKING__,
     'MULTIMODAL_CONTEXT': __MULTIMODAL_CONTEXT__,
     'MULTIMODAL_UPSCALE': __MULTIMODAL_UPSCALE__,
+    **__DUCK_CRITIC_ENV__,
 }
 setup_env_path = Path(os.environ['TAAF_KAGGLE_SETUP_ENV'])
 existing_setup_env = {}

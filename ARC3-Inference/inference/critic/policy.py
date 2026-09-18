@@ -91,6 +91,13 @@ FALLBACK_REPORT_TEXT = (
     "scratchpad: no new findings this invocation"
 )
 
+REPORT_RETRY_REQUEST = (
+    "That reply contained no report (a tool call or nothing). Tools are closed for this "
+    "invocation. Reply with ONLY the eight labeled lines -- confidence, model, objective, plan, "
+    "recommended_action, subgoal, note, scratchpad -- using what you already know. If you "
+    "know little, say so in the lines; do not investigate further."
+)
+
 FINAL_REPORT_REQUEST = (
     "Budget reached. Do NOT call any more tools. Right now, in your reply, give the report in "
     "the required labeled format (confidence/model/objective/plan/recommended_action/subgoal/"
@@ -144,16 +151,24 @@ class CriticModelConfig:
 @dataclass(frozen=True)
 class CriticPolicyConfig:
     """The budget is the design variable: one Duck turn costs ~46 s on Kaggle at
-    10-way concurrency, so every critic firing is priced against that."""
+    10-way concurrency, so every critic firing is priced against that.
 
-    max_tool_steps: int = 4
-    max_seconds: float = 120.0
+    Investigation calls per firing = max_tool_steps - commit_calls_remaining (the
+    last call is the report). Each request's timeout is bounded by the seconds
+    left plus `request_grace_seconds`, so one runaway reasoning call cannot blow
+    the firing past its budget by more than that grace.
+    """
+
+    max_tool_steps: int = 2
+    max_seconds: float = 90.0
     max_output_tokens: int | None = 4096
     tool_timeout_seconds: int = 20
     tool_output_chars: int = 4000
     commit_calls_remaining: int = 1
     commit_seconds_remaining: float = 30.0
-    final_output_multiplier: int = 3
+    final_output_multiplier: int = 2
+    report_retries: int = 1
+    request_grace_seconds: float = 20.0
     max_transitions_in_kickoff: int = 12
 
 
@@ -332,12 +347,13 @@ class CriticPolicy:
         self._model = model
         self._config = config or CriticPolicyConfig()
         self._post = post or self._http_post
+        self._post_is_http = post is None
 
     @property
     def config(self) -> CriticPolicyConfig:
         return self._config
 
-    def _http_post(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _http_post(self, payload: dict[str, Any], timeout: float | None = None) -> dict[str, Any]:
         response = requests.post(
             f"{self._model.base_url.rstrip('/')}/chat/completions",
             headers=build_headers(
@@ -347,13 +363,13 @@ class CriticPolicy:
                 title=self._model.title,
             ),
             json=payload,
-            timeout=self._model.request_timeout_seconds,
+            timeout=timeout if timeout is not None else self._model.request_timeout_seconds,
         )
         if response.status_code >= 400:
             raise requests.RequestException(f"{response.status_code} | {response.text.strip()[:500]}")
         return response.json()
 
-    def _chat(self, messages: list[dict[str, Any]], *, tools: bool, final: bool = False) -> tuple[dict[str, Any], dict[str, Any]]:
+    def _chat(self, messages: list[dict[str, Any]], *, tools: bool, final: bool = False, seconds_left: float | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
         max_tokens = self._config.max_output_tokens
         if final and max_tokens is not None:
             # The report call must survive a long reasoning prefix; give it headroom.
@@ -370,7 +386,11 @@ class CriticPolicy:
             tools=[PYTHON_TOOL] if tools else None,
             tool_choice="auto" if tools else None,
         )
-        body = self._post(payload)
+        timeout = self._model.request_timeout_seconds
+        if seconds_left is not None:
+            bounded = max(5.0, seconds_left + self._config.request_grace_seconds)
+            timeout = bounded if timeout is None else min(timeout, bounded)
+        body = self._http_post(payload, timeout) if self._post_is_http else self._post(payload)
         choices = body.get("choices") or []
         if not choices:
             raise requests.RequestException("server returned no choices")
@@ -383,6 +403,7 @@ class CriticPolicy:
         prompt_tokens = completion_tokens = 0
         model_calls = tool_calls = tool_errors = refused = 0
         forced_final = False
+        report_retries_left = config.report_retries
         error = ""
         final_text = ""
 
@@ -399,7 +420,7 @@ class CriticPolicy:
 
         try:
             while True:
-                message, usage = self._chat(messages, tools=not commit, final=commit)
+                message, usage = self._chat(messages, tools=not commit, final=commit, seconds_left=remaining())
                 model_calls += 1
                 prompt_tokens += int(usage.get("prompt_tokens") or 0)
                 completion_tokens += int(usage.get("completion_tokens") or 0)
@@ -416,8 +437,16 @@ class CriticPolicy:
                         final_text = reasoning
                         break
                     if forced_final:
-                        final_text = content
-                        break
+                        if report_retries_left <= 0 or remaining() <= 0:
+                            final_text = content
+                            break
+                        # Same failure Duck's actor loop retries once: markup or nothing where
+                        # the report should be. One sterner ask, tools still closed.
+                        report_retries_left -= 1
+                        messages.append({"role": "assistant", "content": content or None})
+                        messages.append({"role": "user", "content": REPORT_RETRY_REQUEST})
+                        transcript.append({"role": "user", "content": REPORT_RETRY_REQUEST})
+                        continue
                     # No report and no tool call: force the report once.
                     forced_final = True
                     commit = True
@@ -515,6 +544,7 @@ def _render_tool_outcome(outcome: dict[str, Any], max_chars: int) -> str:
 __all__ = [
     "FALLBACK_REPORT_TEXT",
     "REPORT_FIELDS",
+    "REPORT_RETRY_REQUEST",
     "SYSTEM_PROMPT",
     "CriticFiring",
     "CriticModelConfig",

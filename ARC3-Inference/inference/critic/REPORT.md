@@ -180,3 +180,83 @@ $ uv run --no-sync pytest tests/critic -q --basetemp=/tmp/duck-critic-pytest -p 
    previous turn; `set_critic_report()` before `analyze()`. Not wired here on purpose.
 5. Uptake metric: the `[CRITIC REPORT]` section plus the next `[TOOL CALL: python]`
    gives a direct measure of whether recommended actions were executed.
+
+---
+
+# Second half: critic policy, gate, and solver wiring
+
+Commits `8b2d86f` onward. Model-facing pieces only; the first half's packet, sandbox,
+trigger, and report contract are unchanged.
+
+## What was ported from the Tycho trigger builder, and what was not
+
+| Tycho `builder.py` / `builder.system.j2` | Duck critic (`policy.py`) |
+|---|---|
+| investigator, never acts | same; `action(...)` refused in the sandbox |
+| `notes/world_model.md` scratchpad across invocations | `CriticNotes`: the report's `scratchpad:` line, kept per game (last 12) |
+| `_builder_budget_notice`: investigate → commit by calls/seconds left | `budget_notice()`: same two modes, host-authoritative, appended after every tool result |
+| `FINAL_REPORT_REQUEST` when the budget hits | same; report also parsed from the reasoning channel when `content` is empty |
+| `FALLBACK_REPORT` | same shape (`confidence: none`, no recommendation) |
+| compact labeled report read by the actor every turn | `confidence/model/objective/plan/recommended_action/subgoal/note/scratchpad` |
+| `world_model.py`, verifier, `write_file`/`edit_file`, planner | **not ported** -- Duck has no executable world model; investigation uses Duck's own sandbox |
+
+## Budget semantics
+
+`CriticPolicyConfig(max_tool_steps=2, max_seconds=90)`: investigation calls per firing =
+`max_tool_steps - commit_calls_remaining` (= 1), then one report call. Every request's
+timeout is bounded by `seconds_left + request_grace_seconds` (20 s), so a runaway
+reasoning call cannot push a firing more than ~20 s past its budget; a timeout yields the
+fallback report, never an exception into the game loop.
+
+## Gate runs (OpenRouter `qwen/qwen3.6-27b`, 12 real packets from example-run: lf52 p0, lp85 p1, ls20 p0, sb26 p0 x3 each; 7 level_start, 2 stall_no_change, 3 stall_no_progress)
+
+| run | budget | parsed | fallback | sandbox errors | legal rec. | median s | median tokens in+out |
+|---|---|---|---|---|---|---|---|
+| run1 | 4 steps, 120 s, first prompt | 11/12 | 1 | 14/36 | 11/11 | 60 | 9,059 + 1,739 |
+| run3 | 2 steps, 90 s, field-accurate prompt | **12/12** | 0 | **0/12** | 11/11 | **33** | 3,807 + 1,113 |
+| run2 | 4 steps, 120 s, no request bound | firing #2 ran 667 s / 16k completion tokens with no report; killed | | | | | |
+| run4 | 2 steps, 90 s, bounded requests | 10/12 | 2 | 0/12 | 10/10 | 40 | 3,903 + 1,059 |
+| run5 | **final defaults** (run4 + one report retry) | **12/12** | **0** | **0/12** | **12/12** | **31** | 3,977 + 992 |
+
+run4's two fallbacks were the model ignoring "tools are closed" on the report call (raw
+`<tool_call>` markup as content, or empty content mid-reasoning) -- the same failure Duck's
+actor loop retries once. run5 adds that single retry (`report_retries=1`); it was not
+needed on any of run5's 12 firings, so it is insurance, not a cost.
+
+Per-firing transcripts for every run are under `records/step2-gate/` at the worktree root.
+
+What run1 → run3 changed: (a) the system prompt now states the segmentation node fields
+exactly as Duck's actor prompt does (`pixels` is an integer count) -- 13 of the 14 sandbox
+errors were `len(node['pixels'])`; (b) the report call gets 2x output headroom and the
+reasoning channel is parsed as a fallback; (c) per-request timeouts are bounded by the
+remaining budget (run2 is the failure this prevents).
+
+Cost on Kaggle, extrapolated: Duck generated ~1.1k tokens per turn at ~46 s per turn
+(10-way, RTX PRO 6000), so a lean firing (~1.1k completion tokens, 2 prefills of 3-5k)
+is **about one Duck turn**. At the replay rate of ~2-3 firings per 40-action game that is
+roughly 5-12 % of a 1200 s game.
+
+## Wiring (`runner.py`, `solver.py`, `tool_agent.py`)
+
+- `ToolAgent.critic_context()` / `model_config()`: read-only accessors (+12 lines).
+- `_HarnessGameSession._run_critic_if_triggered()` runs before every `analyze()`:
+  `take_critic_request()` → `CriticRunner.decide()` → on fire `build_packet_from_state` →
+  `CriticPolicy.run` → `set_critic_report()` → a `type: "critic"` viewer event and a
+  `<run_stem>_critic.jsonl` trace next to the transcript. Any exception is printed and
+  swallowed: the critic is advisory and never ends a game.
+- Synchronous in the game thread, so the per-game cap charges it automatically.
+- `HarnessSolver._make_critic()` returns `None` unless `DUCK_CRITIC_ENABLED=1`
+  (test: `test_critic_is_off_by_default`); the incumbent arm is byte-identical upstream.
+- Kaggle: `duck_kaggle_setup_command()` now copies every `DUCK_CRITIC_*` from the launcher
+  env into the runner's setup env, so the arm is chosen at launch by environment alone.
+- End-to-end offline test: `test_session_hook_injects_report_into_next_prompt` drives the
+  hook with a stub game and checks the next user prompt carries the block exactly once.
+
+## Not done / decisions for Step 3
+
+- Uptake is measured post hoc from `_critic.jsonl` (recommended actions) joined to the
+  following action events; no live metric.
+- The critic shares the actor's vLLM endpoint and concurrency slot; its latency on Kaggle
+  is inferred from token counts, not measured. Step 3's first wave measures it.
+- `stall_no_progress` re-fires every 25 actions on a stuck level; not scaled to remaining
+  wall clock.
