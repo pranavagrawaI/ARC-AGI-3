@@ -90,7 +90,8 @@ def run_gate(
             f"[{index}/{len(packet_paths)}] {source} L{packet.level} a{packet.action_num} {packet.trigger_cause}: "
             f"{firing.seconds:.1f}s calls={firing.model_calls} tools={firing.tool_calls} "
             f"tok={firing.prompt_tokens}+{firing.completion_tokens} parsed={firing.parsed} "
-            f"legal={firing.recommended_legal} rec={list(firing.report.recommended_actions)[:2]} {firing.error}",
+            f"legal={firing.recommended_legal} rec={list(firing.report.recommended_actions)[:2]} {firing.error}"
+            + (f"\n      Q: {firing.report.open_questions[0]}" if firing.report.open_questions else ""),
             flush=True,
         )
 
@@ -135,6 +136,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--provider", default=os.environ.get("CRITIC_PROVIDER", "openrouter"))
     parser.add_argument("--base-url", default=os.environ.get("CRITIC_BASE_URL", "https://openrouter.ai/api/v1"))
     parser.add_argument("--api-key", default="", help="defaults to CRITIC_API_KEY, then OPENROUTER_API_KEY")
+    parser.add_argument("--mode", choices=["question", "report"], default=CriticPolicyConfig.mode)
     parser.add_argument("--max-tool-steps", type=int, default=CriticPolicyConfig.max_tool_steps)
     parser.add_argument("--max-seconds", type=float, default=CriticPolicyConfig.max_seconds)
     parser.add_argument("--max-output-tokens", type=int, default=CriticPolicyConfig.max_output_tokens)
@@ -156,6 +158,7 @@ def main(argv: list[str] | None = None) -> int:
             request_timeout_seconds=args.request_timeout,
         ),
         CriticPolicyConfig(
+            mode=args.mode,
             max_tool_steps=args.max_tool_steps,
             max_seconds=args.max_seconds,
             max_output_tokens=args.max_output_tokens,

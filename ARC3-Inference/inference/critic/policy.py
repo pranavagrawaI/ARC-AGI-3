@@ -21,6 +21,13 @@ import requests
 
 from inference.agent.action_names import to_model_actions
 from inference.critic.packet import CriticPacket
+from inference.critic.question import (
+    FALLBACK_QUESTION_TEXT,
+    QUESTION_SYSTEM_PROMPT,
+    parse_question_text,
+    question_report,
+    render_question_kickoff,
+)
 from inference.critic.report import CriticReport
 from inference.critic.sandbox import run_investigation_python
 from inference.utils.grid_utils import ARC_COLOR_LEGEND
@@ -159,9 +166,12 @@ class CriticPolicyConfig:
     the firing past its budget by more than that grace.
     """
 
+    mode: str = "question"  # "question": one call, reasoning off; "report": bounded tool loop
     max_tool_steps: int = 2
     max_seconds: float = 90.0
     max_output_tokens: int | None = 4096
+    question_max_output_tokens: int = 160
+    question_max_seconds: float = 30.0
     tool_timeout_seconds: int = 20
     tool_output_chars: int = 4000
     commit_calls_remaining: int = 1
@@ -369,8 +379,16 @@ class CriticPolicy:
             raise requests.RequestException(f"{response.status_code} | {response.text.strip()[:500]}")
         return response.json()
 
-    def _chat(self, messages: list[dict[str, Any]], *, tools: bool, final: bool = False, seconds_left: float | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
-        max_tokens = self._config.max_output_tokens
+    def _chat(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: bool,
+        final: bool = False,
+        seconds_left: float | None = None,
+        max_tokens: int | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        max_tokens = self._config.max_output_tokens if max_tokens is None else max_tokens
         if final and max_tokens is not None:
             # The report call must survive a long reasoning prefix; give it headroom.
             max_tokens = max_tokens * self._config.final_output_multiplier
@@ -390,6 +408,10 @@ class CriticPolicy:
         if seconds_left is not None:
             bounded = max(5.0, seconds_left + self._config.request_grace_seconds)
             timeout = bounded if timeout is None else min(timeout, bounded)
+        if not self._model.thinking and self._model.provider.strip().lower() in {"openrouter", "router"}:
+            # vLLM honours chat_template_kwargs.enable_thinking (set by build_chat_payload);
+            # OpenRouter needs its unified flag or the model burns the whole budget thinking.
+            payload["reasoning"] = {"enabled": False}
         body = self._http_post(payload, timeout) if self._post_is_http else self._post(payload)
         choices = body.get("choices") or []
         if not choices:
@@ -397,6 +419,73 @@ class CriticPolicy:
         return choices[0].get("message", {}) or {}, body.get("usage") or {}
 
     def run(self, packet: CriticPacket, notes: CriticNotes) -> CriticFiring:
+        if self._config.mode == "question":
+            return self.run_question(packet, notes)
+        return self.run_report(packet, notes)
+
+    def run_question(self, packet: CriticPacket, notes: CriticNotes) -> CriticFiring:
+        """One call, reasoning off, three lines. The scratchpad holds the questions asked."""
+        config = self._config
+        started = time.monotonic()
+        kickoff = render_question_kickoff(packet, notes.lines)
+        messages = [{"role": "system", "content": QUESTION_SYSTEM_PROMPT}, {"role": "user", "content": kickoff}]
+        transcript: list[dict[str, Any]] = [{"role": "user", "content": kickoff}]
+        prompt_tokens = completion_tokens = 0
+        content = reasoning = error = ""
+        model_calls = 0
+        model = self._model
+        if model.thinking:
+            self._model = CriticModelConfig(**{**model.__dict__, "thinking": False})
+        try:
+            message, usage = self._chat(
+                messages,
+                tools=False,
+                seconds_left=config.question_max_seconds,
+                max_tokens=config.question_max_output_tokens,
+            )
+            model_calls = 1
+            prompt_tokens = int(usage.get("prompt_tokens") or 0)
+            completion_tokens = int(usage.get("completion_tokens") or 0)
+            content = _text(message.get("content"))
+            reasoning = _text(message.get("reasoning") or message.get("reasoning_content"))
+            transcript.append({"role": "assistant", "content": content, "reasoning": reasoning[:1000]})
+        except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+            error = f"{type(exc).__name__}: {str(exc)[:300]}"
+        finally:
+            self._model = model
+        fields = parse_question_text(content) or parse_question_text(reasoning)
+        parsed = bool(fields.get("question"))
+        fallback = not parsed
+        report_text = content if parsed else FALLBACK_QUESTION_TEXT
+        if fallback:
+            fields = parse_question_text(FALLBACK_QUESTION_TEXT)
+        candidates = parse_recommended_actions(fields.get("probe", ""))
+        # The host owns legality: a probe outside the packet's action set is dropped; the question stands.
+        recommended = [action for action in candidates if _legal([action], packet.valid_actions)]
+        report = question_report(packet.packet_id, fields, recommended)
+        if parsed:
+            notes.add(packet.level, packet.action_num, fields.get("question", ""))
+        return CriticFiring(
+            packet_id=packet.packet_id,
+            report=report,
+            report_text=report_text,
+            scratchpad=fields.get("question", ""),
+            seconds=round(time.monotonic() - started, 3),
+            model_calls=model_calls,
+            tool_calls=0,
+            tool_errors=0,
+            refused_action_calls=0,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            parsed=parsed,
+            fallback=fallback,
+            forced_final=False,
+            recommended_legal=_legal(recommended, packet.valid_actions),
+            error=error,
+            transcript=transcript,
+        )
+
+    def run_report(self, packet: CriticPacket, notes: CriticNotes) -> CriticFiring:
         config = self._config
         started = time.monotonic()
         transcript: list[dict[str, Any]] = []

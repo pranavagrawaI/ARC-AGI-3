@@ -23,7 +23,7 @@ from inference.agent.runtime_state import (
 
 DEFAULT_HISTORY_LIMIT = 12
 DEFAULT_TRANSITION_LIMIT = 25
-PACKET_SCHEMA_VERSION = 1
+PACKET_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -98,6 +98,7 @@ class CriticPacket:
     last_action_result: dict[str, Any]
     actor_beliefs: dict[str, str]
     step_summary: dict[str, Any] | None
+    actor_last_code: str = ""
     schema_version: int = PACKET_SCHEMA_VERSION
     packet_id: str = field(default="", compare=False)
 
@@ -143,6 +144,7 @@ class CriticPacket:
             last_action_result=_listed(data.get("last_action_result") or {}),
             actor_beliefs={str(k): str(v) for k, v in (data.get("actor_beliefs") or {}).items()},
             step_summary=_listed(data.get("step_summary")) if isinstance(data.get("step_summary"), dict) else None,
+            actor_last_code=str(data.get("actor_last_code", "") or ""),
             schema_version=int(data.get("schema_version", PACKET_SCHEMA_VERSION)),
         )
         if packet_id and packet_id != packet.packet_id:
@@ -190,6 +192,7 @@ def build_packet_from_state(
     trigger_reason: str,
     history_limit: int = DEFAULT_HISTORY_LIMIT,
     transition_limit: int = DEFAULT_TRANSITION_LIMIT,
+    actor_last_code: str = "",
 ) -> CriticPacket:
     """Freeze already-loaded runtime state into a packet (pure; no file access)."""
     transitions = transitions_from_history(history)
@@ -212,6 +215,7 @@ def build_packet_from_state(
         last_action_result=_listed(dict(last_action_result or {})),
         actor_beliefs={str(key): str(value) for key, value in summarized_knowledge.items()},
         step_summary=_listed(dict(last_step_summary)) if last_step_summary else None,
+        actor_last_code=str(actor_last_code or ""),
     )
 
 

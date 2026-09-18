@@ -8,6 +8,7 @@ is byte-identical to upstream Duck.
 
 Configuration is environment-driven so the Kaggle setup env can carry it:
   DUCK_CRITIC_ENABLED=1            turn the critic on
+  DUCK_CRITIC_MODE=question        "question" (one call, reasoning off) or "report" (tool loop)
   DUCK_CRITIC_MAX_TOOL_STEPS=2     investigation calls per firing
   DUCK_CRITIC_MAX_SECONDS=90       wall budget per firing
   DUCK_CRITIC_MAX_OUTPUT_TOKENS=4096
@@ -56,6 +57,7 @@ def critic_enabled() -> bool:
 
 def policy_config_from_env() -> CriticPolicyConfig:
     return CriticPolicyConfig(
+        mode=os.environ.get("DUCK_CRITIC_MODE", "").strip() or CriticPolicyConfig.mode,
         max_tool_steps=_env_int("DUCK_CRITIC_MAX_TOOL_STEPS", CriticPolicyConfig.max_tool_steps),
         max_seconds=_env_float("DUCK_CRITIC_MAX_SECONDS", CriticPolicyConfig.max_seconds),
         max_output_tokens=_env_int("DUCK_CRITIC_MAX_OUTPUT_TOKENS", CriticPolicyConfig.max_output_tokens or 4096),
@@ -68,7 +70,15 @@ def model_config_from_env(actor: tuple[str, str, str, str]) -> CriticModelConfig
         provider=os.environ.get("DUCK_CRITIC_PROVIDER", "").strip() or provider,
         base_url=os.environ.get("DUCK_CRITIC_BASE_URL", "").strip() or base_url,
         model_id=os.environ.get("DUCK_CRITIC_MODEL_ID", "").strip() or model_id,
-        api_key=os.environ.get("DUCK_CRITIC_API_KEY", "").strip() or api_key,
+        api_key=(
+            os.environ.get("DUCK_CRITIC_API_KEY", "").strip()
+            or api_key
+            # The actor authenticates through these env fallbacks (ToolAgent._headers)
+            # but model_config() exposes only its stored key, which may be empty.
+            or os.environ.get("LOCAL_ANALYZER_API_KEY", "").strip()
+            or os.environ.get("OPENROUTER_API_KEY", "").strip()
+            or os.environ.get("OPENAI_API_KEY", "").strip()
+        ),
         request_timeout_seconds=_env_float("DUCK_CRITIC_REQUEST_TIMEOUT", 180.0),
     )
 
@@ -134,6 +144,7 @@ class CriticRunner:
             valid_actions=valid_actions,
             trigger_cause=decision.cause or "",
             trigger_reason=decision.reason or "",
+            actor_last_code=str(actor_context.get("last_tool_code") or ""),
         )
         firing = self.policy.run(packet, self.notes)
         record = {

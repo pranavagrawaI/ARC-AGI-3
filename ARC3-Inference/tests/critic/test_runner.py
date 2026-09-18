@@ -5,13 +5,10 @@ from pathlib import Path
 
 from inference.agent.runtime_state import Frame, HistoryEntry
 from inference.critic.policy import CriticModelConfig, CriticPolicy, CriticPolicyConfig
-from inference.critic.runner import CriticRunner, critic_enabled, policy_config_from_env
+from inference.critic.runner import CriticRunner, critic_enabled, model_config_from_env, policy_config_from_env
 from inference.framework import solver as solver_module
 
-REPORT = (
-    "confidence: low\nmodel: clicks recolor\nobjective: unknown\nplan: none\n"
-    "recommended_action: MOUSE(row=2, col=3)\nsubgoal: probe\nnote: click once\nscratchpad: tiles 2x2"
-)
+REPORT = "assumption: clicks recolor tiles\nquestion: does the order of clicks matter?\nprobe: MOUSE(row=2, col=3)"
 
 
 def _frame(level: int, step: int, fill: int) -> Frame:
@@ -21,6 +18,7 @@ def _frame(level: int, step: int, fill: int) -> Frame:
 def _scripted_policy(calls: list[dict]) -> CriticPolicy:
     def post(payload: dict) -> dict:
         calls.append(payload)
+        assert "tools" not in payload, "question mode is a single call without tools"
         return {"choices": [{"message": {"role": "assistant", "content": REPORT}}], "usage": {"prompt_tokens": 10, "completion_tokens": 5}}
 
     return CriticPolicy(CriticModelConfig(provider="vllm", base_url="http://x", model_id="m"), CriticPolicyConfig(max_tool_steps=2), post=post)
@@ -35,7 +33,7 @@ def test_runner_fires_level_start_then_stays_quiet_until_stall(tmp_path: Path) -
     assert first.fired and first.cause == "level_start"
     firing = runner.fire(first, current_frame=history[-1].frame, history=history, valid_actions=["ACTION1", "ACTION6"], actor_context={"summarized_knowledge": {}, "last_step_summary": None, "last_action_result": None})
     assert firing.parsed and firing.report.recommended_actions == ({"action": "MOUSE", "row": 2, "col": 3},)
-    assert runner.notes.render().endswith("tiles 2x2")
+    assert runner.notes.render().endswith("does the order of clicks matter?")
     trace = [json.loads(line) for line in (tmp_path / "critic.jsonl").read_text().splitlines()]
     assert trace[0]["cause"] == "level_start" and trace[0]["transcript"]
 
@@ -48,6 +46,24 @@ def test_runner_fires_level_start_then_stays_quiet_until_stall(tmp_path: Path) -
     stalled = runner.decide(history=history, level=1, action_num=3, critic_request="")
     assert stalled.fired and stalled.cause == "stall_no_change"
     assert runner.summary()["firings"] == 1  # decide() does not fire the policy; fire() does
+
+
+def test_question_mode_drops_off_list_probe(tmp_path: Path) -> None:
+    """The host owns legality: a probe outside the action set is dropped; the question stands."""
+    report = "assumption: the bar is a wall\nquestion: is it a timer instead?\nprobe: SPACE"
+
+    def post(payload: dict) -> dict:
+        return {"choices": [{"message": {"role": "assistant", "content": report}}], "usage": {"prompt_tokens": 10, "completion_tokens": 5}}
+
+    policy = CriticPolicy(CriticModelConfig(provider="vllm", base_url="http://x", model_id="m"), CriticPolicyConfig(), post=post)
+    runner = CriticRunner(policy=policy, trace_path=None)
+    history = [HistoryEntry(action="RESET", frame=_frame(1, 0, 0))]
+    first = runner.decide(history=history, level=1, action_num=0, critic_request="")
+    firing = runner.fire(first, current_frame=history[-1].frame, history=history, valid_actions=["ACTION1", "ACTION6"], actor_context={"summarized_knowledge": {}, "last_step_summary": None, "last_action_result": None})
+    assert firing.parsed
+    assert firing.report.recommended_actions == ()
+    assert firing.report.open_questions == ("is it a timer instead?",)
+    assert firing.recommended_legal is None
 
 
 def test_explicit_request_fires(tmp_path: Path) -> None:
@@ -63,6 +79,18 @@ def test_critic_is_off_by_default(monkeypatch) -> None:
     assert critic_enabled() is False
     solver = solver_module.HarnessSolver.__new__(solver_module.HarnessSolver)
     assert solver._make_critic(object(), "stem") is None
+
+
+def test_model_config_falls_back_to_env_key(monkeypatch) -> None:
+    """The actor may hold an empty key and authenticate via env; the critic must too."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k-openrouter")
+    monkeypatch.delenv("DUCK_CRITIC_API_KEY", raising=False)
+    monkeypatch.delenv("LOCAL_ANALYZER_API_KEY", raising=False)
+    config = model_config_from_env(("openrouter", "https://openrouter.ai/api/v1", "m", ""))
+    assert config.api_key == "k-openrouter"
+    monkeypatch.setenv("DUCK_CRITIC_API_KEY", "k-critic")
+    config = model_config_from_env(("openrouter", "u", "m", "k-actor"))
+    assert config.api_key == "k-critic"
 
 
 def test_policy_config_from_env(monkeypatch) -> None:

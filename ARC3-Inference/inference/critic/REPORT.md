@@ -260,3 +260,55 @@ roughly 5-12 % of a 1200 s game.
   is inferred from token counts, not measured. Step 3's first wave measures it.
 - `stall_no_progress` re-fires every 25 actions on a stuck level; not scaled to remaining
   wall clock.
+
+# Question mode (default from this commit)
+
+Report mode's tool loop costs ~one Duck turn per firing and hands the actor a plan it did
+not derive. Threads 423/426 on the board showed the same shape: grounding is fine, the
+pivot arrives late, zero levels. Question mode keeps the trigger and the packet, drops the
+tool loop, and makes the host do the grounding the model was spending calls on
+(`question.py`: segmentation summary, previous->current cell diff, the actor's last
+`python` code from the transcript). One call, reasoning off, 160 output tokens, 30 s bound.
+The model answers three lines -- `assumption`, `question`, `probe` -- and the actor sees
+the assumption as the summary, the question under "Open questions", and the probe as a
+recommended action only if it is legal on this game (the host owns legality; an off-list
+probe is dropped, the question stands).
+
+`DUCK_CRITIC_MODE=report` restores the tool loop; `question` is the default in
+`CriticPolicyConfig` and the Kaggle setup env carries the choice. Packet schema is now 2
+(`actor_last_code`).
+
+## Gate (same 12 packets as above, OpenRouter `qwen/qwen3.6-27b`, `reasoning: {enabled: false}`)
+
+| replay | parsed | fallback | probe present / legal | median s | median tokens in+out |
+|---|---|---|---|---|---|
+| question-mode-v1 | 12/12 | 0 | 11 / 9 | 2.6 | 1,154 + 57 |
+| question-mode-v2 | 12/12 | 0 | 12 / 12 | 3.0 | 1,156 + 54 |
+| question-mode-q38 (final tree) | 12/12 | 0 | 10 / 10 | 3.2 | 1,158 + 70 |
+
+Three samples of one tree: 36/36 parsed, no fallback, no sandbox (there is none). Per
+firing that is roughly 1/15 of a Duck turn at Kaggle rates, versus ~1 turn for report
+mode. Transcripts under `records/step2-gate/question-mode-*`.
+
+## Live, local (LS20, 15-action cap, `records/step2-live/`)
+
+- `ls20-q1-auth401`: the first firing failed with `401 No cookie auth credentials`. The
+  actor authenticates through `ToolAgent._headers` env fallbacks but `model_config()`
+  returned its stored key, which was empty. `model_config_from_env` now falls through
+  `DUCK_CRITIC_API_KEY` → actor key → `LOCAL_ANALYZER_API_KEY` → `OPENROUTER_API_KEY` →
+  `OPENAI_API_KEY` (test: `test_model_config_falls_back_to_env_key`). The fallback report
+  reached the actor and the game continued: the advisory contract held under a real error.
+- `ls20-q2`: `level_start` fired at action 0, parsed in 2.9 s (824 + 67 tokens); the probe
+  `MOUSE(row=32, col=32)` was dropped as illegal on LS20, the question reached the prompt.
+  The stall trigger never armed in 15 actions (longest no-change run 1 < 3; 15 < 25), so
+  its silence is correct behavior and **no live game has yet fired on a stall**. Only gate
+  replay has exercised `stall_no_change`/`stall_no_progress` end to end. Step 3's first
+  Kaggle wave is the first place that can happen.
+
+## Not done
+
+- `test_question_mode_falls_back_without_raising` originally accepted a raise; it now
+  asserts the fallback on `requests.exceptions.Timeout`. Non-`requests` exceptions from a
+  custom `post` still propagate; the solver hook swallows them, so the game is safe either way.
+- Kaggle has not executed this tree. Step 1's kernel ran upstream `7652836`; Step 2 only
+  rendered the setup script with and without `DUCK_CRITIC_*` and compiled both.

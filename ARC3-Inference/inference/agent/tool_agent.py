@@ -976,7 +976,17 @@ class ToolAgent:
             "summarized_knowledge": dict(self._summarized_knowledge),
             "last_step_summary": dict(self._last_step_summary) if self._last_step_summary else None,
             "last_action_result": dict(self._last_action_result) if self._last_action_result else None,
+            "last_tool_code": self._last_python_code(),
         }
+
+    def _last_python_code(self) -> str:
+        for message in reversed(self._history_messages):
+            for call in reversed(message.get("tool_calls") or []) if message.get("role") == "assistant" else []:
+                arguments = _normalize_tool_call_arguments((call.get("function") or {}).get("arguments"))
+                code = str(arguments.get("code", "") or "")
+                if code.strip():
+                    return code
+        return ""
 
     def model_config(self) -> tuple[str, str, str, str]:
         """(provider, base_url, model_id, api_key) so a critic can share the actor's endpoint."""
