@@ -383,6 +383,20 @@ class _HarnessGameSession:
             self.write_viewer_payload()
         except Exception as exc:  # noqa: BLE001 - the critic is advisory; never end the game
             print(f"critic: failed at action {self.action_count}: {type(exc).__name__}: {exc}", flush=True)
+            try:  # diagnostic only: an escaped exception is an attempted review with no report
+                self.viewer_events.append(
+                    {
+                        **self._base_viewer_event(self.current_frame()),
+                        "type": "critic",
+                        "title": "Critic (escaped exception)",
+                        "action_num": self.action_count,
+                        "analysis_step": self.analysis_step,
+                        "cause": "",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
     def _finish_if_needed(self) -> None:
         run = self.game.game_run

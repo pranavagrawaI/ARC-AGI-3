@@ -12,6 +12,14 @@ Stall counters re-arm (reset) after any firing and after a level completion. The
 no-change condition is latched: Duck batches actions, so a qualifying run that starts
 and ends inside one batch must still count at the next turn start even though the
 batch's last action changed the board.
+
+`PeriodicTriggerPolicy` is the alternative scheduler for the periodic-v1 screen: no
+tree, no counters, one anchor. It fires at the first turn start at which at least
+`period` recorded actions (`len(game_run.history)`, automatic RESETs included) have
+passed since the previous attempt, and re-anchors at the fired action count, so an
+overshooting batch (18 -> 45) yields one firing at 45 with the next due at 65+. The
+anchor moves in `decide()`, before any packet or model call, so a failed firing is
+not retried until another `period` actions pass. Nothing fires at action 0.
 """
 from __future__ import annotations
 
@@ -24,10 +32,13 @@ CAUSE_LEVEL_START = "level_start"
 CAUSE_ACTOR_REQUEST = "actor_request"
 CAUSE_STALL_NO_CHANGE = "stall_no_change"
 CAUSE_STALL_NO_PROGRESS = "stall_no_progress"
+CAUSE_PERIODIC = "periodic"
+# CAUSES enumerates the tree's causes (the gate replay tallies them); the periodic scheduler has its own.
 CAUSES = (CAUSE_LEVEL_START, CAUSE_ACTOR_REQUEST, CAUSE_STALL_NO_CHANGE, CAUSE_STALL_NO_PROGRESS)
 
 DEFAULT_STALL_NO_CHANGE = 3
 DEFAULT_STALL_NO_PROGRESS = 25
+DEFAULT_PERIOD = 20
 
 
 @dataclass(frozen=True)
@@ -128,14 +139,54 @@ class DuckTriggerPolicy:
         }
 
 
+class PeriodicTriggerPolicy:
+    """Minimum-spacing scheduler: fire when `period` actions have passed since the last attempt."""
+
+    def __init__(self, *, period: int = DEFAULT_PERIOD) -> None:
+        self.period = max(1, int(period))
+        self._anchor = 0
+        self._last_fired_action_num: int | None = None
+        self._attempts = 0
+
+    def observe(self, transitions: Iterable[TransitionRecord]) -> int:
+        """Transitions carry nothing this scheduler uses; the clock is `action_num` at `decide()`."""
+        return sum(1 for _ in transitions)
+
+    def decide(self, *, level: int, action_num: int, critic_request: str = "") -> TriggerDecision:
+        """Evaluate at a turn start. Actor requests and level changes are ignored by design."""
+        elapsed = int(action_num) - self._anchor
+        if elapsed < self.period:
+            return TriggerDecision.silent(f"{elapsed}/{self.period} actions since the last critic attempt")
+        self._anchor = int(action_num)
+        self._last_fired_action_num = int(action_num)
+        self._attempts += 1
+        return TriggerDecision(
+            True,
+            CAUSE_PERIODIC,
+            f"{elapsed} recorded actions since the last critic attempt (period {self.period}); anchor now {self._anchor}",
+        )
+
+    @property
+    def state(self) -> dict[str, int | None | list[int]]:
+        return {
+            "period": self.period,
+            "anchor": self._anchor,
+            "attempts": self._attempts,
+            "last_fired_action_num": self._last_fired_action_num,
+        }
+
+
 __all__ = [
     "CAUSES",
     "CAUSE_ACTOR_REQUEST",
     "CAUSE_LEVEL_START",
+    "CAUSE_PERIODIC",
     "CAUSE_STALL_NO_CHANGE",
     "CAUSE_STALL_NO_PROGRESS",
+    "DEFAULT_PERIOD",
     "DEFAULT_STALL_NO_CHANGE",
     "DEFAULT_STALL_NO_PROGRESS",
     "DuckTriggerPolicy",
+    "PeriodicTriggerPolicy",
     "TriggerDecision",
 ]

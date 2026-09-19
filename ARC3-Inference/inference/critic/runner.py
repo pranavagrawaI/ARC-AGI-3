@@ -12,8 +12,11 @@ Configuration is environment-driven so the Kaggle setup env can carry it:
   DUCK_CRITIC_MAX_TOOL_STEPS=2     investigation calls per firing
   DUCK_CRITIC_MAX_SECONDS=90       wall budget per firing
   DUCK_CRITIC_MAX_OUTPUT_TOKENS=4096
-  DUCK_CRITIC_STALL_NO_CHANGE=3    consecutive no-board-change actions
-  DUCK_CRITIC_STALL_NO_PROGRESS=25 actions without level progress
+  DUCK_CRITIC_TRIGGER=tree         "tree" (level start / actor request / stalls) or
+                                   "periodic" (one firing per DUCK_CRITIC_PERIOD recorded actions, nothing else)
+  DUCK_CRITIC_PERIOD=20            periodic mode: minimum actions between critic attempts
+  DUCK_CRITIC_STALL_NO_CHANGE=3    tree mode: consecutive no-board-change actions
+  DUCK_CRITIC_STALL_NO_PROGRESS=25 tree mode: actions without level progress
   DUCK_CRITIC_MODEL_ID / DUCK_CRITIC_BASE_URL / DUCK_CRITIC_PROVIDER / DUCK_CRITIC_API_KEY
                                    override the actor's endpoint (default: share it)
 """
@@ -29,7 +32,9 @@ from typing import Any
 from inference.agent.runtime_state import HistoryEntry
 from inference.critic.packet import CriticPacket, build_packet_from_state, transitions_from_history
 from inference.critic.policy import CriticFiring, CriticModelConfig, CriticNotes, CriticPolicy, CriticPolicyConfig
-from inference.critic.trigger import DuckTriggerPolicy, TriggerDecision
+from inference.critic.trigger import DEFAULT_PERIOD, DuckTriggerPolicy, PeriodicTriggerPolicy, TriggerDecision
+
+TRIGGER_MODES = ("tree", "periodic")
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -91,16 +96,23 @@ class CriticRunner:
     trace_path: Path | None = None
     stall_no_change: int = 3
     stall_no_progress: int = 25
-    trigger: DuckTriggerPolicy = field(init=False)
+    trigger_mode: str = "tree"
+    period: int = DEFAULT_PERIOD
+    trigger: DuckTriggerPolicy | PeriodicTriggerPolicy = field(init=False)
     notes: CriticNotes = field(default_factory=CriticNotes)
     observed: int = 0
     firings: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        self.trigger = DuckTriggerPolicy(
-            stall_no_change=self.stall_no_change,
-            stall_no_progress=self.stall_no_progress,
-        )
+        if self.trigger_mode not in TRIGGER_MODES:
+            raise ValueError(f"DUCK_CRITIC_TRIGGER must be one of {TRIGGER_MODES}, got {self.trigger_mode!r}")
+        if self.trigger_mode == "periodic":
+            self.trigger = PeriodicTriggerPolicy(period=self.period)
+        else:
+            self.trigger = DuckTriggerPolicy(
+                stall_no_change=self.stall_no_change,
+                stall_no_progress=self.stall_no_progress,
+            )
 
     @classmethod
     def from_env(cls, actor_model: tuple[str, str, str, str], *, trace_path: Path | None) -> CriticRunner:
@@ -109,6 +121,8 @@ class CriticRunner:
             trace_path=trace_path,
             stall_no_change=_env_int("DUCK_CRITIC_STALL_NO_CHANGE", 3),
             stall_no_progress=_env_int("DUCK_CRITIC_STALL_NO_PROGRESS", 25),
+            trigger_mode=os.environ.get("DUCK_CRITIC_TRIGGER", "").strip().lower() or "tree",
+            period=_env_int("DUCK_CRITIC_PERIOD", DEFAULT_PERIOD),
         )
 
     def decide(
@@ -178,6 +192,8 @@ class CriticRunner:
 
     def summary(self) -> dict[str, Any]:
         return {
+            "trigger_mode": self.trigger_mode,
+            "trigger_state": dict(self.trigger.state),
             "firings": len(self.firings),
             "seconds": round(sum(float(f["seconds"]) for f in self.firings), 1),
             "by_cause": {
@@ -190,6 +206,7 @@ class CriticRunner:
 
 
 __all__ = [
+    "TRIGGER_MODES",
     "CriticRunner",
     "critic_enabled",
     "model_config_from_env",
