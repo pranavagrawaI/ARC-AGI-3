@@ -116,3 +116,10 @@ Pre-launch checks: `--kaggle-dry-run` of both bundles (tree hash, 0 vs 4 critic 
 GPU quota ≥ 5 h (two kernels × ~2 h 15).
 
 Readback: `python3 runs/periodic-v1/readback.py control/kaggle-output candidate/kaggle-output`.
+
+## Dry-run receipt (local packaging only; nothing uploaded)
+Both bundles built from tree `03e69bd` (`*-dryrun/git_info.txt`): control carries 0 `DUCK_CRITIC_*`
+keys, candidate carries exactly `ENABLED=1 MODE=question TRIGGER=periodic PERIOD=20` in
+`setup_commands.json`; critic package in the bundle byte-identical to the tree; pickled per-game
+cap 3600 s, kernel max_runtime 8100 s; 20 episodes / 2 waves per arm. `git_status.txt` reports
+DIRTY only because the untracked dry-run directories themselves are in the worktree.
