@@ -1,5 +1,11 @@
-# No execution card frozen
-
-Runtime v8 is an implemented and locally qualified candidate. No paid model or
-Kaggle execution is authorized by this file. Freeze a new experiment card before
-any consequential run.
+# 20260920-v12-sb26-su15
+Question: At 3× Duck's slowest sb26 L1 time (1800 s exclusive wall), can runtime v12 complete a level Duck completes 4/4 on sb26 or su15?
+Posture: discriminating test of whether tycho-nooa's binding constraint is accidental cost (context/tempo) rather than essential capability
+Contrast: none — one arm, v12 chassis (model-free transcript eviction, keep=4), inherited contingent-on surface pinned, reasoning off. Not a comparison with Duck in this kernel; Duck's sb26 L1 4/4 in 133–322 s and su15 L1 4/4 at 600 s are the external target.
+Prediction: at least one of four episodes records `levels_completed >= 1` in `ipc/transitions.jsonl` before wall_budget. Direction: if cost is binding, L1 appears; if capability is binding, 0 levels with eviction having fired.
+Measure: per-episode `solver-workspaces/*/ipc/transitions.jsonl` field `after.levels_completed` (max over rows); `ipc/transcript_evictions.jsonl` event `EVICTED` when turns > 4; `ASSESSMENT.json` status PASS. Raw kernel output under `analysis/deployment-probes/20260920-v12-sb26-su15/`.
+Cap: one private RTX PRO 6000 kernel; session 10800 s; 4 sequential episodes (sb26, su15 × 2 passes); 1800 s admission and 200 Solver actions per episode; launcher 7800 s after server ready; startup 1200 s; keep_turns=4; 16384 output tokens; retries 0; internet off. GPU-hours: at most 3. Spend: not applicable (local FP8).
+Stop: success/normal — every episode ends `win`, `wall_budget`, or `step_budget`; orderly SGLang shutdown; assessor PASS. Futility — all four episodes 0 levels with eviction recorded and no worker abort. Abort — model readiness > 1200 s, seal/source drift, assessor INVALID, leftover descendants.
+Invalid if: any `EVICTION_ERROR`; a session longer than keep_turns with no `EVICTED`; Swarm concurrency sharing wall (episodes overlapping in `official-launcher-command.json` / `#running-req 2`); a level increment followed by ≥3 actor calls and no further executed action; reasoning-off state not recorded; missing session (not 4); competition rerun; retry or second push.
+Result map: positive (any L1) → cost is the binding constraint; next card is Duck caps 1–4 and 7 as one package, target sb26 L1 ≤ 322 s. Negative (0 levels, valid) → the other Duck caps are not the next move; do not port them. Ambiguous/INVALID → repair the named machinery; do not read as a capability ceiling.
+Outputs: kernel `pranavagrawai/tycho-nooa-v12-sb26-su15`; raw under `analysis/deployment-probes/20260920-v12-sb26-su15/` after download.

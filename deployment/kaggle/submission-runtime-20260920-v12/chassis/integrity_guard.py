@@ -154,11 +154,16 @@ class IntegrityGuard:
                 )
             if isinstance(content, str):
                 user.append(content)
-        for tool_id, (expected, reads) in self.outputs.items():
+        for tool_id, (expected, reads) in list(self.outputs.items()):
             # A Summary can mention an archived tool ID without containing its
             # original output. Use active events when checking Actor requests.
             active = active_output_ids is None or tool_id in active_output_ids
             visible = [text for text in user if tool_id in text] if active else []
+            if active_output_ids is not None and not active:
+                # Transcript eviction archives outputs by design (v12). Record
+                # the eviction once; an archived output cannot become visible
+                # again, so re-checking it every request only grows the log.
+                del self.outputs[tool_id]
             if active and active_output_ids is not None:
                 tag = active_output_ids[tool_id]
                 if history:

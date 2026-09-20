@@ -48,7 +48,7 @@ def evidence(root, *, contingent_arm, reasoning_tokens=0, reasoning_present=Fals
         {'turn': 0, 'step': 1, 'after': {'levels_completed': 0}}) + '\n')
     (ipc / 'actions.jsonl').write_text(json.dumps({'turn': 0}) + '\n')
     (ipc / 'integrity.jsonl').write_text(json.dumps({'ok': True}) + '\n')
-    (root / 'solver-workspaces' / 'game-stops.jsonl').write_text(json.dumps({
+    (session / 'game-stops.jsonl').write_text(json.dumps({
         'action_limit': action_limit, 'admission_horizon_seconds': ADMISSION,
         'executed_solver_actions': 1, 'reason': 'step_budget'}) + '\n')
     return root
@@ -121,3 +121,60 @@ def test_the_notebook_hands_the_assessor_its_own_budgets():
         assert "'--action-limit',os.environ['TYCHO_KAGGLE_MAX_ACTIONS']" in source
         assert "'--admission-seconds',os.environ['TYCHO_GAMEPLAY_ADMISSION_SECONDS']" in source
         assert "'--reasoning','off'" in source
+        assert "'--episodes','4'" in source
+
+
+def _session(root):
+    return root / 'solver-workspaces' / 'ls20-fixture'
+
+
+def test_eviction_error_or_absence_is_invalid(tmp_path):
+    root = evidence(tmp_path / 'raw', contingent_arm='off')
+    ipc = _session(root) / 'ipc'
+    # Long enough to have evicted (5 batches, keep 4) but no eviction record.
+    (ipc / 'actions.jsonl').write_text(''.join(json.dumps({'turn': t}) + '\n' for t in range(5)))
+    result = assess(root)
+    assert any('no transcript eviction after 5 turns' in e for e in result['errors']), result['errors']
+    (ipc / 'transcript_evictions.jsonl').write_text(json.dumps({'event': 'EVICTED', 'range': '1..40'}) + '\n')
+    assert not [e for e in assess(root)['errors'] if 'eviction' in e]
+    (ipc / 'transcript_evictions.jsonl').write_text(json.dumps({'event': 'EVICTION_ERROR', 'error': 'KeyError'}) + '\n')
+    assert 'transcript eviction error' in assess(root)['errors']
+
+
+def test_short_session_needs_no_eviction_and_zero_disables_the_rule(tmp_path):
+    root = evidence(tmp_path / 'raw', contingent_arm='off')
+    assert not [e for e in assess(root)['errors'] if 'eviction' in e]
+    launch = json.loads((_session(root) / 'launch.json').read_text())
+    launch['transcript_keep_turns'] = 0
+    (_session(root) / 'launch.json').write_text(json.dumps(launch))
+    (_session(root) / 'ipc' / 'actions.jsonl').write_text(''.join(json.dumps({'turn': t}) + '\n' for t in range(9)))
+    assert not [e for e in assess(root)['errors'] if 'eviction' in e]
+
+
+def test_level_then_stall_is_machinery_not_a_result(tmp_path):
+    root = evidence(tmp_path / 'raw', contingent_arm='off')
+    ipc = _session(root) / 'ipc'
+    (ipc / 'transitions.jsonl').write_text(json.dumps(
+        {'turn': 0, 'step': 1, 'before': {'levels_completed': 0},
+         'after': {'levels_completed': 1, 'state': 'NOT_FINISHED'}}) + '\n')
+    (ipc / 'model_calls.jsonl').write_text(''.join(json.dumps(
+        {'request_purpose': 'actor', 'step': 1, 'reasoning_tokens': 0, 'reasoning_present': False}) + '\n'
+        for _ in range(4)))
+    result = assess(root)
+    assert any(e.startswith('level completed at step 1 then 4 actor calls') for e in result['errors']), result['errors']
+    # A level followed by another executed action is ordinary play.
+    (ipc / 'transitions.jsonl').write_text(
+        (ipc / 'transitions.jsonl').read_text() + json.dumps(
+            {'turn': 1, 'step': 2, 'before': {'levels_completed': 1},
+             'after': {'levels_completed': 1, 'state': 'NOT_FINISHED'}}) + '\n')
+    (_session(root) / 'game-stops.jsonl').write_text(json.dumps({
+        'action_limit': ACTIONS, 'admission_horizon_seconds': ADMISSION,
+        'executed_solver_actions': 2, 'reason': 'step_budget'}) + '\n')
+    assert not [e for e in assess(root)['errors'] if e.startswith('level completed')]
+
+
+def test_episode_count_mismatch_is_invalid(tmp_path):
+    root = evidence(tmp_path / 'raw', contingent_arm='on')
+    assert assess(root, contingent_arm='on', episodes=1)['status'] == 'PASS'
+    result = assess(root, contingent_arm='on', episodes=4)
+    assert any('expected 4 sessions, found 1' in e for e in result['errors']), result['errors']

@@ -5,7 +5,7 @@ from pathlib import Path
 
 HERE=Path(__file__).resolve().parent
 
-def assess(root,arm,*,reasoning='off',contingent_arm=None,action_limit=30,admission_seconds=1800):
+def assess(root,arm,*,reasoning='off',contingent_arm=None,action_limit=30,admission_seconds=1800,episodes=None):
     errors=[]
     def doc(path):
         try:return json.loads(path.read_text())
@@ -32,6 +32,21 @@ def assess(root,arm,*,reasoning='off',contingent_arm=None,action_limit=30,admiss
         actions=rows(ipc/'actions.jsonl',True);experiments=rows(ipc/'decision_experiments.jsonl');checks=rows(ipc/'step_checks.jsonl')
         if not rows(ipc/'integrity.jsonl',True):errors.append('no integrity evidence')
         if (ipc/'ABORT').exists():errors.append('worker abort')
+        # v12: the transcript is bounded by model-free eviction. An eviction
+        # error fails open into v11's unbounded growth, so it is INVALID, and a
+        # session long enough to evict must show at least one eviction.
+        evictions=rows(ipc/'transcript_evictions.jsonl')
+        if any(e.get('event')=='EVICTION_ERROR' for e in evictions):errors.append('transcript eviction error')
+        keep=int(launch.get('transcript_keep_turns',4) or 0)
+        if keep and len(actions)>keep and not any(e.get('event')=='EVICTED' for e in evictions):
+            errors.append(f'no transcript eviction after {len(actions)} turns (keep {keep})')
+        # A level completed and then no further executed action while the model
+        # kept being called is a boundary-machinery failure (scribe gate, worker
+        # path), not a gameplay ceiling. It must not read as a result.
+        level_steps=[t['step'] for t in transitions if t['after'].get('levels_completed',0)>t.get('before',{}).get('levels_completed',0)]
+        if level_steps and transitions and transitions[-1]['step']==level_steps[-1] and transitions[-1]['after'].get('state')=='NOT_FINISHED':
+            calls_after=[c for c in calls if c.get('request_purpose')=='actor' and c.get('step',0)>=level_steps[-1]]
+            if len(calls_after)>=3:errors.append(f'level completed at step {level_steps[-1]} then {len(calls_after)} actor calls with no executed action')
         # The card invalidates a run whose reasoning-off STATE cannot be established,
         # so check the configuration the worker recorded. Observed reasoning is
         # reported as a measurement: an empty think block is not reasoning being on,
@@ -54,14 +69,15 @@ def assess(root,arm,*,reasoning='off',contingent_arm=None,action_limit=30,admiss
             experiments=len(experiments),checks=len(checks),reasoning_tokens=observed_reasoning,
             calls_reporting_reasoning=observed_present,interrupted_actions=sum(c.get('skipped_actions',0) for c in checks),
             final_levels=max((t['after'].get('levels_completed',0) for t in transitions),default=0)))
+        stops=rows(path/'game-stops.jsonl',True)
+        if len(stops)!=1:errors.append(f'{path.name}: expected one game stop')
+        else:
+            stop=stops[0]
+            if stop.get('action_limit')!=action_limit or stop.get('admission_horizon_seconds')!=admission_seconds:errors.append('wrong budgets')
+            if stop.get('executed_solver_actions')!=len(transitions) or len(transitions)>action_limit:errors.append('wrong action reconciliation')
+            if stop.get('reason') not in ('win','wall_budget','step_budget'):errors.append('unexpected stop')
     if not sessions:errors.append('no sessions')
-    stops=rows(root/'solver-workspaces/game-stops.jsonl',True)
-    if len(stops)!=1:errors.append('expected one game stop')
-    total=sum(s['actions'] for s in sessions)
-    for stop in stops:
-        if stop.get('action_limit')!=action_limit or stop.get('admission_horizon_seconds')!=admission_seconds:errors.append('wrong budgets')
-        if stop.get('executed_solver_actions')!=total or total>action_limit:errors.append('wrong action reconciliation')
-        if stop.get('reason') not in ('win','wall_budget','step_budget'):errors.append('unexpected stop')
+    if episodes is not None and len(sessions)!=episodes:errors.append(f'expected {episodes} sessions, found {len(sessions)}')
     return dict(status='INVALID' if errors else 'PASS',errors=errors,arm=arm,reasoning=reasoning,
                 contingent_arm=contingent_arm,action_limit=action_limit,sessions=sessions,promotion=False,
                 scope='Integration only. Review objective hypotheses, chosen tests and progress in raw IPC; this is not a causal gameplay verdict.')
@@ -72,9 +88,11 @@ if __name__=='__main__':
     parser.add_argument('--contingent-arm',choices=['off','on'])
     parser.add_argument('--action-limit',type=int,default=30)
     parser.add_argument('--admission-seconds',type=int,default=1800)
+    parser.add_argument('--episodes',type=int)
     args=parser.parse_args()
     result=assess(args.raw,args.arm,reasoning=args.reasoning,contingent_arm=args.contingent_arm,
-                  action_limit=args.action_limit,admission_seconds=args.admission_seconds)
+                  action_limit=args.action_limit,admission_seconds=args.admission_seconds,
+                  episodes=args.episodes)
     text=json.dumps(result,indent=2)+'\n'
     if args.output:args.output.write_text(text)
     print(text);raise SystemExit(result['status']!='PASS')

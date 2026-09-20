@@ -1,20 +1,11 @@
 # Local qualification
 
-Runtime contract: `8532c0a7d18fbbf7d4fa4afd583a868cbfe347d03977053533864d2cb9e105d9`.
+Runtime contract: `f8fa9c62d63b814b965861646aebbe82f57b3a0b190101ec6b042d6369a78627`.
 
-- Full runtime suite: 159 passed.
-- Frozen qualification subset: 103 passed.
-- Exact notebook and entrypoint suite: 35 passed.
-- Contingent-worker suite: 4 passed.
+- Full runtime suite: 187 passed (`pytest .` in this directory).
+- `verify_candidate.py`: PASS, 0 network calls, slug `pranavagrawai/tycho-nooa-v12-sb26-su15`.
+- `freeze_candidate.py --check` and `prepare_candidate.py --check` match.
 
-The live worker test proves that an invalid critic response leaves the
-eight-Actor-call boundary pending, a later valid question binds to an
-Actor-authored event, the critic receives no tools, and the question reaches the
-same pending Actor continuation. Packaging tests cover three-action cadence and
-per-mismatch cadence through the real subprocess entrypoint.
-
-Evidence: `analysis/deployment-probes/20260912-epistemic-questioner-local-v1/`.
-
-These are deterministic and loopback HTTP checks. They do not establish Qwen
-question quality, Actor adoption, gameplay benefit, GPU behavior, or Kaggle
-performance.
+These are deterministic and captured-CLI checks. They do not establish Qwen
+play quality, GPU behavior, or Kaggle performance. The discriminating run is
+authorized by `LAUNCH.json` and `EXPERIMENT-CARD.md`.

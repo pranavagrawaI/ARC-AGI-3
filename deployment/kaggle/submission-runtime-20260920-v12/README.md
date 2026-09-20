@@ -32,10 +32,10 @@ Not changed: budgets, critic, prompts, tool surface, worker protocol, launcher.
 `build_notebook.py` ships the new module; `test_every_frozen_chassis_file_ships_in_the_notebook`
 keeps the freeze list and the ship list from diverging again.
 
-Qualification: local deterministic only (180 tests). No loopback or Kaggle run.
-`LAUNCH.json` is `not_authorized`. The carried `kernel-metadata.json` still names
-the v10 kernel and must be re-slugged before any push
-(see kaggle-kernel-title-must-slugify-to-id).
+Qualification: local deterministic plus the v12 launch package (sequential
+episodes, assessor eviction/level-stall gates, freeze/ship). No loopback run.
+The discriminating Kaggle kernel is `pranavagrawai/tycho-nooa-v12-sb26-su15`
+(see `EXPERIMENT-CARD.md`).
 
 ---
 

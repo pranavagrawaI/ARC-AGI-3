@@ -22,6 +22,8 @@ SOURCES.append('heterogeneous_self_test_probe.py')
 SOURCES.extend(['controller_screen.py','test_contingent_controller.py','test_contingent_worker.py','test_contingent_arm.py','test_assessment.py'])
 SOURCES.extend(['test_epistemic_critic.py','test_objection_ledger.py','test_done_refusal.py'])
 SOURCES.append('test_transcript_eviction.py')
+SOURCES.append('test_level_boundary.py')
+SOURCES.append('test_sequential_episodes.py')
 
 
 def manifest():

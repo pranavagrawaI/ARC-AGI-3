@@ -642,6 +642,7 @@ class ArcSolverBase(InteractiveAgent):
     _critic_last_mismatch_count: Annotated[int, hidden, nosnapshot]
     _critic_pending_sequence_length: Annotated[int, hidden, nosnapshot]
     _critic_pending_sequence_step: Annotated[int | None, hidden, nosnapshot]
+    _transcript_eviction: Annotated[TranscriptEviction | None, hidden, nosnapshot]
 
     def __init__(
         self,

@@ -55,6 +55,26 @@ PUBLIC_MAX_ACTIONS = int(os.getenv("TYCHO_KAGGLE_MAX_ACTIONS", "16"))
 LIST_HOST = "127.0.0.1"
 LIST_PORT = 18_001
 WORKING_ROOT = Path(os.getenv("TYCHO_PUBLIC25_WORKING_ROOT", "/kaggle/working"))
+_GAMES_LOCK = threading.Lock()
+CURRENT_GAMES = list(EXPECTED_GAMES)
+
+
+def episode_plan(
+    games: list[str] | None = None, passes: int | None = None
+) -> list[tuple[int, str]]:
+    """One official-launcher process per (pass, game). Swarm must not share wall."""
+    names = list(EXPECTED_GAMES if games is None else games)
+    if passes is None:
+        raw = os.getenv("TYCHO_PUBLIC_GAME_PASSES", "1")
+        try:
+            passes = int(raw)
+        except ValueError as error:
+            raise RuntimeError(
+                "TYCHO_PUBLIC_GAME_PASSES must be a positive integer"
+            ) from error
+    if passes < 1:
+        raise RuntimeError("TYCHO_PUBLIC_GAME_PASSES must be a positive integer")
+    return [(pass_i, game) for pass_i in range(passes) for game in names]
 
 
 class GameListHandler(http.server.BaseHTTPRequestHandler):
@@ -62,7 +82,9 @@ class GameListHandler(http.server.BaseHTTPRequestHandler):
         if self.path != "/api/games":
             self.send_error(404)
             return
-        body = json.dumps([{"game_id": game} for game in EXPECTED_GAMES]).encode()
+        with _GAMES_LOCK:
+            offered = list(CURRENT_GAMES)
+        body = json.dumps([{"game_id": game} for game in offered]).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -374,6 +396,30 @@ def contain_group(process: subprocess.Popen[bytes], *, timed_out: bool) -> bool:
     return True
 
 
+def _wait_process(
+    process: subprocess.Popen[bytes], timeout: float
+) -> tuple[int, bool, bool]:
+    timed_out = False
+    try:
+        returncode = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        residual = contain_group(process, timed_out=True)
+        try:
+            returncode = process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            returncode = 124
+        return returncode, timed_out, residual
+    residual = contain_group(process, timed_out=False)
+    return returncode, timed_out, residual
+
+
+def _episode_timeout(remaining: float, leftover: int, admission: float) -> float:
+    cap = admission + 180.0
+    reserved = 30.0 * leftover
+    return max(60.0, min(remaining - reserved, cap))
+
+
 def official_launcher_environment(
     *,
     base_url: str,
@@ -429,6 +475,8 @@ def main() -> int:
     ]
     stdout_path = args.output.with_name("nooa-join-launcher.stdout.log")
     stderr_path = args.output.with_name("nooa-join-launcher.stderr.log")
+    plan = episode_plan()
+    admission = float(os.getenv("TYCHO_GAMEPLAY_ADMISSION_SECONDS", "1800"))
     list_server = http.server.ThreadingHTTPServer(
         (LIST_HOST, LIST_PORT), GameListHandler
     )
@@ -438,27 +486,41 @@ def main() -> int:
     timed_out = False
     residual_group_term_required = False
     returncode = 1
+    started = time.monotonic()
     try:
         with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
-            process = subprocess.Popen(
-                command,
-                cwd=official_root,
-                env=environment,
-                stdout=stdout,
-                stderr=stderr,
-                start_new_session=True,
-            )
-            try:
-                returncode = process.wait(timeout=args.timeout_s)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                residual_group_term_required = contain_group(process, timed_out=True)
-                try:
-                    returncode = process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
+            for index, (pass_i, game) in enumerate(plan):
+                with _GAMES_LOCK:
+                    CURRENT_GAMES[:] = [game]
+                leftover = len(plan) - index - 1
+                remaining = args.timeout_s - (time.monotonic() - started)
+                if remaining <= 60:
+                    timed_out = True
                     returncode = 124
-            else:
-                residual_group_term_required = contain_group(process, timed_out=False)
+                    break
+                episode_timeout = _episode_timeout(remaining, leftover, admission)
+                marker = f"\n# episode pass={pass_i} game={game} timeout={episode_timeout:.0f}s\n"
+                stdout.write(marker.encode())
+                stdout.flush()
+                process = subprocess.Popen(
+                    command,
+                    cwd=official_root,
+                    env=environment,
+                    stdout=stdout,
+                    stderr=stderr,
+                    start_new_session=True,
+                )
+                returncode, episode_timed_out, residual = _wait_process(
+                    process, episode_timeout
+                )
+                residual_group_term_required = (
+                    residual_group_term_required or residual
+                )
+                if episode_timed_out:
+                    timed_out = True
+                    break
+                if returncode != 0:
+                    break
     finally:
         list_server.shutdown()
         list_server.server_close()
@@ -513,6 +575,8 @@ def main() -> int:
         "stderr": log_facts(stderr_path),
         "operation_mode": "offline",
         "public_games": EXPECTED_GAMES,
+        "public_game_passes": len({pass_i for pass_i, _ in plan}),
+        "episodes": [{"pass": pass_i, "game": game} for pass_i, game in plan],
         "public_max_actions": PUBLIC_MAX_ACTIONS,
         "solver_workspace_root": str(args.workspace_root),
         "public_progress": public_progress,

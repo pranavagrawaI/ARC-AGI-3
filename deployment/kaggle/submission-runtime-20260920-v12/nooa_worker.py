@@ -150,6 +150,9 @@ class HostSession:
                     # stripped on the way here, this says 'on' and the assessor
                     # rejects the off arm rather than silently comparing on to on.
                     "contingent_arm": contingent_arm(),
+                    # Same reasoning: the assessor's eviction rule reads the
+                    # value the worker actually ran with, not the notebook's.
+                    "transcript_keep_turns": int(os.environ.get("ARC_TRANSCRIPT_KEEP_TURNS", "4")),
                     "platform": "kaggle",
                     "contract_sha256": manifest["contract_sha256"],
                     "manifest": manifest,

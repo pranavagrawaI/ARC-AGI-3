@@ -14,21 +14,22 @@ def test_notebook_arms_preserve_inputs_and_isolate_outputs():
     nb=prepare_candidate.build()
     names=prepare_candidate.ARMS
     arms=[''.join(c['source']) for c in nb['cells'][-len(names):]]
-    assert len(arms) == len(names) == 2
+    assert len(arms) == len(names) == 1
     for name, source in zip(names, arms):
-        # One isolated factor: the arm sets ARC_CONTINGENT_ARM and nothing else,
-        # and every other setting below is identical across both arms.
         assert f"ARC_CONTINGENT_ARM']={name!r}" in source
         assert "ARC_DISCOVERY_ARM']='a'" in source
-        assert f"/kaggle/working/contingent-{name}" in source
+        assert "ARC_TRANSCRIPT_KEEP_TURNS']='4'" in source
+        assert "TYCHO_PUBLIC_GAME_PASSES']='2'" in source
+        assert '/kaggle/working/v12-sb26-su15' in source
         assert source.index('subprocess.run(command, check=True)') < source.index('assess_candidate.py')
         assert 'speculative-algorithm' not in source
         assert 'submission.parquet' not in source
-        assert "TYCHO_PUBLIC_GAME_IDS'] = 'ls20'" in source
+        assert "TYCHO_PUBLIC_GAME_IDS'] = 'sb26,su15'" in source
         assert '"enable_thinking":false' in source
         assert '"reasoning":{"enabled":false}' in source
         assert "ARC_LLM_MAX_TOKENS'] = '16384'" in source
         assert "ARC_LLM_CONTEXT_WINDOW'] = '262144'" in source
+        assert "'--episodes','4'" in source
 
 
 def test_assessor_rejects_missing_and_empty_evidence(tmp_path):
