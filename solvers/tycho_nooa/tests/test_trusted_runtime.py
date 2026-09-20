@@ -322,3 +322,34 @@ def manifest_module(manifest: dict[str, object], path: str) -> dict[str, str]:
     modules = manifest["modules"]
     assert isinstance(modules, list)
     return next(module for module in modules if module["path"] == path)
+
+
+def test_bubblewrap_binds_the_interpreter_a_venv_python_links_to(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A venv's ``bin/python`` links into the build that created it. When that
+    build lives outside ``/usr`` (uv, pyenv), the sandbox must bind it and
+    recreate any symlinked directory on the link chain, or ``execvp`` fails."""
+    from tycho_nooa import wm_probe
+
+    build = tmp_path / "builds" / "cpython-3.13.15"
+    (build / "bin").mkdir(parents=True)
+    real_python = build / "bin" / "python3.13"
+    real_python.write_text("")
+    alias = tmp_path / "builds" / "cpython-3.13"
+    alias.symlink_to(build)
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").symlink_to(alias / "bin" / "python3.13")
+    monkeypatch.setattr(wm_probe.sys, "prefix", str(venv))
+    monkeypatch.setattr(wm_probe.sys, "base_prefix", str(alias))
+    monkeypatch.setattr(wm_probe.sys, "executable", str(venv / "bin" / "python"))
+
+    command = wm_probe._bubblewrap_command(
+        "/usr/bin/bwrap", tmp_path / "workspace", (), ["python", "-c", "pass"]
+    )
+
+    assert command[command.index("--symlink") + 1 :][:2] == [str(build), str(alias)]
+    binds = [command[i + 1] for i, a in enumerate(command) if a == "--ro-bind"]
+    assert str(build.resolve()) in binds
+    assert str(venv.resolve()) in binds

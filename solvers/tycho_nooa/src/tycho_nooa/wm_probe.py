@@ -26,6 +26,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import inspect
+import os
 import shutil
 import sys
 import tempfile
@@ -276,10 +277,11 @@ def _bubblewrap_command(
     generated_source: Path | None = None,
 ) -> list[str]:
     venv = Path(sys.prefix).resolve(strict=True)
-    directories = _mount_parent_directories(workspace, venv)
+    interpreter_roots, interpreter_symlinks = _interpreter_mounts(venv)
+    directories = _mount_parent_directories(workspace, venv, *interpreter_roots)
     mounts = [
         argument
-        for path in protected_paths
+        for path in (*protected_paths, *interpreter_roots)
         for argument in ("--ro-bind", str(path), str(path))
     ]
     generated_source_mount = (
@@ -311,6 +313,7 @@ def _bubblewrap_command(
         "--disable-userns",
         "--clearenv",
         *directories,
+        *interpreter_symlinks,
         "--ro-bind",
         "/usr",
         "/usr",
@@ -363,6 +366,35 @@ def _bubblewrap_command(
         "--",
         *command,
     ]
+
+
+def _interpreter_mounts(venv: Path) -> tuple[list[Path], list[str]]:
+    """Mounts that make the venv's ``bin/python`` resolvable inside the sandbox.
+
+    A venv's interpreter is a symlink into the build that created it. When that
+    build lives outside ``/usr`` (uv- or pyenv-managed), binding only the venv
+    and ``/usr`` leaves the link dangling and bubblewrap fails with
+    ``execvp ... No such file or directory``. Bind the real interpreter home
+    read-only and recreate any symlinked directory the link chain passes
+    through, so the unresolved link path exists exactly as on the host.
+    """
+    roots: list[Path] = []
+    symlinks: list[str] = []
+    home = Path(sys.base_prefix).resolve(strict=True)
+    if home != venv and not home.is_relative_to("/usr"):
+        roots.append(home)
+    current = Path(sys.executable)
+    seen: set[Path] = set()
+    while current.is_symlink() and current not in seen:
+        seen.add(current)
+        target = Path(os.readlink(current))
+        if not target.is_absolute():
+            target = current.parent / target
+        for ancestor in target.parents:
+            if ancestor.is_symlink() and not ancestor.is_relative_to(venv):
+                symlinks.extend(("--symlink", os.readlink(ancestor), str(ancestor)))
+        current = target
+    return roots, symlinks
 
 
 def _mount_parent_directories(*paths: Path) -> list[str]:
