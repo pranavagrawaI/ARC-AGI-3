@@ -936,6 +936,11 @@ class ArcSolverBase(InteractiveAgent):
                         )
                         wall_remaining = (max(0.0, deadline - time.monotonic())
                                           if math.isfinite(deadline) else None)
+                        critic_flag = os.environ.get('ARC_EPISTEMIC_CRITIC', '1')
+                        if critic_flag not in ('0', '1'):
+                            raise ValueError('ARC_EPISTEMIC_CRITIC must be 0 or 1')
+                        if critic_flag == '0':
+                            review_trigger = None
                         spent_probe = self._objections.probe_due(step_before)
                         if spent_probe is not None:
                             from objection_ledger import probe_guidance

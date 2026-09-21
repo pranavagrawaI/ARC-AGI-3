@@ -5,7 +5,7 @@ from pathlib import Path
 
 HERE=Path(__file__).resolve().parent
 
-def assess(root,arm,*,reasoning='off',contingent_arm=None,action_limit=30,admission_seconds=1800,episodes=None):
+def assess(root,arm,*,reasoning='off',contingent_arm=None,action_limit=30,admission_seconds=1800,episodes=None,epistemic_critic=None):
     errors=[]
     def doc(path):
         try:return json.loads(path.read_text())
@@ -28,9 +28,13 @@ def assess(root,arm,*,reasoning='off',contingent_arm=None,action_limit=30,admiss
         if launch.get('contract_sha256')!=manifest.get('contract_sha256') or launch.get('solver_arm')!=arm:errors.append('wrong worker identity/arm')
         if contingent_arm is not None and launch.get('contingent_arm')!=contingent_arm:
             errors.append(f"contingent arm not recorded as {contingent_arm}: {launch.get('contingent_arm')!r}")
+        if epistemic_critic is not None and str(launch.get('epistemic_critic','1'))!=str(epistemic_critic):
+            errors.append(f"epistemic critic not recorded as {epistemic_critic}: {launch.get('epistemic_critic')!r}")
         calls=rows(ipc/'model_calls.jsonl',True);transitions=rows(ipc/'transitions.jsonl',True)
         actions=rows(ipc/'actions.jsonl',True);experiments=rows(ipc/'decision_experiments.jsonl');checks=rows(ipc/'step_checks.jsonl')
         if not rows(ipc/'integrity.jsonl',True):errors.append('no integrity evidence')
+        if epistemic_critic=='0' and any(c.get('request_purpose')=='critic' for c in calls):
+            errors.append('epistemic critic calls present on the off arm')
         if (ipc/'ABORT').exists():errors.append('worker abort')
         # v12: the transcript is bounded by model-free eviction. An eviction
         # error fails open into v11's unbounded growth, so it is INVALID, and a
@@ -89,10 +93,11 @@ if __name__=='__main__':
     parser.add_argument('--action-limit',type=int,default=30)
     parser.add_argument('--admission-seconds',type=int,default=1800)
     parser.add_argument('--episodes',type=int)
+    parser.add_argument('--epistemic-critic',choices=['0','1'])
     args=parser.parse_args()
     result=assess(args.raw,args.arm,reasoning=args.reasoning,contingent_arm=args.contingent_arm,
                   action_limit=args.action_limit,admission_seconds=args.admission_seconds,
-                  episodes=args.episodes)
+                  episodes=args.episodes,epistemic_critic=args.epistemic_critic)
     text=json.dumps(result,indent=2)+'\n'
     if args.output:args.output.write_text(text)
     print(text);raise SystemExit(result['status']!='PASS')

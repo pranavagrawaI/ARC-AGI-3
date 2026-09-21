@@ -118,10 +118,11 @@ def test_the_notebook_hands_the_assessor_its_own_budgets():
     for arm, cell in zip(prepare_candidate.ARMS, nb['cells'][-len(prepare_candidate.ARMS):]):
         source = ''.join(cell['source'])
         assert "'--contingent-arm',os.environ['ARC_CONTINGENT_ARM']" in source
+        assert "'--epistemic-critic',os.environ['ARC_EPISTEMIC_CRITIC']" in source
         assert "'--action-limit',os.environ['TYCHO_KAGGLE_MAX_ACTIONS']" in source
         assert "'--admission-seconds',os.environ['TYCHO_GAMEPLAY_ADMISSION_SECONDS']" in source
         assert "'--reasoning','off'" in source
-        assert "'--episodes','4'" in source
+        assert 'launcher = subprocess.run(command, check=False)' in source
 
 
 def _session(root):
@@ -171,6 +172,23 @@ def test_level_then_stall_is_machinery_not_a_result(tmp_path):
         'action_limit': ACTIONS, 'admission_horizon_seconds': ADMISSION,
         'executed_solver_actions': 2, 'reason': 'step_budget'}) + '\n')
     assert not [e for e in assess(root)['errors'] if e.startswith('level completed')]
+
+
+def test_critic_calls_fail_the_off_arm(tmp_path):
+    root = evidence(tmp_path / 'raw', contingent_arm='off')
+    session = _session(root)
+    launch = json.loads((session / 'launch.json').read_text())
+    launch['epistemic_critic'] = '0'
+    (session / 'launch.json').write_text(json.dumps(launch))
+    result = assess(root, contingent_arm='off', epistemic_critic='0')
+    assert result['status'] == 'PASS', result['errors']
+    ipc = session / 'ipc'
+    (ipc / 'model_calls.jsonl').write_text(
+        (ipc / 'model_calls.jsonl').read_text()
+        + json.dumps({'request_purpose': 'critic', 'reasoning_tokens': 0, 'reasoning_present': False}) + '\n'
+    )
+    result = assess(root, contingent_arm='off', epistemic_critic='0')
+    assert any('epistemic critic calls present on the off arm' in e for e in result['errors']), result['errors']
 
 
 def test_episode_count_mismatch_is_invalid(tmp_path):

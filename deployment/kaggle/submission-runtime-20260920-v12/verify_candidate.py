@@ -1,9 +1,7 @@
 """Capture the installed Kaggle CLI request without network or upload.
 
-Every assertion below describes THIS package: v12 transcript-eviction on
-sb26/su15, sequential episodes, one pinned arm. It is the last gate before a
-push, so it must fail whenever the notebook, the games, the budgets or the
-launch identity drift.
+This package is v12 eviction, critic off, contingent off, sb26 two sequential
+passes. Fail if the notebook, games, critic gate or launch identity drift.
 """
 from contextlib import contextmanager
 import json
@@ -34,29 +32,36 @@ def main():
 
     assert request.slug == launch['kernel'] == metadata['id']
     assert slugify(metadata['title']) == metadata['id'].split('/')[1]
-    assert request.slug == 'pranavagrawai/tycho-nooa-v12-sb26-su15'
-    assert request.slug != 'pranavagrawai/contingent-controller-20260909'
+    assert request.slug == 'pranavagrawai/tycho-nooa-v12-sb26-critic-off'
+    assert request.slug != 'pranavagrawai/tycho-nooa-v12-sb26-su15'
     assert request.session_timeout_seconds == launch['session_timeout_seconds'] == 10800
     assert request.machine_shape == 'NvidiaRtxPro6000'
     assert request.is_private and request.enable_gpu and not request.enable_internet
     assert launch['launch_ready'] and not launch['promotion']
-    assert launch['factor'] == 'v12-transcript-eviction'
-    assert launch['games'] == ['sb26', 'su15']
-    assert launch['passes'] == 2 and launch['episodes'] == 4
+    assert launch['factor'] == 'v12-critic-off'
+    assert launch['games'] == ['sb26']
+    assert launch['passes'] == 2 and launch['episodes'] == 2
     assert launch['transcript_keep_turns'] == 4
-    assert launch['arms'] == ['on']
+    assert launch['arms'] == ['off']
+    assert launch['epistemic_critic'] == '0'
 
     nb = json.loads(request.text)
     code = '\n'.join(''.join(c['source']) for c in nb['cells'])
 
-    assert code.count("os.environ['ARC_CONTINGENT_ARM']='on'") == 1
+    assert code.count("os.environ['ARC_CONTINGENT_ARM']='off'") == 1
+    assert "os.environ['ARC_EPISTEMIC_CRITIC']='0'" in code
     assert code.count("os.environ['ARC_DISCOVERY_ARM']='a'") == 1
     assert "os.environ['ARC_SOLVER_ARM']='loop'" in code
     assert "os.environ['ARC_TRANSCRIPT_KEEP_TURNS']='4'" in code
     assert "os.environ['TYCHO_PUBLIC_GAME_PASSES']='2'" in code
-    assert "TYCHO_PUBLIC_GAME_IDS'] = 'sb26,su15'" in code
+    assert "TYCHO_PUBLIC_GAME_IDS'] = 'sb26'" in code
+    assert "TYCHO_PUBLIC_GAME_IDS'] = 'sb26,su15'" not in code
     assert 'mindset' not in code
     assert "ARC_DISCOVERY_ARM']='b'" not in code
+    assert "subprocess.run(command, check=True)" not in code
+    assert 'launcher = subprocess.run(command, check=False)' in code
+    assert 'assess = subprocess.run(' in code
+    assert 'check=False)' in code
 
     assert code.count('"enable_thinking":false') == 1
     assert code.count('"reasoning":{"enabled":false}') == 1
@@ -69,14 +74,14 @@ def main():
     assert f"ARC_LLM_MAX_TOKENS'] = '{launch['max_output_tokens_per_request']}'" in code
     assert f"ARC_LLM_CONTEXT_WINDOW'] = '{launch['model_context_tokens']}'" in code
     assert "ARC_LLM_RETRIES'] = '0'" in code
-    assert "'--episodes','4'" in code
+    assert "'--epistemic-critic',os.environ['ARC_EPISTEMIC_CRITIC']" in code
     assert 'kaggle competitions submit' not in code
     assert metadata['competition_sources'] == ['arc-prize-2026-arc-agi-3']
 
     print(json.dumps(dict(
         status='PASS', network_calls=0, kernel=request.slug,
         factor=launch['factor'], games=launch['games'],
-        episodes=launch['episodes'],
+        episodes=launch['episodes'], epistemic_critic=launch['epistemic_critic'],
         competition=metadata['competition_sources'],
         actions_per_arm=launch['actions_per_arm'],
         admission_seconds=launch['admission_seconds_per_arm'],

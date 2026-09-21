@@ -1,4 +1,4 @@
-"""Build/check the v12 sb26/su15 sequential discriminating notebook."""
+"""Build/check the v12 sb26 critic-off sequential notebook."""
 import argparse
 import ast
 import base64
@@ -11,20 +11,20 @@ import build_notebook as builder
 from freeze_candidate import verify
 
 HERE = Path(__file__).resolve().parent
-GAMES = 'sb26,su15'
+GAMES = 'sb26'
 PASSES = 2
-EPISODES = 4
-ARMS = ('on',)
+EPISODES = 2
+ARMS = ('off',)
 ACTIONS_PER_ARM = '200'
 ADMISSION_SECONDS = '1800'
-LAUNCHER_TIMEOUT_SECONDS = 7800
+LAUNCHER_TIMEOUT_SECONDS = 4200
 WORKER_TIMEOUT_SECONDS = 2400
 KEEP_TURNS = '4'
-OUT = HERE.parents[2] / 'analysis/deployment-probes/20260920-v12-sb26-su15'
+OUT = HERE.parents[2] / 'analysis/deployment-probes/20260921-v12-sb26-critic-off'
 
 
 def build():
-    off = '{"chat_template_kwargs":{"enable_thinking":false},"reasoning":{"enabled":false}}'
+    extra = '{"chat_template_kwargs":{"enable_thinking":false},"reasoning":{"enabled":false}}'
     nb = builder.build(
         games=GAMES,
         max_actions=ACTIONS_PER_ARM,
@@ -33,13 +33,13 @@ def build():
         max_tokens='16384',
         llm_timeout_s=300,
         request_timeout_s=180,
-        extra_body=off,
+        extra_body=extra,
         heading=(
-            '# v12 transcript-eviction discriminating test\n\n'
-            'One arm: runtime v12 (model-free whole-turn eviction, keep=4), '
-            'Actor reasoning off, discovery A, contingent on (inherited default, pinned). '
-            f'Public {GAMES} only, {PASSES} sequential passes, {ADMISSION_SECONDS}s '
-            'admission each so Swarm cannot share wall. No submission or automatic promotion.'
+            '# v12 sb26 critic-off\n\n'
+            'One arm: runtime v12 eviction keep=4, Actor reasoning off, discovery A, '
+            'contingent off, epistemic critic off. Public sb26 only, 2 sequential '
+            '1800s passes. A later-episode worker abort must not skip assessment. '
+            'No submission or automatic promotion.'
         ),
     )
     builder.validate(
@@ -47,16 +47,17 @@ def build():
         games=GAMES,
         max_actions=ACTIONS_PER_ARM,
         launcher_timeout_s=LAUNCHER_TIMEOUT_SECONDS,
-        extra_body=off,
+        extra_body=extra,
     )
     body = ''.join(nb['cells'][3]['source']).split('submission = pd.DataFrame(')[0]
     body = body.replace(
         "os.environ['TYCHO_GAMEPLAY_ADMISSION_SECONDS'] = '7200'",
         f"os.environ['TYCHO_GAMEPLAY_ADMISSION_SECONDS'] = {ADMISSION_SECONDS!r}",
     )
+    body = body.replace('subprocess.run(command, check=True)', 'launcher = subprocess.run(command, check=False)')
     cells = nb['cells'][:3]
     arm = ARMS[0]
-    root = '/kaggle/working/v12-sb26-su15'
+    root = '/kaggle/working/v12-sb26-critic-off'
     code = (
         "import os, shutil\nfrom pathlib import Path\n"
         f"arm_root=Path({root!r})\n"
@@ -65,19 +66,23 @@ def build():
         "os.environ['ARC_SOLVER_ARM']='loop'\n"
         "os.environ['ARC_DISCOVERY_ARM']='a'\n"
         f"os.environ['ARC_CONTINGENT_ARM']={arm!r}\n"
+        "os.environ['ARC_EPISTEMIC_CRITIC']='0'\n"
         f"os.environ['ARC_TRANSCRIPT_KEEP_TURNS']={KEEP_TURNS!r}\n"
         f"os.environ['TYCHO_PUBLIC_GAME_PASSES']={str(PASSES)!r}\n"
         f"os.environ['TYCHO_PUBLIC25_WORKING_ROOT']={root!r}\n"
     )
     code += body.replace('/kaggle/working/', root + '/')
     code += (
-        "subprocess.run([sys.executable,str(arm_root/'nooa-join/assess_candidate.py'),str(output_dir),"
+        "print('launcher_returncode', launcher.returncode)\n"
+        "print((output_dir / 'result.json').read_text())\n"
+        "assess = subprocess.run([sys.executable,str(arm_root/'nooa-join/assess_candidate.py'),str(output_dir),"
         "'--arm',os.environ['ARC_SOLVER_ARM'],'--reasoning','off',"
         "'--contingent-arm',os.environ['ARC_CONTINGENT_ARM'],"
+        "'--epistemic-critic',os.environ['ARC_EPISTEMIC_CRITIC'],"
         "'--action-limit',os.environ['TYCHO_KAGGLE_MAX_ACTIONS'],"
         "'--admission-seconds',os.environ['TYCHO_GAMEPLAY_ADMISSION_SECONDS'],"
-        f"'--episodes','{EPISODES}',"
-        "'--output',str(output_dir/'ASSESSMENT.json')],check=True)\n"
+        "'--output',str(output_dir/'ASSESSMENT.json')],check=False)\n"
+        "print('assess_returncode', assess.returncode)\n"
     )
     ast.parse(code)
     cells.append(dict(cell_type='code', execution_count=None, metadata={}, outputs=[], source=code))
@@ -137,11 +142,12 @@ def main():
         kernel=metadata['id'],
         session_timeout_seconds=10800,
         arms=list(ARMS),
-        factor='v12-transcript-eviction',
+        factor='v12-critic-off',
         games=GAMES.split(','),
         passes=PASSES,
         episodes=EPISODES,
         discovery_arm='a',
+        epistemic_critic='0',
         admission_seconds_per_arm=int(ADMISSION_SECONDS),
         launcher_timeout_seconds_per_arm=LAUNCHER_TIMEOUT_SECONDS,
         actions_per_arm=int(ACTIONS_PER_ARM),
@@ -152,8 +158,8 @@ def main():
         promotion=False,
         launch_ready=True,
         authorization=(
-            'One private RTX PRO 6000 kernel: v12 eviction chassis on public sb26 and su15, '
-            '2 sequential passes, 1800s admission each. No submission, retry or automatic promotion.'
+            'One private RTX PRO 6000 kernel: v12 eviction chassis, contingent off, '
+            'epistemic critic off, public sb26, 2 sequential 1800s passes. No submission, retry or automatic promotion.'
         ),
         openrouter_qualified=False,
         automatic_retries=0,

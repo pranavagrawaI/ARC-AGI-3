@@ -485,7 +485,7 @@ def main() -> int:
     started_at = datetime.now(UTC).isoformat()
     timed_out = False
     residual_group_term_required = False
-    returncode = 1
+    returncode = 0
     started = time.monotonic()
     try:
         with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
@@ -510,7 +510,7 @@ def main() -> int:
                     stderr=stderr,
                     start_new_session=True,
                 )
-                returncode, episode_timed_out, residual = _wait_process(
+                episode_rc, episode_timed_out, residual = _wait_process(
                     process, episode_timeout
                 )
                 residual_group_term_required = (
@@ -518,9 +518,11 @@ def main() -> int:
                 )
                 if episode_timed_out:
                     timed_out = True
+                    returncode = episode_rc
                     break
-                if returncode != 0:
-                    break
+                if episode_rc != 0:
+                    returncode = episode_rc
+                    continue
     finally:
         list_server.shutdown()
         list_server.server_close()

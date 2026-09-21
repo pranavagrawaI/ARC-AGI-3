@@ -18,18 +18,20 @@ def test_notebook_arms_preserve_inputs_and_isolate_outputs():
     for name, source in zip(names, arms):
         assert f"ARC_CONTINGENT_ARM']={name!r}" in source
         assert "ARC_DISCOVERY_ARM']='a'" in source
+        assert "ARC_EPISTEMIC_CRITIC']='0'" in source
         assert "ARC_TRANSCRIPT_KEEP_TURNS']='4'" in source
         assert "TYCHO_PUBLIC_GAME_PASSES']='2'" in source
-        assert '/kaggle/working/v12-sb26-su15' in source
-        assert source.index('subprocess.run(command, check=True)') < source.index('assess_candidate.py')
+        assert '/kaggle/working/v12-sb26-critic-off' in source
+        assert 'launcher = subprocess.run(command, check=False)' in source
+        assert source.index('launcher = subprocess.run(command, check=False)') < source.index('assess_candidate.py')
         assert 'speculative-algorithm' not in source
         assert 'submission.parquet' not in source
-        assert "TYCHO_PUBLIC_GAME_IDS'] = 'sb26,su15'" in source
+        assert "TYCHO_PUBLIC_GAME_IDS'] = 'sb26'" in source
         assert '"enable_thinking":false' in source
         assert '"reasoning":{"enabled":false}' in source
         assert "ARC_LLM_MAX_TOKENS'] = '16384'" in source
         assert "ARC_LLM_CONTEXT_WINDOW'] = '262144'" in source
-        assert "'--episodes','4'" in source
+        assert "'--epistemic-critic',os.environ['ARC_EPISTEMIC_CRITIC']" in source
 
 
 def test_assessor_rejects_missing_and_empty_evidence(tmp_path):
