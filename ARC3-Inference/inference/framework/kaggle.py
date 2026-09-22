@@ -121,6 +121,15 @@ def duck_kaggle_setup_command(config: DuckKaggleVllmConfig | None = None) -> str
         # Critic arm: every DUCK_CRITIC_* set on the launcher is carried into the
         # runner env verbatim; unset means the incumbent (critic off) arm.
         "__DUCK_CRITIC_ENV__": repr({key: value for key, value in os.environ.items() if key.startswith("DUCK_CRITIC_")}),
+        # Chat-template kwargs passed to vLLM. The Qwen3.8 template adds a
+        # reasoning_effort variable defaulting to 'xhigh', which injects a
+        # "think carefully" line into every system prompt; 'medium' injects
+        # nothing and renders byte-identically to the Qwen3.6 template. Set
+        # DUCK_CHAT_TEMPLATE_KWARGS on the launcher to choose; the default is
+        # the historical literal.
+        "__CHAT_TEMPLATE_KWARGS__": repr(
+            os.environ.get("DUCK_CHAT_TEMPLATE_KWARGS", '{"preserve_thinking": true}')
+        ),
         "__VLLM_TENSOR_PARALLEL_SIZE__": repr(int(cfg.tensor_parallel_size)),
         "__WHEELHOUSE_STAMP_TEXT__": repr(cfg.wheelhouse_stamp_text),
     }
@@ -157,6 +166,7 @@ WHEELHOUSE_SLUG = __WHEELHOUSE_SLUG__
 MODEL_OWNER = __MODEL_OWNER__
 MODEL_SLUG = __MODEL_SLUG__
 SERVED_MODEL_NAME = __SERVED_MODEL_NAME__
+CHAT_TEMPLATE_KWARGS = __CHAT_TEMPLATE_KWARGS__
 VLLM_HOST = '127.0.0.1'
 VLLM_PORT = __VLLM_PORT__
 VLLM_BASE_URL = f'http://{VLLM_HOST}:{VLLM_PORT}/v1'
@@ -332,7 +342,7 @@ def start_vllm_server() -> None:
         'vllm',
         '--enable-prefix-caching',
         '--default-chat-template-kwargs',
-        '{"preserve_thinking": true}',
+        CHAT_TEMPLATE_KWARGS,
         '--reasoning-parser',
         'qwen3',
         '--max-model-len',
