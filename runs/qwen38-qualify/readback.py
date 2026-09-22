@@ -99,6 +99,23 @@ def main() -> None:
     args = p.parse_args()
 
     rows = episodes(args.output)
+    if not rows:
+        # The failure path: vLLM never served, or every episode died before a transcript.
+        # This is when the kill rule fires, so say why rather than crashing on empty stats.
+        print(f"NO EPISODES under {args.output}")
+        log = args.output / "vllm-openai-server.log"
+        if not log.exists():
+            print("  vllm-openai-server.log absent — the server was never started (check the kernel log).")
+        else:
+            text = log.read_text()
+            print(f"  vllm-openai-server.log present, {len(text.splitlines())} lines")
+            bad = [l for l in text.splitlines() if re.search(r"Error|Traceback|ValueError|unsupported|not supported|CUDA out of memory", l)]
+            for l in bad[:10]:
+                print("   ", l.strip()[:200])
+            if not bad:
+                print("    no error lines matched; inspect the tail manually")
+        raise SystemExit(1)
+
     hdr = f"{'episode':<12}{'levels':>7}{'actions':>8}{'turns':>7}{'s/turn':>8}{'s→L1':>7}{'act→L1':>8}{'chg%':>6}{'calls':>7}{'tok/call':>9}"
     print(hdr)
     for r in rows:
@@ -109,8 +126,8 @@ def main() -> None:
             f"{r['calls']:>7}{(r['out_chars'] / r['calls'] / 3.5 if r['calls'] else 0):>9.0f}"
         )
 
-    tot_calls = sum(r["calls"] for r in rows)
-    tot_out = sum(r["out_chars"] for r in rows)
+    tot_calls = max(1, sum(r["calls"] for r in rows))
+    tot_out = max(1, sum(r["out_chars"] for r in rows))
     reasoning = sum(r["reasoning_chars"] for r in rows)
     code = sum(r["code_chars"] for r in rows)
     l1 = {r["episode"]: r["levels"] for r in rows}
@@ -125,7 +142,7 @@ def main() -> None:
 
     print("\nDecode profile:")
     print(f"  median s/turn            : {st.median([r['s_per_turn'] for r in rows]):.1f}  (3.6: 46)")
-    print(f"  calls / turn             : {tot_calls / sum(r['turns'] for r in rows):.2f}  (3.6: 1.67)")
+    print(f"  calls / turn             : {tot_calls / max(1, sum(r['turns'] for r in rows)):.2f}  (3.6: 1.67)")
     # chars/3.5 is an estimate; the vLLM log's own token count gives 573 for the same 3.6 run.
     print(f"  output tokens / call ~   : {tot_out / tot_calls / 3.5:.0f}  (3.6, same estimator: 514)")
     print(f"  reasoning / code share   : {reasoning / tot_out:.0%} / {code / tot_out:.0%}  (3.6: 59% / 37%)")
