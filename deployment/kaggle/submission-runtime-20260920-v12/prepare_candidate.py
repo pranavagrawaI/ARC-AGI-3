@@ -1,4 +1,4 @@
-"""Build/check the v12 sb26 critic-off sequential notebook."""
+"""Build/check the v12 sb26 Duck-batch sequential notebook."""
 import argparse
 import ast
 import base64
@@ -20,7 +20,7 @@ ADMISSION_SECONDS = '1800'
 LAUNCHER_TIMEOUT_SECONDS = 4200
 WORKER_TIMEOUT_SECONDS = 2400
 KEEP_TURNS = '4'
-OUT = HERE.parents[2] / 'analysis/deployment-probes/20260921-v12-sb26-critic-off'
+OUT = HERE.parents[2] / 'analysis/deployment-probes/20260922-v12-sb26-duck-batch'
 
 
 def build():
@@ -35,8 +35,9 @@ def build():
         request_timeout_s=180,
         extra_body=extra,
         heading=(
-            '# v12 sb26 critic-off\n\n'
-            'One arm: runtime v12 eviction keep=4, Actor reasoning off, discovery A, '
+            '# v12 sb26 duck batch\n\n'
+            'One arm: runtime v12 eviction keep=4, letter boards, 1024-token tool clamp, '
+            '32k request trim, open batching. Actor reasoning off, discovery A, '
             'contingent off, epistemic critic off. Public sb26 only, 2 sequential '
             '1800s passes. A later-episode worker abort must not skip assessment. '
             'No submission or automatic promotion.'
@@ -57,7 +58,7 @@ def build():
     body = body.replace('subprocess.run(command, check=True)', 'launcher = subprocess.run(command, check=False)')
     cells = nb['cells'][:3]
     arm = ARMS[0]
-    root = '/kaggle/working/v12-sb26-critic-off'
+    root = '/kaggle/working/v12-sb26-duck-batch'
     code = (
         "import os, shutil\nfrom pathlib import Path\n"
         f"arm_root=Path({root!r})\n"
@@ -67,6 +68,7 @@ def build():
         "os.environ['ARC_DISCOVERY_ARM']='a'\n"
         f"os.environ['ARC_CONTINGENT_ARM']={arm!r}\n"
         "os.environ['ARC_EPISTEMIC_CRITIC']='0'\n"
+        "os.environ['ARC_DUCK_BATCH']='1'\n"
         f"os.environ['ARC_TRANSCRIPT_KEEP_TURNS']={KEEP_TURNS!r}\n"
         f"os.environ['TYCHO_PUBLIC_GAME_PASSES']={str(PASSES)!r}\n"
         f"os.environ['TYCHO_PUBLIC25_WORKING_ROOT']={root!r}\n"
@@ -142,7 +144,8 @@ def main():
         kernel=metadata['id'],
         session_timeout_seconds=10800,
         arms=list(ARMS),
-        factor='v12-critic-off',
+        factor='v12-duck-batch',
+        duck_batch='1',
         games=GAMES.split(','),
         passes=PASSES,
         episodes=EPISODES,
@@ -158,8 +161,9 @@ def main():
         promotion=False,
         launch_ready=True,
         authorization=(
-            'One private RTX PRO 6000 kernel: v12 eviction chassis, contingent off, '
-            'epistemic critic off, public sb26, 2 sequential 1800s passes. No submission, retry or automatic promotion.'
+            'One private RTX PRO 6000 kernel: v12 eviction plus Duck letter boards, '
+            'tool clamp, 32k trim, and open batching. Contingent off, critic off, '
+            'public sb26, 2 sequential 1800s passes. No submission, retry or automatic promotion.'
         ),
         openrouter_qualified=False,
         automatic_retries=0,

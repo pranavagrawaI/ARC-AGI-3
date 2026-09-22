@@ -73,6 +73,7 @@ JOIN_FILES = (
     "chassis/stall_contract.py",
     "chassis/integrity_guard.py",
     "chassis/transcript_eviction.py",
+    "chassis/duck_view.py",
     "CHASSIS.json",
     "chassis/skills/interactive-game-solver/SKILL.md",
 )

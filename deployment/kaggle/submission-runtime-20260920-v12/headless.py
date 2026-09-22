@@ -258,8 +258,15 @@ async def run() -> None:
         'action, outcomes) in the SAME cell as your justified self.submit_actions(...). '
         'outcomes must contain target, metric, predictions, updates, and otherwise. Prediction keys and '
         'update keys exactly match the two or three hypotheses, and predicted values must differ. '
+        'Read the board with self.grid_letters(), not by printing grid_array or model_grid. '
         'Do not print full grids, helper source, or old trajectories unless the missing detail '
-        'is decision-relevant. World-model construction is optional: build only enough code '
+        'is decision-relevant. '
+        + (
+            'When a short action sequence is selected, submit the whole sequence in one '
+            'self.submit_actions call. Open batching is on: a predicted_path is not required. '
+            if os.environ.get('ARC_DUCK_BATCH', '0') == '1' else ''
+        ) +
+        'World-model construction is optional: build only enough code '
         'to answer the live question. Compile a supported recurring operation with '
         'save_procedure() so future actions do not require rediscovery. Routine reasoning is '
         'off. Use await self.deep_investigate(...) only for a hard abstraction failure whose '

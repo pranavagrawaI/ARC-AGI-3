@@ -11,7 +11,7 @@ FILES = ['nooa_worker.py','headless.py','state_delivery.py','local_solver.py','s
          'nooa_public_probe.py','chassis/arc_llm.py','chassis/solver_agent.py',
          'chassis/latent_planner.py','chassis/prediction_feedback.py','chassis/epistemic_critic.py','chassis/objection_ledger.py','chassis/host_contract.py','chassis/stall_contract.py','chassis/integrity_guard.py',
          'chassis/skills/interactive-game-solver/SKILL.md',
-         'chassis/transcript_eviction.py']
+         'chassis/transcript_eviction.py','chassis/duck_view.py']
 SOURCES = ['exact_request_outer_runtime.py','build_notebook.py','freeze_candidate.py',
            'adapter.py','shared_local_solver.py','run_official_agent.py',
            'openrouter_probe.py','probe_lifecycle.py']
@@ -24,6 +24,7 @@ SOURCES.extend(['test_epistemic_critic.py','test_objection_ledger.py','test_done
 SOURCES.append('test_transcript_eviction.py')
 SOURCES.append('test_level_boundary.py')
 SOURCES.append('test_sequential_episodes.py')
+SOURCES.append('test_duck_view.py')
 
 
 def manifest():

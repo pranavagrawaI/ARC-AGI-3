@@ -19,9 +19,10 @@ def test_notebook_arms_preserve_inputs_and_isolate_outputs():
         assert f"ARC_CONTINGENT_ARM']={name!r}" in source
         assert "ARC_DISCOVERY_ARM']='a'" in source
         assert "ARC_EPISTEMIC_CRITIC']='0'" in source
+        assert "ARC_DUCK_BATCH']='1'" in source
         assert "ARC_TRANSCRIPT_KEEP_TURNS']='4'" in source
         assert "TYCHO_PUBLIC_GAME_PASSES']='2'" in source
-        assert '/kaggle/working/v12-sb26-critic-off' in source
+        assert '/kaggle/working/v12-sb26-duck-batch' in source
         assert 'launcher = subprocess.run(command, check=False)' in source
         assert source.index('launcher = subprocess.run(command, check=False)') < source.index('assess_candidate.py')
         assert 'speculative-algorithm' not in source

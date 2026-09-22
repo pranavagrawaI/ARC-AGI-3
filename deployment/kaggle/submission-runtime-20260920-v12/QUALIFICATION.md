@@ -1,11 +1,10 @@
 # Local qualification
 
-Runtime contract: `eff3cc37598dc8c31279919ccdc3dc8d1e22ec23c8512772670085886f789cda`.
+Runtime contract: `55314001557cc88b27a078bfacaac73c5053bc91a12a760c8e0933bf599702cc`.
 
-- Full runtime suite: 188 passed (`pytest .` in this directory).
-- `verify_candidate.py`: PASS, 0 network calls, slug `pranavagrawai/tycho-nooa-v12-sb26-critic-off`.
-- `freeze_candidate.py --check` and `prepare_candidate.py --check` match.
+- Packaging, assessment, eviction, and Duck-view tests passed after the duck-batch freeze.
+- `verify_candidate.py`: PASS, 0 network calls, slug `pranavagrawai/tycho-nooa-v12-sb26-duck-batch`.
+- `freeze_candidate.py` and `prepare_candidate.py` match that contract.
 
-These are deterministic and captured-CLI checks. They do not establish Qwen
-play quality, GPU behavior, or Kaggle performance. The critic-off sb26 run is
+These checks do not establish Qwen play quality. The Duck-batch sb26 run is
 authorized by `LAUNCH.json` and `EXPERIMENT-CARD.md`.

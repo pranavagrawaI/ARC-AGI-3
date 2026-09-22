@@ -1,7 +1,7 @@
 """Capture the installed Kaggle CLI request without network or upload.
 
-This package is v12 eviction, critic off, contingent off, sb26 two sequential
-passes. Fail if the notebook, games, critic gate or launch identity drift.
+This package is v12 Duck batch on sb26: letter boards, tool clamp, 32k trim,
+open batching, critic off, contingent off, two sequential passes.
 """
 from contextlib import contextmanager
 import json
@@ -32,13 +32,14 @@ def main():
 
     assert request.slug == launch['kernel'] == metadata['id']
     assert slugify(metadata['title']) == metadata['id'].split('/')[1]
-    assert request.slug == 'pranavagrawai/tycho-nooa-v12-sb26-critic-off'
-    assert request.slug != 'pranavagrawai/tycho-nooa-v12-sb26-su15'
+    assert request.slug == 'pranavagrawai/tycho-nooa-v12-sb26-duck-batch'
+    assert request.slug != 'pranavagrawai/tycho-nooa-v12-sb26-critic-off'
     assert request.session_timeout_seconds == launch['session_timeout_seconds'] == 10800
     assert request.machine_shape == 'NvidiaRtxPro6000'
     assert request.is_private and request.enable_gpu and not request.enable_internet
     assert launch['launch_ready'] and not launch['promotion']
-    assert launch['factor'] == 'v12-critic-off'
+    assert launch['factor'] == 'v12-duck-batch'
+    assert launch['duck_batch'] == '1'
     assert launch['games'] == ['sb26']
     assert launch['passes'] == 2 and launch['episodes'] == 2
     assert launch['transcript_keep_turns'] == 4
@@ -50,6 +51,7 @@ def main():
 
     assert code.count("os.environ['ARC_CONTINGENT_ARM']='off'") == 1
     assert "os.environ['ARC_EPISTEMIC_CRITIC']='0'" in code
+    assert "os.environ['ARC_DUCK_BATCH']='1'" in code
     assert code.count("os.environ['ARC_DISCOVERY_ARM']='a'") == 1
     assert "os.environ['ARC_SOLVER_ARM']='loop'" in code
     assert "os.environ['ARC_TRANSCRIPT_KEEP_TURNS']='4'" in code

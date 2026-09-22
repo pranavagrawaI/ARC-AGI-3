@@ -55,6 +55,7 @@ with hidden:
         validate as _validate_question,
     )
     from host_contract import atomic_json
+    from duck_view import clamp_tool_text, duck_batch_open, format_grid_ascii, trim_messages
     from transcript_eviction import DEFAULT_KEEP_TURNS, TranscriptEviction
     from nooa.context_blocks.formatter import XMLBlockFormatter
     from nooa.context_blocks import Context
@@ -782,6 +783,12 @@ class ArcSolverBase(InteractiveAgent):
                         if red != val:
                             upd[field] = red
                 self._integrity.capture(ctx.params.get("tool_call_id"), r.stdout, upd.get("stdout", r.stdout))
+                for field in ("stdout", "stderr", "error"):
+                    val = upd.get(field, getattr(r, field, None))
+                    if isinstance(val, str) and val:
+                        clamped = clamp_tool_text(val)
+                        if clamped != val:
+                            upd[field] = clamped
                 if upd:
                     ctx.result = r.model_copy(update=upd)
             return ctx
@@ -1081,8 +1088,20 @@ class ArcSolverBase(InteractiveAgent):
                                         step=step_before, wall_remaining=wall_remaining)
                                     ctx.messages.append(_critic_actor_injection(review_id, question))
                                     self._integrity.check_messages(ctx.messages, active_outputs)
+                    # Trim a copy for this request. Writing the trim back would
+                    # delete turns the eviction policy still owns, and can split
+                    # an assistant tool-call from its result.
+                    full_messages = list(ctx.messages)
+                    trimmed_messages = trim_messages(full_messages)
+                    if trimmed_messages != full_messages:
+                        ctx.messages[:] = trimmed_messages
                     request_messages, tool_results = _request_evidence(ctx.messages, self._llm)
-                    ctx = await nxt(ctx)
+                    try:
+                        ctx = await nxt(ctx)
+                    finally:
+                        if trimmed_messages != full_messages:
+                            added = list(ctx.messages)[len(trimmed_messages):]
+                            ctx.messages[:] = [*full_messages, *added]
                 except BaseException as error:
                     append(self.ipc_dir / 'request_lifecycle.jsonl', {
                         'request_id': request_id, 'event': 'failed',
@@ -1487,6 +1506,20 @@ class ArcSolverBase(InteractiveAgent):
         elif isinstance(grid, list) and grid and isinstance(grid[0], str):
             grid = self.grid_array(grid)
         return np.asarray(grid, dtype=int).copy()
+
+    def grid_letters(self, grid_rows: list[str] | None = None) -> str:
+        """Letter-coded board. One character per cell, rows top to bottom.
+
+        This is the view to print. Do not print ``grid_array`` or ``model_grid``;
+        a numeric dump is clamped and wastes the turn. Legend: W white, w light
+        gray, g gray, G dark gray, c charcoal, B black, M magenta, P pink, R red,
+        b blue, S sky, Y yellow, O orange, r dark red, N light green, p purple.
+        """
+        if grid_rows is None:
+            arr = self.model_grid()
+        else:
+            arr = self.grid_array(grid_rows)
+        return format_grid_ascii(arr)
 
     def game_status(self) -> dict:
         """Current game status: latest state header (without the grid) plus whether
@@ -2204,14 +2237,15 @@ class ArcSolverBase(InteractiveAgent):
         # Coarse frame change cannot validate an executable state prediction.
         # Snapshot the Actor's own helper, never a host-authored game model.
         proposal = self._model_feedback.prepare(state, actions)
-        if len(actions) > 1:
+        if len(actions) > 1 and not duck_batch_open():
             error = self._model_feedback.batch_error(proposal, self.prediction_feedback())
             if error:
                 self._log_rejection("model_prediction_unverified", actions, error)
                 return "REJECTED: " + error
 
         # G3/G4 — batch length is earned by a scored prediction, never by tone.
-        if len(actions) > 1:
+        # ARC_DUCK_BATCH=1 is Duck's open batch: one call may submit a sequence.
+        if len(actions) > 1 and not duck_batch_open():
             err = _bad_path(predicted_path)
             if err:
                 msg = (

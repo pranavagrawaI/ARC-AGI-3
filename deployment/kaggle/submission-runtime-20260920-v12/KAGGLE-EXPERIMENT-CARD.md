@@ -1,9 +1,8 @@
-# 20260921-v12-sb26-critic-off (Kaggle)
+# 20260922-v12-sb26-duck-batch (Kaggle)
 
 Same card as `EXPERIMENT-CARD.md`. One private kernel, no submission, no retry.
 
-- Kernel: `pranavagrawai/tycho-nooa-v12-sb26-critic-off`
+- Kernel: `pranavagrawai/tycho-nooa-v12-sb26-duck-batch`
 - Machine: NvidiaRtxPro6000, internet off, session 10800 s
-- Command: `kaggle kernels push --path deployment/kaggle/submission-runtime-20260920-v12 --timeout 10800 --accelerator NvidiaRtxPro6000`
 - Games: sb26; 2 sequential passes; 1800 s / 200 actions each
-- Factor: epistemic critic off, contingent off; v12 eviction keep=4
+- Factor: letter boards, tool clamp, 32k trim, `ARC_DUCK_BATCH=1`; critic off; contingent off; eviction keep=4

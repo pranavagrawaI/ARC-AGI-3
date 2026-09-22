@@ -41,6 +41,7 @@ CHASSIS = HERE / "chassis"
 HEADLESS = HERE / "headless.py"
 STUB = HERE / "stub_agent.py"
 sys.path.insert(0, str(CHASSIS))
+from duck_view import duck_batch_keeps_queue  # noqa: E402
 from host_contract import HostEvidence, score_predicted_path, atomic_json  # noqa: E402
 from step_check import bind_prediction, check_step  # noqa: E402
 
@@ -154,6 +155,7 @@ class HostSession:
                     # value the worker actually ran with, not the notebook's.
                     "transcript_keep_turns": int(os.environ.get("ARC_TRANSCRIPT_KEEP_TURNS", "4")),
                     "epistemic_critic": os.environ.get("ARC_EPISTEMIC_CRITIC", "1"),
+                    "duck_batch": os.environ.get("ARC_DUCK_BATCH", "0"),
                     "platform": "kaggle",
                     "contract_sha256": manifest["contract_sha256"],
                     "manifest": manifest,
@@ -261,7 +263,7 @@ class HostSession:
             checked['skipped_actions'] = len(self._queue) if checked['status'] != 'matched' else 0
             with (self.ipc / 'step_checks.jsonl').open('a') as handle:
                 handle.write(json.dumps(checked) + '\n')
-            if checked['status'] != 'matched':
+            if checked['status'] != 'matched' and not duck_batch_keeps_queue(checked['status']):
                 stop = True
                 self.evidence.last_retrodiction = score_predicted_path(
                     self.evidence.batch.get('predicted_path'), self.evidence.results)
