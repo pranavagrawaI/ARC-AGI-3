@@ -8,8 +8,14 @@ from dataclasses import dataclass
 from inference.utils.openai_compat import normalize_provider
 
 DEFAULT_VLLM_WHEELHOUSE_DATASET_SOURCE = "driessmit1/arc3-vllm-h100-wheelhouse-v3"
-DEFAULT_QWEN_MODEL_DATASET_SOURCE = "jakobbrggen/qwen3-8-27b-fp8-hf-snapshot"
-DEFAULT_SERVED_MODEL_NAME = "Qwen/Qwen3.8-27B-FP8"
+# Model pins. Both are launcher-overridable so one tree can build either arm's bundle
+# without a code edit: DUCK_MODEL_DATASET_SOURCE / DUCK_SERVED_MODEL_NAME. Defaults are the
+# Qwen3.8 arm under test; the Qwen3.6 incumbent is
+#   driessmit1/vrfai-qwen3-6-27b-fp8-hf-snapshot / vrfai/Qwen3.6-27B-FP8
+DEFAULT_QWEN_MODEL_DATASET_SOURCE = os.environ.get(
+    "DUCK_MODEL_DATASET_SOURCE", "jakobbrggen/qwen3-8-27b-fp8-hf-snapshot"
+)
+DEFAULT_SERVED_MODEL_NAME = os.environ.get("DUCK_SERVED_MODEL_NAME", "Qwen/Qwen3.8-27B-FP8")
 DEFAULT_VLLM_PORT = 1234
 DEFAULT_VLLM_MAX_MODEL_LEN = 65536
 DEFAULT_VLLM_TENSOR_PARALLEL_SIZE = 1
