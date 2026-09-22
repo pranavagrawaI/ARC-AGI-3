@@ -57,3 +57,18 @@ or not — the question the 600 s arms could not reach.
 ## Cost
 ~2.3 h GPU (0 submission slots). The commit run is a prerequisite for any submission anyway,
 so this buys the capability answer at no slot cost, and the submit decision follows the table.
+
+## Submit step (only per the amended table; kernel version 1)
+```bash
+export KAGGLE_USERNAME=pranavagrawai
+export KAGGLE_API_TOKEN="$(python3 -c "import json;print(json.load(open('/home/pranav/.kaggle/credentials.json'))['access_token'])")"
+export KAGGLE_KEY="$KAGGLE_API_TOKEN"
+kaggle competitions submit arc-prize-2026-arc-agi-3 \
+  -k pranavagrawai/taaf-duck-qwen38-commit -v 1 -f submission.parquet \
+  -m "Duck on Qwen3.8-27B-FP8 (default reasoning_effort), 28-way, 120 min/game; commit run <N> levels on 25 public games vs Qwen3.6's 17"
+```
+Token valid to 2026-09-23 06:14Z. One submission per day; the 2026-09-22 slot is unspent.
+The rerun replays the notebook against 110 hidden games with `KAGGLE_IS_COMPETITION_RERUN=1`,
+which is the 4.4x larger sample this whole exercise is trying to buy.
+
+Reference to beat on the board: **0.67** public RHAE (ref 56355127, Duck on 3.6, same recipe).
