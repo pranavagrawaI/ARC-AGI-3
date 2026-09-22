@@ -30,13 +30,25 @@ and the checkpoint as its authors intend it). 25 public games, 1 pass, 28-way, 1
 2026-09-18 commit run, Duck on 3.6, identical recipe:
 **13/25 games with >=1 level, 17 levels, TAAF 1.90** -> public 0.67 (ref 56355127).
 
-## Reading, frozen in advance
-| 3.8 levels on 25 games | reading | action |
-|---|---|---|
-| **>= 20** | clearly smarter once unclocked | submit; expect > 0.67 |
-| **17–19** | at least as smart; probe cap was the whole story | submit to measure the hidden set |
-| **13–16** | comparable, noise-dominated at n=25 | do not submit; report the tie |
-| **<= 12** | genuinely worse, not a speed artifact | do not submit; 3.8 closed for real |
+## Reading — AMENDED 2026-09-22 19:50Z, before the result, after measuring the noise floor
+The original table below was too lenient. Duck's within-game level variance is ~0.35
+(measured on two independent repeated-pass runs, `analysis/level-noise-floor.py`). Two runs
+over the same 25 games share game difficulty but each carries its own stochastic noise, so
+sd(delta) = sqrt(2 x 25 x 0.35) ~= **4.0–4.3 levels**. A 2-sigma claim needs delta >= 8–9.
+
+| 3.8 levels | delta vs 17 | what it supports | action |
+|---|---|---|---|
+| **>= 26** | +9 | real advantage at 2 sigma | submit |
+| **21–25** | +4…+8 | suggestive (1–2 sigma) | submit; a confirming run would be needed for a claim |
+| **13–20** | −4…+3 | **indistinguishable** | submit only to buy the 110-game hidden-set sample; do not call it smarter |
+| **<= 12** | <= −5 | suggestive of worse | do not submit |
+
+ORIGINAL (superseded, kept for the record): >=20 clearly smarter / 17–19 at least as smart /
+13–16 tie / <=12 worse. It called +3 "clearly smarter" when +3 is 0.7 sigma.
+
+**What this run answers regardless of the noisy total**, because these are high-n within the run:
+- the minute each level lands, and s/turn at 28-way -> does the clock still bind at 7200 s?
+- actions-to-first-level at n~13 instead of n~3 -> per-action efficiency.
 
 Also recorded per game: levels, minute of each level, actions->L1, s/turn, tokens. The
 per-game level-minute distribution answers directly whether 3.8's slower turns bind at 120 min
