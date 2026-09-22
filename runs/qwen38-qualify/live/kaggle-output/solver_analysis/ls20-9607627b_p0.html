@@ -1,0 +1,281 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>ls20-9607627b analysis</title><style>body{background:#1e1e1e;color:#e0e0e0;font-family:-apple-system,system-ui,sans-serif;padding:20px;max-width:1100px;margin:0 auto;line-height:1.4;}h1{color:#fff;}pre{white-space:pre-wrap;background:#111;padding:16px;border-radius:6px;border:1px solid #333;overflow:auto;}</style></head><body><h1>ls20-9607627b analysis</h1><pre>
+--- analysis_step=1 | action=1 | 14:47:10 | tool-agent ---
+[SYSTEM PROMPT]
+You are a coding agent solving a grid-based puzzle game.
+
+Game overview:
+- You are solving a multi-level grid puzzle game. 
+- You are called repeatedly over the course of a run. Treat each turn as one observe-plan-act cycle: re-understand the current state from the newest frame, update your working world model in Python, choose the next best action or short sequence against the goal as currently understood, execute it, and expect to re-evaluate on the next turn from the updated state.
+- Your job is to solve the entire game by clearing every level, not just the current screen.
+- Levels often build on earlier mechanics, but layouts and interactions can still change between levels.
+- Optimize for as few in-game actions as possible while still being reliable.
+- In this environment, boards are presented as 64 x 64 color grids rendered with ARC color symbols.
+- Color legend: W=white, w=light gray, g=gray, G=dark gray, c=charcoal, B=black, M=magenta, P=pink, R=red, b=blue, S=sky blue, Y=yellow, O=orange, r=dark red, N=light green, p=purple.
+
+
+Runtime variables inside every `python` tool call:
+- `current_frame` is a lightweight frame view for the latest environment state.
+- `current_frame` exposes only `.ascii`, `.step`, `.level`, `.shape`, and `.segmentation`.
+- `current_frame.ascii` is a single newline-delimited string containing the latest board rendered with the letter-coded ARC color symbols.
+- `current_frame.segmentation` parses the board into objects. It returns `{&#x27;nodes&#x27;: [...], &#x27;adjacency_list&#x27;: [...]}`.
+- Each node in `segmentation[&#x27;nodes&#x27;]` is one 4-connected same-color object with: `id` (index, ordered top-most-left-most), `color` (ARC color character), `hash` (a signature of the object&#x27;s color and shape that ignores its position -- equal hashes mean the same object regardless of where it is, so use it to track an object across frames or to spot multiple identical objects in one frame), `pixels` (cell count), `boundary` (clockwise outer-perimeter corner points as `[row, col]`), and `children` (ids of objects fully enclosed by this one).
+- `segmentation[&#x27;adjacency_list&#x27;]` is a list of `[i, j]` node-id pairs whose objects share an edge.
+- `current_frame.step` is the current environment step count.
+- `current_frame.level` is the current level number.
+- `current_frame.shape` is a `(rows, cols)` tuple.
+- The raw numeric grid is intentionally not exposed. Use `current_frame.segmentation` as your primary view of the board -- objects, colors, shapes, containment, adjacency, and cross-frame object hashes. Use `current_frame.ascii` only to read a small, specific region; do not scan the whole board with it.
+- `history` is a chronological list of action/frame snapshots.
+- `history` is a Python list of objects, not a dict.
+- Each history entry exposes only `.action` and `.frame`; entries are not subscriptable like `entry[&#x27;action&#x27;]`.
+- Each `history[i].frame` is the frame after `history[i].action`; each frame exposes only `.ascii`, `.step`, `.level`, `.shape`, and `.segmentation`.
+- Important history semantics: when `history` is non-empty, `history[-1].frame` is the same latest/post-action board as `current_frame`. It is not the previous board. To inspect the state before the latest action, use `previous_frame` or `history[-2].frame` when available.
+- `previous_frame` is the frame before the most recent real environment action, or `None` if no previous frame is available.
+- `last_action` is the most recent real environment action name/display, or `None` before any real action.
+- `last_action_frame` is the post-action frame for `last_action`; it matches `current_frame` after a real action.
+- `transitions` is a chronological list of actual action transitions, excluding the initial seeded frame. Each transition exposes `.action`, `.before_frame`, `.after_frame`, `.frame` (alias of `.after_frame`), and `.result`.
+- `last_transition` is `transitions[-1]` or `None`. Its `.result` mirrors `last_action_result`; older transitions may have an empty `.result`. For before/after diffs, compare `last_transition.before_frame` to `last_transition.after_frame`; do not compare `current_frame` to `history[-1].frame`.
+- `last_action_result` is the persisted result dict from the most recent `action(...)` call. It remains available across later Python inspection calls that do not call `action(...)`, and is `{}` before any action result exists. Read transition metadata from fields/keys such as `last_action_result[&#x27;board_changed&#x27;]`, `last_action_result[&#x27;done&#x27;]`, `last_action_result[&#x27;level_completed&#x27;]`, `last_action_result[&#x27;game_over&#x27;]`, `last_action_result[&#x27;run_complete&#x27;]`, `last_action_result[&#x27;reward&#x27;]`, and `last_action_result[&#x27;valid_actions&#x27;]`.
+- `valid_actions` is the current list of valid action names.
+- Call `action(actions)` to execute one or more real environment actions from Python.
+- Pass `action(actions)` a list like `[&#x27;LEFT&#x27;]` or `[{&#x27;action&#x27;: &#x27;MOUSE&#x27;, &#x27;row&#x27;: 4, &#x27;col&#x27;: 7}]`.
+- One action usually returns one frame, but a single action can result in a short multi-frame animation.
+- After `action(actions)` returns, `current_frame`, `previous_frame`, `history`, `transitions`, `valid_actions`, and `last_action_result` are refreshed.
+
+
+Multimodal context:
+- User turns include an attached image of the current ARC grid.
+- The image and `current_frame.ascii` are two representations of the same current frame.
+- You can use images and other tools to understand the game state and guide your strategy, each may be useful depending on the current uncertainty.
+
+
+Visual-game guidance:
+- Treat each board as a scene with objects, blockers, targets, adjacency, containment, motion, and symmetry.
+- Game entities are usually be rendered as connected multi-tile shapes such as 2×2, 2×3, 3×3, or longer patterned structures. Sometime they might also be 1x1 tokens.- Some games are logic or layout puzzles with no explicit player avatar or controllable sprite on the board. Do not assume a player exists; the relevant state may be an object, region, cursor, selector, or whole-board configuration.
+- Background colors are often white or gray/black-ish large regions, but not always. Verify background hypotheses by area, stability, and object boundaries rather than assuming them.
+- In many games, a long horizontal or vertical line near an edge is a timer or remaining-steps bar. It often shrinks or changes each step. If you identify such a bar, do not get distracted by it or treat it as core gameplay state unless there is concrete evidence that it interacts with the puzzle mechanics.
+A common failure mode is to mistake a segmented edge bar for clickable puzzle pieces. If a repeated strip of small blocks sits flush against the top, bottom, left, or right border and actions only change that strip while the interior board stays the same, classify it as HUD/timer state, not as an object to click through segment by segment. DON&#x27;T DO THIS!
+- Use coordinates only to target actions or describe local evidence. Do not frame the objective as reaching a specific absolute row or column.
+- Re-ground on the newest frame after any score increase or abrupt scene change; the returned board may already be the next level.
+- `WIN` means the whole game is solved. Mid-run level completion is more likely to appear as a score increase while play continues.
+- Strategies may transfer loosely across levels, but layouts and mechanics can change. Re-check the new board before repeating a plan.
+- For `MOUSE`, pass `row` and `col` integer arguments. `row` is vertical position, `col` is horizontal position.
+
+
+Python tool guidance:
+- Use `current_frame.segmentation` as your primary view of the board -- objects, colors, containment, adjacency, and cross-frame object hashes.
+- Use `current_frame.ascii` only to read a small, specific region of the board when `segmentation` is not enough; never use it to scan or summarize the whole board.
+- Every `python` tool call starts fresh. Re-import modules or re-define any custom utility logic you need.
+- The only importable standard-library modules are: bisect, collections, copy, fractions, functools, heapq, itertools, json, math, operator, random, re, statistics, string.
+- The only tool is `python`; call it with one ephemeral `code` string.
+- Always inspect `current_frame`, `history`, and `valid_actions` from Python instead of reasoning from the raw board by eye.
+- For the most recent change, compare `previous_frame` to `current_frame`, or `last_transition.before_frame` to `last_transition.after_frame`. `history[-1].frame` is the current frame, so comparing it to `current_frame` only compares the board to itself.
+- Maintain a compact working world model: what entities or regions exist, what actions seem to do, what the goal likely is, what remains uncertain, and what plan best fits the evidence so far.
+- IMPORTANT: Especially when the game is about making an agent navigate to a target, it is usually safer to write an explicit search algorithm such as BFS. More generally, when the objective is understood but the best action order is unclear, pathfinding, flood fill, BFS, DFS, beam search, shortest-path search, limited action-sequence search, or custom heuristics are all valid.
+- Optimize for the shortest reliable sequence that advances the current goal as described by your world model. If confidence is low, program a discriminating probe and revise the world model from the result.
+- Once the important state variables and action effects are sufficiently understood, stop probing and search in the inferred state space.
+- Inspect current and history frames from Python instead of describing frames freehand.
+- Never print or echo full board frames. Return only compact derived summaries such as object lists, diffs, coordinates, counts, or tiny local crops.
+- Keep tool-output context size minimal and decision-oriented so you can quickly compare before/after state. It&#x27;s fine to write a lot of python code, just make the output short and interpretable
+- A strong default loop is: summarize the board, infer the desired environment change, write a small scorer or search over candidate sequences, execute the best probe or plan with `action(...)`, then inspect again until you understand exactly what changed.
+- For object tracking, match objects by color, overlap, bounding box proximity, area change, and edge contact rather than by exact coordinates alone.
+- For frame diffs, summarize changed cells, color transitions, appearing/disappearing components, movement candidates, and small local row slices around the changed region.
+- After every action, verify whether gameplay objects changed or whether only a timer, progress bar, or remaining-step bar moved. Do not treat HUD-only changes as evidence that the move worked.
+- Use `print(...)` for compact summaries, or assign a final compact object to `result`.
+- Call `action(...)` inside Python rather than returning action text in the chat.
+- `action(...)` accepts an ordered list of one or more actions. Once your code has selected a reliable sequence, it is often useful to batch it.
+- You can also call `action(...)` multiple times in one Python snippet, including inside loops. Each call updates the preloaded variables before execution continues.
+- If an action result reports `game_over`, `run_complete`, `level_completed`, or `done`, stop acting immediately and re-ground on the next turn.
+
+
+Tool session rules:
+- You have exactly one tool: `python`.
+- When calling `python`, emit exactly the tool-call format shown elsewhere in this prompt for this model. Use only that format; do not add markdown fences, prose wrappers, or alternate tool-call syntax. Do not quote or place tool-call markup inside explanatory text; when you decide to call the tool, emit the tool call itself.
+- The `python` tool code is not saved between calls, so rewrite any custom utility logic you still need.
+- You can call the `python` tool as many times as you want per step. Investigate until your code has a clear probe or plan.
+- Do not ration tool calls when the state is unclear. Spend extra tool calls to confirm what changed between frames and whether the last action affected gameplay state or only HUD elements such as countdown bars.
+- After `action(...)` returns, the structured runtime state is refreshed before the next Python statement and before the next tool call. Inspection-only Python calls do not clear `last_action_result`.
+- Each `python` tool call has a hard time limit of 30 seconds.
+- Tool responses are capped to about 1024 tokens. If a response is cut off, the tool result will tell you that.
+- Keep code snippets short and purpose-built rather than dumping large frameworks into one call.
+
+[USER PROMPT]
+No previous sequence has been executed yet.
+Current state: step 1, level 1.
+Valid actions right now: UP, DOWN, LEFT, RIGHT.
+Only tool: `python`. It receives `current_frame`, `previous_frame`, `history`, `transitions`, `last_transition`, `valid_actions`, `last_action_result`, and `action(actions)`.
+Only letter-coded board views and lightweight metadata are exposed; raw numeric color IDs are not available.
+Keep tool output compact: use `current_frame.segmentation` as the primary view, and `current_frame.ascii` only for a small specific region; never print full boards.
+For the most recent change, compare `previous_frame` to `current_frame`, or `last_transition.before_frame` to `last_transition.after_frame`; `history[-1].frame` is the current frame, not the previous one.
+Use Python to inspect the evidence, refine that world model from the newest history, and search or score candidate actions or short sequences against the current goal as you currently understand it.
+Maintain a compact working world model of what the current level seems to contain, what actions appear to do, what the goal seems to be, what is still uncertain, and what plan currently looks best.
+Below you are provided with the current world model from the previous turn. The default behavior is to copy it and add or remove things based on the evidence that you gathered. BEFORE EXECUTING NEW ACTIONS YOU MUST ALWAYS GIVE THE REVISED VERSION OF THE WORLD MODEL.
+You may call `action(actions)` more than once in one Python snippet if your search or control loop needs it, but stop immediately if a result reports `game_over`, `run_complete`, `level_completed`, or `done`.
+end of world model. 
+Ground yourself in `current_frame` before acting, but start with a compact structural summary rather than restating the full frame.
+When ready, call `action(actions)` from inside the `python` tool with the best valid action or ordered batch selected by your code. If your code has found a reliable short sequence, prefer batching it in one call.
+You may call `action(actions)` more than once in one Python snippet if your search or control loop needs it.
+If you include assistant text before a tool call, keep it short and use it to update the world model. Helpful optional prefixes are `World model:`, `Goal model:`, `Action model:`, `Recent findings:`, `Open questions:`, `Plan:`, and `Cross-level notes:`.
+When calling `python`, emit exactly the tool-call format shown elsewhere in this prompt for this model. Use only that format; do not add markdown fences, prose wrappers, or alternate tool-call syntax. Do not quote or place tool-call markup inside explanatory text; when you decide to call the tool, emit the tool call itself.
+
+[MODEL RESPONSE META]
+finish_reason: tool_calls
+tool_call_count: 1
+content_chars: 0
+reasoning_chars: 717
+tool_call_markup_in_text: no
+tool_calls_recovered_from_markup: no
+raw_tool_calls:
+[
+  {
+    &quot;id&quot;: &quot;chatcmpl-tool-a6e0d306fbe1da16&quot;,
+    &quot;type&quot;: &quot;function&quot;,
+    &quot;function&quot;: {
+      &quot;name&quot;: &quot;python&quot;,
+      &quot;arguments&quot;: &quot;{\&quot;code\&quot;: \&quot;seg = current_frame.segmentation\\nfor n in seg[&#x27;nodes&#x27;]:\\n    print(n[&#x27;id&#x27;], n[&#x27;color&#x27;], n[&#x27;pixels&#x27;], n[&#x27;boundary&#x27;][:4], n[&#x27;children&#x27;])\\nprint(&#x27;adj:&#x27;, seg[&#x27;adjacency_list&#x27;])\\nprint(&#x27;shape&#x27;, current_frame.shape, &#x27;step&#x27;, current_frame.step, &#x27;level&#x27;, current_frame.level)\\n\&quot;}&quot;
+    }
+  }
+]
+
+[THINKING]
+Let&#x27;s look at the current state. The image shows a dark gray board, with a large gray rectangle (a room?) in the center. There&#x27;s a small white cross/plus shape on the left side inside the room, a small blue square with a dark frame in the upper right (a target?), and an orange/blue square at the bottom of the room. In the lower left there&#x27;s a blue icon (probably a player indicator), and in the lower part there&#x27;s a yellow bar (timer/steps).
+The valid actions are UP, DOWN, LEFT, RIGHT — keyboard movement. So there&#x27;s probably a player somewhere. The white plus might be the player. The blue square in the upper right might be the goal. The orange/blue at the bottom might be an item.
+Let&#x27;s investigate with Python.
+
+[TOOL CALL: python]
+&lt;tool_call&gt;
+&lt;function=python&gt;
+&lt;parameter=code&gt;
+seg = current_frame.segmentation
+for n in seg[&#x27;nodes&#x27;]:
+    print(n[&#x27;id&#x27;], n[&#x27;color&#x27;], n[&#x27;pixels&#x27;], n[&#x27;boundary&#x27;][:4], n[&#x27;children&#x27;])
+print(&#x27;adj:&#x27;, seg[&#x27;adjacency_list&#x27;])
+print(&#x27;shape&#x27;, current_frame.shape, &#x27;step&#x27;, current_frame.step, &#x27;level&#x27;, current_frame.level)
+&lt;/parameter&gt;
+&lt;/function&gt;
+&lt;/tool_call&gt;
+
+[TOOL RESULT: python]
+0 B 208 [[0, 0], [0, 3], [51, 3], [51, 0]] []
+1 c 2509 [[0, 4], [0, 63], [59, 63], [59, 12]] [2, 10, 11, 12]
+2 G 892 [[8, 32], [8, 40], [16, 40], [16, 39]] [3, 6, 7, 8, 9]
+3 B 43 [[9, 33], [9, 39], [15, 39], [15, 33]] [4, 5]
+4 b 5 [[11, 35], [11, 37], [13, 37], [12, 37]] []
+5 b 1 [[13, 35]] []
+6 c 100 [[30, 29], [30, 33], [44, 33], [44, 24]] []
+7 W 3 [[31, 21], [32, 22], [32, 21]] []
+8 w 1 [[32, 20]] []
+9 w 1 [[33, 21]] []
+10 O 10 [[45, 34], [45, 38], [46, 38], [46, 34]] []
+11 b 15 [[47, 34], [47, 38], [49, 38], [49, 34]] []
+12 B 76 [[53, 1], [53, 10], [62, 10], [62, 1]] [13, 14]
+13 b 20 [[55, 3], [55, 8], [56, 8], [56, 5]] []
+14 b 4 [[59, 7], [59, 8], [60, 8], [60, 7]] []
+15 B 112 [[60, 12], [60, 63], [60, 62], [61, 61]] [16, 17, 18]
+16 Y 84 [[61, 13], [61, 54], [62, 54], [62, 13]] []
+17 R 4 [[61, 56], [61, 57], [62, 57], [62, 56]] []
+18 R 4 [[61, 59], [61, 60], [62, 60], [62, 59]] []
+19 R 4 [[61, 62], [61, 63], [62, 63], [62, 62]] []
+adj: [[0, 1], [1, 2], [1, 11], [1, 12], [1, 15], [2, 3], [2, 6], [2, 7], [2, 8], [2, 9], [2, 10], [2, 11], [3, 4], [3, 5], [7, 8], [7, 9], [10, 11], [12, 13], [12, 14], [15, 16], [15, 17], [15, 18], [15, 19]]
+shape (64, 64) step 0 level 1
+
+[MODEL RESPONSE META]
+finish_reason: tool_calls
+tool_call_count: 1
+content_chars: 0
+reasoning_chars: 2639
+tool_call_markup_in_text: no
+tool_calls_recovered_from_markup: no
+raw_tool_calls:
+[
+  {
+    &quot;id&quot;: &quot;chatcmpl-tool-bb6296afd37bea5f&quot;,
+    &quot;type&quot;: &quot;function&quot;,
+    &quot;function&quot;: {
+      &quot;name&quot;: &quot;python&quot;,
+      &quot;arguments&quot;: &quot;{\&quot;code\&quot;: \&quot;a = current_frame.ascii.split(&#x27;\\\\n&#x27;)\\ndef crop(r0,r1,c0,c1):\\n    return &#x27;\\\\n&#x27;.join(&#x27;&#x27;.join(a[r][c0:c1] for c in range(c0,c1)) for r in range(r0,r1))\\nprint(&#x27;player plus (rows 30-35, cols 18-25):&#x27;)\\nprint(crop(30,35,18,25))\\nprint(&#x27;top black box (rows 8-16, cols 32-41):&#x27;)\\nprint(crop(8,16,32,41))\\nprint(&#x27;bottom blue+orange (rows 44-50, cols 33-40):&#x27;)\\nprint(crop(44,50,33,40))\\nprint(&#x27;bottom-left HUD (rows 52-63, cols 0-12):&#x27;)\\nprint(crop(52,63,0,12))\\n\&quot;}&quot;
+    }
+  }
+]
+
+[THINKING]
+Let me try to interpret the board:
+- Node 0: black border (left edge, columns 0-3, rows 0-51?)
+- Node 1: charcoal (c) background, 2509 px — main background.
+- Node 2: gray (G) 892 px — large room rectangle. Boundary is roughly [[8,32],[8,40],[16,40],[16,39]] — this is just the first corner point; the room is a large gray rectangle.
+- Node 3: black (B) 43 px, rows 9-15, columns 33-39 — a black square frame at the top (a target?).
+- Node 4: blue (b) 5 px, inside the black frame — a small blue shape.
+- Node 5: blue 1 px.
+- Node 6: charcoal (c) 100 px, rows 30-44, columns 24-33 — a dark vertical rectangle inside the room (a wall/blocker).
+- Node 7: white (W) 3 px + nodes 8, 9 (w) 1 px each — a small white plus/cross shape at roughly rows 31-33, columns 20-22. Probably the player.
+- Node 10: orange (O) 10 px, rows 45-46, columns 34-38 — an orange bar.
+- Node 11: blue (b) 15 px, rows 47-49, columns 34-38 — a blue square below the orange.
+- Node 12: black frame in the bottom-left, containing blue shapes (13, 14) — probably a HUD icon (a minimap or player indicator?).
+- Node 15: black bar in the bottom HUD, containing a yellow bar (16) and a red block (17, 18, 19) — a timer/step bar.
+So the player is probably the white plus at (32, 21). The goal is probably the blue square at the bottom (rows 47-49, columns 34-38) with the orange on top? Or the black-framed blue at the top (rows 9-15, columns 33-39)?
+The black frame at the top with the blue inside — it looks like a &quot;goal&quot; marker floating above the room, connected by a thin gray pillar (part of node 2? The gray room extends up to row 8, columns 32-40 — a thin vertical strip from the room up to the black square). Actually, node 2&#x27;s boundary starts at [8,32] — the gray room includes a thin pillar extending up to the black square.
+The blue square at the bottom (11) is adjacent to the orange (10), and both are adjacent to the background (1) and the room (2). The blue square at the bottom might be a &quot;goal&quot; to reach, or maybe a block to push?
+The valid actions are UP/DOWN/LEFT/RIGHT — movement. The white plus is probably the player. The blue square at the bottom might be the goal (collect it). The blue in the black frame at the top might be a &quot;target&quot; icon indicating the goal? Hmm.
+Actually, the blue shape in the black frame at the top looks like a small &quot;L&quot; or arrow shape. The blue shape in the bottom-left HUD (13, 14) also looks similar. These might be indicators.
+Let me look at the ASCII of a small region to understand the shapes: the white plus, the blue at the top, the blue at the bottom, the blue in the bottom-left.
+Let me try outputting a small crop.
+
+[TOOL CALL: python]
+&lt;tool_call&gt;
+&lt;function=python&gt;
+&lt;parameter=code&gt;
+a = current_frame.ascii.split(&#x27;\n&#x27;)
+def crop(r0,r1,c0,c1):
+    return &#x27;\n&#x27;.join(&#x27;&#x27;.join(a[r][c0:c1] for c in range(c0,c1)) for r in range(r0,r1))
+print(&#x27;player plus (rows 30-35, cols 18-25):&#x27;)
+print(crop(30,35,18,25))
+print(&#x27;top black box (rows 8-16, cols 32-41):&#x27;)
+print(crop(8,16,32,41))
+print(&#x27;bottom blue+orange (rows 44-50, cols 33-40):&#x27;)
+print(crop(44,50,33,40))
+print(&#x27;bottom-left HUD (rows 52-63, cols 0-12):&#x27;)
+print(crop(52,63,0,12))
+&lt;/parameter&gt;
+&lt;/function&gt;
+&lt;/tool_call&gt;
+
+[TOOL RESULT: python]
+player plus (rows 30-35, cols 18-25):
+GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG
+GGGWGGGGGGWGGGGGGWGGGGGGWGGGGGGWGGGGGGWGGGGGGWGGG
+GGwWWGGGGwWWGGGGwWWGGGGwWWGGGGwWWGGGGwWWGGGGwWWGG
+GGGwGGGGGGwGGGGGGwGGGGGGwGGGGGGwGGGGGGwGGGGGGwGGG
+GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG
+top black box (rows 8-16, cols 32-41):
+GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG
+GBBBBBBBGGBBBBBBBGGBBBBBBBGGBBBBBBBGGBBBBBBBGGBBBBBBBGGBBBBBBBGGBBBBBBBGGBBBBBBBG
+GBBBBBBBGGBBBBBBBGGBBBBBBBGGBBBBBBBGGBBBBBBBGGBBBBBBBGGBBBBBBBGGBBBBBBBGGBBBBBBBG
+GBBbbbBBGGBBbbbBBGGBBbbbBBGGBBbbbBBGGBBbbbBBGGBBbbbBBGGBBbbbBBGGBBbbbBBGGBBbbbBBG
+GBBBBbBBGGBBBBbBBGGBBBBbBBGGBBBBbBBGGBBBBbBBGGBBBBbBBGGBBBBbBBGGBBBBbBBGGBBBBbBBG
+GBBbBbBBGGBBbBbBBGGBBbBbBBGGBBbBbBBGGBBbBbBBGGBBbBbBBGGBBbBbBBGGBBbBbBBGGBBbBbBBG
+GBBBBBBBGGBBBBBBBGGBBBBBBBGGBBBBBBBGGBBBBBBBGGBBBBBBBGGBBBBBBBGGBBBBBBBGGBBBBBBBG
+GBBBBBBBGGBBBBBBBGGBBBBBBBGGBBBBBBBGGBBBBBBBGGBBBBBBBGGBBBBBBBGGBBBBBBBGGBBBBBBBG
+bottom blue+orange (rows 44-50, cols 33-40):
+cGGGGGGcGGGGGGcGGGGGGcGGGGGGcGGGGGGcGGGGGGcGGGGGG
+GOOOOOGGOOOOOGGOOOOOGGOOOOOGGOOOOOGGOOOOOGGOOOOOG
+GOOOOOGGOOOOOGGOOOOOGGOOOOOGGOOOOOGGOOOOOGGOOOOOG
+GbbbbbGGbbbbbGGbbbbbGGbbbbbGGbbbbbGGbbbbbGGbbbbbG
+GbbbbbGGbbbbbGGbbbbbGGbbbbbGGbbbbbGGbbbbbGGbbbbbG
+GbbbbbGGbbbbbGGbbbbbGGbbbbbGGbbbbbGGbbbbbGGbbbbbG
+bottom-left HUD (rows 52-63, cols 0-12):
+cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+cBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBc
+cBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBc
+cBBbbbbbbBBccBBbbbbbbBBccBBbbbbbbBBccBBbbbbbbBBccBBbbbbbbBBccBBbbbbbbBBccBBbbbbbbBBccBBbbbbbbBBccBBbbbbbbBBccBBbbbbbbBBccBBbbbbbbBBccBBbbbbbbBBc
+cBBbbbbbbBBccBBbbbbbbBBccBBbbbbbbBBccBBbbbbbbBBccBBbbbbbbBBccBBbbbbbbBBccBBbbbbbbBBccBBbbbbbbBBccBBbbbbbbBBccBBbbbbbbBBccBBbbbbbbBBccBBbbbbbbBBc
+cBBbbBBBBBBccBBbbBBBBBBccBBbbBBBBBBccBBbbBBBBBBccBBbbBBBBBBccBBbbBBBBBBccBBbbBBBBBBccBBbbBBBBBBccBBbbBBBBBBccBBbbBBBBBBccBBbbBBBBBBccBBbbBBBBBBc
+cBBbbBBBBBBccBBbbBBBBBBccBBbbBBBBBBccBBbbBBBBBBccBBbbBBBBBBccBBbbBBBBBBccBBbbBBBBBBccBBbbBBBBBBccBBbbBBBBBBccBBbbBBBBBBccBBbbBBBBBBccBBbbBBBBBBc
+cBBbbBBbbBBccBBbbBBbbBBccBBbbBBbbBBccBBbbBBbbBBccBBbbBBbbBBccBBbbBBbbBBccBBbbBBbbBBccBBbbBBbbBBccBBbbBBbbBBccBBbbBBbbBBccBBbbBBbbBBccBBbbBBbbBBc
+cBBbbBBbbBBccBBbbBBbbBBccBBbbBBbbBBccBBbbBBbbBBccBBbbBBbbBBccBBbbBBbbBBccBBbbBBbbBBccBBbbBBbbBBccBBbbBBbbBBccBBbbBBbbBBccBBbbBBbbBBccBBbbBBbbBBc
+cBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBc
+cBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBccBBBBBBBBBBc
+
+[ANALYZER STATUS]
+request_error: HTTPConnectionPool(host=&#x27;127.0.0.1&#x27;, port=1234): Read timed out. (read timeout=599.955911452)
+
+</pre></body></html>
