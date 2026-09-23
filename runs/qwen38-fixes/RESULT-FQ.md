@@ -33,3 +33,12 @@ and not yet asking the questions that change outcomes.
 **ref 56493155**, submitted 2026-09-23 12:31:34Z, kernel `pranavagrawai/taaf-duck-qwen38-fixes-f` v1.
 Board reference: 1.47 (ref 56474012, same model without the fixes). A single board score is ±50 %
 (duck-score-noise-vs-shift), so this reads the fixes' direction on the hidden set, not their size.
+
+## Lock-break preview on the first pair (questioner v2), `lockbreak.py`
+| points | n | break rate (new target within 10 actions) | level within 10 actions |
+|---|---|---|---|
+| Q, at delivered questions | 232 | 54 % | 0.9 % |
+| Q, at matched control points | 222 | 52 % | 0.9 % |
+| F, at matched control points | 237 | 59 % | 0.8 % |
+v2 did not make the actor reach for anything new more often than no question at all. Base rate ~55 %,
+so the card's bar for v3 is Q3 question points >= F2 matched points + 10.
