@@ -28,3 +28,8 @@ What the transcripts show (tn36, sp80, sc25, dc22 ledgers): the actor engages ("
 or a progress bar? why is the dot 2 cells?) rather than the load-bearing one; in tn36 no question
 reached the T bars; one form dominates ("Why must X be Y?"). The questioner is working as built
 and not yet asking the questions that change outcomes.
+
+## Submission (user decision 2026-09-23: "Submit F, keep improving Q")
+**ref 56493155**, submitted 2026-09-23 12:31:34Z, kernel `pranavagrawai/taaf-duck-qwen38-fixes-f` v1.
+Board reference: 1.47 (ref 56474012, same model without the fixes). A single board score is ±50 %
+(duck-score-noise-vs-shift), so this reads the fixes' direction on the hidden set, not their size.
