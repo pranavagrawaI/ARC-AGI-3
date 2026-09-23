@@ -79,3 +79,9 @@ belief, and exploration then fell below the no-question control; concessions wen
 - Lock-break at the self-question turns (same schedule as lockbreak.py control points) vs F/F2 control
   (61 %, n=467): >= +7 points is the bar (~2 sigma at n~450).
 - Uptake: share of self-question turns whose response contains an `Alternative:` line.
+
+## AMENDMENT 2026-09-23 ~18:50Z — confirming pair S-c vs F-c, run together
+S (52 vs 45) landed in the suggestive band. Confirmation: one S kernel (S-c) and one F kernel (F-c), same
+tree, launched together. Pooled after it: S 75 episodes vs F 75 episodes (sd of delta ~7.2):
+>= +15 real, +8..+14 suggestive, below that indistinguishable. Also re-read "level within 10 actions of a
+self-question turn" (S) vs the same points in F.
