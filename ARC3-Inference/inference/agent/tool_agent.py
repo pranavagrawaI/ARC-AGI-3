@@ -149,6 +149,17 @@ _PROMPT_GAMEOVER_RETRY = _get_env_bool("DUCK_PROMPT_GAMEOVER_RETRY", False)
 # LEVELUP_REVIEW: actors carried a hasty rule for what cleared the last level (lf52 "reduce to 1"
 # was really "reduce to 2") and re-derived it from history only many turns later.
 _PROMPT_LEVELUP_REVIEW = _get_env_bool("DUCK_PROMPT_LEVELUP_REVIEW", False)
+# SELF_QUESTION_PERIOD: every Nth analyzer turn within a level (after the 2nd), the actor is asked to
+# doubt itself -- name the belief its plan depends on and the strongest alternative explanation. An
+# external "why" question was mostly answered by defending the belief (77 %), after which the actor
+# explored less (runs/qwen38-fixes/RESULT-FQ.md, "Do questions entrench?"). 0 = off.
+_PROMPT_SELF_QUESTION_PERIOD = _get_env_int("DUCK_PROMPT_SELF_QUESTION_PERIOD", 0)
+SELF_QUESTION_TEXT = (
+    "Before you act this turn, doubt yourself once. Name the belief your current plan depends on, then write "
+    "the strongest alternative explanation of the same evidence -- one that would make your plan pointless -- "
+    "in one line starting `Alternative:`. If what you have seen cannot rule it out, prefer an action that tells "
+    "the two apart."
+)
 _LOCAL_ANALYZER_ENABLE_THINKING = _get_env_bool("LOCAL_ANALYZER_ENABLE_THINKING", True)
 _LOCAL_ANALYZER_TEMPERATURE = _get_env_float("LOCAL_ANALYZER_TEMPERATURE", 0.6)
 _LOCAL_ANALYZER_TOP_P = _get_env_float("LOCAL_ANALYZER_TOP_P", 0.95)
@@ -991,6 +1002,15 @@ class ToolAgent:
             "recent_words": [dict(item) for item in self._recent_words],
         }
 
+    def _self_question_due(self, level: int) -> bool:
+        """Count analyzer turns per level; due on every Nth turn after the 2nd (the questioner's cadence)."""
+        if _PROMPT_SELF_QUESTION_PERIOD <= 0:
+            return False
+        if level != getattr(self, "_self_question_level", None):
+            self._self_question_level, self._self_question_turns = level, 0
+        self._self_question_turns += 1
+        return self._self_question_turns > 2 and (self._self_question_turns - 1) % _PROMPT_SELF_QUESTION_PERIOD == 0
+
     def _last_python_code(self) -> str:
         for message in reversed(self._history_messages):
             for call in reversed(message.get("tool_calls") or []) if message.get("role") == "assistant" else []:
@@ -1305,6 +1325,8 @@ class ToolAgent:
         if self._pending_critic_report is not None:
             lines.extend(render_report_block(self._pending_critic_report))
             self._pending_critic_report = None
+        if self._self_question_due(current_level):
+            lines.append(SELF_QUESTION_TEXT)
         if action_num == 0:
             lines.append(
                 "Ground yourself in `current_frame` before acting, but start with a compact structural summary rather than restating the full frame."

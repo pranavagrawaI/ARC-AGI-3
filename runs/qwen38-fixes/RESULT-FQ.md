@@ -67,3 +67,17 @@ answer lines), but engagement goes into reflection and verification rather than 
 new. The offline grade measured question quality; the live runs show that question quality in this
 form does not convert into behaviour. Stop spending GPU on this formulation until something changes
 what the actor does with a question.
+
+## Do questions entrench? (`defendconcede.py q/... q2x/...`, both live questioner runs)
+User's reading (2026-09-23): "asking questions, rather than making the model question itself and find a
+different pathway, makes it double down on that pathway." Test: split the 306 answered questions by
+whether the answer defends or concedes the belief, and compare exploration after each.
+| after the question, the actor... | n | new target within 10 actions |
+|---|---|---|
+| defended ("Because ... the only object that moved was ...") | 237 (77 %) | 58 % |
+| (no question, matched control, both F runs) | 467 | 61 % |
+| conceded ("Fair point — ... it may not be ...") | 69 (23 %) | 68 % |
+Supports the user's reading: a "why" question is mostly answered by marshalling evidence for the belief,
+and then the actor explores less than with no question; self-generated doubt goes with more exploration.
+Caveat: conceding may simply mark beliefs that were already weak (selection), so this is correlational;
+the next arm tests it causally by having the actor generate its own alternative.

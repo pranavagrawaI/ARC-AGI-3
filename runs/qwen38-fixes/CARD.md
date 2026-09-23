@@ -65,3 +65,17 @@ Tree c19dee3 (questioner v3: plan-belief aim + form rotation; grade in runs/crit
   matched points (every 2nd turn after the 2nd turn of a level). Questioner helps the mechanism if
   Q3's break rate exceeds F2's matched rate by >= 10 points.
 - Mechanism checks as before: >= 80 % delivered, < 10 % of wall, 0 duplicates, answer-line rate.
+
+## AMENDMENT 2026-09-23 ~15:45Z — arm S: the actor doubts itself (no external questioner)
+Motivation: RESULT-FQ.md "Do questions entrench?" — 77 % of answers to an external "why" defended the
+belief, and exploration then fell below the no-question control; concessions went with more exploration.
+- **S** = F + `DUCK_PROMPT_SELF_QUESTION_PERIOD=2`: on analyzer turns 3, 5, 7, ... of each level the
+  actor's own prompt asks it to name the belief its plan depends on and write the strongest alternative
+  explanation (`Alternative:` line), preferring an action that tells them apart. No critic call.
+- Two one-pass kernels (S-a, S-b; the share notebook forces 1 pass) = 50 episodes, against the two F
+  runs already recorded today (F 25 + F2 20 = 45 levels over 50 episodes, identical config).
+- Levels: sd of a 50-episode delta ~5.9 -> >= +12 (S >= 57) real, +6..+11 suggestive, -6..+5
+  indistinguishable, <= -7 harm. Different-day caveat: none (same day, same tree otherwise).
+- Lock-break at the self-question turns (same schedule as lockbreak.py control points) vs F/F2 control
+  (61 %, n=467): >= +7 points is the bar (~2 sigma at n~450).
+- Uptake: share of self-question turns whose response contains an `Alternative:` line.
