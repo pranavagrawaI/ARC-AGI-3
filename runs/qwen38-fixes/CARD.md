@@ -37,3 +37,18 @@ arm here becomes the base the questioner is tested on.
 
 ## Cost
 ~2.3 h GPU per arm, 0 submission slots.
+
+## AMENDMENT 2026-09-23 10:20Z, after FM, before F and Q are pushed
+FM result in RESULT-FM.md (MTP saturates KV at 28-way; no throughput gain). Next, run together,
+same day, both **without MTP**:
+- **F** = yield 300 + game-over retry + level-up review.
+- **Q** = F + questioner (`DUCK_CRITIC_ENABLED=1 DUCK_CRITIC_MODE=questioner
+  DUCK_CRITIC_PERIOD_TURNS=2 DUCK_CRITIC_QUESTIONER_EFFORT=none`), offline grade in
+  runs/critic-v2/grade/GRADE.md.
+Q vs F is the paired comparison (same tree, same day, one flag). Levels table as above with F as
+the reference (sd of delta ~4): >= +8 real, +4..+7 suggestive, -4..+3 indistinguishable, <= -5 harm.
+Also report the delta with the top game dropped, and per-game deltas on sp80, tn36, sc25, dc22.
+Q mechanism checks: >= 80 % of firings deliver a question; questioner time < 10 % of game wall;
+0 host errors; share of delivered questions followed by an `Answer to observer:` line (uptake);
+no question delivered twice (ledger). F vs FM tells whether the KV saturation came from MTP or
+from the yield.
