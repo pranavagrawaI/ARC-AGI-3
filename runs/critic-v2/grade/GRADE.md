@@ -43,3 +43,21 @@ premise-breaking question at least once per game-length sequence, and in the cle
 the premise behind the failure (sc25 legend, lf52 carried L1 rule, cn04 feet/squares). Thinking off
 is ~9 s / 20 tokens and reads as well as low effort (~31 s / 850 tokens) -> live arm uses effort none.
 Offline grading cannot show uptake; that needs the live arm.
+
+## v3 — plan-belief aim + host form rotation (kernel duck-questioner-grade-comp v3, 12:59Z)
+`results-v3/results.json`. 95/95 delivered, 0 rejections. Openers: "Why must" 27/95 (v2: most),
+"If the" 13, "Why does" 12, "What have" 8.
+Hits on the belief the plan depends on (none of these appeared in v2):
+- tn36: "The piece has never moved regardless of T state — why must it be the thing that responds?"
+  (t26 low); "Why does 'only T's changed across all frames' count as evidence about the goal when you
+  only ever clicked T's?" (seq t38 — names the circular evidence); "Why did the game start with stems
+  already equal to bars, and what does that initial match imply about the goal?" (seq t26).
+- sc25: "Why must the left block's dots represent the cells that must be green?" (t10 none) and the
+  key anomaly "Why did the 5th click change 50 cells when the first four each changed only one?" (t14).
+- sp80: "You noted a 4-row gap between blue's bottom and the pillar top — what is actually blocking
+  the blue from falling through it?" (seq t9).
+- lf52: "If the goal were not 'reduce to one piece,' what would you expect the orange square to be?"
+Weaknesses: the *untouched* form drifts into action nudges ("What happens if you move LEFT or UP?",
+"why have you never tried LEFT?"), the closest thing to advice; the *anomaly* form still sometimes
+picks HUD trivia (dc22 t8, tn36 t30 timer questions).
+Reading: v3 aims better than v2 and is the version for the next live test.
