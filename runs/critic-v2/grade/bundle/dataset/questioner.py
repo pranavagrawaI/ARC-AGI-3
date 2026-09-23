@@ -23,7 +23,9 @@ QUESTIONER_SYSTEM_PROMPT = (
     "one question.\n\n"
     "Ask the question that would break the agent's current way of seeing the game -- the question "
     "a zen master asks: short, plain, aimed at the belief the agent is standing on without "
-    "noticing. The strongest questions:\n"
+    "noticing. First find the belief the agent's current plan depends on: the one that, if false, "
+    "would make the plan pointless. Question that belief. Do not ask about HUD bars, timers, sizes "
+    "or step lengths unless the plan itself depends on them. The strongest questions:\n"
     "- ask why the agent treats something as settled (\"Why must <that> be <so>?\");\n"
     "- point at an observation the agent recorded but never explained (\"Why does <that "
     "regularity you noted> happen at all?\");\n"
@@ -150,6 +152,7 @@ def render_questioner_input(
     max_turns: int = 5,
     said_chars: int = 600,
     thinking_chars: int = 900,
+    form: str | None = None,
 ) -> str:
     lines = [f"Level {level}. {action_num} actions this game; {turns_since_level} agent turns since the last level began."]
     lines.append("What the agent said and the end of its thinking, oldest first:")
@@ -174,8 +177,23 @@ def render_questioner_input(
         lines.append("Questions already asked this game (never repeat these), with the agent's reply:")
         for entry in ledger.entries[-8:]:
             lines.append(f"- {entry.question} -> {entry.reply or '(no reply)'}")
+    lines.append(f"Form for this question -- {form or form_for(ledger)}.")
     lines.append("One question.")
     return "\n".join(lines)
+
+
+# The host rotates the form so one template cannot take over (grade v2 / live Q: "Why must X be
+# Y?" dominated). Each firing names the form to use; the order cycles with the ledger length.
+QUESTION_FORMS = (
+    "premise: ask why the belief the plan depends on must be true",
+    "anomaly: ask about something the agent observed but never explained",
+    "untouched: ask about what the agent has never done or never looked at that its plan ignores",
+    "inversion: ask what the agent would expect to see if the belief its plan depends on were false",
+)
+
+
+def form_for(ledger: QuestionLedger) -> str:
+    return QUESTION_FORMS[len(ledger.entries) % len(QUESTION_FORMS)]
 
 
 def render_actor_block(question: str) -> list[str]:
@@ -185,6 +203,8 @@ def render_actor_block(question: str) -> list[str]:
 __all__ = [
     "ACTOR_BLOCK_HEADER",
     "QUESTIONER_SYSTEM_PROMPT",
+    "QUESTION_FORMS",
+    "form_for",
     "LedgerEntry",
     "QuestionLedger",
     "parse_question",

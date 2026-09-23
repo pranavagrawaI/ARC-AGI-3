@@ -92,3 +92,14 @@ def test_fire_delivers_nothing_after_two_rejections():
     firing = runner.fire(SimpleNamespace(cause="period"), current_frame=SimpleNamespace(level=1), history=[],
                          valid_actions=[], actor_context={})
     assert not firing.parsed and render_report_block(firing.report) == []
+
+
+def test_form_rotates_with_ledger():
+    from inference.critic.questioner import QUESTION_FORMS, render_questioner_input
+    ledger = QuestionLedger()
+    seen = []
+    for i in range(len(QUESTION_FORMS)):
+        text = render_questioner_input(level=1, action_num=i, turns_since_level=i, recent_words=[], transitions=[], ledger=ledger)
+        seen.append(next(l for l in text.splitlines() if l.startswith("Form for this question")))
+        ledger.add(1, i, f"Why {i} thing{i}?")
+    assert len(set(seen)) == len(QUESTION_FORMS)
