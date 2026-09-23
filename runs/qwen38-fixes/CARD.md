@@ -52,3 +52,16 @@ Q mechanism checks: >= 80 % of firings deliver a question; questioner time < 10 
 0 host errors; share of delivered questions followed by an `Answer to observer:` line (uptake);
 no question delivered twice (ledger). F vs FM tells whether the KV saturation came from MTP or
 from the yield.
+
+## AMENDMENT 2026-09-23 13:10Z — F2 vs Q3, two passes each (user: "yes do it")
+Tree c19dee3 (questioner v3: plan-belief aim + form rotation; grade in runs/critic-v2/grade/GRADE.md).
+- **F2** = F, `--n-passes 2`. **Q3** = F2 + questioner v3 (period 2, thinking off). No MTP.
+  Run together; 50 episodes each, 2 waves, ~4.3 h.
+- Levels: sd of a 50-episode delta ~ sqrt(2*50*0.35) ~ 5.9. >= +12 real, +6..+11 suggestive,
+  -6..+5 indistinguishable, <= -7 harm. Also pooled with the first pair (Q vs F, -2): 75 episodes/arm.
+- **Lock-break metric (primary for the questioner, many samples):** at each delivered question, compare
+  the 10 actions after it with the level's actions before it; a *break* = the post-question actions
+  touch an action/click target never used before in that level. Control: the same metric in F2 at
+  matched points (every 2nd turn after the 2nd turn of a level). Questioner helps the mechanism if
+  Q3's break rate exceeds F2's matched rate by >= 10 points.
+- Mechanism checks as before: >= 80 % delivered, < 10 % of wall, 0 duplicates, answer-line rate.
