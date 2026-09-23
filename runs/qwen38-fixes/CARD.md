@@ -1,0 +1,39 @@
+# qwen38-fixes — do the step-1 fixes buy levels? (frozen 2026-09-23 before push)
+
+## What changed (tree 7769142 + launcher env), and the evidence for each
+| fix | knob | evidence (runs/qwen38-learnings/STEP1.md) |
+|---|---|---|
+| turn yield 60 s -> 300 s | `LOCAL_ANALYZER_YIELD_SECONDS=300` | 45 % of 3.8 turns ended with no action (3.6: 22 %); one call takes ~142 s median at 28-way, so 60 s ends nearly every turn after its first call; ls20 re-ran the same first survey 42x |
+| game-over retry note | `DUCK_PROMPT_GAMEOVER_RETRY=1` | reset keeps the level (su15, tu93); tn36 read "The game is over." as stop; tr87 cleared L1 in 9 actions after its retry |
+| level-up review | `DUCK_PROMPT_LEVELUP_REVIEW=1` | lf52 carried "reduce to 1" (really 2) and declared L2 impossible; ar25/s5i5 re-derived L1 late |
+| MTP speculative decode (arm FM only) | `DUCK_VLLM_SPECULATIVE_CONFIG={"method":"mtp","num_speculative_tokens":3}` | a turn is 100 % decode; the snapshot ships `mtp.safetensors`; vLLM recipe for Qwen3.8-27B; vLLM >= 0.17 (we run 0.19) |
+With all flags off the user prompt renders byte-identically to upstream (checked).
+
+## Arms (25 public games, 1 pass, 28-way, 120 min/game — same recipe as qwen38-commit)
+- **FM** = yield 300 + both prompt fixes + MTP. Launched first (one GPU slot free; the other
+  holds `tycho-nooa-v12-sb26-duck-batch`).
+- **F** = yield 300 + both prompt fixes, no MTP. Launched when a slot frees; attributes MTP.
+- Baseline (recorded, not re-run): qwen38-commit, 22 levels, 14/25 games, 45 % yielded turns,
+  median 192 s/turn.
+
+## Mechanism checks (low noise; each is pass/fail on its own)
+- F and FM: yielded-turn share **< 20 %** (from 45 %); ls20 takes >= 1 action.
+- FM: vLLM log shows spec-decode acceptance, and median s/turn (or output tok/s per stream)
+  **>= 25 % better than F**. Throughput alone is not accepted as proof the drafter works.
+- FM startup failure (server does not come up) => relaunch as F, record MTP as not working here.
+
+## Levels (sd of a 25-game delta ~ 4; noise floor from analysis/level-noise-floor.py)
+| arm levels | vs 22 | reading |
+|---|---|---|
+| >= 30 | +8 | real gain at 2 sigma |
+| 26–29 | +4…+7 | suggestive |
+| 18–25 | -4…+3 | indistinguishable: keep a fix only on its mechanism check |
+| <= 17 | <= -5 | suggestive of harm: find which fix before keeping any |
+Also read: levels with the top game dropped (sb26 carried 4 in the baseline).
+
+## What this does not decide
+Submission. The user's order is fixes -> scaffolding (questioner v2) -> submission. The winning
+arm here becomes the base the questioner is tested on.
+
+## Cost
+~2.3 h GPU per arm, 0 submission slots.
