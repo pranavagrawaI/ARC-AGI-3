@@ -1289,10 +1289,13 @@ class HarnessSolver(Solver):
     def _make_critic(self, analyzer: Any, run_stem: str) -> CriticRunner | None:
         if not critic_enabled() or not hasattr(analyzer, "model_config"):
             return None
-        return CriticRunner.from_env(
-            analyzer.model_config(),
-            trace_path=self._transcripts_dir() / f"{run_stem}_critic.jsonl",
-        )
+        trace_path = self._transcripts_dir() / f"{run_stem}_critic.jsonl"
+        if os.environ.get("DUCK_CRITIC_MODE", "").strip() == "questioner":
+            from inference.critic.questioner_runner import QuestionerRunner
+            from inference.critic.runner import model_config_from_env
+
+            return QuestionerRunner.from_env(model_config_from_env(analyzer.model_config()), trace_path=trace_path)
+        return CriticRunner.from_env(analyzer.model_config(), trace_path=trace_path)
 
     def _artifacts_dir(self) -> Path:
         root = self.job_dir or Path.cwd() / "taaf_harness_artifacts"

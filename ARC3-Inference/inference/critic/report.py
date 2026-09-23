@@ -24,6 +24,8 @@ class CriticReport:
     confidence: str = ""
     open_questions: tuple[str, ...] = ()
     evidence: tuple[str, ...] = ()
+    # "question": critic v2 questioner -- render only the observer's question, never advice.
+    style: str = "report"
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -33,6 +35,7 @@ class CriticReport:
             "confidence": self.confidence,
             "open_questions": list(self.open_questions),
             "evidence": list(self.evidence),
+            "style": self.style,
         }
 
     def to_json(self, *, indent: int | None = None) -> str:
@@ -49,6 +52,7 @@ class CriticReport:
             confidence=str(payload.get("confidence", "")),
             open_questions=tuple(str(item) for item in payload.get("open_questions", ())),
             evidence=tuple(str(item) for item in payload.get("evidence", ())),
+            style=str(payload.get("style", "report")),
         )
 
     @classmethod
@@ -58,6 +62,12 @@ class CriticReport:
 
 def render_report_block(report: CriticReport) -> list[str]:
     """Render the labeled block Duck appends right after `end of world model. `."""
+    if report.style == "question":
+        # Imported here: questioner.py stays free of report.py and agent imports.
+        from inference.critic.questioner import render_actor_block
+
+        question = next((q for q in report.open_questions if _one_line(q)), "")
+        return render_actor_block(_one_line(question)) if question else []
     lines = [REPORT_BLOCK_HEADER, f"- Packet: {_one_line(report.packet_id) or 'unknown'}"]
     lines.append(f"- Summary: {_one_line(report.summary) or '(none)'}")
     if report.confidence:

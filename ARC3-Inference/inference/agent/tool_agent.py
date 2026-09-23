@@ -967,6 +967,10 @@ class ToolAgent:
         self._summarized_knowledge = _empty_world_model()
         self._pending_critic_report: CriticReport | None = None
         self._critic_request = ""
+        # The actor's own words per model response (critic v2 reads these; the carried world
+        # model is empty on ~half of turns). Bounded; never fed back to the actor.
+        self._recent_words: list[dict[str, Any]] = []
+        self._recent_words_seq = 0
 
     def set_critic_report(self, report: CriticReport | None) -> None:
         """Queue an advisory critic report for the next user prompt (consumed once)."""
@@ -984,6 +988,7 @@ class ToolAgent:
             "last_step_summary": dict(self._last_step_summary) if self._last_step_summary else None,
             "last_action_result": dict(self._last_action_result) if self._last_action_result else None,
             "last_tool_code": self._last_python_code(),
+            "recent_words": [dict(item) for item in self._recent_words],
         }
 
     def _last_python_code(self) -> str:
@@ -1958,6 +1963,17 @@ class ToolAgent:
                     captured_reasoning = reasoning
                     append_transcript("THINKING", reasoning)
                     assistant_message["reasoning"] = reasoning
+                if content or reasoning:
+                    self._recent_words_seq += 1
+                    self._recent_words.append(
+                        {
+                            "seq": self._recent_words_seq,
+                            "action_num": display_action_num,
+                            "said": str(content or "")[-2000:],
+                            "thinking": str(reasoning or "")[-3000:],
+                        }
+                    )
+                    del self._recent_words[:-8]
 
                 if not tool_calls:
                     if content:
