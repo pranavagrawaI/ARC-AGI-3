@@ -124,9 +124,11 @@ def duck_kaggle_setup_command(config: DuckKaggleVllmConfig | None = None) -> str
         "__LOCAL_ANALYZER_ENABLE_THINKING__": repr(os.environ.get("LOCAL_ANALYZER_ENABLE_THINKING", "1")),
         "__MULTIMODAL_CONTEXT__": repr(os.environ.get("MULTIMODAL_CONTEXT", "current_grid")),
         "__MULTIMODAL_UPSCALE__": repr(os.environ.get("MULTIMODAL_UPSCALE", "4")),
-        # Critic arm: every DUCK_CRITIC_* set on the launcher is carried into the
-        # runner env verbatim; unset means the incumbent (critic off) arm.
-        "__DUCK_CRITIC_ENV__": repr({key: value for key, value in os.environ.items() if key.startswith("DUCK_CRITIC_")}),
+        # Arm flags: every DUCK_CRITIC_* / DUCK_PROMPT_* set on the launcher is carried
+        # into the runner env verbatim; unset means the incumbent (upstream) arm.
+        "__DUCK_CRITIC_ENV__": repr({key: value for key, value in os.environ.items() if key.startswith(("DUCK_CRITIC_", "DUCK_PROMPT_"))}),
+        # Optional vLLM --speculative-config JSON (e.g. MTP); empty means none.
+        "__SPECULATIVE_CONFIG__": repr(os.environ.get("DUCK_VLLM_SPECULATIVE_CONFIG", "")),
         # Chat-template kwargs passed to vLLM. The Qwen3.8 template adds a
         # reasoning_effort variable defaulting to 'xhigh', which injects a
         # "think carefully" line into every system prompt; 'medium' injects
@@ -173,6 +175,7 @@ MODEL_OWNER = __MODEL_OWNER__
 MODEL_SLUG = __MODEL_SLUG__
 SERVED_MODEL_NAME = __SERVED_MODEL_NAME__
 CHAT_TEMPLATE_KWARGS = __CHAT_TEMPLATE_KWARGS__
+SPECULATIVE_CONFIG = __SPECULATIVE_CONFIG__
 VLLM_HOST = '127.0.0.1'
 VLLM_PORT = __VLLM_PORT__
 VLLM_BASE_URL = f'http://{VLLM_HOST}:{VLLM_PORT}/v1'
@@ -354,6 +357,8 @@ def start_vllm_server() -> None:
         '--max-model-len',
         str(VLLM_MAX_MODEL_LEN),
     ]
+    if SPECULATIVE_CONFIG:
+        cmd += ['--speculative-config', SPECULATIVE_CONFIG]
     print('Starting vLLM OpenAI server:', ' '.join(cmd), flush=True)
     process = subprocess.Popen(cmd, env=vllm_env(), stdout=log_handle, stderr=subprocess.STDOUT, text=True)
     VLLM_SERVER_PID.write_text(str(process.pid), encoding='utf-8')

@@ -142,6 +142,13 @@ _LOCAL_ANALYZER_TOOL_STEPS = _get_env_int("LOCAL_ANALYZER_TOOL_STEPS", 12)
 _LOCAL_ANALYZER_TOOL_TIMEOUT = _get_env_int("LOCAL_ANALYZER_TOOL_TIMEOUT", 30)
 _LOCAL_ANALYZER_TOOL_OUTPUT_TOKENS = _get_env_int("LOCAL_ANALYZER_TOOL_OUTPUT_TOKENS", 1024)
 _LOCAL_ANALYZER_YIELD_SECONDS = _get_env_float("LOCAL_ANALYZER_YIELD_SECONDS", 0.0)
+# Prompt fixes from the 3.8 step-1 readback (runs/qwen38-learnings/STEP1.md); off = upstream text.
+# GAMEOVER_RETRY: the auto-RESET after GAME_OVER keeps the current level, but actors read
+# "The game is over." as "stop playing" (tn36 idled; tr87 cleared L1 in 9 actions after its retry).
+_PROMPT_GAMEOVER_RETRY = _get_env_bool("DUCK_PROMPT_GAMEOVER_RETRY", False)
+# LEVELUP_REVIEW: actors carried a hasty rule for what cleared the last level (lf52 "reduce to 1"
+# was really "reduce to 2") and re-derived it from history only many turns later.
+_PROMPT_LEVELUP_REVIEW = _get_env_bool("DUCK_PROMPT_LEVELUP_REVIEW", False)
 _LOCAL_ANALYZER_ENABLE_THINKING = _get_env_bool("LOCAL_ANALYZER_ENABLE_THINKING", True)
 _LOCAL_ANALYZER_TEMPERATURE = _get_env_float("LOCAL_ANALYZER_TEMPERATURE", 0.6)
 _LOCAL_ANALYZER_TOP_P = _get_env_float("LOCAL_ANALYZER_TOP_P", 0.95)
@@ -1244,10 +1251,24 @@ class ToolAgent:
                 lines.append("You have completed the run!")
             elif previous_step_summary.get("level_transition"):
                 lines.append("You have progressed to a new level!")
+                if _PROMPT_LEVELUP_REVIEW:
+                    lines.append(
+                        "Before planning this level, use `history` to establish exactly what the previous level's final "
+                        "actions changed and which condition completed it. Write that as a verified rule under "
+                        "`Cross-level notes:`, and treat any earlier guess about the win condition as unverified until "
+                        "it matches that evidence."
+                    )
             else:
                 lines.append("You are still on the same level.")
             if previous_step_summary.get("game_over"):
-                lines.append("The game is over.")
+                if _PROMPT_GAMEOVER_RETRY:
+                    lines.append(
+                        "The previous action reached GAME_OVER. The runner has reset the current level: you keep your "
+                        "level progress, and play continues from this level's start with a fresh budget. Keep playing, "
+                        "and use what the failed attempt taught you; record it under `Cross-level notes:`."
+                    )
+                else:
+                    lines.append("The game is over.")
         elif (current_frame is not None and current_frame.step > 0) or action_num > 0:
             lines.append("No previous action sequence was captured.")
         else:
@@ -1272,6 +1293,7 @@ class ToolAgent:
         lines.append(
             "You may call `action(actions)` more than once in one Python snippet if your search or control loop needs it, "
             "but stop immediately if a result reports `game_over`, `run_complete`, `level_completed`, or `done`."
+            + (" That ends only the current snippet; after a game over or level change, play continues next turn." if _PROMPT_GAMEOVER_RETRY else "")
         )
         lines.extend(self._summarized_knowledge_lines())
         lines.append("end of world model. ")
