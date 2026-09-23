@@ -42,3 +42,28 @@ Board reference: 1.47 (ref 56474012, same model without the fixes). A single boa
 | F, at matched control points | 237 | 59 % | 0.8 % |
 v2 did not make the actor reach for anything new more often than no question at all. Base rate ~55 %,
 so the card's bar for v3 is Q3 question points >= F2 matched points + 10.
+
+## Pair 2: F2 vs Q3 (questioner v3), both 13:05Z -> ~15:20Z
+**Launch error (mine):** the cards asked for 2 passes, but the share notebook hardcodes `bm.n_passes = 1`
+(kernel notebook line ~407), overriding the pickled `benchmark.passes: 2`. My dry-run check read the
+pickle, not the notebook. Each arm ran 25 episodes, i.e. a second one-pass pair.
+
+| | F (pair 1) | F2 (pair 2, identical config) | Q (v2) | Q3 (v3) |
+|---|---|---|---|---|
+| levels (top dropped) | 25 (22) | 20 (17) | 23 (20) | 20 (17) |
+| games with a level | 16 | 16 | 16 | 13 |
+| answered questions | — | — | 62 % | **78 %** (173/223) |
+- **F vs F2 = 25 vs 20 with identical config**: the noise floor in the flesh (predicted sd of a delta ~4).
+- **Q3 vs F2: 0.** Pooled over both pairs (50 episodes/arm): questioner 43 vs fixes-only 45.
+- **Lock-break**: Q3 question points 57 % (n=221) vs F2 matched 63 % (n=230). Pooled with pair 1:
+  questions 55.5 % (n=453) vs no-question control 61 % (n=467), about -5.5 points (~1.7 sigma).
+  The card's bar was +10; the sign is the other way in both pairs.
+Questioner mechanics clean again: 248/250 delivered, 0 errors, 0 duplicates, ~0.4 % of wall.
+
+## Reading
+The questioner as built (v2 and v3) does not raise levels and, in both pairs, the actor explored
+*less* after a question than at matched points without one. The actor engages more with v3 (78 %
+answer lines), but engagement goes into reflection and verification rather than into trying anything
+new. The offline grade measured question quality; the live runs show that question quality in this
+form does not convert into behaviour. Stop spending GPU on this formulation until something changes
+what the actor does with a question.
