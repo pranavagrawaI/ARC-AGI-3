@@ -46,3 +46,10 @@ This is the "21–25 -> submit" cell of the table amended at 19:46Z, before the 
 public RHAE (ref 56355127, Duck on 3.6, same recipe). RHAE also rewards action efficiency via
 `min((human/agent)^2, 1.15)`, and 3.8 used half the actions for more levels, so the score may
 move more than the level count alone implies. Rerun ~9 h over 110 hidden games.
+
+## Hidden-set result (read 2026-09-23 07:17Z)
+**ref 56474012: COMPLETE, 1.47 public RHAE** vs 0.67 for ref 56355127 (Duck on 3.6, same
+recipe): **2.2x**. The 110-game hidden set agrees with the 25-game public-set efficiency ratio
+(2.2-2.7x). The +5 public level delta was 1.25 sigma; the hidden set is the independent
+confirmation it lacked. 3.8 replaces 3.6 as the incumbent model. Per-game levels on the hidden
+set are not exposed; the rerun log is only in the Kaggle UI.
