@@ -21,3 +21,19 @@ lp85/ls20/tn36/tr87 -1, sc25/wa30 -2. 10 games better, 6 worse; no single game c
   pure mirror reflection ... so the gray is decorative"), i.e. sharper tests rather than wider search.
 - Compared with the external questioner (pooled 43 vs 45, exploration down), self-generated doubt is the
   first critic-like intervention in this project to come out ahead of its control. Confirmation needed.
+
+## Confirmation pair S-c vs F-c (launched together 18:45Z) — the edge did not replicate
+| | F-c | S-c |
+|---|---|---|
+| levels (top dropped) | **27 (23)**, 18 games | 22 (18), 15 games |
+| new target at matched / self-question turns | 55 % | 60 % |
+| level within 10 actions of those turns | 0.0 % | 1.4 % |
+**Pooled over 75 episodes per arm: S 74 vs F 72 (+2), indistinguishable** (card: >= +15 real, +8..+14
+suggestive). The first S result (52 vs 45) was noise in the favourable direction; F-c alone scored 27,
+above either S run.
+One signal persists across all three S runs: levels land within 10 actions of a self-question turn far more
+often (~11 of ~650 points vs ~3 of ~705 in F). With total levels unchanged, this reads as timing — the
+self-question turn is where the actor sets up the decisive test — not as extra levels.
+
+## Submission ref 56493155 (arm F): COMPLETE, **1.58** public (vs 1.47 for 3.8 without the fixes).
+Direction positive, size within single-score noise (±50 %).
