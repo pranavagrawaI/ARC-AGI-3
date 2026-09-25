@@ -34,3 +34,12 @@ Two RTX PRO 6000 sessions, ~2.5–3 h each (135 GB model load + one 7920 s wave)
 Dataset uploaded and verified (marker, watchdog, patches, F tool_agent 94300 B). Both kernel pushes
 refused: "Maximum weekly GPU quota of 30.00 hours reached." Quota resets Saturday 00:00 UTC.
 Launch with `./launch.sh` after reset. Nothing ran; no GPU hours spent on this card.
+
+## OpenRouter smoke 2026-09-25 16:15Z (openrouter/smoke.py, out-kf-smoke1, kf-smoke1.log)
+KF shipped tree against `qwen/qwen3.8-flash` (hf Qwen/Qwen3.8-Flash-Next, Alibaba upstream), sb26 + tr87,
+8 min each, 2-way. PASS on wiring: tool_agent loaded from the bundle, yield 300 / retry / review on;
+no crash; tool calls parse; sb26 **L1 at step 13** (64 actions), post-level prompt carried the review
+text and the model wrote `Cross-level notes:`; game-over suffix rendered. tr87 made 2 actions: 12
+upstream 429s (Alibaba shared pool) starved it. Cost $0.08.
+Not a level measurement: different host, no preserve_thinking, full-precision weights, rate-limited.
+A 25-game pair would cost ~$30 against a $10 key limit and be confounded by 429s — not run.
