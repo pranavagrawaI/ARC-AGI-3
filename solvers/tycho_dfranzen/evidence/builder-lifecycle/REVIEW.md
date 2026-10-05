@@ -1,0 +1,13 @@
+# Review of bounded Builder and pair-1, 2026-10-05
+
+Scope: new candidate-only strategy, assembly/decorator/config seams, interrupted-usage accounting, exact frozen pair budgets/notebooks, launcher/reservations and read-only collector. Compared existing files with the preserved pre-intervention candidate, canonical Builder (unchanged), and previous accounting commit.
+
+Supported findings fixed: eager strategy import reached helpers before canonical module initialized; switched to lazy dispatch and exercised real worker imports. Slow Builder request handed off but receipt claimed no unresolved provider usage; durable provider_interrupted markers now feed final accounting without fabricating completed tokens/calls. Pair collector omitted the hybrid's own evidence index; now fetched explicitly. Uncovered watcher path gained a behavioral test for transient status failure, terminal-only collection, and exactly one collection per arm. No supported findings remain in the reviewed change.
+
+Validation: 11 actual runner/HTTP/GameAPI tests, 26 behavioral regressions, 3 watchdog/collector tests; exact payload/manifest/notebook and donor preservation check passes. Repeated-inspection fixture makes 12 construction calls, hands off twice, then prediction/repair/actions complete. Slow-response fixture performs an engine action after timely Builder handoff, and reports one unknown-cost interrupted request. External cancellation propagates; exhausted final phases persist confidence:none report and notes. Lost launch response stays reserved/unresolved and is never retried. Source-v7 downloaded payload equals frozen hash.
+
+Risk: stdlib AST decision and in-process coverage diagnostic retained in baseline.json/risk-final.json. New generate score 10, launch about 12, watch 10. Subprocess-covered execute/construction paths appear uncovered in the in-process metric; real worker traces are the execution evidence. No invented threshold/dependency or canonical Radon gate claim. Existing host complexity is not reduced by this experiment; accounting changes are narrowly tested.
+
+Limits: fixtures establish wiring, not the model's adoption/correctness. Native HTTP timeout plus phase cancellation leave possible backend usage unknown. Host watchdog is the hard boundary. Twelve calls and early commit instruction could hurt reasoning; matched score will decide. New whole-system contrast bundles several differences; cannot attribute its score effect to Builder alone. Account quota supports this pair, not necessarily the planned conditional second pair.
+
+Freeze: pair-1/EXPERIMENT-CARD.md, margins.json, pair-identity.json. No GPU launch occurred during local qualification. Original q6 and prior candidate bytes preserved.

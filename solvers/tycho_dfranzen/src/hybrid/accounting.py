@@ -5,6 +5,16 @@ import json
 from pathlib import Path
 
 
+def interrupted_builder_calls(session_root: Path) -> int:
+    """Unreturned provider responses are unknown costs, not completed-call totals."""
+    path = session_root / 'builder-lifecycle.jsonl'
+    if not path.exists():
+        return 0
+    records = path.read_bytes().split(b'\n')
+    unknown = int(bool(records.pop()))
+    return unknown + sum(json.loads(raw)['phase'] == 'provider_interrupted' for raw in records)
+
+
 def final_usage(session_root: Path, reported: dict | None) -> tuple[dict, dict]:
     """Prefer durable completed responses to the last, possibly stale IPC snapshot.
 
@@ -13,11 +23,13 @@ def final_usage(session_root: Path, reported: dict | None) -> tuple[dict, dict]:
     are integrity failures, rather than permission to discard known computation.
     """
     snapshot = dict(reported or {})
+    interrupted = interrupted_builder_calls(session_root)
     path = session_root / 'llm-trace.jsonl'
     if not path.exists():
         return snapshot, {'source': 'worker_ipc_snapshot', 'incomplete_trace_tail': False,
                           'unknown_usage_calls': 0, 'unreported_completed_calls': 0,
-                          'unreported_completion_tokens': 0}
+                          'unreported_completion_tokens': 0,
+                          'interrupted_builder_calls_unknown_usage': interrupted}
     data = path.read_bytes()
     records = data.split(b'\n')
     tail_incomplete = bool(records.pop())
@@ -46,6 +58,7 @@ def final_usage(session_root: Path, reported: dict | None) -> tuple[dict, dict]:
     return {**snapshot, **totals}, {
         'source': 'retired_worker_llm_trace', 'incomplete_trace_tail': tail_incomplete,
         'unknown_usage_calls': unknown_usage,
+        'interrupted_builder_calls_unknown_usage': interrupted,
         'unreported_completed_calls': totals['calls'] - snapshot.get('calls', 0),
         'unreported_completion_tokens': totals['completion_tokens'] - snapshot.get('completion_tokens', 0),
     }
