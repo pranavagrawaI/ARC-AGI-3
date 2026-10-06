@@ -178,5 +178,39 @@ class WaveLaunch(unittest.TestCase):
                          ['control', 'lean', 'port'])
 
 
+class WaveTwo(unittest.TestCase):
+    """wave-2 = control, lean_prune, lean_cap4: each lean arm is port with one env line changed."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.out = Path(self.directory.name)/'wave-2'
+        subprocess.run([sys.executable, '-B', str(HERE/'experiment/freeze_wave.py'), '--wave-id', 'wave-2',
+                        '--out', str(self.out), '--seed', '7'], check=True, capture_output=True)
+        self.identity = json.loads((self.out/'pair-identity.json').read_text())
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    def test_arms_kernels_and_budget(self):
+        self.assertEqual(sorted(self.identity['arms']), ['control', 'lean_cap4', 'lean_prune'])
+        self.assertEqual(self.identity['hybrid_arms'], ['lean_prune', 'lean_cap4'])
+        self.assertEqual(self.identity['reserved_gpu_hours'], 4.0)
+        for arm, slug in (('lean_prune', 'lean-prune'), ('lean_cap4', 'lean-cap4')):
+            meta = json.loads((self.out/arm/'kernel/kernel-metadata.json').read_text())
+            self.assertEqual(meta['id'], f'pranavagrawai/tycho-dfranzen-wave-2-{slug}')
+            self.assertEqual(meta['title'], f'Tycho dfranzen wave-2 {slug}')  # Kaggle slugifies the title
+            self.assertTrue((self.out/arm/'source-bundle/hybrid-runtime.zlib').is_file())
+            self.assertEqual(WaveRegressions.budget_block(self, arm), WaveRegressions.budget_block(self, 'control'))
+
+    def test_lean_arms_differ_only_by_treatment(self):
+        prune = json.loads((self.out/'lean_prune/kernel/notebook.ipynb').read_text())
+        cap = json.loads((self.out/'lean_cap4/kernel/notebook.ipynb').read_text())
+        diffs = [(''.join(a['source']), ''.join(b['source'])) for a, b in zip(prune['cells'], cap['cells'])
+                 if ''.join(a['source']).replace('lean_prune', 'X') != ''.join(b['source']).replace('lean_cap4', 'X')]
+        self.assertEqual(diffs, [])
+        self.assertTrue(any("'TYCHO_MODE': 'no_world_model', 'TYCHO_NOOA_TREATMENT': 'lean_cap4'" in ''.join(c['source'])
+                            for c in cap['cells']))
+
+
 if __name__ == '__main__':
     unittest.main()

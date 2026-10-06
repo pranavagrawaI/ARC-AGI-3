@@ -60,7 +60,16 @@ def assemble(destination):
             source = replace_once(source, '                "chat_template_kwargs": {"enable_thinking": False}',
                 '                "top_k": 20,\n                "chat_template_kwargs": {"enable_thinking": False}')
             source = replace_once(source, 'f"{strategy_prompt}\\n\\n"',
-                'f"{strategy_prompt}\\n\\n" + __import__("hybrid.policy", fromlist=["SYSTEM_GUIDANCE"]).SYSTEM_GUIDANCE + "\\n\\n"')
+                'f"{strategy_prompt}\\n\\n" + __import__("hybrid.policy", fromlist=["system_guidance"]).system_guidance() + "\\n\\n"')
+            # Lean treatments prune closed decisions once per decision (hybrid/lean.py).
+            source = replace_once(source, "            keep=config.history_keep_turns,\n        )\n",
+                "            keep=config.history_keep_turns,\n        )\n"
+                "        __import__('hybrid.lean', fromlist=['prune_for_decision']).prune_for_decision(runtime.event_manager)\n")
+            # A decision without an action costs the game its remaining budget: retry the
+            # action-only call once before failing.
+            source = replace_once(source, "        decision = await self._demand_action(runtime, surface, tools, config)\n        if decision is None:\n            raise GenerationError(",
+                "        decision = await self._demand_action(runtime, surface, tools, config)\n        if decision is None:\n"
+                "            decision = await self._demand_action(runtime, surface, tools, config)\n        if decision is None:\n            raise GenerationError(")
         if name == "action_batch":
             source = replace_once(source, "and previous_result.after.grid == previous_result.before.grid",
                 "and not __import__('hybrid.policy', fromlist=['interior_changed']).interior_changed(\n"
@@ -75,6 +84,8 @@ def assemble(destination):
             source = replace_once(source, "    SINGLE_DECISION_DISCIPLINE: TreatmentPolicy(\n",
                 '    "no_scribe": TreatmentPolicy("no_scribe",\n'
                 "        level_boundary_policy=DETERMINISTIC_LEVEL_CHECKPOINT),\n"
+                "    **__import__('hybrid.lean', fromlist=['treatment_policies']).treatment_policies(\n"
+                "        TreatmentPolicy, DETERMINISTIC_LEVEL_CHECKPOINT),\n"
                 "    SINGLE_DECISION_DISCIPLINE: TreatmentPolicy(\n")
         if name == "wm_probe":
             source = replace_once(source, "    _PREAMBLE = ToolExecutor._PREAMBLE + (",
@@ -145,8 +156,8 @@ def build():
     for notice in ('NOTICE.md','LICENSE-APACHE-2.0'):
         shutil.copy2(HERE/notice,bundle/notice)
     (bundle/'dataset-metadata.json').write_text(json.dumps({
-        'id':'pranavagrawai/tycho-dfranzen-source-v8',
-        'title':'Tycho dfranzen source v8',
+        'id':'pranavagrawai/tycho-dfranzen-source-v9',
+        'title':'Tycho dfranzen source v9',
         'licenses':[{'name':'other'}]},indent=2)+'\n')
     hashes = {rel:sha(data) for rel,data in sorted(files.items())}
     wheel_manifest = (WHEELS/"wheelhouse-manifest.json").read_bytes()
@@ -174,7 +185,7 @@ _hybrid_hashes = {hashes!r}
 _payload_candidates=[p for p in Path('/kaggle/input').rglob('hybrid-runtime.zlib')
                      if hashlib.sha256(p.read_bytes()).hexdigest()=={sha(payload)!r}]
 if len(_payload_candidates)!=1:
-    raise RuntimeError('Attach exact hash-bound tycho-dfranzen-source-v8 dataset')
+    raise RuntimeError('Attach exact hash-bound tycho-dfranzen-source-v9 dataset')
 _hybrid_files = json.loads(zlib.decompress(_payload_candidates[0].read_bytes()))
 for _rel, _encoded in _hybrid_files.items():
     _data = base64.b64decode(_encoded)
@@ -273,7 +284,7 @@ finally:
                     code_file=out.name)
     metadata['dataset_sources'] += ['pranavagrawai/tycho-nooa-solver-wheelhouse-cp312-v11',
                                     'pranavagrawai/tycho-dfranzen-runtime-deps',
-                                    'pranavagrawai/tycho-dfranzen-source-v8']
+                                    'pranavagrawai/tycho-dfranzen-source-v9']
     (HERE/'kernel/kernel-metadata.json').write_text(json.dumps(metadata,indent=2)+'\n')
     manifest={'schema':'tycho-dfranzen-candidate-v3','source_payload_sha256':sha(payload),'donor_notebook':str(nb_path.relative_to(ROOT)),
               'donor_notebook_sha256':sha(nb_path.read_bytes()),'notebook_sha256':sha(out.read_bytes()),

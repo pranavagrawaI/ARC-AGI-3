@@ -94,3 +94,11 @@ A pre-run audit stopped pair-1 while it was queued. Its hybrid crashed on any no
 - An interior-only batch no-op guard (`policy.interior_changed`).
 - A `no_scribe` treatment, so the lean arm runs the Actor only (`TYCHO_MODE=no_world_model`).
 The wave tooling (`experiment/freeze_wave.py`, `experiment/wave_run.py`) freezes and launches control, port and lean on 10 games at 10 streams. See `experiment/wave-1/EXPERIMENT-CARD.md`. Checks: `tests/port_regressions.py`, `tests/wave_regressions.py`. Pair-1's candidate is preserved in `revisions/local-v3-pair1`.
+
+## v5 lean Actor (wave-2), 2026-10-06
+
+Pair-1 ran (both arms COMPLETE): the hybrid lost 12 vs 17 levels on tokens per level, not crashes or play quality (`experiment/pair-1/DIAGNOSIS.md`). Actor prompts averaged 63-103K tokens, a third of them replayed reasoning, and ls20 spent up to 23 calls on one decision. v5 adds two Actor-only treatments, selected by `TYCHO_NOOA_TREATMENT` under `TYCHO_MODE=no_world_model` (`hybrid/lean.py`):
+- `lean_prune`: no Builder or Scribe. When a decision starts, every earlier decision loses its replayed reasoning, tool results/argument strings/prose are bounded to 1,536 bytes, and old observations lose their images; only the newest observation inlines the grid (`grid_keep=1`). Each event changes once, so the cached prefix before the just-closed decision survives. The provider window is 64K. The system prompt drops the optionality lines and the symmetry/dynamics brief.
+- `lean_cap4`: `lean_prune` plus at most 4 tool-using model calls per decision; a fifth call offers only `take_actions`, with thinking off and 2,048 output tokens. The strategy block announces the budget.
+- All treatments: the action-only call is retried once before the decision fails (a failed decision costs the game its remaining budget). No evidence shows the donor SGLang accepts `tool_choice="required"`, so it stays `auto`.
+Other treatments are unchanged. The source dataset is `tycho-dfranzen-source-v9`. Checks: `tests/lean_regressions.py` (loopback provider through the real worker; mutation-tested against removing the pruning, the cap and the retry) and `tests/wave_regressions.py::WaveTwo`. `experiment/freeze_wave.py --wave-id wave-2` freezes control, lean_prune and lean_cap4.

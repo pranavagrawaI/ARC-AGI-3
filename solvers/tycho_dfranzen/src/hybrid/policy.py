@@ -12,6 +12,7 @@ from tycho_nooa.llm_trace import LLMTrace
 from inference.agent.tool_agent import _estimate_tokens, _split_messages_for_estimate
 from inference.agent.runtime_state import Frame
 from inference.agent.vision_context import frame_to_png_data_url, diff_image_part
+from hybrid.lean import guidance, lean
 
 # One worker owns one game. Every model-using role contributes to this ledger.
 LEDGER = {"completion_tokens": 0, "prompt_tokens": 0, "cached_tokens": 0,
@@ -37,6 +38,11 @@ SYSTEM_GUIDANCE = """Game rules and scoring (host facts, not hypotheses):
 _GAME_OVER = """GAME OVER: the previous action ended this attempt in FAILURE (it does NOT mean the run is finished). Only RESET is legal now; it restarts the current level from its initial state and keeps completed levels. Before resetting, diagnose the cause. The current board shows the fatal state; wmlib.death_events() returns the board before the fatal action ('prev') and the death frame ('next'), also saved as the newest death_* files of this level. Check what the fatal action targeted and inspect the budget bar in the death frame. BAR RULE: the bar shrinking with each action is NORMAL; a slightly shorter bar is NOT evidence of the cause of death. The budget caused the death ONLY if the bar is fully (or almost fully) depleted in the death frame. If it is: reach the goal in fewer actions, or find a way to restore the bar (e.g. an item that refills it). If the bar clearly had budget left, the fatal action itself caused the death (hazard or forbidden move): do NOT retry the same path. The game is deterministic, so replaying the sequence that killed you will kill you again; change the plan BEFORE the fatal point. Record the diagnosed cause in your notes."""
 
 _LEVEL_UP = """You have completed the previous level. The current board is the starting state of the next level; build a new plan for this layout rather than continuing the previous level's action sequence. Start from the mechanics you established on the previous level; do not rediscover them without reason. Inspect the new board for unfamiliar elements, changed arrangements, or interactions your previous understanding does not explain. New elements often introduce mechanics needed to solve this level, so prioritize small, informative tests when their behavior is unclear. Reassess the goal: does the previous objective still apply, now requiring the new mechanics, or does the evidence suggest a different objective?"""
+
+
+def system_guidance():
+    """Host facts for the Actor's cached strategy block, plus any lean decision budget."""
+    return SYSTEM_GUIDANCE + guidance(lean())
 
 
 def interior_changed(before, after, border=BORDER):
@@ -189,7 +195,8 @@ class HybridLLMTrace(LLMTrace):
     """Install the projection BEFORE canonical exact-request checkpoints."""
     def attach(self, event_manager, *, source):
         super().attach(event_manager, source=source)
-        projection = ContextProjection()
+        choice = lean()
+        projection = ContextProjection(window=choice.window) if choice else ContextProjection()
         self._projections = getattr(self, "_projections", {})
         self._projections[id(event_manager)] = projection
         path = self._path.with_name("context-projection.jsonl") if self._path else None
@@ -214,7 +221,7 @@ class HybridLLMTrace(LLMTrace):
                         "projected_sha256": digest({"messages": ctx.messages}),
                         "estimated_input_tokens": projection.last_estimate,
                         "compactions": projection.last_compactions,
-                        "evictions": LEDGER["evictions"]}) + "\n")
+                        "evictions": LEDGER["evictions"], "window": projection.window}) + "\n")
             result = await nxt(ctx)
             usage = getattr(result.response, "usage", None)
             prompt_tokens = getattr(usage, "prompt_tokens", 0) if usage is not None else 0

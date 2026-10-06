@@ -14,7 +14,6 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from pair_run import save, sha, quota  # noqa: E402
 
-HYBRID_ARMS = ('port', 'lean')
 TERMINAL = ('COMPLETE', 'ERROR', 'CANCELLED', 'FAILED')
 
 
@@ -28,7 +27,7 @@ def verify_frozen(directory, identity):
         assert sha(root/'kernel/notebook.ipynb') == item['notebook_sha256']
         assert sha(root/'kernel/kernel-metadata.json') == item['metadata_sha256']
         assert json.loads((root/'kernel/kernel-metadata.json').read_text())['is_private'] is True
-        if arm in HYBRID_ARMS:
+        if arm != 'control':
             assert sha(root/'source-bundle/hybrid-runtime.zlib') == identity['source_payload_sha256']
 
 
@@ -92,7 +91,7 @@ def collect_arm(directory, arm, kernel, version):
     root = directory/arm
     output = root/'output'; output.mkdir(exist_ok=True)
     receipt = {'files': [], 'errors': [], 'critical_complete': False}
-    hybrid = arm in HYBRID_ARMS
+    hybrid = arm != 'control'
 
     def fetch(name, required=True, expected=None):
         try:
