@@ -7,7 +7,10 @@ from pathlib import Path
 
 def interrupted_builder_calls(session_root: Path) -> int:
     """Unreturned provider responses are unknown costs, not completed-call totals."""
-    path = session_root / 'builder-lifecycle.jsonl'
+    return interrupted_calls(session_root / 'builder-lifecycle.jsonl')
+
+
+def interrupted_calls(path: Path) -> int:
     if not path.exists():
         return 0
     records = path.read_bytes().split(b'\n')
@@ -24,12 +27,15 @@ def final_usage(session_root: Path, reported: dict | None) -> tuple[dict, dict]:
     """
     snapshot = dict(reported or {})
     interrupted = interrupted_builder_calls(session_root)
+    interrupted_actor = interrupted_calls(session_root / 'actor-lifecycle.jsonl')
     path = session_root / 'llm-trace.jsonl'
     if not path.exists():
         return snapshot, {'source': 'worker_ipc_snapshot', 'incomplete_trace_tail': False,
                           'unknown_usage_calls': 0, 'unreported_completed_calls': 0,
                           'unreported_completion_tokens': 0,
-                          'interrupted_builder_calls_unknown_usage': interrupted}
+                          'interrupted_builder_calls_unknown_usage': interrupted,
+                          'interrupted_actor_calls_unknown_usage': interrupted_actor,
+                          'interrupted_model_calls_unknown_usage': interrupted + interrupted_actor}
     data = path.read_bytes()
     records = data.split(b'\n')
     tail_incomplete = bool(records.pop())
@@ -59,6 +65,8 @@ def final_usage(session_root: Path, reported: dict | None) -> tuple[dict, dict]:
         'source': 'retired_worker_llm_trace', 'incomplete_trace_tail': tail_incomplete,
         'unknown_usage_calls': unknown_usage,
         'interrupted_builder_calls_unknown_usage': interrupted,
+        'interrupted_actor_calls_unknown_usage': interrupted_actor,
+        'interrupted_model_calls_unknown_usage': interrupted + interrupted_actor,
         'unreported_completed_calls': totals['calls'] - snapshot.get('calls', 0),
         'unreported_completion_tokens': totals['completion_tokens'] - snapshot.get('completion_tokens', 0),
     }

@@ -18,6 +18,7 @@ from inference.agent.priority_scheduler import PrioritySnapshot
 from hybrid_local_solver import worker_environment, _identity_for_game, _require_hardened_host_supervisor
 from hybrid.transport import HybridLocalSolver
 from hybrid.accounting import final_usage
+from hybrid.decision_time import game_environment
 from tycho_nooa.models import GameTurn
 from tycho_nooa.protocol import (PROTOCOL_VERSION, ActionResultMessage,
     ARC_ACTION_NAME_TO_ID, project_arc_observation)
@@ -138,7 +139,7 @@ class HybridSolver(Solver):
                     self._stop.wait(min(1, remaining))
                 if self._stop.is_set():
                     return
-            environment = dict(os.environ)
+            environment = game_environment(deadline)
             if environment.get("TYCHO_KAGGLE_HARDENED_HOST") == "1":
                 _require_hardened_host_supervisor(environment)
                 uid = _identity_for_game(f"{game.game_id}-{index}")
@@ -241,7 +242,7 @@ class HybridSolver(Solver):
                         "usage_reconciliation": usage,
                         "unresolved_provider_usage": bool(failure or self._stop.is_set()
                             or usage['incomplete_trace_tail'] or usage['unknown_usage_calls']
-                            or usage['interrupted_builder_calls_unknown_usage']),
+                            or usage['interrupted_model_calls_unknown_usage']),
                         "provider_cancellation_confirmed": False,
                     }, indent=2)+"\n")
             finally:

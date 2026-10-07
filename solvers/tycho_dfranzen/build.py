@@ -55,8 +55,18 @@ def assemble(destination):
                 "class FocusedBuilder(Agent,")
             source = replace_once(source, "@strategy(BuilderStrategy())", "@strategy(HybridBuilderDispatch())")
         if name == "strategy":
+            source = replace_once(source, "from nooa.errors import GenerationError",
+                "from nooa.errors import GenerationError\nfrom hybrid.decision_time import decision_runtime, dispatch, ExplorationExpired")
+            source = replace_once(source, "        surface = self._surface(runtime)\n",
+                "        runtime = decision_runtime(runtime)\n        surface = self._surface(runtime)\n")
             source = replace_once(source, "                prompt=prompt,\n                metadata={",
-                "                prompt=prompt + __import__('hybrid.policy', fromlist=['observation_notes']).observation_notes() + '\\nOptional computation: run_python preloads dfr; dfr.segment(grid) supplies connected components with numeric colors. See notes/hybrid_tools.md.',\n                images=__import__('hybrid.policy', fromlist=['actor_images']).actor_images(runtime.agent, turn),\n                metadata={")
+                "                prompt=prompt + __import__('hybrid.policy', fromlist=['observation_notes']).observation_notes() + __import__('hybrid.terminal_frames', fromlist=['context']).context(workspace, turn) + '\\nOptional computation: run_python preloads dfr; dfr.segment(grid) supplies connected components with numeric colors. See notes/hybrid_tools.md.',\n                images=__import__('hybrid.policy', fromlist=['actor_images']).actor_images(runtime.agent, turn),\n                metadata={")
+            before = "            response, event_id = await runtime.generate(\n                tools=tools,\n                max_tokens=config.max_tokens,\n                temperature=config.temperature,\n                tool_choice=\"auto\",\n            )\n"
+            source = replace_once(source, before,
+                "            try:\n" + ''.join('    '+line+'\n' for line in before.splitlines()) +
+                "            except ExplorationExpired:\n                break\n")
+            source = replace_once(source, "            result = surface.dispatch(\n                tool,",
+                "            result = dispatch(\n                runtime, surface, tool,")
             source = replace_once(source, '                "chat_template_kwargs": {"enable_thinking": False}',
                 '                "top_k": 20,\n                "chat_template_kwargs": {"enable_thinking": False}')
             source = replace_once(source, 'f"{strategy_prompt}\\n\\n"',
@@ -124,7 +134,7 @@ def assemble(destination):
     transport = transport_path.read_text()
     transport = replace_once(transport, "_MODEL_GENERATION_ADMISSION = threading.BoundedSemaphore(1)",
                             "from contextlib import nullcontext\n_MODEL_GENERATION_ADMISSION = nullcontext()")
-    transport = replace_once(transport, '        "ARC_LLM_API_KEY",', '        "TYCHO_NOOA_SCRIPTED_TOOL_CALLS",\n        "ARC_LLM_API_KEY",')
+    transport = replace_once(transport, '        "ARC_LLM_API_KEY",', '        "TYCHO_NOOA_SCRIPTED_TOOL_CALLS",\n        "TYCHO_TERMINAL_FRAMES",\n        "TYCHO_TIME_AWARE",\n        "TYCHO_GAME_DEADLINE_MONOTONIC",\n        "ARC_LLM_API_KEY",')
     transport = replace_once(transport, '                cwd=session_root,',
                             '                cwd=session_root,\n                start_new_session=True,')
     files["hybrid_local_solver.py"] = transport.encode()
