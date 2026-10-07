@@ -6,9 +6,10 @@ Supported findings fixed before freeze:
 - M3C could be dropped or absent while an adoption verdict used two anchors. It is now protected and mandatory.
 - CARD.md and the uploaded payload still described the earlier design. Card/order/provenance are reconciled and upload readback is required before launch.
 - Provenance changed the notebook call and silently disabled rehearsal time scaling. The substitution now asserts its anchor and scales the session deadline too.
-- A missing quota record was treated as zero usage. Missing/invalid quota now blocks launch.
+- A missing quota record was treated as zero usage. Missing/invalid quota now blocks launch. A subsequent live check exposed the SDK serializer emitting 21783.604.0s and discarding duration days; admission now uses its parsed timedelta.total_seconds(), with the live result and day/fraction regression preserved.
 - The mounted dataset could present its own stale manifest. The notebook now binds an expected manifest and code commit independently, and the local verifier checks code against git, uploaded readback, and the tag.
 - A socket hang could prevent the watcher from recovering. SDK requests receive connect/read timeouts, polling faults stay in the log, and dry checks fail promptly.
+- The owned-kernel list includes the exact redacted sentinel ref empty, title [Private Notebook], no author/version, fixed timestamp 2010-04-01. Querying its numeric id 0 produces a permanent unknown. The checker skips only that exact non-runnable sentinel, queries recent owned kernels with an explicit owner, and retains unknown blocking for every other unidentified entry.
 - Merely writing a wave-2 launch decision could release its priority before its push. Accepted control receipt or hash-checked HOLD evidence is required.
 - Startup exceptions escaped before launch.json was written; they are now recorded once.
 - An anchor without warm-up or finite U/CV could appear usable. It now makes the comparison incomplete.

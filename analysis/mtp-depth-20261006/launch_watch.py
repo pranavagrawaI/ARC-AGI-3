@@ -50,22 +50,39 @@ def log(msg):
 
 def quota_used_s(api):
     with api.build_kaggle_client() as client:
-        q = json.loads(str(client.kernels.kernels_api_client.get_accelerator_quota_statistics()))
-    g = q.get("gpuQuota") or q.get("gpu_quota")
-    if not g or "timeUsed" not in g or "timeReserved" not in g:
+        response = client.kernels.kernels_api_client.get_accelerator_quota_statistics()
+    g = getattr(response, "gpu_quota", None)
+    used, reserved = getattr(g, "time_used", None), getattr(g, "time_reserved", None)
+    if not isinstance(used, dt.timedelta) or not isinstance(reserved, dt.timedelta):
         raise ValueError("GPU quota usage/reservation missing; cannot admit a launch")
-    used = float(str(g["timeUsed"]).removesuffix("s"))
-    reserved = float(str(g["timeReserved"]).removesuffix("s"))
-    if not (0 <= used < float("inf") and 0 <= reserved < float("inf")):
-        raise ValueError("GPU quota is not a finite nonnegative duration")
-    return used + reserved, q
+    used_s, reserved_s = used.total_seconds(), reserved.total_seconds()
+    if used_s < 0 or reserved_s < 0:
+        raise ValueError("GPU quota duration is negative")
+    # The SDK string serializer emits e.g. 21783.604.0s and discards duration days.
+    # Use its parsed timedelta objects for admission; retain the raw serialization too.
+    q = json.loads(str(response))
+    q["gpuQuotaSeconds"] = {"timeUsed": used_s, "timeReserved": reserved_s}
+    return used_s + reserved_s, q
 
 
 def active_sessions(api):
-    kernels = api.kernels_list(mine=True, sort_by="dateRun", page_size=20)
+    owner = json.loads((NOTEBOOK_DIR / "kernel-metadata.json").read_text())["id"].split("/")[0]
+    kernels = api.kernels_list(mine=True, user=owner, sort_by="dateRun", page_size=20)
     active = []
     for k in kernels:
-        ref = getattr(k, "ref", None) or getattr(k, "id", None)
+        ref = getattr(k, "ref", None)
+        if not ref:
+            # Kaggle returns redacted historical records with no runnable identity.
+            # Match the observed sentinel exactly; any other missing identity blocks launch.
+            stamp = getattr(k, "last_run_time", None)
+            if (getattr(k, "title", None) == "[Private Notebook]"
+                    and not getattr(k, "author", None)
+                    and isinstance(stamp, dt.datetime)
+                    and stamp.replace(tzinfo=dt.timezone.utc) == dt.datetime(2010, 4, 1, tzinfo=dt.timezone.utc)
+                    and not getattr(k, "current_version_number", None)):
+                continue
+            active.append((None, "unknown (missing kernel ref)"))
+            continue
         try:
             status = str(api.kernels_status(ref).status)
         except Exception as e:

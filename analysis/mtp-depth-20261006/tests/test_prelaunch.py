@@ -127,9 +127,27 @@ class WatchTests(unittest.TestCase):
             def __exit__(self, *args): pass
             def __init__(self): self.kernels = types.SimpleNamespace(kernels_api_client=self)
             def get_accelerator_quota_statistics(self):
-                return json.dumps({'gpuQuota': {'timeUsed': '123.5s', 'timeReserved': '45s'}})
+                import datetime
+                class Quota:
+                    gpu_quota = types.SimpleNamespace(time_used=datetime.timedelta(seconds=123.5), time_reserved=datetime.timedelta(seconds=45))
+                    def __str__(self): return json.dumps({'gpuQuota': {'timeUsed': '123.5.0s', 'timeReserved': '45s'}})
+                return Quota()
         api = types.SimpleNamespace(build_kaggle_client=Client)
         self.assertEqual(launch_watch.quota_used_s(api)[0], 168.5)
+
+    def test_quota_uses_duration_days_not_the_lossy_sdk_string(self):
+        import datetime
+        class Quota:
+            gpu_quota = types.SimpleNamespace(time_used=datetime.timedelta(days=1, seconds=21783.604), time_reserved=datetime.timedelta(seconds=3600))
+            def __str__(self): return json.dumps({'gpuQuota': {'timeUsed': '21783.604.0s', 'timeReserved': '3600s'}})
+        class Client:
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def __init__(self): self.kernels = types.SimpleNamespace(kernels_api_client=self)
+            def get_accelerator_quota_statistics(self): return Quota()
+        used, receipt = launch_watch.quota_used_s(types.SimpleNamespace(build_kaggle_client=Client))
+        self.assertAlmostEqual(used, 111783.604)
+        self.assertAlmostEqual(receipt['gpuQuotaSeconds']['timeUsed'], 108183.604)
 
     def test_watcher_records_one_accepted_attempt_and_never_repeats_it(self):
         import requests
@@ -185,6 +203,17 @@ class WatchTests(unittest.TestCase):
                 self.assertTrue(launch_watch.priority_resolved())
                 readout.write_text('changed')
                 self.assertFalse(launch_watch.priority_resolved())
+
+    def test_redacted_historical_placeholder_is_not_kernel_zero(self):
+        import datetime
+        placeholder = types.SimpleNamespace(ref='', title='[Private Notebook]', author='',
+            last_run_time=datetime.datetime(2010, 4, 1), current_version_number=0)
+        api = unittest.mock.Mock()
+        api.kernels_list.return_value = [placeholder]
+        self.assertEqual(launch_watch.active_sessions(api), [])
+        api.kernels_status.assert_not_called()
+        api.kernels_list.return_value = [types.SimpleNamespace(ref='', title='unidentified new job')]
+        self.assertEqual(launch_watch.active_sessions(api), [(None, 'unknown (missing kernel ref)')])
 
     def test_unknown_remote_status_blocks_launch(self):
         class API:
