@@ -1,0 +1,9 @@
+# Repair review
+
+Scope: new tractability-2 branch harness versus frozen tractability-1; production decision_time.py versus HEAD. Source identity confirms only these two runtime files changed; every packet file is identical. Reviewed admission before provider dispatch, conservative unknown reservations, both final attempts, call ceilings, final tool/sampling policy, disabled behavior, absolute timeouts, sandbox identities, payload/card hashes and single-launch guard.
+
+No unresolved supported defect. Four recorded ledgers each reached both final attempts. Exact-boundary cancellation retained12288 unknown tokens and returned two2048 final receipts within25000. Local rejection records request_not_sent; generic transport failures keep existing conservative accounting. Eight real-worker clock checks and two terminal checks passed. Loopback exercises actual CompletionClient serialization and real tools; corrupt packet suite aborted. Cloud hardened UID preflight remains mandatory. Dataset readiness produced one download404, retained then succeeded with exact readback.
+
+Qualification initially compiled inherited IPython file/shell cells and top-level await as ordinary Python: corrected qualification handles notebook await and excludes inherited shell/file literals without changing them. Launcher refused before any GPU reservation because qualification file was absent; no save request/launch-attempt occurred. Failures retained in launch.log. The final qualifying command is qualify_freeze.py.
+
+Risk: fixed diagnostic generate scores9.889->16.052 (probe) and17.563->23.424 (clock). Added budget/phase/error branches are required; no threshold or risk reduction claim. Small diagnostic omits subprocess coverage; worker tests verify those paths separately. Historical totals are descriptive because all arms now protect final tokens. Interrupted provider work remains unknown. One action batch cannot establish full-game solvability.

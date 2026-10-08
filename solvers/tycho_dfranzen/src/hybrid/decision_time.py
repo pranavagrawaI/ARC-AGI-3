@@ -12,6 +12,10 @@ class ExplorationExpired(TimeoutError):
     """The Actor must proceed to its existing action-only demand."""
 
 
+class RequestNotSent(RuntimeError):
+    """Local admission rejected a request before provider contact."""
+
+
 def game_environment(deadline):
     environment = dict(os.environ)
     if environment.get("TYCHO_TIME_AWARE") == "1":
@@ -94,6 +98,9 @@ class DecisionRuntime:
         try:
             async with asyncio.timeout_at(cutoff):
                 return await self.runtime.generate(**kwargs)
+        except RequestNotSent as error:
+            self.record("request_not_sent", error_type=type(error).__name__, action_demand=final)
+            raise
         except asyncio.CancelledError:
             self.record("provider_interrupted", provider_usage="unknown", action_demand=final)
             raise
