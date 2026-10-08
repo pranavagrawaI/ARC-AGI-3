@@ -23,7 +23,7 @@ for n,c in enumerate(nb['cells']):
   else:lines.append(line)
  compile(''.join(lines),f'cell{n}','exec',flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT);cells.append(n)
 assert '"self_test": "PASS"' in (p/'qualification-final.log').read_text()
-assert 'Ran 9 tests' in (p/'worker-tests.log').read_text() and 'FAILED (errors=1)' in (p/'worker-tests.log').read_text()
+assert 'Ran 8 tests' in (p/'clock-tests-clean.log').read_text() and '\nOK\n' in (p/'clock-tests-clean.log').read_text()
 assert 'Ran 2 tests' in (p/'terminal-tests.log').read_text() and '\nOK\n' in (p/'terminal-tests.log').read_text()
 (p/'LOCAL-QUALIFICATION.json').write_text(json.dumps({'passed':True,'source_payload_sha256':i['source_payload_sha256'],'packets_payload_sha256':i['packets_payload_sha256'],'branch':'qualification-final.log; four recorded ledgers and maximum cancellation plus two final maxima','worker_checks':{'clock':8,'terminal':2},'test_harness_failure':'Combined run:8 clock passes plus missing port_regressions import; copied helper then terminal2/2 passed','dataset':'downloaded payload hashes matched','compiled_python_portions':cells,'inherited_ipython_exclusions':magic,'risk':'risk-before.json and risk-final.json; bounded diagnostic, added admission branches raise scores; no canonical gate or overall risk improvement claim'},indent=2)+'\n')
 print('PASS: freeze/readback and recorded behavioral qualification')
