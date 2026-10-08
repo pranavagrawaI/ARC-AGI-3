@@ -1,0 +1,13 @@
+# Tractability probe result
+
+Live Kaggle status COMPLETE; all 24 planned cases retained,388 collected files independently hash-checked. Notebook execution took 1723.84 seconds (28m44s). Exact billed GPU allocation is not inferred from this duration; the account quota interval also contains a separate MTP run.
+
+Four stalled continuations per arm: two LS20 and two RE86 replicas. Baseline committed an action in 3/4, terminal presentation 4/4, clock 2/4, both 2/4. None completed a stalled level within the committed batch. Every arm retained 2/2 successful RE86 control completions. This probe stops at first action commitment; these counts do not establish full-game solvability or a score improvement.
+
+Terminal-only LS20 moves (RIGHT and LEFT) were interior no-ops. RE86 moves changed the board without completing the level. Raw reasoning still re-derives mechanics; observed tool errors include wrong terminal.json key `grid`, malformed frame array indexing and attempted ndarray JSON serialization. Providing the correct terminal channel did not reliably settle the game's rule.
+
+The clock comparison has a probe defect: it reserves wall-clock time but admits exploratory requests without reserving 2048 output tokens for the final action demand. Canceled exploratory responses conservatively occupy their full 12,288-token reservation. Four clock/both cases then needed 25,302, 25,748, 25,490 or 25,281 tokens against the 25,000 cap; the local guard rejected final demands. Replaying the actual frozen RequestRuntime.generate with each recorded ledger reproduces all four rejections before provider contact. The clock wrapper also labels these local pre-send errors `provider_interrupted`; that lifecycle label must not be counted as an extra transmitted request. Original canceled exploratory usage remains unknown.
+
+Judgment: easy control performance was preserved. Terminal presentation produced commitments in all four stalled branches, but useful recovery is unproven. Clock efficacy is unresolved because the probe failed to preserve its promised final-call token allowance. Do not promote either repair from this result, and do not infer that the stalled games are unsolvable. Next useful engineering change: reserve final-demand tokens before admitting exploration, qualify near-cap cancellation against recorded ledgers, then precommit any further model comparison separately. No new model run or retry launched during readout.
+
+Evidence: POST-RUN-AUDIT.json, summary.json, output/tractability-output/block-*/*/{requests,responses,tool-trace.jsonl,result.json,engine-evaluation.json}. Frozen cards/payloads and raw outputs are unchanged.
