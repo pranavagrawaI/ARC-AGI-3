@@ -1,0 +1,11 @@
+# Prelaunch review
+
+Scope: new diagnostic wrapper/driver only. Prior source, replay payload and analyzer remain frozen. The original effective launcher differs only in max-running requests and decode graph maximum, both 10 to 16; a separate cell copies installed profiling/model/quantization source for runtime attribution. Precision, M3 acceptance, sampler, loader, checkpoints and graph execution remain unchanged.
+
+Qualification: `python3 -B analysis/serving-headroom-20261008/test_probe.py`. Six checks exercise bursty generation-counter denominators, prefill/queue/counter-reset exclusions, exact occupancy including unfinished HTTP requests, native profile parameters, generated notebook compilation and parent-cell equality, and actual local HTTP execution with persisted success/failure receipts. The HTTP rehearsal caught a module/function name collision; fixed before launch. These checks do not qualify CUDA graph tracing, 16-request capacity or model responses.
+
+Risk scope/contract and scores are in QUALIFICATION.json. New functions have no prior baseline or improvement claim. Reused stdlib AST decision counts and statement-start CRAP formula, no threshold. Trace does not follow worker threads; generate's zero traced coverage is not proof it was untested. Legitimate plateau filtering retains CC28 with full traced statement coverage rather than splitting it solely for a metric. Runtime-only run_probe and launch verification retain explicit coverage gaps, constrained separately by native API/source audit, frozen identity verification and launch admission.
+
+Failure review: the profiler runs in separate blocks; partial/absent traces cannot become speedup evidence. Full HTTP responses, request hashes and all metric scrapes persist. An admission queue outside a plateau is reported, while steady throughput only uses exact occupancy and no queue. Fixed-length forced continuations and the favorable shorter-context cohort limit external validity. Extra graph memory or KV admission failure is a valid capacity observation and blocks an N16 superiority claim. Hard platform timeout remains containment if notebook/thread cleanup overruns. One exclusive attempt marker prevents retries after ambiguous push.
+
+No supported remaining prelaunch defect from the bounded source review. Actual GPU and observational claim validity remain runtime questions.
