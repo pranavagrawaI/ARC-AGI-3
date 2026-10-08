@@ -1,0 +1,15 @@
+# Packaged-runtime repair review
+
+Candidate: v3 successor to frozen v2 commit2033fba. The first failure was a source-contract mismatch before model loading, not a gameplay or throughput result. V3 derives its native fixture from the exact SGLang wheel rather than treating the version label or local checkout as source identity.
+
+The downloaded wheel SHA256d0620216... has24,833,268 bytes. All seven qualified members match v2's observed installed files byte-for-byte. The only changed fixture member is the allocator, which includes RecoverSSM scratch-budget handling. The packaged methods reproduce Mamba60 -> effective12 for a requested16, and the actual S10 launch cell remains byte-identical to the incumbent parent. No memory, model, sampling, concurrency or scheduling treatment is introduced.
+
+package_contract.py verifies wheel filename/full SHA, unique selected source members and requirements.lock; the actual generated preinstall cell executes this guard before installation. The generated installed-source subprocess independently checks the effective files afterward. The raw-output audit requires the same package identity receipt. Guards remain strict. The original mismatched fixture and changed wheel/lock/source are rejected locally.
+
+Generated notebook validation uses nbformat5.10.4. Markdown cells contain neither outputs nor execution_count. Every code cell compiles. The package guard is appended with an explicit newline boundary; the serving install/launcher cell itself is unchanged.
+
+Validation: uv run --no-project --with prometheus-client==0.26.0 --with nbformat==5.10.4 python -B analysis/serving-headroom-v3-20261008/risk.py. All32 tests pass: inherited wire/occupancy/profile/accounting/admission/raw-audit/collector regressions, nine native-method/real-Prometheus cases, independent audit endpoint/HTTP-receipt failures, exact package-vs-installed matching, the v2 mismatched allocator regression, changed archive/lock/extra-wheel rejection, actual generated guard execution, notebook schema, and wrong raw package identity rejection even after rebuilding the output manifest. Framework/GPU boundaries remain explicitly simulated in CPU profiler tests.
+
+The scoped CC/traced-statement/CRAP report is QUALIFICATION.json with no threshold. evidence/risk-before.json preserves a26-test baseline. Final scope/test universe adds package qualification, so no numerical improvement claim is made. Package-contract functions have behavioral coverage; launch and long-running watch are checked through concrete identity/admission and live receipts rather than claiming local coverage. No broad refactor is warranted for this bounded repair.
+
+Independent source inspection on shared board504 event597 found no remaining supported repair defect. Preparation conflicts were reconciled before freeze; one owner launches. The old run cards/sources are preserved. Actual CUDA profiling, model health, token accounting timing and cache fit still require this single bounded GPU qualification. A pass would qualify measurements, not prove an optimization advantage.
