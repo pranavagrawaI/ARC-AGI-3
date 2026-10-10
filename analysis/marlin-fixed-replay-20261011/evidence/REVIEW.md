@@ -1,0 +1,3 @@
+# Scoped review
+
+Reviewed the complete new directory against EXPERIMENT-CARD.md and compared inherited mechanics with v3/v4. Numerical acceptance remains false, all nine finite cases retain diagnostic timings, graph inputs restore, repeats copy outputs, source identity is hash-bound, and the collector audit fails terminally after download. Added/fixed audit checks for manifest completeness, nonfinite references and scratch-poison agreement. Eight behavioral tests pass. New CUDA repeat graphs, dtype reference and notebook-output mount remain unexecuted locally. Live quota discrepancy stops before any attempt. No unresolved local defect found; this is not GPU qualification.
