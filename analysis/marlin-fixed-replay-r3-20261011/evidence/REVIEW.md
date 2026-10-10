@@ -1,0 +1,3 @@
+# Diagnostic review
+
+Ten local behavioral tests pass. Repair recreates the original metadata adapter before publishing captured runtime args. Finite eager/graph differences and original numerical failures now retain diagnostic timings and retain the failed original verdict. Nonfinite outputs, scratch poison mismatch, identity/input corruption and actual runtime failure still abort. Raw audit recomputes repeats, numerical comparisons and paired intervals; no serving advancement. CUDA and metadata initialization remain GPU-unqualified. This preparation supersedes unlaunched r2; one consumed predecessor attempt remains preserved.
