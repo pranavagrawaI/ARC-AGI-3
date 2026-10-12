@@ -103,6 +103,49 @@ def filter_target_weights(model, weights):
         print('RETAINED_PRUNING_TARGET', json.dumps({k: v for k, v in receipt.items() if k != 'shapes'}), flush=True)
 
 
+DRAFT_EXPERTS = 512
+
+
+def is_identity_layout(metadata):
+    """True when every logical expert lives in the physical slot of the same id on one rank."""
+    import torch
+    n = metadata.num_logical_experts
+    p2l = metadata.physical_to_logical_map_cpu
+    l2p = metadata.logical_to_all_physical_map_cpu
+    identity = torch.arange(n).expand(metadata.num_layers, n)
+    return (metadata.ep_size == 1 and metadata.num_physical_experts == n
+            and torch.equal(p2l, identity) and torch.equal(l2p[:, :, 0], identity)
+            and bool((l2p[:, :, 1:] == -1).all()))
+
+
+def guard_draft_expert_map():
+    """Let the full-512 drafter load against the 448-expert target's expert map.
+
+    SGLang keeps one process-wide expert map, sized by the target. The drafter's
+    MoE weight loader indexes it with drafter expert ids 448..511 (IndexError), and
+    for global-expert params the stock range() would silently return no slots.
+    On one rank with the trivial layout every map query is the identity, so ids
+    past the target's experts get the identity too; anything else refuses.
+    """
+    from sglang.srt.eplb.expert_location import ExpertLocationMetadata
+    original = ExpertLocationMetadata.logical_to_all_physical
+    if getattr(original, 'retained_pruning', False):
+        return
+
+    def logical_to_all_physical(self, layer_id, logical_expert_id, require_global_experts=False):
+        if logical_expert_id < self.num_logical_experts:
+            return original(self, layer_id, logical_expert_id, require_global_experts)
+        if not 0 <= logical_expert_id < DRAFT_EXPERTS:
+            raise ValueError(f'Expert id {logical_expert_id} outside the drafter bank')
+        if not is_identity_layout(self):
+            raise ValueError('Expert map is not the one-rank identity; drafter experts cannot be placed')
+        return [logical_expert_id]
+
+    logical_to_all_physical.retained_pruning = True
+    ExpertLocationMetadata.logical_to_all_physical = logical_to_all_physical
+    print('RETAINED_PRUNING_DRAFT_MAP_GUARD installed', flush=True)
+
+
 def record_draft(model):
     directory = os.environ.get('RETAINED_PRUNING_RECEIPT_DIR')
     if not directory:
@@ -110,6 +153,7 @@ def record_draft(model):
     shapes = expert_shapes(model)
     if model.config.num_experts != 512 or not shapes or any(s[0] != 512 for s in shapes.values()):
         raise ValueError('Drafter expert bank was changed')
+    guard_draft_expert_map()
     output = Path(directory) / 'draft.json'
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps({'draft_experts': 512, 'shapes': shapes}, indent=2) + '\n')

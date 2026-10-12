@@ -10,3 +10,5 @@ Invalid if: any paired validity condition in control/EXPERIMENT-CARD.md fails, t
 Result map: the exact paired rule in control/EXPERIMENT-CARD.md applies: require >=10% more levels, nondecreasing mean score, >=10% throughput gain and zero retraction log events to retain this bundle as the next local testing baseline. Negative or ambiguous results preserve c14. Never replace the retained mask based on this run or claim pruning alone caused the result.
 Outputs: analysis/pruning-transfer-20261011/candidate/{launch-attempt.json,launch-response.json,status-history.jsonl,output/,collection.json}; paired RESULT.json and retention.json.
 Authority: Pranav's 2026-10-11 request for a few tests with retention; launch only after valid probe and paired admission. No automatic repairs, retries, submissions or publication.
+
+Amendment 2026-10-12: notebook rebuilt after probe 1 so its embedded pruning.py carries the drafter expert-map guard (probe2/EXPERIMENT-CARD.md) and smoke.py carries the misload floors. The guard defers every id below the target expert count to the stock wheel, so it is a no-op wrapper in the 512-expert control.

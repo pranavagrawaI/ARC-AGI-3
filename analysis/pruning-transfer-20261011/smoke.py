@@ -1,4 +1,9 @@
-"""Finite-output and concurrency qualification only; no performance comparison."""
+"""Finite-output and concurrency qualification only; no performance comparison.
+
+Two gross-misload floors, not quality comparisons: a drafter with misplaced experts drafts
+near-random tokens (acceptance near 1; c14 gameplay median 2.67), and a broken target cannot
+reach n^2 = 289 in any of 32 answers.
+"""
 import concurrent.futures
 import json
 import os
@@ -6,6 +11,7 @@ import time
 import urllib.request
 from pathlib import Path
 
+ACCEPT_FLOOR = 2.0
 OUT = Path(os.environ.get('PRUNING_OUTPUT', '/kaggle/working/pruning'))
 BASE = os.environ.get('PRUNING_SERVER', 'http://127.0.0.1:8001')
 
@@ -55,7 +61,15 @@ def main():
         with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
             responses = list(pool.map(request_one, range(concurrency)))
         windows.append({'concurrency': concurrency, 'elapsed_s': time.monotonic() - start, 'responses': responses})
-    (OUT / 'SMOKE.json').write_text(json.dumps({'passed': True, 'windows': windows,
+    after = http('/get_server_info')
+    (OUT / 'server-info-after.json').write_text(json.dumps(after, indent=2))
+    accept = [state.get('avg_spec_accept_length') for state in after.get('internal_states', [])]
+    texts = [json.loads((OUT / f'c{w["concurrency"]}-{i}-response.json').read_text())['choices'][0]['message']
+             for w in windows for i in range(w['concurrency'])]
+    answers = sum('289' in (m.get('content') or '') + (m.get('reasoning_content') or '') for m in texts)
+    passed = bool(accept) and all(a is not None and a >= ACCEPT_FLOOR for a in accept) and answers >= 1
+    (OUT / 'SMOKE.json').write_text(json.dumps({'passed': passed, 'windows': windows,
+        'accept_length': accept, 'accept_floor': ACCEPT_FLOOR, 'answers_289': answers, 'responses': len(texts),
         'limits': ['Short requests do not establish long-context capacity or quality.', 'No comparative throughput inference.']}, indent=2) + '\n')
 
 

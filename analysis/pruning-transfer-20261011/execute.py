@@ -52,7 +52,8 @@ def admission(backend, runs):
     used, reserved, allowed = (getattr(quota, name).total_seconds() for name in ['time_used', 'time_reserved', 'total_time_allowed'])
     active = backend.active_sessions('pranavagrawai')
     cap = sum(r['hard_cap_s'] for r in runs)
-    all_runs = json.loads((HERE / 'runs.json').read_text())['runs']
+    plan = json.loads((HERE / 'runs.json').read_text())
+    all_runs = plan.get('retired', []) + plan['runs']
     committed = sum(r['hard_cap_s'] for r in all_runs if (HERE / r['run'] / 'launch-attempt.json').exists())
     result = {'utc': now(), 'used_s': used, 'reserved_s': reserved, 'allowed_s': allowed,
               'active': active, 'new_cap_s': cap, 'committed_cap_s': committed}
@@ -131,8 +132,8 @@ def collect(backend, run):
     return receipt
 
 
-def probe_passed(receipt):
-    output = HERE / 'probe/output/pruning'
+def probe_passed(receipt, name):
+    output = HERE / name / 'output/pruning'
     if receipt['status'] != 'COMPLETE':
         return False
     target = json.loads((output / 'target.json').read_text())
@@ -145,6 +146,8 @@ def probe_passed(receipt):
     expected = {'kept': 193536, 'dropped': 27648, 'routers': 48}
     return (target['complete'] and target['target_experts'] == 448 and target['counts'] == expected
             and draft['draft_experts'] == 512 and smoke['passed']
+            and smoke['accept_length'] and all(a >= smoke['accept_floor'] >= 2.0 for a in smoke['accept_length'])
+            and smoke['answers_289'] >= 1
             and [w['concurrency'] for w in smoke['windows']] == [14, 18]
             and all(len(w['responses']) == w['concurrency'] for w in smoke['windows']))
 
@@ -163,16 +166,16 @@ def main():
         probe, *pair = runs
         if not args.run:
             print(json.dumps(admission(backend, [probe]), indent=2)); return
-        if not (HERE / 'probe/launch-attempt.json').exists():
+        if not (HERE / probe['run'] / 'launch-attempt.json').exists():
             launch(backend, probe, admission(backend, [probe]))
             board('Pruning transfer probe accepted once. One slot claimed for at most 1 h. If qualification passes, the frozen c14 versus REAP448+c18 pair may claim two slots after fresh admission, 2.5 h each; six-hour total ceiling. No retries or submissions.')
         receipt = collect(backend, probe)
-        passed = probe_passed(receipt)
-        save(HERE / 'probe/qualification.json', {'passed': passed, 'collection': receipt})
+        passed = probe_passed(receipt, probe['run'])
+        save(HERE / probe['run'] / 'qualification.json', {'passed': passed, 'collection': receipt})
         if not passed:
             result = {'status': 'PROBE_FAILED_RETAIN_CONTROL', 'retained': 'c14', 'gameplay_launched': False}
             save(HERE / 'RESULT.json', result); save(HERE / 'retention.json', result)
-            board('Pruning probe failed qualification; c14 retained. No gameplay launches or retry. Evidence: analysis/pruning-transfer-20261011/probe/output and qualification.json.'); return
+            board('Pruning probe failed qualification; c14 retained. No gameplay launches or retry. Evidence: analysis/pruning-transfer-20261011/' + probe['run'] + '/output and qualification.json.'); return
         pending = [run for run in pair if not (HERE / run['run'] / 'launch-attempt.json').exists()]
         if pending:
             admitted = admission(backend, pending)

@@ -59,6 +59,17 @@ class ContractTests(unittest.TestCase):
                 (root / 'probe/launch-attempt.json').write_text('{}')
                 with self.assertRaisesRegex(ValueError, 'already attempted'):
                     execute.admission(backend, [run])
+                # A retired attempt keeps its cap committed against the six-hour ceiling.
+                pair = [{'run': name, 'hard_cap_s': 9000, 'slug': 'owner/' + name} for name in ['control', 'candidate']]
+                (root / 'runs.json').write_text(json.dumps({'retired': [run], 'runs': pair}))
+                self.assertEqual(execute.admission(backend, pair)['committed_cap_s'], 3600)  # 1 h + 5 h fits exactly
+                (root / 'probe2').mkdir(); (root / 'probe2/launch-attempt.json').write_text('{}')
+                probe2 = dict(run, run='probe2', slug='owner/probe2')
+                (root / 'runs.json').write_text(json.dumps({'retired': [run], 'runs': [probe2, *pair]}))
+                with self.assertRaisesRegex(ValueError, 'ceiling'):
+                    execute.admission(backend, pair)
+                (root / 'runs.json').write_text(json.dumps({'runs': pair}))
+                self.assertEqual(execute.admission(backend, pair)['committed_cap_s'], 0)
 
     def test_collector_hashes_raw_data_and_rejects_changed_readback(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -114,17 +125,24 @@ class ContractTests(unittest.TestCase):
 
     def test_probe_must_have_real_capacity_and_all_responses(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp); out = root / 'probe/output/pruning'; out.mkdir(parents=True)
+            root = Path(temp); out = root / 'probe2/output/pruning'; out.mkdir(parents=True)
+            smoke = {'passed': True, 'windows': [{'concurrency': n, 'responses': [1]*n} for n in [14, 18]],
+                     'accept_length': [2.7], 'accept_floor': 2.0, 'answers_289': 30}
             docs = {'target.json': {'complete': True, 'target_experts': 448, 'counts': {'kept': 193536, 'dropped': 27648, 'routers': 48}},
-                    'draft.json': {'draft_experts': 512}, 'SMOKE.json': {'passed': True, 'windows': [{'concurrency': n, 'responses': [1]*n} for n in [14, 18]]},
+                    'draft.json': {'draft_experts': 512}, 'SMOKE.json': smoke,
                     'server-info-start.json': {'internal_states': [{'effective_max_running_requests_per_dp': 18}]}}
             for name, doc in docs.items():
                 (out / name).write_text(json.dumps(doc))
             with patch.object(execute, 'HERE', root):
-                self.assertTrue(execute.probe_passed({'status': 'COMPLETE'}))
-                self.assertFalse(execute.probe_passed({'status': 'ERROR'}))
+                self.assertTrue(execute.probe_passed({'status': 'COMPLETE'}, 'probe2'))
+                self.assertFalse(execute.probe_passed({'status': 'ERROR'}, 'probe2'))
+                # A mis-placed drafter shows as near-1 acceptance; a broken target never reaches 289.
+                for bad in [{'accept_length': [1.2]}, {'accept_length': []}, {'answers_289': 0}, {'accept_floor': 1.0, 'accept_length': [1.5]}]:
+                    (out / 'SMOKE.json').write_text(json.dumps(dict(smoke, **bad)))
+                    self.assertFalse(execute.probe_passed({'status': 'COMPLETE'}, 'probe2'), bad)
+                (out / 'SMOKE.json').write_text(json.dumps(smoke))
                 (out / 'server-info-start.json').write_text(json.dumps({'internal_states': [{'effective_max_running_requests_per_dp': 14}]}))
-                self.assertFalse(execute.probe_passed({'status': 'COMPLETE'}))
+                self.assertFalse(execute.probe_passed({'status': 'COMPLETE'}, 'probe2'))
 
     def test_launch_marker_prevents_duplicate_push(self):
         with tempfile.TemporaryDirectory() as temp:

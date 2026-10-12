@@ -110,8 +110,11 @@ def main():
                 'index_tensor_names_sha256': hashlib.sha256(json.dumps(sorted(index['weight_map'])).encode()).hexdigest(),
                 'note': 'Kaggle splits large HF shards; tensor names, config and router bytes are verified independently of sharding.'}
     (HERE / 'contract.json').write_text(json.dumps(contract, indent=2) + '\n')
-    runs = [build('probe', 'pruned', 18, True), build('control', 'control', 14), build('candidate', 'pruned', 18)]
-    (HERE / 'runs.json').write_text(json.dumps({'baseline_notebook_sha256': BASE_SHA, 'runs': runs}, indent=2) + '\n')
+    # Probe 1 died loading the drafter (probe/RESULT.json); its cap stays committed against the ceiling.
+    retired = [r for r in json.loads((HERE / 'runs.json').read_text()).get('retired', []) +
+               json.loads((HERE / 'runs.json').read_text())['runs'] if (HERE / r['run'] / 'launch-attempt.json').exists()]
+    runs = [build('probe2', 'pruned', 18, True), build('control', 'control', 14), build('candidate', 'pruned', 18)]
+    (HERE / 'runs.json').write_text(json.dumps({'baseline_notebook_sha256': BASE_SHA, 'retired': retired, 'runs': runs}, indent=2) + '\n')
     print(json.dumps([{k: v for k, v in r.items() if k != 'metadata'} for r in runs], indent=2))
 
 
