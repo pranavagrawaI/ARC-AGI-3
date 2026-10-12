@@ -7,5 +7,5 @@ New misload floors (gross only, not a quality comparison): SMOKE.json passes onl
 Measure: as probe 1, plus SMOKE.json accept_length / answers_289 and server-info-after.json; serve.log must show RETAINED_PRUNING_DRAFT_MAP_GUARD installed.
 Cap: one RTX PRO 6000, one launch, platform hard timeout 3600 s. Probe 1's 3600 s stays committed against the 21600 s investigation ceiling.
 Stop / invalid: as probe 1. No retry.
-Result map: pass -> the frozen c14 control / REAP448+c18 candidate pair is eligible, but admission counts 3600 + 3600 + 18000 = 25200 s against the 21600 s ceiling and will refuse; launching the pair needs Pranav to raise the ceiling to 25200 s (actual probe-1 use was minutes). Fail -> retain c14, diagnose from raw evidence.
+Result map: pass -> the frozen c14 control / REAP448+c18 candidate pair launches once after fresh admission (ceiling raised by Pranav to 25200 s = probe1 + probe2 + pair). Fail -> retain c14, diagnose from raw evidence.
 Authority: Pranav, 2026-10-12, after the recall brief proposing "fix the drafter load offline, then rerun the <=1 h probe once": "yes ensuring first that there is no confound and lost knowledge due to bugs, second we need to ensure that retention happens". See AUTHORITY-R2.json.

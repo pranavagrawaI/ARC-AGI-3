@@ -17,7 +17,7 @@ BACKEND = HERE.parent / 'marlin-fixed-replay-r3-20261011'
 sys.path.insert(0, str(BACKEND))
 from kaggle_backend import KaggleBackend
 
-CEILING = 21600
+CEILING = 25200  # Pranav 2026-10-12: 7 h incl. both probes (AUTHORITY-R2.json)
 TERMINAL = {'COMPLETE', 'ERROR', 'CANCELED', 'CANCELLED'}
 
 
@@ -62,7 +62,7 @@ def admission(backend, runs):
     if len(active) + len(runs) > 2 or any(not a.get('ref') for a in active):
         raise ValueError('Insufficient or unknown GPU slots')
     if committed + cap > CEILING:
-        raise ValueError('Experiment six-hour ceiling would be exceeded')
+        raise ValueError('Experiment GPU ceiling would be exceeded')
     for run in runs:
         if (HERE / run['run'] / 'launch-attempt.json').exists():
             raise ValueError('Run already attempted; never retry')

@@ -62,10 +62,13 @@ class ContractTests(unittest.TestCase):
                 # A retired attempt keeps its cap committed against the six-hour ceiling.
                 pair = [{'run': name, 'hard_cap_s': 9000, 'slug': 'owner/' + name} for name in ['control', 'candidate']]
                 (root / 'runs.json').write_text(json.dumps({'retired': [run], 'runs': pair}))
-                self.assertEqual(execute.admission(backend, pair)['committed_cap_s'], 3600)  # 1 h + 5 h fits exactly
+                self.assertEqual(execute.admission(backend, pair)['committed_cap_s'], 3600)
                 (root / 'probe2').mkdir(); (root / 'probe2/launch-attempt.json').write_text('{}')
                 probe2 = dict(run, run='probe2', slug='owner/probe2')
                 (root / 'runs.json').write_text(json.dumps({'retired': [run], 'runs': [probe2, *pair]}))
+                self.assertEqual(execute.admission(backend, pair)['committed_cap_s'], 7200)  # 1 h + 1 h + 5 h = 7 h ceiling
+                probe3 = dict(run, run='probe3', slug='owner/probe3'); (root / 'probe3').mkdir(); (root / 'probe3/launch-attempt.json').write_text('{}')
+                (root / 'runs.json').write_text(json.dumps({'retired': [run, probe3], 'runs': [probe2, *pair]}))
                 with self.assertRaisesRegex(ValueError, 'ceiling'):
                     execute.admission(backend, pair)
                 (root / 'runs.json').write_text(json.dumps({'runs': pair}))
