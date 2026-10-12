@@ -67,7 +67,8 @@ class ContractTests(unittest.TestCase):
                 probe2 = dict(run, run='probe2', slug='owner/probe2')
                 (root / 'runs.json').write_text(json.dumps({'retired': [run], 'runs': [probe2, *pair]}))
                 self.assertEqual(execute.admission(backend, pair)['committed_cap_s'], 7200)  # 1 h + 1 h + 5 h = 7 h ceiling
-                probe3 = dict(run, run='probe3', slug='owner/probe3'); (root / 'probe3').mkdir(); (root / 'probe3/launch-attempt.json').write_text('{}')
+                probe3 = dict(run, run='probe3', slug='owner/probe3', hard_cap_s=12600)  # 3600+3600+12600+18000 > 34200
+                (root / 'probe3').mkdir(); (root / 'probe3/launch-attempt.json').write_text('{}')
                 (root / 'runs.json').write_text(json.dumps({'retired': [run, probe3], 'runs': [probe2, *pair]}))
                 with self.assertRaisesRegex(ValueError, 'ceiling'):
                     execute.admission(backend, pair)
@@ -102,6 +103,28 @@ class ContractTests(unittest.TestCase):
                 compile((root / name).read_text(), name, 'exec')
             with self.assertRaisesRegex(ValueError, 'source changed'):
                 install.patch_sources(root)
+
+    def test_rerun_evaluates_candidate2_against_collected_control(self):
+        real = HERE / 'control'
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name, experts, streams in [('control', 512, 14), ('candidate2', 448, 18)]:
+                out = root / name / 'output'; (out / 'pruning').mkdir(parents=True)
+                (root / name / 'collection.json').write_text(json.dumps({'status': 'COMPLETE'}))
+                for f in ['serve.log', 'benchmark.json', 'kernel.log']:
+                    (out / f).symlink_to(real / 'output' / f)
+                log = (real / 'output/kernel.log').read_text().replace('priority gate active: 14', f'priority gate active: {streams}')
+                (out / 'kernel.log').unlink(); (out / 'kernel.log').write_text(log)
+                for f, v in {'target.json': {'complete': True, 'target_experts': experts}, 'draft.json': {'draft_experts': 512},
+                             'server-info-start.json': {'max_running_requests': streams, 'context_length': 102400}}.items():
+                    (out / 'pruning' / f).write_text(json.dumps(v))
+            shutil.copy2(HERE / 'runs.json', root / 'runs.json')
+            with patch.object(evaluate, 'HERE', root):
+                result = evaluate.evaluate('candidate2')
+            self.assertEqual(result['candidate_run'], 'candidate2')
+            self.assertEqual(result['control']['levels'], 103)
+            self.assertEqual(result['candidate']['levels'], 103)
+            self.assertEqual(result['status'], 'INCONCLUSIVE_RETAIN_CONTROL')  # identical play, no +10% throughput
 
     def test_score_first_retention(self):
         base = {'levels': 100, 'score': 45., 'throughput': 800., 'retractions': 0}

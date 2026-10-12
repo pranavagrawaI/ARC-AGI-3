@@ -17,7 +17,7 @@ BACKEND = HERE.parent / 'marlin-fixed-replay-r3-20261011'
 sys.path.insert(0, str(BACKEND))
 from kaggle_backend import KaggleBackend
 
-CEILING = 25200  # Pranav 2026-10-12: 7 h incl. both probes (AUTHORITY-R2.json)
+CEILING = 34200  # Pranav 2026-10-12: 7 h incl. both probes (AUTHORITY-R2.json) + candidate2 rerun 2.5 h (AUTHORITY-R3.json)
 TERMINAL = {'COMPLETE', 'ERROR', 'CANCELED', 'CANCELLED'}
 
 
@@ -156,14 +156,35 @@ def board(message):
     subprocess.run([sys.executable, '/home/pranav/.agent-board/board.py', 'reply', '659', '--as', 'codex-pruning-transfer', '--body', message], check=True)
 
 
+def rerun(backend, run, go):
+    """One launch of a repaired candidate against the already collected control; no retry."""
+    if not go:
+        print(json.dumps(admission(backend, [run]), indent=2)); return
+    if not (HERE / run['run'] / 'launch-attempt.json').exists():
+        launch(backend, run, admission(backend, [run]))
+        board(f"REAP448+c18 rerun accepted once as {run['slug']} (<=2.5 h, 1 slot): the first candidate died at startup on our "
+              "health assert (slow-disk deadline miss). The rerun waits for READY up to 1300 s. Compared against today's c14 "
+              "control (103 levels). No retries or submissions.")
+    collect(backend, run)
+    sys.path.insert(0, str(HERE))
+    from evaluate import evaluate
+    result = evaluate(run['run'])
+    board('REAP448+c18 rerun complete: ' + json.dumps({k: result[k] for k in ['status', 'retained']}) +
+          '. Evidence: analysis/pruning-transfer-20261011/RESULT.json. No submission.')
+    print(json.dumps(result, indent=2), flush=True)
+
+
 def main():
-    parser = argparse.ArgumentParser(); parser.add_argument('--run', action='store_true'); args = parser.parse_args()
+    parser = argparse.ArgumentParser(); parser.add_argument('--run', action='store_true')
+    parser.add_argument('--rerun', choices=['candidate2']); args = parser.parse_args()
     with (HERE / 'execution.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         verify_freeze()
         runs = json.loads((HERE / 'runs.json').read_text())['runs']
         backend = KaggleBackend()
-        probe, *pair = runs
+        if args.rerun:
+            rerun(backend, next(r for r in runs if r['run'] == args.rerun), args.run); return
+        probe, *pair = runs[:3]
         if not args.run:
             print(json.dumps(admission(backend, [probe]), indent=2)); return
         if not (HERE / probe['run'] / 'launch-attempt.json').exists():

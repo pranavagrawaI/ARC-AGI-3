@@ -8,6 +8,7 @@ BASE = HERE.parent / 'model-serving-20261011/wave-1/e2-c14/kernel'
 BASE_FILE = BASE / 'wave1-e2-c14-20261011.ipynb'
 BASE_SHA = '543cae3c0f880476746bf0af0d32cc54cb3b76690edd7ef7846508c973cad0ad'
 WHEEL_SHA = 'd0620216732b82b6efd4f8a78cc9b5f55343a4d3837fdfa3bcbb841b7718a225'
+LATE_READY_LIMIT = 1300
 
 
 def replace_once(source, old, new):
@@ -63,9 +64,25 @@ assert draft_config.get('text_config', draft_config)['num_experts'] == 512
 '''
     launcher = replace_once(launcher, 'args = [SGLANG, "serve",', install + '\nargs = [SGLANG, "serve",')
     # Both arms must reach health; the original fail-fast did not reject a live hung server.
+    # A slow Kaggle disk can push READY past dfranzen's 722 s deadline (6 of 32 kernels; candidate
+    # 138302732 died here). Keep waiting while the server lives, so both arms start play READY.
+    launcher += f'''
+LATE_READY_LIMIT = {LATE_READY_LIMIT}  # s from notebook start; + 7254 s play stays inside the 9000 s cap
+while True:
+    try:
+        with urllib.request.urlopen(url, timeout=5) as health:
+            if health.status == 200:
+                break
+    except Exception:
+        pass
+    if proc.poll() is not None:
+        show_log_tail(); raise RuntimeError(f"SGLang server exited during startup (code {{proc.returncode}})")
+    if time.time() - NOTEBOOK_START_TIME > LATE_READY_LIMIT:
+        show_log_tail(); raise RuntimeError("Server not READY by LATE_READY_LIMIT")
+    time.sleep(3)
+print(f"SERVER READY at {{int(time.time()-NOTEBOOK_START_TIME)}}s from notebook start", flush=True)
+'''
     launcher += '''
-with urllib.request.urlopen(url, timeout=10) as health:
-    assert health.status == 200
 with urllib.request.urlopen(f'http://127.0.0.1:{SERVED_MODEL_PORT}/get_server_info', timeout=10) as r:
     (PRUNE_OUT/'server-info-start.json').write_bytes(r.read())
 target_receipt = json.loads((PRUNE_OUT/'target.json').read_text())
@@ -113,6 +130,15 @@ def main():
     # Probe 1 died loading the drafter (probe/RESULT.json); its cap stays committed against the ceiling.
     retired = [r for r in json.loads((HERE / 'runs.json').read_text()).get('retired', []) +
                json.loads((HERE / 'runs.json').read_text())['runs'] if (HERE / r['run'] / 'launch-attempt.json').exists()]
+    if (HERE / 'candidate/launch-attempt.json').exists():
+        # 2026-10-12 rerun: candidate ERRORed at startup (readout/README.md); only candidate2 is new.
+        plan = json.loads((HERE / 'runs.json').read_text())
+        if any(r['run'] == 'candidate2' for r in plan['runs']):
+            raise ValueError('candidate2 already planned')
+        plan['runs'].append(build('candidate2', 'pruned', 18))
+        (HERE / 'runs.json').write_text(json.dumps(plan, indent=2) + '\n')
+        print(json.dumps({k: v for k, v in plan['runs'][-1].items() if k != 'metadata'}, indent=2))
+        return
     runs = [build('probe2', 'pruned', 18, True), build('control', 'control', 14), build('candidate', 'pruned', 18)]
     (HERE / 'runs.json').write_text(json.dumps({'baseline_notebook_sha256': BASE_SHA, 'retired': retired, 'runs': runs}, indent=2) + '\n')
     print(json.dumps([{k: v for k, v in r.items() if k != 'metadata'} for r in runs], indent=2))

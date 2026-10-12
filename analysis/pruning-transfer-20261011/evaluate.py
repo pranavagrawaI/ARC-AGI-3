@@ -50,12 +50,12 @@ def arm(name, expected_experts, streams):
             'serve': stats, 'games': {g['game_id']: g['levels_completed'] for g in games}}
 
 
-def evaluate():
+def evaluate(candidate_run='candidate'):
     result = {'status': 'INVALID_RETAIN_CONTROL', 'retained': 'c14', 'fallback': 'c14'}
     try:
-        control = arm('control', 512, 14); candidate = arm('candidate', 448, 18)
+        control = arm('control', 512, 14); candidate = arm(candidate_run, 448, 18)
         status = decision(control, candidate)
-        result.update(status=status, control=control, candidate=candidate,
+        result.update(status=status, candidate_run=candidate_run, control=control, candidate=candidate,
                       retained='REAP448+c18' if status == 'RETAIN_CANDIDATE' else 'c14',
                       limitations=['One paired run; no hidden-set generalization claim.', 'Bundled pruning plus capacity; not isolated pruning efficacy.'])
     except Exception as error:
