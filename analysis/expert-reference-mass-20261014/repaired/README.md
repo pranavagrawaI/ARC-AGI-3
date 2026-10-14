@@ -1,4 +1,4 @@
-# Locally verified repair; GPU comparison pending
+# Verified repair and completed negative screen
 
 The original screen reused a process-wide scheduler across sequential arms. Its clock intentionally takes the earliest session start/deadline, so a new benchmark object retained the control's expired clock. The original launcher also suppressed successful unittest stderr, losing the detailed GPU qualification report.
 
@@ -18,4 +18,8 @@ uv run --with nbformat --with ipython python -B analysis/expert-reference-mass-2
 REFERENCE_WHEEL=/tmp/a5b-wheel/sglang-0.5.19+gd00d88efc8d6-cp312-cp312-linux_x86_64.whl OMP_NUM_THREADS=2 analysis/expert-reference-mass-20261014/.venv/bin/python -B analysis/expert-reference-mass-20261014/repaired/test_routing.py
 ```
 
-The Duck archive location can be overridden with `REFERENCE_DUCK_REPO`; the numerical oracle needs CPU Torch and the exact wheel. No GPU time was spent on this repair. Full Kaggle startup, benchmark serialization and gameplay remain untested in the repaired notebook. The original v1 notebook/card/launch/result and raw evidence are preserved. A clean comparison requires a new bounded authorization: the original card allowed one accepted launch and explicitly prohibited automatic retries. Do not run the original v1 `readout.py` unchanged on a successor: its validity flags are specific to v1.
+The Duck archive location can be overridden with `REFERENCE_DUCK_REPO`; the numerical oracle needs CPU Torch and the exact wheel. No GPU time was spent on the local repair stage. The subsequently authorized rerun verified repaired Kaggle startup, benchmark serialization and gameplay. The original v1 notebook/card/launch/result and raw evidence are preserved. Any further comparison requires a new bounded authorization: both cards allow one accepted launch and prohibit automatic retries. Do not run the original v1 `readout.py` unchanged on a successor: its validity flags are specific to v1.
+
+## Rerun completed
+
+Pranav authorized a rerun on2026-10-15. Kernel138721881 v1 completed under the same one-hour cap. Real runtime isolation and all7 GPU tests now pass; all20 validity gates pass. The result is a valid negative quality screen:17 versus6 levels at900s despite21.13% faster candidate decode. See [FINDINGS.md](FINDINGS.md) and [RESULT.json](RESULT.json). The earlier CPU-only preparation limits above describe the repair stage; full repaired Kaggle execution is now verified. No promotion or further launch followed.
