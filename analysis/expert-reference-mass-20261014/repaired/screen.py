@@ -101,7 +101,8 @@ async def run_screen(ns):
             save('progress.json',{'arm':arm,'state':'playing','elapsed_s':time.monotonic()-START,'phases':phases})
             import subprocess
             config={'phase_sources':str(ns['KIT']/'phase-sources.json'),'bundle_dir':str(ns['BUNDLE_DIR']),
-                    'working_dir':str(out),'play_s':PLAY_S}
+                    'working_dir':str(out),'play_s':PLAY_S,
+                    'source_entries':[str(p) for p in ns['source_entries']]}
             config_path=out/'phase-config.json';config_path.write_text(json.dumps(config))
             with (out/'gameplay.log').open('wb') as log:
                 child=subprocess.Popen([ns['sys'].executable,'-B',str(ns['KIT']/'isolated_phase.py'),str(config_path)],

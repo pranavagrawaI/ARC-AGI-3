@@ -32,10 +32,11 @@ def build():
 run([PYTHON, str(KIT/'patch_runtime.py'), str(wheel), str(site_dir), ARM, str(WORKING_DIR/'routing-install.json')], env=install_env)
 if ARM == 'control':
     test_env = dict(install_env, REFERENCE_WHEEL=str(wheel), PYTHONDONTWRITEBYTECODE='1', OMP_NUM_THREADS='2')
-    test_result = run([PYTHON, '-B', str(KIT/'test_routing.py')], env=test_env)
+    test_result = run([PYTHON, '-B', str(KIT/'test_routing.py')], env=test_env, check=False)
     (WORKING_DIR/'routing-tests.stdout.txt').write_text(test_result.stdout)
     (WORKING_DIR/'routing-tests.stderr.txt').write_text(test_result.stderr)
     (WORKING_DIR/'routing-tests.json').write_text(json.dumps({'returncode':test_result.returncode,'gpu_graph_executed':'REFERENCE_GRAPH_TEST_PASSED' in test_result.stdout}))
+    if test_result.returncode: raise RuntimeError('Routing qualification failed; see routing-tests.stderr.txt')
     if 'REFERENCE_GRAPH_TEST_PASSED' not in test_result.stdout: raise RuntimeError('GPU graph qualification did not execute')
 """
     assert launcher.count(marker)==1
