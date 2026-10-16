@@ -1,6 +1,6 @@
-# M2 F1: friction bundle on B1
+# M2 F1: friction bundle on B1-fixed
 
-F1 is B1, the notebook drawn as hidden D5 (26.96), plus two friction fixes. It comes from the plan agreed on 2026-10-16: "start with friction removal", where pieces enter on mechanism plus no-harm. `build.py` derives everything from the frozen B1 notebook. B1's own install cell is untouched. F1 adds one hash-checked patch cell after it and changes three config lines.
+F1 is B1-fixed plus two friction fixes. B1-fixed is `solvers/m2_b1_fixed`: B1, the notebook drawn as hidden D5 (26.96), with its false frame-API instruction repaired. It was added on 2026-10-17, before launch, on the notebook-mining report. It comes from the plan agreed on 2026-10-16: "start with friction removal", where pieces enter on mechanism plus no-harm. `build.py` derives everything from the frozen B1-fixed notebook. Its install cell is untouched; its sandbox is byte-identical to B1's. F1 adds one hash-checked patch cell after it and changes three config lines.
 
 | Piece | Change | Evidence (B1 pair-1, two 25-game runs) |
 |---|---|---|
@@ -23,7 +23,7 @@ PYTHONDONTWRITEBYTECODE=1 $PY -B solvers/m2_f1/build.py
 PYTHONDONTWRITEBYTECODE=1 $PY -B -m unittest solvers/m2_f1/tests/test_f1.py
 ```
 
-`test_f1.py` runs the notebook's actual install cell against a copy of the B1 source, then exercises the real sandbox subprocess. It checks forgotten imports, retention of functions that use preloaded modules (with and without explicit imports), rebinding of a preloaded name, an unchanged allowlist, and refusal of a non-B1 sandbox. B1's own suite (`solvers/m2_b1/tests`, 29 tests) also passes on the F1 tree when `M2_SOURCE_ROOT` points at it. On plain B1, the forgotten-import case fails with NameError.
+`test_f1.py` runs the notebook's actual install cell against a copy of the B1-fixed source, then exercises the real sandbox subprocess. It checks forgotten imports, retention of functions that use preloaded modules (with and without explicit imports), rebinding of a preloaded name, an unchanged allowlist, and refusal of a non-B1 sandbox. B1-fixed's own suite (`solvers/m2_b1_fixed/tests`, 29 tests) also passes on the F1 tree when `M2_SOURCE_ROOT` points at it. On plain B1, the forgotten-import case fails with NameError.
 
 `incumbent/check.py` needs `--without c14 --without server-fail-fast --without reap448`, because the B1 notebook drawn as D5 never carried them.
 

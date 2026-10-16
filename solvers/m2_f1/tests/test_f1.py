@@ -10,7 +10,7 @@ from types import ModuleType
 import unittest
 
 HERE = Path(__file__).resolve().parents[1]
-B1_SRC = HERE.parent / 'm2_b1' / 'src'
+B1_SRC = HERE.parent / 'm2_b1_fixed' / 'src'  # F1 builds on B1-fixed
 NOTEBOOK = HERE / 'kernel' / 'm2-f1.ipynb'
 REL = 'inference/agent/python_tool_sandbox.py'
 STATE = {'current_frame': {'grid': [[0, 1]], 'ascii': 'Ww', 'shape': [1, 2], 'step': 0, 'level': 1},

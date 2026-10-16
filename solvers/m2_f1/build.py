@@ -1,17 +1,21 @@
 """Build the M2 F1 friction notebook and its 60-minute screen runs from the frozen B1 notebook. Never uploads.
 
-F1 = B1 + two friction fixes (agreed plan 2026-10-16; evidence in README.md):
+F1 = B1-fixed (solvers/m2_b1_fixed: B1 with its false frame-API instruction repaired) + two friction fixes
+(agreed plan 2026-10-16; evidence in README.md):
   preload  : the sandbox preloads allowed stdlib modules, so a snippet that forgets `import collections` still runs.
   out16k   : output cap 12K -> 16K; the analyzer window and server context grow by the same 4K, so the input budget
              (116K) is unchanged.
-Screen runs (experiment/screen-1): f1 and b1ctl, identical except for F1's changes; both stop 60 min after the
+Screen runs (experiment/screen-1): f1 and b1ctl (B1 as drawn in D5), identical except for the B1-fixed overlay and
+F1's changes; both stop 60 min after the
 server is up (interactive branch only; every TRUE_SUBMISSION path is untouched by the screen edit).
 """
 import hashlib, json
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-B1 = HERE.parent / 'm2_b1'
+B1 = HERE.parent / 'm2_b1'          # control: the notebook drawn as hidden D5
+BASE = HERE.parent / 'm2_b1_fixed'  # F1 builds on this
+BASE_NB = 'kernel/m2-b1-fixed.ipynb'
 EXP = HERE / 'experiment'
 SANDBOX_REL = 'inference/agent/python_tool_sandbox.py'
 B1_INSTALL = '# M2 B1: install verified source before importing the harness.'
@@ -33,9 +37,10 @@ def sha(data): return hashlib.sha256(data).hexdigest()
 
 
 def patched_sandbox():
-    old = (B1 / 'src' / SANDBOX_REL).read_bytes()
-    want = json.loads((B1 / 'manifest.json').read_text())['changes'][SANDBOX_REL]['after']
-    assert sha(old) == want, 'B1 sandbox source drifted from its manifest'
+    old = (BASE / 'src' / SANDBOX_REL).read_bytes()
+    for d in (B1, BASE):  # B1-fixed leaves the sandbox byte-identical to B1
+        want = json.loads((d / 'manifest.json').read_text())['changes'][SANDBOX_REL]['after']
+        assert sha(old) == want, f'{d.name} sandbox source drifted from its manifest'
     text = old.decode()
     assert text.count(ANCHOR) == 1
     new = text.replace(ANCHOR, ANCHOR + PRELOAD, 1).encode()
@@ -65,7 +70,7 @@ def replace_once(cells, old, new):
 
 
 def f1_notebook():
-    nb = json.loads((B1 / 'kernel/m2-b1.ipynb').read_text())
+    nb = json.loads((BASE / BASE_NB).read_text())
     old, new = patched_sandbox()
     idx = [i for i, c in enumerate(nb['cells']) if ''.join(c['source']).startswith(B1_INSTALL)]
     assert len(idx) == 1
@@ -73,7 +78,7 @@ def f1_notebook():
                                     'source': install_cell(old, new).splitlines(True)})
     for a, b in CONFIG:
         replace_once(nb['cells'], a, b)
-    nb['cells'][0]['source'] = ['# M2 F1 candidate\n', 'B1 plus friction fixes: sandbox stdlib preload and a 16K output cap '
+    nb['cells'][0]['source'] = ['# M2 F1 candidate\n', 'B1-fixed plus friction fixes: sandbox stdlib preload and a 16K output cap '
                                 '(input budget unchanged). See solvers/m2_f1/README.md.\n\n'] + nb['cells'][0]['source']
     return nb, sha(new)
 
@@ -105,15 +110,20 @@ def main():
         if (EXP / run / 'launch-attempt.json').exists():  # a launched run's notebook is evidence: never rebuild
             runs.append(previous[run]); continue
         runs.append({'run': run, **write(EXP / run / 'kernel', nb, slug, title)})
-    # The two screen arms must differ only by F1's install cell and config lines.
+    # The f1 arm minus F1's cell and config lines must be the B1-fixed notebook; B1-fixed may differ from B1
+    # only in its overlay cell (checked below), so the arms differ by nothing else.
     arms = [json.loads((EXP / r['run'] / 'kernel' / f"{r['slug']}.ipynb").read_text()) for r in runs]
     code = [[''.join(c['source']) for c in a['cells'] if c['cell_type'] == 'code'] for a in arms]
     f1_code = [s for s in code[0] if not s.startswith('# M2 F1:')]
     for a, b in CONFIG:
         f1_code = [s.replace(b, a) for s in f1_code]
-    assert f1_code == code[1], 'screen arms differ beyond F1'
+    base = screen(json.loads((BASE / BASE_NB).read_text()))
+    assert f1_code == [''.join(c['source']) for c in base['cells'] if c['cell_type'] == 'code'], 'f1 differs from B1-fixed beyond F1'
+    diff = [i for i, (x, y) in enumerate(zip(f1_code, code[1])) if x != y]
+    assert len(f1_code) == len(code[1]) and len(diff) == 1 and f1_code[diff[0]].startswith('# M2 B1: install'), diff
     (HERE / 'manifest.json').write_text(json.dumps({
         'b1_notebook_sha256': sha((B1 / 'kernel/m2-b1.ipynb').read_bytes()),
+        'b1_fixed_notebook_sha256': sha((BASE / BASE_NB).read_bytes()),
         'f1_notebook_sha256': kernel['notebook_sha256'], 'sandbox_after_sha256': sandbox_after,
         'preload_modules': PRELOAD_MODULES, 'config': CONFIG}, indent=2) + '\n')
     EXP.mkdir(exist_ok=True)

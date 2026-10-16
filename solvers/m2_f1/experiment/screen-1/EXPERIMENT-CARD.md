@@ -4,13 +4,14 @@
 
 **Posture:** Screen under the plan agreed on 2026-10-16. A piece is admitted if its mechanism visibly fires and it shows no harm (≤ 1 sd below the paired control). Score cannot see a gain this small.
 
-**Arms:** `screen-1/f1` = B1 (the D5 kernel's notebook, sha da5bef…) + F1. `screen-1/b1ctl` = B1. The two notebooks differ only in F1's install cell and three config lines; `build.py` asserts this. Both arms stop 60 min after server startup, set by `soft_end` in the interactive branch only. Games keep their full-run per-game caps, so the first 60 minutes match a full run.
+**Arms:** `screen-1/f1` = B1-fixed (`solvers/m2_b1_fixed`) + F1. `screen-1/b1ctl` = B1, the D5 kernel's notebook (sha da5bef…). The two notebooks differ only in B1-fixed's overlay cell, F1's install cell and three config lines; `build.py` asserts this. Both arms stop 60 min after server startup, set by `soft_end` in the interactive branch only. Games keep their full-run per-game caps, so the first 60 minutes match a full run.
 
 **F1 pieces (evidence: solvers/m2_f1/README.md):**
+- **api-text (from B1-fixed, added 2026-10-17 before launch):** B1's instructions told the model the frame has only five fields and that raw numeric grids are inaccessible. The sandbox already exposes `.grid`, `.rows`, `.counts` and `.cells(color)`, so both instructions now describe the real API. B1-fixed also corrects eviction counters, which is measurement only.
 - **preload:** the sandbox preloads bisect, collections, copy, functools, heapq, itertools, json, math and statistics. In B1 pair-1, about 8 NameErrors per run came from forgotten imports.
 - **out16k:** `LOCAL_ANALYZER_MAX_OUTPUT` 12K→16K, with window and server context each +4K, so the input budget is unchanged at 116K. In B1, 24–35 responses per run hit 12,288 tokens, almost all with no tool call.
 
-**Absent by declaration (`incumbent/check.py --without`):** c14, server-fail-fast and reap448 are not in the B1 notebook that was drawn as D5. F1 is a pure delta on that notebook.
+**Absent by declaration (`incumbent/check.py --without`):** c14, server-fail-fast and reap448 are not in the B1 notebook that was drawn as D5. F1 is a delta on B1-fixed, which differs from that notebook only in its overlay cell.
 
 **Prediction:** F1 shows 0 NameErrors on preloaded module names (b1ctl shows a few). F1 shows some responses ending between 12,289 and 16,384 completion tokens with a tool call; b1ctl can't. Levels: no detectable difference.
 
