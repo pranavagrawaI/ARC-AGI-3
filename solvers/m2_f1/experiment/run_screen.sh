@@ -1,0 +1,13 @@
+#!/bin/bash
+# Timer entry point for screen-1: launch once after the weekly quota reset, collect, analyze. Idempotent.
+set -u
+cd "$(dirname "$0")"
+KPY=/home/pranav/.local/share/uv/tools/kaggle/bin/python
+if [ ! -e screen-1/f1/launch-attempt.json ]; then
+  "$KPY" -B launch.py screen-1 || exit 1
+fi
+[ -e screen-1/f1/launch-response.json ] && [ -e screen-1/b1ctl/launch-response.json ] || { echo "not launched (admission refused?)"; exit 1; }
+for run in screen-1/f1 screen-1/b1ctl; do
+  [ -e "$run/output/benchmark.json" ] || "$KPY" -B collect.py "$run" || exit 1
+done
+[ -e screen-1/RESULT.json ] || python3 -B analyze.py screen-1
