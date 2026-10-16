@@ -3,9 +3,14 @@
 set -u
 cd "$(dirname "$0")"
 KPY=/home/pranav/.local/share/uv/tools/kaggle/bin/python
+# One launcher at a time account-wide: two screens admitted together would exceed the 2-session cap.
+exec 9>/tmp/arc-gpu-launch.lock
+flock 9
 if [ ! -e screen-1/f1/launch-attempt.json ]; then
   "$KPY" -B launch.py screen-1 || exit 1
 fi
+sleep 90  # let the new sessions show up in the next launcher's slot check
+flock -u 9
 [ -e screen-1/f1/launch-response.json ] && [ -e screen-1/b1ctl/launch-response.json ] || { echo "not launched (admission refused?)"; exit 1; }
 for run in screen-1/f1 screen-1/b1ctl; do
   [ -e "$run/output/benchmark.json" ] || "$KPY" -B collect.py "$run" || exit 1
