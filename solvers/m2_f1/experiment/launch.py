@@ -9,9 +9,10 @@ sys.path.insert(0, str(HERE.parents[2] / 'analysis/mtp-depth-20261006'))
 import launch_watch as lw  # quota_used_s, active_sessions, refresh_token (shared, already field-tested)
 lw.EVID = HERE  # keep this experiment's log lines out of mtp-depth's evidence
 
-CEILING_S = 3.5 * 3600
+CEILING_S = 7.0 * 3600  # 3.5 h per screen; screen-2 approved by Pranav 2026-10-17
 WEEKLY_CAP_S = 30 * 3600
-GROUPS = {'screen-1': (['screen-1/f1', 'screen-1/b1ctl'], 6000)}
+GROUPS = {'screen-1': (['screen-1/f1', 'screen-1/b1ctl'], 6000),
+          'screen-2': (['screen-2/f1x', 'screen-2/b1ctl'], 6000)}
 LEDGER = HERE / 'budget.json'
 
 def now(): return dt.datetime.now(dt.timezone.utc).isoformat()
@@ -50,7 +51,7 @@ def main():
     if used + cap * len(runs) > WEEKLY_CAP_S:
         reasons.append(f'weekly quota: used {used/3600:.2f} h + {cap*len(runs)/3600:.2f} h > 30 h')
     if committed_s(ledger) + cap * len(runs) > CEILING_S:
-        reasons.append(f'experiment ceiling: committed {committed_s(ledger)/3600:.2f} h + {cap*len(runs)/3600:.2f} h > 3.5 h')
+        reasons.append(f'experiment ceiling: committed {committed_s(ledger)/3600:.2f} h + {cap*len(runs)/3600:.2f} h > {CEILING_S/3600:.1f} h')
     print(f'{now()} {group}: quota used {used/3600:.2f} h, active {active}, committed {committed_s(ledger)/3600:.2f} h:',
           'READY' if not reasons else '; '.join(reasons))
     if dry or reasons:

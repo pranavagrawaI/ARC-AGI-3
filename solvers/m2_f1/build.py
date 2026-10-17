@@ -69,8 +69,8 @@ def replace_once(cells, old, new):
     hits[0]['source'] = ''.join(hits[0]['source']).replace(old, new).splitlines(True)
 
 
-def f1_notebook():
-    nb = json.loads((BASE / BASE_NB).read_text())
+def f1_notebook(base_nb=BASE / BASE_NB, header='B1-fixed plus friction fixes'):
+    nb = json.loads(base_nb.read_text())
     old, new = patched_sandbox()
     idx = [i for i, c in enumerate(nb['cells']) if ''.join(c['source']).startswith(B1_INSTALL)]
     assert len(idx) == 1
@@ -78,7 +78,7 @@ def f1_notebook():
                                     'source': install_cell(old, new).splitlines(True)})
     for a, b in CONFIG:
         replace_once(nb['cells'], a, b)
-    nb['cells'][0]['source'] = ['# M2 F1 candidate\n', 'B1-fixed plus friction fixes: sandbox stdlib preload and a 16K output cap '
+    nb['cells'][0]['source'] = ['# M2 F1 candidate\n', f'{header}: sandbox stdlib preload and a 16K output cap '
                                 '(input budget unchanged). See solvers/m2_f1/README.md.\n\n'] + nb['cells'][0]['source']
     return nb, sha(new)
 
@@ -96,6 +96,32 @@ def write(d, nb, slug, title):
     meta.update(id=f'pranavagrawai/{slug}', title=title, code_file=f'{slug}.ipynb', is_private=True)
     (d / 'kernel-metadata.json').write_text(json.dumps(meta, indent=2) + '\n')
     return {'slug': slug, 'notebook_sha256': sha((d / f'{slug}.ipynb').read_bytes()), 'metadata': meta}
+
+
+def code_cells(nb):
+    return [''.join(c['source']) for c in nb['cells'] if c['cell_type'] == 'code']
+
+
+def screen2(previous):
+    """screen-2 (2026-10-17): F1 minus the B1-fixed frame-API rewrite (f1x = B1 + preload + out16k) vs a fresh B1
+    control. f1 and the lexicon arm, the two arms that rewrite the frame text, both started ~15% slower."""
+    b1_path = B1 / 'kernel/m2-b1.ipynb'
+    f1x, _ = f1_notebook(b1_path, 'B1 (frame-API text untouched) plus friction fixes')
+    b1 = json.loads(b1_path.read_text())
+    runs = []
+    for run, nb, slug, title in [('screen-2/f1x', screen(f1x), 'm2-f1-screen2-f1x', 'M2 F1 screen2 f1x'),
+                                 ('screen-2/b1ctl', screen(b1), 'm2-f1-screen2-b1ctl', 'M2 F1 screen2 b1ctl')]:
+        if (EXP / run / 'launch-attempt.json').exists():
+            runs.append(previous[run]); continue
+        runs.append({'run': run, **write(EXP / run / 'kernel', nb, slug, title)})
+    arms = [json.loads((EXP / r['run'] / 'kernel' / f"{r['slug']}.ipynb").read_text()) for r in runs]
+    f1x_code = [s for s in code_cells(arms[0]) if not s.startswith('# M2 F1:')]
+    for a, b in CONFIG:
+        f1x_code = [s.replace(b, a) for s in f1x_code]
+    assert f1x_code == code_cells(arms[1]), 'f1x differs from the B1 control beyond F1'
+    screen1_ctl = EXP / 'screen-1/b1ctl/kernel/m2-f1-screen1-b1ctl.ipynb'
+    assert code_cells(arms[1]) == code_cells(json.loads(screen1_ctl.read_text())), 'screen-2 control != screen-1 control'
+    return runs
 
 
 def main():
@@ -121,6 +147,7 @@ def main():
     assert f1_code == [''.join(c['source']) for c in base['cells'] if c['cell_type'] == 'code'], 'f1 differs from B1-fixed beyond F1'
     diff = [i for i, (x, y) in enumerate(zip(f1_code, code[1])) if x != y]
     assert len(f1_code) == len(code[1]) and len(diff) == 1 and f1_code[diff[0]].startswith('# M2 B1: install'), diff
+    runs += screen2(previous)
     (HERE / 'manifest.json').write_text(json.dumps({
         'b1_notebook_sha256': sha((B1 / 'kernel/m2-b1.ipynb').read_bytes()),
         'b1_fixed_notebook_sha256': sha((BASE / BASE_NB).read_bytes()),
