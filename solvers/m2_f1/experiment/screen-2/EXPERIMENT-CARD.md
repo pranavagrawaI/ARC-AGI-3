@@ -35,3 +35,22 @@ Both arms stop 60 min after server startup.
 **After:** the candidate gets a full-length kernel (no SCREEN soft_end) and enters `analysis/hidden-draws-20261010/queue.json` for the next daily draw.
 
 **Cap:** one launch per arm, hard cap 6,000 s each, 2 slots. Admission requires quota used + 3.34 h ≤ 30 h. No retry except for a proven infrastructure failure. No submission from this experiment.
+
+## Addendum: hidden-draw read rule (2026-10-17, approved by Pranav, fixed before either draw)
+
+**Result:** f1x 76 vs b1ctl 72, no-harm PASS. The rule above selects F1x (R = 1.06), but that call is void. Control actions@30 span 1160–1323 across runs and cover both rewrite arms, so tempo at n=1 cannot resolve a 15% effect.
+
+**What separates F1 from F1x** (code diff of the two kernels):
+- The frame-API prompt text, in `prompts.py` and the `tool_agent.py` tool description.
+- B1-fixed's schema-2 eviction counters. Their extra state is read only for counting, so they can't change play.
+
+The text change shifts behavior. In model code across 25 games, f1 used `.rows` 596×, `.grid` 121×, `.cells(` 98× and `.ascii` 111×. f1x used `.rows` 0×, `.grid` 2× and `.ascii` 448×. Its level effect is unmeasured: f1 was −3 vs its control and f1x +4 vs its own, a difference-of-differences of 7 with sd ≈ 9.
+
+**Draws:** D9 (2026-10-18) = F1 (`m2-f1-screen1-f1` v1, card `analysis/hidden-draws-20261010/d9-f1/`). D10 (2026-10-19) = F1x (`m2-f1-screen2-f1x` v1).
+
+**Read rule:** hidden sd ≈ 3, so the D9 − D10 difference has sd ≈ 4.
+- If D9 ≥ D10 + 6, **F1** is the friction candidate.
+- Otherwise **F1x** is the candidate. It is the smaller change from B1, the only drawn parent (26.96), and F1's raw-grid shift has no evidence that it pays.
+- If either draw is invalid, there's no read. F1x stays the default and no retry is automatic.
+
+This picks between the two variants only. Whether the friction bundle beats control is still judged against the control draws (ledger mean, D8 pending), and D9's own ≥30 result map still applies.
