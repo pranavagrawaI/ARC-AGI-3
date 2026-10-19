@@ -1,4 +1,4 @@
-"""Standing daily draw: submit today's queued candidate, else the incumbent. Something runs every day.
+"""Standing daily draw: submit today's queued candidate, else the fallback candidate (F1x since 10-18). Something runs every day.
 
   daily_draw.py            (run by arc-hidden-draw-daily.timer, hourly at :30 UTC)
 
@@ -16,6 +16,12 @@ KAGGLE_PY = "/home/pranav/.local/share/uv/tools/kaggle/bin/python"
 FALLBACK_HOUR = 10  # UTC (15:30 IST); was 20, but 20-24Z is 01:30-05:30 IST when the laptop sleeps: D6 (10-15) was lost
 INCUMBENT = ("pranavagrawai/dfranzen-m2-raw", "1",
              "(incumbent, no candidate ready): unchanged dfranzen M2, byte-identical to 56747536/D2.")
+# From 2026-10-19 the empty-queue fallback is the newest no-harm candidate, not the control (Pranav, 10-18):
+# five control draws anchor the finals already, a sixth adds no information, and an equal-ticket candidate does.
+# The private LB is the other 55 games of the same run (draw-variance-20261018), so every draw is a finals ticket.
+FALLBACK = ("pranavagrawai/m2-f1-screen2-f1x", "1",
+            "(fallback candidate, F1x, no new candidate queued): B1 + stdlib preload + 16K output cap; "
+            "screen-2 no-harm PASS 76 vs b1ctl 72 at 60 min public-25.")
 
 
 def main():
@@ -32,7 +38,7 @@ def main():
             f.write(f"{dt.datetime.now(dt.timezone.utc).isoformat()} {draw}: note, {yesterday} slot went unused\n")
     if not entry and dt.datetime.now(dt.timezone.utc).hour < FALLBACK_HOUR:
         return  # leave the day open for a candidate that passes its smoke later
-    kernel, version, message = (entry["kernel"], str(entry["version"]), entry["message"]) if entry else INCUMBENT
+    kernel, version, message = (entry["kernel"], str(entry["version"]), entry["message"]) if entry else FALLBACK
     sys.exit(subprocess.run([KAGGLE_PY, "-B", str(HERE / "submit_draw.py"), draw, kernel, version, message,
                              "--not-before", today.isoformat()], cwd=HERE).returncode)
 

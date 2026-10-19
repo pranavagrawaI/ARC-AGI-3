@@ -1,0 +1,115 @@
+--- parent/cell-5
++++ probe/cell-5
+@@ -32,7 +32,9 @@
+ print('harness patch applied successfully')
+ 
+ # True only inside a real competition rerun; switches diagnostics + soft deadline.
+-TRUE_SUBMISSION = os.environ.get("KAGGLE_IS_COMPETITION_RERUN", "").strip().lower() in {"1", "true"}
++if os.environ.get("KAGGLE_IS_COMPETITION_RERUN", "").strip().lower() in {"1", "true"}:
++    raise RuntimeError("Diagnostic only; never submit this probe")
++TRUE_SUBMISSION = True  # Emulate production flags; local public competition server.
+ NOTEBOOK_START_EPOCH = time.time()
+ 
+ # Non-interactive matplotlib backend: diagnostics render plots with no display attached.
+--- parent/cell-23
++++ probe/cell-23
+@@ -60,6 +60,25 @@
+ # mode, environments dir, and base url are all passed explicitly via the spec, so no env is needed.
+ os.environ.setdefault("RECORDINGS_DIR", str(WORKING_DIR / "server_recording"))
+ 
++# Probe-only local server, exposing 110 unique clones of public games.
++import types
++_probe_gateway = types.ModuleType('_f1x_probe_gateway')
++sys.modules[_probe_gateway.__name__] = _probe_gateway
++exec(compile('"""Local competition-mode ARC-AGI Arcade simulator (R11.13).\n\nThe real Kaggle submission path talks to a gateway-backed Arcade with\ncompetition constraints: one scorecard, hidden baselines, and no repeated\ngame IDs within that scorecard. This module starts the same ``arc_agi``\nREST app on localhost against the bundled offline games so those failures\ncan be reproduced before submission.\n"""\n\nfrom __future__ import annotations\n\nimport copy\nimport json\nimport logging\nimport socketserver\nimport threading\nimport time\nfrom collections.abc import Sequence\nfrom dataclasses import dataclass, field\nfrom typing import Any\nfrom urllib.error import URLError\nfrom urllib.request import urlopen\nfrom wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server\n\nimport arc_agi\nfrom arc_agi.models import EnvironmentInfo\n\nimport taaf.game_api\n\n_LOGGER = logging.getLogger("taaf.competition_arcade")\n_LOGGER.setLevel(logging.WARNING)\n\nDEFAULT_API_KEY = "test-key-123"\nDEFAULT_HOST = "127.0.0.1"\nDEFAULT_CLONE_PREFIX = "k"\nOFFICIAL_110_RUN_COUNT = 110\n\n\nclass _ThreadingWSGIServer(socketserver.ThreadingMixIn, WSGIServer):\n    daemon_threads = True\n\n\nclass _QuietWSGIRequestHandler(WSGIRequestHandler):\n    def log_message(self, format: str, *args: object) -> None:\n        return\n\n\n_OFFICIAL_GAME_IDS: tuple[str, ...] = (\n    "tn36-ef4dde99", "lf52-271a04aa", "cn04-2fe56bfb", "bp35-0a0ad940",\n    "wa30-ee6fef47", "lp85-305b61c3", "r11l-495a7899", "tu93-0768757b",\n    "sp80-589a99af", "m0r0-492f87ba", "vc33-5430563c", "ar25-0c556536",\n    "ka59-38d34dbb", "sc25-635fd71a", "sk48-d8078629", "dc22-fdcac232",\n    "cd82-fb555c5d", "ft09-0d8bbf25", "g50t-5849a774", "ls20-9607627b",\n    "re86-8af5384d", "s5i5-18d95033", "sb26-7fbdac44", "su15-1944f8ab",\n    "tr87-cd924810",\n)\n\n\ndef official_game_ids() -> tuple[str, ...]:\n    """Return the 25 public official game IDs used for Kaggle smoke runs.\n\n    Hardcoded so the build carries no external dataset dependency.\n    """\n    if len(_OFFICIAL_GAME_IDS) != 25:\n        raise RuntimeError(f"Expected 25 official games, got {len(_OFFICIAL_GAME_IDS)}.")\n    return _OFFICIAL_GAME_IDS\n\n\ndef clone_game_ids(\n    source_game_ids: Sequence[str],\n    *,\n    total_runs: int,\n    clone_prefix: str = DEFAULT_CLONE_PREFIX,\n) -> list[str]:\n    """Return unique 4-character game IDs for a competition-compatible pass.\n\n    ``arc_agi`` competition scorecards can only create one run per game ID.\n    Repeating a 25-game list to 110 entries therefore needs cloned IDs on\n    the simulator side. The cloned IDs are stable, compact, and hyphen-free\n    so the engine treats each one as a distinct base game.\n    """\n    if not source_game_ids:\n        raise ValueError("source_game_ids must be non-empty.")\n    if total_runs <= 0:\n        raise ValueError("total_runs must be positive.")\n    if not clone_prefix or len(clone_prefix) > 1:\n        raise ValueError("clone_prefix must be a single character.")\n    if total_runs > 1000:\n        raise ValueError("clone_game_ids supports at most 1000 runs for 4-character clone IDs.")\n    return [f"{clone_prefix}{i:03d}" for i in range(total_runs)]\n\n\ndef cloned_environment_infos(\n    available_environments: Sequence[EnvironmentInfo],\n    source_game_ids: Sequence[str],\n    *,\n    total_runs: int,\n    clone_prefix: str = DEFAULT_CLONE_PREFIX,\n) -> list[EnvironmentInfo]:\n    """Clone selected ``EnvironmentInfo`` entries with unique game IDs."""\n    clone_ids = clone_game_ids(source_game_ids, total_runs=total_runs, clone_prefix=clone_prefix)\n    source_infos = [_find_environment_info(available_environments, game_id) for game_id in source_game_ids]\n    out: list[EnvironmentInfo] = []\n    for i, clone_id in enumerate(clone_ids):\n        source = source_infos[i % len(source_infos)]\n        private_tags = list(source.private_tags or [])\n        private_tags.append(f"taaf_source_game:{source.game_id}")\n        out.append(\n            source.model_copy(\n                deep=True,\n                update={\n                    "game_id": clone_id,\n                    "private_tags": private_tags,\n                },\n            )\n        )\n    return out\n\n\ndef make_competition_arcade_spec(base_url: str) -> taaf.game_api.ArcadeSpec:\n    """Build a ``GameAPI`` spec that talks to a competition-mode REST Arcade."""\n    return taaf.game_api.ArcadeSpec(\n        operation_mode=arc_agi.OperationMode.COMPETITION,\n        arc_base_url=base_url,\n        environments_dir="",\n    )\n\n\n@dataclass\nclass CompetitionArcadeServer:\n    """Context-managed localhost competition Arcade server.\n\n    By default this exposes the 25 official games once each. Use\n    ``official_110()`` to expose the R2.57 110-run clone set.\n    """\n\n    game_ids: Sequence[str] = field(default_factory=official_game_ids)\n    total_runs: int | None = None\n    clone_prefix: str = DEFAULT_CLONE_PREFIX\n    host: str = DEFAULT_HOST\n    port: int = 0\n    api_key: str = DEFAULT_API_KEY\n    environments_dir: str = taaf.game_api._AUTO_ENV_DIR\n    include_frame_data: bool = True\n    save_all_recordings: bool = False\n\n    _arcade: arc_agi.Arcade | None = field(default=None, init=False, repr=False)\n    _app: Any | None = field(default=None, init=False, repr=False)\n    _api: Any | None = field(default=None, init=False, repr=False)\n    _server: Any | None = field(default=None, init=False, repr=False)\n    _thread: threading.Thread | None = field(default=None, init=False, repr=False)\n    _base_url: str | None = field(default=None, init=False, repr=False)\n\n    @classmethod\n    def official_110(\n        cls,\n        *,\n        host: str = DEFAULT_HOST,\n        port: int = 0,\n        clone_prefix: str = DEFAULT_CLONE_PREFIX,\n    ) -> CompetitionArcadeServer:\n        """Expose 110 cloned official games for the submission-shaped benchmark."""\n        return cls(\n            game_ids=official_game_ids(),\n            total_runs=OFFICIAL_110_RUN_COUNT,\n            clone_prefix=clone_prefix,\n            host=host,\n            port=port,\n        )\n\n    @property\n    def base_url(self) -> str:\n        if self._base_url is None:\n            raise RuntimeError("CompetitionArcadeServer has not been started.")\n        return self._base_url\n\n    @property\n    def arcade_spec(self) -> taaf.game_api.ArcadeSpec:\n        return make_competition_arcade_spec(self.base_url)\n\n    @property\n    def exposed_game_ids(self) -> list[str]:\n        if self._arcade is None:\n            raise RuntimeError("CompetitionArcadeServer has not been started.")\n        return [env.game_id for env in self._arcade.available_environments]\n\n    def start(self) -> CompetitionArcadeServer:\n        if self._server is not None:\n            return self\n\n        arcade = arc_agi.Arcade(\n            operation_mode=arc_agi.OperationMode.OFFLINE,\n            environments_dir=taaf.game_api._resolve_environments_dir(self.environments_dir),\n            logger=_LOGGER,\n        )\n        arcade.available_environments = self._build_exposed_environments(arcade.available_environments)\n\n        from arc_agi import server as arc_agi_server\n\n        app, api = arc_agi_server.create_app(\n            arcade,\n            competition_mode=True,\n            save_all_recordings=self.save_all_recordings,\n            include_frame_data=self.include_frame_data,\n        )\n\n        def _anon_key() -> tuple[str, int, dict[str, str]]:\n            return json.dumps({"api_key": self.api_key}), 200, {"Content-Type": "application/json"}\n\n        app.add_url_rule("/api/games/anonkey", methods=["GET"], view_func=_anon_key, endpoint="anon_key")\n        server = make_server(\n            self.host,\n            self.port,\n            app,\n            server_class=_ThreadingWSGIServer,\n            handler_class=_QuietWSGIRequestHandler,\n        )\n        self._arcade = arcade\n        self._app = app\n        self._api = api\n        self._server = server\n        self._base_url = f"http://{self.host}:{server.server_port}"\n        self._thread = threading.Thread(target=server.serve_forever, name="taaf-competition-arcade", daemon=True)\n        self._thread.start()\n        self._wait_until_ready()\n        return self\n\n    def stop(self) -> None:\n        server = self._server\n        thread = self._thread\n        self._server = None\n        self._thread = None\n        if server is not None:\n            server.shutdown()\n        if thread is not None:\n            thread.join(timeout=5.0)\n\n    def __enter__(self) -> CompetitionArcadeServer:\n        return self.start()\n\n    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:\n        self.stop()\n\n    def _build_exposed_environments(self, available: Sequence[EnvironmentInfo]) -> list[EnvironmentInfo]:\n        game_ids = tuple(self.game_ids)\n        if self.total_runs is not None:\n            return cloned_environment_infos(\n                available,\n                game_ids,\n                total_runs=self.total_runs,\n                clone_prefix=self.clone_prefix,\n            )\n        return [copy.deepcopy(_find_environment_info(available, game_id)) for game_id in game_ids]\n\n    def _wait_until_ready(self) -> None:\n        deadline = time.monotonic() + 10.0\n        last_error = ""\n        while time.monotonic() < deadline:\n            try:\n                with urlopen(f"{self.base_url}/api/healthcheck", timeout=1.0) as response:\n                    if response.status == 200:\n                        return\n            except (OSError, URLError) as exc:\n                last_error = repr(exc)\n            time.sleep(0.05)\n        raise RuntimeError(f"Competition Arcade did not become ready: {last_error}")\n\n\ndef _find_environment_info(available: Sequence[EnvironmentInfo], game_id: str) -> EnvironmentInfo:\n    by_id = {env.game_id: env for env in available}\n    if game_id in by_id:\n        return by_id[game_id]\n    base_id = game_id.split("-", 1)[0]\n    for env in available:\n        if env.game_id.split("-", 1)[0] == base_id:\n            return env\n    raise ValueError(f"Game {game_id!r} is not available in the local ARC environment files.")\n', '<probe-gateway>', 'exec'), _probe_gateway.__dict__)
++_probe_server = _probe_gateway.CompetitionArcadeServer.official_110()
++_probe_server.environments_dir = str(Path('/kaggle/input/competitions/arc-prize-2026-arc-agi-3/environment_files'))
++_probe_server.start()
++os.environ['ARC_BASE_URL'] = _probe_server.base_url + '/'
++os.environ['ARC_API_KEY'] = _probe_server.api_key
++_probe_config = dict(emulated_competition=True, actual_competition_rerun=False,
++    concurrency=bm.solver.concurrency, save_request_logs=bm.solver.save_request_logs,
++    minimal_diagnostics=os.environ['TAAF_MINIMAL_DIAGNOSTICS'],
++    games=len(_probe_server.exposed_game_ids), play_cap_s=900)
++assert _probe_config['concurrency'] == 120 and _probe_config['save_request_logs'] is False
++assert _probe_config['minimal_diagnostics'] == '1' and _probe_config['games'] == 110
++(WORKING_DIR / 'probe-config.json').write_text(json.dumps(_probe_config, indent=2))
++print('PROBE_CONFIG', json.dumps(_probe_config), flush=True)
++
+ if TRUE_SUBMISSION:
+     # Real submission: play the live competition Arcade served by the Kaggle gateway.
+     os.environ.setdefault("ARC_API_KEY", "test-key-123")
+@@ -81,7 +100,72 @@
+         soft_end = datetime.now() + timedelta(seconds=60*60)  # SCREEN: 60 min of play after server startup
+ 
+ # Play the benchmark; teardown commands run even if the run raises.
+-await bm.run(soft_end_time=soft_end, runtime_environment=target, minimal_diagnostics=TRUE_SUBMISSION)
++"""Probe-only evidence capture; embedded into the diagnostic notebook."""
++import json
++import threading
++import time
++import traceback
++
++
++def probe_snapshot(benchmark):
++    rows = []
++    for run in list(benchmark.game_runs):
++        rows.append({
++            'game_id': run.game_id, 'state': run.state,
++            'actions': len(run.history), 'levels': run.levels_completed,
++            'tokens': run.final_generated_tokens, 'solver_note': run.solver_note,
++        })
++    return {'time': time.time(), 'games': rows}
++
++
++async def probe_run(benchmark, target, working, soft_end, server):
++    stop = threading.Event()
++    progress = working / 'probe-progress.jsonl'
++
++    def sample():
++        while not stop.is_set():
++            try:
++                row = probe_snapshot(benchmark)
++                with progress.open('a') as stream:
++                    stream.write(json.dumps(row) + '\n')
++            except Exception:
++                with (working / 'probe-observer-errors.txt').open('a') as stream:
++                    stream.write(traceback.format_exc())
++            stop.wait(15)
++
++    observer = threading.Thread(target=sample, daemon=True)
++    observer.start()
++    try:
++        await benchmark.run(soft_end_time=soft_end, runtime_environment=target,
++                            minimal_diagnostics=True)
++    except BaseException:
++        (working / 'probe-exception.txt').write_text(traceback.format_exc())
++        raise
++    finally:
++        stop.set()
++        observer.join(timeout=3)
++        try:
++            final = probe_snapshot(benchmark)
++            (working / 'probe-final.json').write_text(json.dumps(final, indent=2) + '\n')
++            print('PROBE_FINAL', json.dumps(final), flush=True)
++        finally:
++            server.stop()
++    rows = final['games']
++    bad = [r for r in rows if r['state'] == 'crashed'
++           or str(r['solver_note'] or '').startswith(('error:', 'analyzer failed'))]
++    gates = {
++        '110_unique_games': len(rows) == len({r['game_id'] for r in rows}) == 110,
++        'no_game_errors': not bad,
++        '10_games_with_actions': sum(r['actions'] > 0 for r in rows) >= 10,
++        'reported_generated_tokens': sum(r['tokens'] for r in rows) > 0,
++    }
++    (working / 'probe-gates.json').write_text(json.dumps(gates, indent=2) + '\n')
++    if not all(gates.values()):
++        raise RuntimeError('Production probe failed: ' + json.dumps(gates))
++    print('PROBE_OPERATIONAL_PASS', flush=True)
++
++soft_end = datetime.now() + timedelta(seconds=900)  # Probe-only cap.
++await probe_run(bm, target, WORKING_DIR, soft_end, _probe_server)
+ if not TRUE_SUBMISSION:
+     # An offline run isn't scored, but Kaggle still expects a submission.parquet output.
+     import pandas as pd
