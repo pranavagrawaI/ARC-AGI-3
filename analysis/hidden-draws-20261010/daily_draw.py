@@ -2,7 +2,8 @@
 
   daily_draw.py            (run by arc-hidden-draw-daily.timer, hourly at :30 UTC)
 
-queue.json maps a UTC date to {"kernel", "version", "message"}; a candidate goes there only after its smoke passed.
+queue.json maps a UTC date to {"kernel", "version", "message"[, "requires": ["D11", ...]]}; a candidate goes there
+only after its smoke passed. With "requires", it is submitted only once those draws are COMPLETE with a score above 0.
 Draw labels are D4 on 2026-10-13, D5 on 2026-10-14, ... so every day has one stable tag and submit_draw.py
 stays idempotent. Plan (2026-10-13, Pranav): gold target; the slot goes to the candidate that resolves a path
 fastest; second draws only on slack days and only for arms whose first draw was >= 30; from 2026-10-30
@@ -13,12 +14,12 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 KAGGLE_PY = "/home/pranav/.local/share/uv/tools/kaggle/bin/python"
+REQUIRES_FAILED, REQUIRES_PENDING = 3, 4  # submit_draw.py exit codes for a queue entry's "requires"
 FALLBACK_HOUR = 10  # UTC (15:30 IST); was 20, but 20-24Z is 01:30-05:30 IST when the laptop sleeps: D6 (10-15) was lost
-INCUMBENT = ("pranavagrawai/dfranzen-m2-raw", "1",
-             "(incumbent, no candidate ready): unchanged dfranzen M2, byte-identical to 56747536/D2.")
 # From 2026-10-19 the empty-queue fallback is the newest no-harm candidate, not the control (Pranav, 10-18):
 # five control draws anchor the finals already, a sixth adds no information, and an equal-ticket candidate does.
 # The private LB is the other 55 games of the same run (draw-variance-20261018), so every draw is a finals ticket.
+# F1x is also the incumbent stack in incumbent/stack.json since 2026-10-20.
 FALLBACK = ("pranavagrawai/m2-f1-screen2-f1x", "1",
             "(fallback candidate, F1x, no new candidate queued): B1 + stdlib preload + 16K output cap; "
             "screen-2 no-harm PASS 76 vs b1ctl 72 at 60 min public-25.")
@@ -38,9 +39,26 @@ def main():
             f.write(f"{dt.datetime.now(dt.timezone.utc).isoformat()} {draw}: note, {yesterday} slot went unused\n")
     if not entry and dt.datetime.now(dt.timezone.utc).hour < FALLBACK_HOUR:
         return  # leave the day open for a candidate that passes its smoke later
-    kernel, version, message = (entry["kernel"], str(entry["version"]), entry["message"]) if entry else FALLBACK
-    sys.exit(subprocess.run([KAGGLE_PY, "-B", str(HERE / "submit_draw.py"), draw, kernel, version, message,
-                             "--not-before", today.isoformat()], cwd=HERE).returncode)
+
+    def submit(kernel, version, message, requires=()):
+        cmd = [KAGGLE_PY, "-B", str(HERE / "submit_draw.py"), draw, kernel, version, message, "--not-before", today.isoformat()]
+        return subprocess.run(cmd + (["--requires", ",".join(requires)] if requires else []), cwd=HERE).returncode
+
+    if not entry:
+        sys.exit(submit(*FALLBACK))
+    rc = submit(entry["kernel"], str(entry["version"]), entry["message"], entry.get("requires", ()))
+    if fall_back(rc, dt.datetime.now(dt.timezone.utc).hour):
+        why = "failed" if rc == REQUIRES_FAILED else "still pending at the fallback hour"
+        kernel, version, message = FALLBACK
+        rc = submit(kernel, version, message.replace("no new candidate queued",
+                                                     f"queued {entry['kernel']} held: {','.join(entry['requires'])} {why}"))
+    sys.exit(0 if rc == REQUIRES_PENDING else rc)
+
+
+def fall_back(rc, hour):
+    """A queued candidate whose required draws failed yields the day at once; one still pending waits until the
+    fallback hour, so a slow prerequisite can't cost the day (the laptop sleeps 17:30Z-03:00Z)."""
+    return rc == REQUIRES_FAILED or (rc == REQUIRES_PENDING and hour >= FALLBACK_HOUR)
 
 
 if __name__ == "__main__":
