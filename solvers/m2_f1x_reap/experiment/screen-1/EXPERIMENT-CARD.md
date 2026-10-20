@@ -36,3 +36,22 @@
 **Cap:** one launch, hard cap 6,000 s, one GPU slot. Play is 3,600 s plus at most 1,300 s to READY. Admission requires quota used + 1.67 h ≤ 30 h and a free slot. No retry except for a proven infrastructure failure. This experiment makes no submission; the queue entry is the only output that reaches the draw.
 
 **Known risk carried by D11, not this arm:** REAP v1's late-READY limit is fatal in competition mode. In 1 of 32 dfranzen-family kernels, weight load alone took over 1,200 s, so D11 has roughly a 3% chance of dying on a slow disk. The merge gates that limit to screens.
+
+## Result (2026-10-20, kernel 139766262 v1, COMPLETE at 08:16Z, ~1.25 GPU-h)
+
+**PASS.** 80 levels at 60 minutes, against a floor of 64 (pool mean 71). All ten mechanism checks held:
+
+| Measure | Merge | Prediction | F1x |
+|---|---|---|---|
+| Pool tokens | 1,471,936 | about 1.47M | 1,012,736 |
+| Aggregate tok/s, min 0–60 | 823 | about 830 | 697 |
+| Per-stream tok/s | 63.4 | — | 75.8 |
+| KV usage p50 / p90 | 0.64 / 0.80 | p90 0.78–0.86 | 0.62 / 0.81 |
+| Retractions | 0 | — | — |
+| READY | 676 s | — | — |
+
+Tempo: 46 / 62 / 80 levels at minutes 30 / 45 / 60, 1,361 actions at minute 30, and 993 tokens per action. `check.py --logs` shows every piece carried, log markers included.
+
+80 levels is above every B1-lineage screen (65, 72, 76) and equal to the raw control's 80. That is about +1 replicate sd over the pool mean, so it is no efficacy claim. Queued by `queue_candidate.py` for 2026-10-22 with requires [D11, D12].
+
+The first collection hit a broken download (`IncompleteRead`) that left `benchmark.json` without `serve.log`. `collect.py` now stages the download and renames it only when complete, and charges the session up to the first terminal status.

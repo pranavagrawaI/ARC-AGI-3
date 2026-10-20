@@ -1,6 +1,6 @@
 """Poll a launched run until terminal, then download its output once and record session seconds in budget.json.
 ~/.local/share/uv/tools/kaggle/bin/python -B collect.py screen-1/merge"""
-import datetime as dt, json, sys, time
+import datetime as dt, json, shutil, sys, time
 from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[2] / 'analysis/mtp-depth-20261006'))
@@ -27,14 +27,23 @@ def main():
             if any(s in status for s in ('COMPLETE', 'ERROR', 'CANCEL')):
                 break
             time.sleep(120)
-        out = d / 'output'; out.mkdir(exist_ok=True)
+        # Download into a staging dir and rename when complete: a broken transfer (2026-10-20 IncompleteRead) left
+        # benchmark.json without serve.log, which run_screen.sh would have taken for a finished collection.
+        out, part = d / 'output', d / 'output.partial'
+        if part.exists():
+            shutil.rmtree(part)
+        part.mkdir()
         try:
-            api.kernels_output(ref, path=str(out), force=True, quiet=True)
+            api.kernels_output(ref, path=str(part), force=True, quiet=True)
         except TypeError:
-            api.kernels_output(ref, path=str(out))
+            api.kernels_output(ref, path=str(part))
+        if out.exists():
+            shutil.rmtree(out)
+        part.rename(out)
         rows = [json.loads(l) for l in hist.read_text().splitlines()]
         start = json.loads((d / 'launch-attempt.json').read_text())['utc']
-        wall = (dt.datetime.fromisoformat(rows[-1]['utc']) - dt.datetime.fromisoformat(start)).total_seconds()
+        ended = next(r for r in rows if any(s in r['status'] for s in ('COMPLETE', 'ERROR', 'CANCEL')))
+        wall = (dt.datetime.fromisoformat(ended['utc']) - dt.datetime.fromisoformat(start)).total_seconds()
         ledger = json.loads(LEDGER.read_text())
         for r in ledger['runs']:
             if r['run'] == run.rstrip('/'):
