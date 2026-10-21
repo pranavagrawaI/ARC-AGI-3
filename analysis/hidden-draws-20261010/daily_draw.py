@@ -1,4 +1,5 @@
-"""Standing daily draw: submit today's queued candidate, else the fallback candidate (F1x since 10-18). Something runs every day.
+"""Standing daily draw: submit today's queued candidate, else the fallback candidate (F1x since 10-18).
+Exact-version submission quarantine takes precedence and can leave the slot unused.
 
   daily_draw.py            (run by arc-hidden-draw-daily.timer, hourly at :30 UTC)
 

@@ -1,5 +1,7 @@
 # Hidden draws: the daily submission as the instrument
 
+Current containment (2026-10-21): `submit_draw.py` checks [quarantine.json](quarantine.json) before contacting Kaggle. F1 v1 and F1x v1 are held after their unexplained COMPLETE-zero draws; exit 5 does not authorize another fallback. The Oct 22 merge's failed D12 prerequisite therefore leads to a quarantined fallback, not another F1x submission. An eligible, separately qualified successor must be selected before the slot is used. A missing or malformed policy fails closed. See [verification](quarantine-20261021/FINDINGS.md).
+
 Started 2026-10-10. Each daily submission scores 110 hidden games (55 on the public board).
 Alternate a candidate with the unchanged control so that every candidate draw has a neighbouring control draw.
 Deadline 2026-11-02; merger deadline 2026-10-26.

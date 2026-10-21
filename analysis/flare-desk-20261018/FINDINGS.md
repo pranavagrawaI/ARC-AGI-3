@@ -1,5 +1,9 @@
 # FLARE serving runtime: desk check (2026-10-18, no GPU, binary not executed)
 
+> **Retired from active work on 2026-10-21, at Pranav's direction.** The desk check below is historical; GPU tests subsequently completed. [Smoke 3d](smoke3d/RESULT.md) failed the speed gate with image-bearing traffic; [smoke 3e](smoke3e/RESULT.md) also failed after replacing every image with a fixed placeholder. Its best-case overlap rate was 500.8 tok/s against the historical full-image SGLang reference of 477.6 (1.05x; stopping threshold 1.10x). These are different workloads, not a matched engine comparison. Preserve all receipts and failed evidence. Reopen only for a materially changed build with finer-grained prefix snapshots, adequate image capacity, and evidence of a useful gain on long-context agent traffic.
+
+> **Reference correction, 2026-10-21:** the historical SGLang run was itself graded [INVALID WORKLOAD](../mtp-depth-retry1-readout-20261008/READOUT.md): mean running requests 8.051 fell below its frozen 8.57–9.37 band. Its 477.6/518.2 rates are descriptive only. The recorded 1.05x ratio cannot establish comparative efficacy or serve as acceptance evidence for another runtime. Retirement remains a resource-allocation decision; any future serving acceptance comparison needs a valid matched control.
+
 ## Why it matters
 dfranzen serving is step-time-bound, and levels-time elasticity is about 0.35. A runtime that decodes
 1.3-1.5x faster at our concurrency is worth roughly +10-17% levels, which is the silver-sized gap
