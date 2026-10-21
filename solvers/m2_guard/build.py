@@ -1,0 +1,196 @@
+"""Silent-zero guard for dfranzen-lineage notebooks (F1x, control). Builds local notebooks only; never uploads.
+
+Why (analysis/f1x-hidden-zero-diagnosis-20261021/FINDINGS.md): hidden draws D9 and D12 finished COMPLETE 0.00 in
+<= ~2.4 h. The parent notebooks print the log tail and `break` when SGLang exits during startup, nothing watches
+the server after READY, and each game quits after 11 consecutive analyzer failures. A dead server therefore ends
+the run early with a valid-looking zero. On CPU (faults/run_competition_cpu.py) a dead endpoint reproduces this.
+
+The guard leaves a healthy run unchanged and adds:
+  gpu        before serving, raise unless nvidia-smi reports an RTX PRO 6000 (a misplaced kernel fails in minutes)
+  supervise  after the startup wait, a thread watches the server for the whole run. If it exits, kill its process
+             group and relaunch it with the same arguments, at most twice. Events go to guard-lifecycle.jsonl
+  patience   ARC3_MAX_ANALYZER_FAILURES 10 -> 40 (~17 min of consecutive failed turns), so games ride out a
+             ~10 min reload instead of quitting
+  end        after bm.run, raise if no level was completed and either no model tokens were generated (history
+             plus final no-move turn), or >= 90% of served games ended on analyzer failures or crashes
+"""
+import hashlib, json, sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parents[1]
+PARENTS = {  # name: (notebook, sha256 of the drawn version)
+    'f1x': (ROOT / 'solvers/m2_f1/experiment/screen-2/f1x/kernel/m2-f1-screen2-f1x.ipynb',
+            '826dfdc2a483a786bdfe888ad9b9422630bc4c615a187b34bdc9762975fb7df9'),
+    'control': (ROOT / 'analysis/m2-winners-20261001/runs/raw/dfranzen-m2-raw.ipynb', None),
+}
+GPU_ANCHOR = "'''], env=env)\n\n# ---- validate target"
+GPU = """'''], env=env)
+
+# M2 GUARD gpu: Kaggle has placed RTX PRO 6000 kernels on a T4; SGLang then dies and the run would score a silent zero.
+_guard_gpu = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"], capture_output=True, text=True).stdout.strip()
+print("M2 GUARD gpu:", _guard_gpu or "(none)")
+if not _guard_gpu or any("RTX PRO 6000" not in line for line in _guard_gpu.splitlines()):
+    raise RuntimeError(f"M2 GUARD: expected RTX PRO 6000 only, got {_guard_gpu!r}")
+
+# ---- validate target"""
+SUPERVISOR_BEFORE = '# Restore the deployment target'
+SUPERVISOR = '''# M2 GUARD supervise: watch the SGLang server for the whole run and relaunch it if it exits.
+import signal, threading
+if "inference.framework.solver" in sys.modules:
+    raise RuntimeError("M2 GUARD must run before the solver is imported (it sets the failure limit)")
+os.environ["ARC3_MAX_ANALYZER_FAILURES"] = "40"  # was 10: ~17 min of failed turns outlasts a ~10 min reload
+GUARD_LOG = Path(WORKING_DIR) / "guard-lifecycle.jsonl"
+GUARD_MAX_RESTARTS = 2
+GUARD_POLL_S = float(os.environ.get("M2_GUARD_POLL_S", "10"))
+_guard = {"proc": proc, "restarts": 0, "ready": False}
+
+def _guard_event(event, **fields):
+    row = {"t": round(time.time() - NOTEBOOK_START_TIME, 1), "event": event, **fields}
+    with open(GUARD_LOG, "a") as f:
+        f.write(json.dumps(row) + "\\n")
+    print("M2 GUARD", json.dumps(row), flush=True)
+
+def _guard_healthy():
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{SERVED_MODEL_PORT}/health", timeout=5) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+def _guard_loop():
+    while True:
+        p = _guard["proc"]
+        code = p.poll()
+        if code is not None:
+            _guard_event("server_exit", code=code, pid=p.pid, restarts=_guard["restarts"])
+            try:
+                os.killpg(p.pid, signal.SIGKILL)  # orphaned scheduler children would hold the port and VRAM
+            except (ProcessLookupError, PermissionError):
+                pass
+            if _guard["restarts"] >= GUARD_MAX_RESTARTS:
+                _guard_event("server_abandoned")
+                return
+            time.sleep(min(15.0, GUARD_POLL_S))
+            _guard["restarts"] += 1
+            with open(LOG, "ab", buffering=0) as logf:
+                _guard["proc"] = subprocess.Popen(args, env=env, stdout=logf, stderr=subprocess.STDOUT, start_new_session=True)
+            _guard["ready"] = False
+            _guard_event("server_relaunch", pid=_guard["proc"].pid, restarts=_guard["restarts"])
+        elif not _guard["ready"] and _guard_healthy():
+            _guard["ready"] = True
+            _guard_event("server_ready", pid=p.pid, restarts=_guard["restarts"])
+        time.sleep(GUARD_POLL_S)
+
+_guard_event("supervisor_start", pid=proc.pid, alive=proc.poll() is None, healthy=_guard_healthy())
+threading.Thread(target=_guard_loop, name="m2-guard", daemon=True).start()
+'''
+RUN_ANCHOR = 'await bm.run(soft_end_time=soft_end, runtime_environment=target, minimal_diagnostics=TRUE_SUBMISSION)'
+END = RUN_ANCHOR + '''
+# M2 GUARD end: no level and (nearly) every game ended on analyzer failures = dead serving stack, not a zero score.
+# Games still queued for a stream when their cap ran out end as tokens=0, so failures count against served games.
+_guard_runs = list(bm.game_runs)
+_guard_bad = [r.state == "crashed" or str(r.solver_note or "").startswith(("analyzer failed", "error:")) for r in _guard_runs]
+# GameRun.final_generated_tokens covers only the final turn without a move; action tokens live in history.
+_guard_tokens = [sum(int(action.generated_tokens or 0) for action in r.history)
+                 + int(getattr(r, "final_generated_tokens", 0) or 0) for r in _guard_runs]
+_guard_failed = sum(_guard_bad)
+_guard_served = sum(b or t > 0 for b, t in zip(_guard_bad, _guard_tokens))
+_guard_levels = sum(int(r.levels_completed or 0) for r in _guard_runs)
+print("M2 GUARD end", json.dumps({"games": len(_guard_runs), "served": _guard_served, "failed": _guard_failed,
+                                  "tokens": sum(_guard_tokens), "levels": _guard_levels}), flush=True)
+if _guard_runs and _guard_levels == 0 and (sum(_guard_tokens) == 0 or _guard_failed >= 0.9 * _guard_served):
+    raise RuntimeError(f"M2 GUARD: {_guard_failed}/{_guard_served} served games ended on analyzer failures, "
+                       f"{sum(_guard_tokens)} tokens, no level")'''
+FAULT = '''# M2 GUARD screen fault: interactive screens only, never a submission. Once the server is READY, wait
+# M2_GUARD_FAULT_KILL_S and SIGKILL the SGLang parent alone (its scheduler children are orphaned holding VRAM and
+# the port, the hard case), to qualify the supervisor's cleanup and relaunch on real hardware.
+if not TRUE_SUBMISSION:
+    def _guard_fault(delay=float(os.environ.get("M2_GUARD_FAULT_KILL_S", "1200"))):
+        while not _guard["ready"]:
+            time.sleep(5)
+        time.sleep(delay)
+        p = _guard["proc"]
+        _guard_event("fault_injected_kill", pid=p.pid, after_ready_s=delay)
+        p.kill()
+    threading.Thread(target=_guard_fault, name="m2-guard-fault", daemon=True).start()
+'''
+HEADER = ['# M2 silent-zero guard\n', 'Parent notebook plus GPU check, SGLang supervision, analyzer patience 40 and '
+          'an end-of-run dead-stack check. See solvers/m2_guard/build.py.\n\n']
+
+
+def sha(data): return hashlib.sha256(data).hexdigest()
+
+
+def source(c): return ''.join(c['source'])
+
+
+def guard(nb):
+    """Return a guarded copy of a dfranzen-lineage notebook. Every anchor must occur exactly once."""
+    nb = json.loads(json.dumps(nb))
+    cells = nb['cells']
+
+    def edit(anchor, new):
+        hits = [c for c in cells if anchor in source(c)]
+        assert len(hits) == 1 and source(hits[0]).count(anchor) == 1, anchor[:60]
+        hits[0]['source'] = source(hits[0]).replace(anchor, new).splitlines(True)
+
+    edit(GPU_ANCHOR, GPU)
+    edit(RUN_ANCHOR, END)
+    idx = [i for i, c in enumerate(cells) if c['cell_type'] == 'code' and source(c).startswith(SUPERVISOR_BEFORE)]
+    assert len(idx) == 1, 'pickle cell'
+    cells.insert(idx[0], {'cell_type': 'code', 'metadata': {}, 'execution_count': None, 'outputs': [],
+                          'source': SUPERVISOR.splitlines(True)})
+    for text in (GPU.split("'''], env=env)", 1)[1], SUPERVISOR, END.replace('await bm.run', 'bm.run')):
+        compile(text, 'm2-guard', 'exec')
+    cells[0]['source'] = HEADER + source(cells[0]).splitlines(True)
+    return nb
+
+
+def fault_screen(nb):
+    """The guarded notebook plus the screen-only fault cell, placed right after the supervisor cell."""
+    nb = json.loads(json.dumps(nb))
+    idx = [i for i, c in enumerate(nb['cells']) if source(c).startswith('# M2 GUARD supervise')]
+    assert len(idx) == 1
+    compile(FAULT, 'm2-guard-fault', 'exec')
+    nb['cells'].insert(idx[0] + 1, {'cell_type': 'code', 'metadata': {}, 'execution_count': None, 'outputs': [],
+                                    'source': FAULT.splitlines(True)})
+    return nb
+
+
+def write_kernel(d, nb, slug, title, parent_meta):
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f'{slug}.ipynb').write_text(json.dumps(nb, indent=1) + '\n')
+    meta = json.loads(parent_meta.read_text())
+    meta.update(id=f'pranavagrawai/{slug}', title=title, code_file=f'{slug}.ipynb', is_private=True)
+    (d / 'kernel-metadata.json').write_text(json.dumps(meta, indent=2) + '\n')
+    return sha((d / f'{slug}.ipynb').read_bytes())
+
+
+def main(names):
+    if (HERE / 'experiment/fault-screen-1/launch-attempt.json').exists():
+        raise RuntimeError('m2_guard is frozen after a fault-screen-1 launch attempt; refusing all build writes')
+    out = {}
+    for name in names:
+        path, digest = PARENTS[name]
+        data = path.read_bytes()
+        assert digest is None or sha(data) == digest, f'{name} parent drifted'
+        nb = guard(json.loads(data))
+        d = HERE / 'kernel' / name
+        d.mkdir(parents=True, exist_ok=True)
+        target = d / f'm2-guard-{name}.ipynb'
+        target.write_text(json.dumps(nb, indent=1) + '\n')
+        out[name] = {'parent': str(path.relative_to(ROOT)), 'parent_sha256': sha(data),
+                     'notebook_sha256': sha(target.read_bytes())}
+    if 'f1x' in names:  # public fault screen: guarded F1x (60-min interactive soft end) + injected server kill
+        path, _ = PARENTS['f1x']
+        nb = fault_screen(guard(json.loads(path.read_bytes())))
+        d = HERE / 'experiment/fault-screen-1/kernel'
+        digest = write_kernel(d, nb, 'm2-guard-fault-screen1', 'M2 guard fault screen1', path.parent / 'kernel-metadata.json')
+        out['fault_screen_1'] = {'notebook_sha256': digest, 'fault_kill_after_ready_s': 1200}
+    (HERE / 'manifest.json').write_text(json.dumps(out, indent=2) + '\n')
+    print(json.dumps(out, indent=1))
+
+
+if __name__ == '__main__':
+    main(sys.argv[1:] or ['f1x', 'control'])
