@@ -1,5 +1,26 @@
 # F1x hidden-run zeros: independent diagnosis, 2026-10-21
 
+## Reviewed update, 2026-10-22
+
+The CPU production-timing probes below are now complete: dead endpoint 12,863.0 seconds, HTTP500 12,862.3 seconds,
+HTTP400 1,106.6 seconds. All 110 games reached the analyzer-failure exit with zero levels. Under the reproduced settings,
+the simple dead/5xx-from-start scenario is inconsistent with D12's reported completion bound; fast rejection remains
+plausible. These are stand-in endpoints and a local gateway, not hidden-run evidence, and do not exclude every startup fault.
+See `faults/FAULTS.md` and its raw `runs/` artifacts.
+
+The independent review verified the end-guard repair: the real-record zero-level regression passes, and the corrected
+healthy CPU run completed without raising (that run itself completed one level). Historical notebook execution identity
+was not captured. The postlaunch test-fixture defect is also repaired: 18 tests pass, the original test bytes are archived,
+and the original GPU freeze/runtime are preserved. See `solvers/m2_guard/evidence/postlaunch-test-repair-20261022/repair.json`.
+
+Fault screen 1 is not a hardware recovery PASS. A relaunched loader began with restored free VRAM and reached 6/38 shards
+in the retained log; no second READY was observed. Neither successful port binding nor complete recovery is established.
+Selective recovery of the terminal console confirms the GPU guard and normal end guard, but does not change this verdict;
+see `solvers/m2_guard/experiment/fault-screen-1/gate-evaluation-recovered-20261022.json`.
+The historical median-load estimate lacks a retained sample inventory and was not independently verified. No hidden
+submission, runtime promotion, or new GPU attempt follows from these findings. The earlier sections below retain the
+original diagnosis and recommendations as history; the reviewed statements here supersede their stronger causal claims.
+
 ## Coordinator correction, 2026-10-21
 
 The initial recommendations below are historical and superseded where noted here. Hidden-run root cause remains unresolved. A dead server is a demonstrated source path, not an established explanation of D9/D12. The approximate 3.5-hour dead-endpoint duration is a timing estimate under tested settings, not a completed production-timing result: `out-dead-prod`, `out-dead-fast`, and `out-500-prod` were still running under `/tmp/f1x-faults` when checked. The HTTP400 stand-in completed in 1106.6 seconds: all 110 games gave up after 11 analyzer failures, with zero levels. This shows an alive-but-rejecting endpoint can reach the early-zero path under these settings; it does not establish the hidden failure cause or qualify process-exit recovery. Completed shortened fake-server evidence is preserved in `faults/historical-cpu-snapshot-20261021/`, explicitly as historical pre-review runs with unavailable executed-notebook hashes.

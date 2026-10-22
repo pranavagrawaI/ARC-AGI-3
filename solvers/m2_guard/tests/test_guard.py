@@ -54,7 +54,7 @@ class BuildTouchesOnlyAnchors(unittest.TestCase):
     def test_repeated_prelaunch_builds_are_identical(self):
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory) / 'm2_guard'
-            shutil.copytree(HERE, folder, ignore=shutil.ignore_patterns('evidence', '__pycache__'))
+            shutil.copytree(HERE, folder, ignore=shutil.ignore_patterns('evidence', '__pycache__', 'launch-attempt.json', 'output.partial', 'output'))
             with mock.patch.object(build, 'HERE', folder), contextlib.redirect_stdout(io.StringIO()):
                 build.main(['f1x', 'control'])
                 before = {p.relative_to(folder): p.read_bytes() for p in folder.rglob('*') if p.is_file()}
@@ -66,7 +66,7 @@ class BuildTouchesOnlyAnchors(unittest.TestCase):
     def test_any_build_after_launch_attempt_refuses_before_mutation(self):
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory) / 'm2_guard'
-            shutil.copytree(HERE, folder, ignore=shutil.ignore_patterns('evidence', '__pycache__'))
+            shutil.copytree(HERE, folder, ignore=shutil.ignore_patterns('evidence', '__pycache__', 'launch-attempt.json', 'output.partial', 'output'))
             with mock.patch.object(build, 'HERE', folder), contextlib.redirect_stdout(io.StringIO()):
                 build.main(['f1x', 'control'])
                 (folder / 'experiment/fault-screen-1/launch-attempt.json').write_text('{"test": true}\n')
