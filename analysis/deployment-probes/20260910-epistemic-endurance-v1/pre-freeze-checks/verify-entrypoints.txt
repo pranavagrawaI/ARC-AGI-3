@@ -1,0 +1,1732 @@
+..............FFFFFFFFFF...........                                      [100%]
+=================================== FAILURES ===================================
+_______________________ test_real_entrypoint[True-True] ________________________
+
+tmp_path = PosixPath('/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_True_True0')
+gateway = True, exhausted = True, planner = False
+
+    @pytest.mark.parametrize('gateway', [False, True])
+    @pytest.mark.parametrize('exhausted', [False, True, 'thinking', 'slow_http', 'http_error', 'stalled_tool'])
+    def test_real_entrypoint(tmp_path, gateway, exhausted, planner=False):
+        fault = exhausted in ('slow_http', 'http_error', 'stalled_tool')
+        framework = tmp_path/'framework'
+        (framework/'agents/templates').mkdir(parents=True)
+        for name in ['agent.py', 'recorder.py', 'tracing.py', 'swarm.py']:
+            shutil.copy2(OFFICIAL/'agents'/name, framework/'agents'/name)
+        (framework/'agents/__init__.py').write_text('from .agent import Agent, Playback\nfrom .swarm import Swarm\n')
+        shutil.copy2(DONOR/'adapter.py', framework/'agents/templates/my_agent.py')
+        (framework/'runtime').mkdir()
+        (framework/'runtime/__init__.py').write_text('')
+        shutil.copy2(DONOR/'shared_local_solver.py', framework/'runtime/local_solver.py')
+        shutil.copy2(DONOR/'local_solver.py', framework/'local_solver.py')
+        requests = []
+        actor_requests = []
+    
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+    
+            def do_POST(self):
+                requests.append(json.loads(self.rfile.read(int(self.headers['Content-Length']))))
+                if exhausted == 'http_error':
+                    self.send_error(503, 'injected qualification transport failure')
+                    return
+                if exhausted == 'slow_http':
+                    time.sleep(5)
+                if len(requests) > 40:
+                    self.send_error(429, 'qualification request cap')
+                    return
+                is_actor = any(t.get('function', {}).get('name') == 'execute_python'
+                               for t in requests[-1].get('tools', []))
+                if is_actor:
+                    actor_requests.append(requests[-1])
+                action = ['UP', 'DOWN', 'LEFT', 'RIGHT'][(len(actor_requests)-1) % 4]
+                reply = dict(id=f'local-{len(requests)}', object='chat.completion', created=1,
+                    model='controlled-local', choices=[dict(index=0, finish_reason='tool_calls', message=dict(
+                        role='assistant', content=None, tool_calls=[dict(id=f'call-{len(requests)}', type='function',
+                        function=dict(name='execute_python', arguments=json.dumps(dict(code=
+                        f'grid=self.model_grid(); self.submit_actions([{action!r}], rationale="predict: controlled movement")'))))]))],
+                    usage=dict(prompt_tokens=22000, completion_tokens=50, total_tokens=22050))
+                if not is_actor:
+                    reply['choices'] = [dict(index=0, finish_reason='stop',
+                        message=dict(role='assistant', content=json.dumps(dict(
+                            value='Controlled summary: mechanics and goal remain unproven.'))))]
+                data=json.dumps(reply).encode()
+                if exhausted == 'thinking':
+                    time.sleep(1)
+                    reply['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = json.dumps(
+                        dict(code='print(self.model_grid())'))
+                    data = json.dumps(reply).encode()
+                if exhausted == 'stalled_tool':
+                    reply['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = json.dumps(
+                        dict(code='while True: pass'))
+                    data = json.dumps(reply).encode()
+                if planner and is_actor:
+                    source = 'def encode(g): return {"x":0}\ndef predict(z,a): return {"x":z["x"]+1}'
+                    code = (f'self.write_helper("world_model.py", {source!r}); '
+                            f'r=self.plan_actions({{"path":["x"],"op":"eq","value":3}}, [{action!r}]); '
+                            'assert r["status"] == "path_found", r; '
+                            'self.submit_actions(r["plan"][:1], rationale="observe a local consequence; objective unknown", search_id=r["search_id"])')
+                    reply['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = json.dumps(dict(code=code))
+                    data = json.dumps(reply).encode()
+                self.send_response(200)
+                self.send_header('Content-Type','application/json')
+                self.send_header('Content-Length',str(len(data)))
+                self.end_headers()
+                try:
+                    self.wfile.write(data)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # Expected for the intentionally timed-out HTTP request.
+    
+        server = ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        thread = threading.Thread(target=server.serve_forever,daemon=True)
+        thread.start()
+        env = dict(os.environ, KAGGLE_IS_COMPETITION_RERUN='true' if gateway else 'false', SUBMISSION_FRAMEWORK=str(framework),
+            SUBMISSION_ENVIRONMENTS=str(ROOT/'environment_files'), SUBMISSION_PUBLIC_GAMES='ls20',
+            NOOA_JOIN_ROOT=str(DONOR), ARC_LLM_MAX_TOKENS='16384', ARC_LLM_RETRIES='0',
+            ARC_LLM_TIMEOUT_SECONDS='30', TYCHO_NOOA_WORKER_TIMEOUT_SECONDS='40',
+            ARC_STALL_REVIEW='0', ARC_DISCOVERY_ARM='a', ARC_SOLVER_ARM='loop', ARC_CONTINGENT_ARM='on', SUBMISSION_ACTION_LIMIT='10',
+            ARC_LLM_EXTRA_BODY='{"chat_template_kwargs":{"enable_thinking":false},"reasoning":{"enabled":false}}')
+        if exhausted:
+            env['SUBMISSION_ADMISSION_CAP_SECONDS'] = '12' if exhausted == 'thinking' else '0'
+        if fault:
+            env['SUBMISSION_ADMISSION_CAP_SECONDS'] = '12'
+            env['ARC_LLM_TIMEOUT_SECONDS'] = '2'
+        if exhausted == 'stalled_tool':
+            # Exercise the actual cell middleware and independent protocol poller.
+            # Accelerate its production 60s deadline, not the generic host timeout.
+            bootstrap = (
+                'import sys,asyncio;sys.path.insert(0,' + repr(str(DONOR)) + ');'
+                'import headless,solver_agent;'
+                'solver_agent._ARC_CELL_CONFIG=solver_agent._ARC_CELL_CONFIG.model_copy('
+                'update={"cell_timeout":0.3});'
+                'sys.argv=["headless","--run-dir","."];asyncio.run(headless.run())'
+            )
+            env['NOOA_AGENT_COMMAND'] = json.dumps([sys.executable, '-c', bootstrap])
+        expected_games = 2 if exhausted is True and not gateway else 1
+        if expected_games == 2:
+            # Two invocations prove the first exhausted game does not abort the loop.
+            env['SUBMISSION_PUBLIC_GAMES'] = 'ls20,ls20'
+        gateway_server = None
+        if gateway:
+            from arc_agi import Arcade, OperationMode
+            from arc_agi.server import create_app
+            from werkzeug.serving import make_server
+            arcade = Arcade(operation_mode=OperationMode.OFFLINE, environments_dir=str(ROOT/'environment_files'))
+            app, _ = create_app(arcade, competition_mode=True)
+            gateway_server = make_server('127.0.0.1', 0, app, threaded=True)
+            gateway_thread = threading.Thread(target=gateway_server.serve_forever, daemon=True)
+            gateway_thread.start()
+            env['SUBMISSION_GATEWAY_BASE_URL'] = f'http://127.0.0.1:{gateway_server.server_port}'
+        try:
+            # Widen the observed finish/cleanup race without bypassing Agent.main.
+            runner = ('import sys,time;sys.path.insert(0,' + repr(str(framework)) + ');'
+                      'from agents.templates.my_agent import MyAgent;'
+                      'original=MyAgent.cleanup;'
+                      'MyAgent.cleanup=lambda self:(time.sleep(1),original(self))[-1];'
+                      'import runpy;runpy.run_path(sys.argv.pop(1),run_name="__main__")')
+            completed = subprocess.run([sys.executable,'-c',runner,str(HERE/'play.py'),
+                '--base-url',f'http://127.0.0.1:{server.server_port}/v1','--model','qwen/qwen3.8-27b',
+                '--workspace-root',str(tmp_path/'workspaces'),'--output',str(tmp_path/'RESULT.json'),
+                '--timeout-s','1200'], env=env, capture_output=True, text=True, timeout=180)
+            (tmp_path/'stdout.log').write_text(completed.stdout)
+            (tmp_path/'stderr.log').write_text(completed.stderr)
+            (tmp_path/'requests.json').write_text(json.dumps(requests,indent=2)+'\n')
+            if fault:
+                assert completed.returncode != 0, 'Injected failure was incorrectly accepted'
+                assert not (tmp_path/'RESULT.json').exists()
+                assert (tmp_path/'RESULT.failure.json').exists()
+                assert requests, 'Fixture failed before reaching injected request'
+                if exhausted == 'stalled_tool':
+                    assert 'timed out' in completed.stderr.lower()
+                    assert not list((tmp_path/'workspaces').rglob('budget_exhausted.json'))
+                    assert len(requests) == 1, 'Timed-out cell issued another model call'
+                    markers = list((tmp_path/'workspaces').rglob('tool_timeout.json'))
+                    assert len(markers) == 1, 'Generic decision timeout is not a cell deadline'
+                    cell = json.loads(markers[0].read_text())
+                    assert cell['timeout_seconds'] == 0.3
+                    assert 0.3 <= cell['elapsed_seconds'] < 3
+                else:
+                    lifecycle = [json.loads(line) for p in (tmp_path/'workspaces').rglob('request_lifecycle.jsonl')
+                                 for line in p.read_text().splitlines()]
+                    assert any(row['event'] == 'failed' for row in lifecycle)
+                    assert len(requests) == 1, 'A failed call made another HTTP attempt'
+                    assert 'Model request failed' in completed.stderr
+                assert not (tmp_path/'game-progress.jsonl').exists(), 'Fault was mistaken for normal game completion'
+                # PIDs recorded by the real worker must be retired before returning.
+                for p in (tmp_path/'workspaces').rglob('worker-metadata.json'):
+                    pid = json.loads(p.read_text())['agent_pid']
+                    with pytest.raises(ProcessLookupError):
+                        os.kill(pid, 0)
+                return
+>           assert completed.returncode == 0, completed.stdout + completed.stderr
+E           AssertionError: INFO:arc_agi.scorecard:Initialized ScorecardManager with idle_for=0:15:00 and max_open_for=3 days, 0:00:00
+E             2026-09-10 18:54:31 | INFO | Successfully fetched 1 environment(s) from API
+E             2026-09-10 18:54:31 | INFO | Created new scorecard: 4bc880da-bda2-41c7-80c5-204ab7d41a95
+E             {"game_count": 1, "global_deadline": 72779.203901467}
+E             2026-09-10 18:54:31 | INFO | Successfully fetched metadata for game ls20
+E             2026-09-10 18:54:31 | INFO | Successfully reset game ls20-9607627b, guid=e538196f-3448-4b82-a40f-226e7b2a0b61, scorecard_id=4bc880da-bda2-41c7-80c5-204ab7d41a95
+E             2026-09-10 18:54:34 | INFO | Closed scorecard: 4bc880da-bda2-41c7-80c5-204ab7d41a95
+E             Traceback (most recent call last):
+E               File "<string>", line 1, in <module>
+E               File "<frozen runpy>", line 287, in run_path
+E               File "<frozen runpy>", line 98, in _run_module_code
+E               File "<frozen runpy>", line 88, in _run_code
+E               File "/home/pranav/.superset/worktrees/b420fea5-43e0-4bc6-a3d0-0629350d400b/tall-humerus/deployment/kaggle/submission-20260910-v9/play.py", line 184, in <module>
+E                 main()
+E               File "/home/pranav/.superset/worktrees/b420fea5-43e0-4bc6-a3d0-0629350d400b/tall-humerus/deployment/kaggle/submission-20260910-v9/play.py", line 176, in main
+E                 run(args)
+E               File "/home/pranav/.superset/worktrees/b420fea5-43e0-4bc6-a3d0-0629350d400b/tall-humerus/deployment/kaggle/submission-20260910-v9/play.py", line 120, in run
+E                 agent.main()
+E               File "/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_True_True0/framework/agents/tracing.py", line 119, in wrapper
+E                 return func(agent_instance, *args, **kwargs)
+E                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E               File "/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_True_True0/framework/agents/agent.py", line 76, in main
+E                 action = self.choose_action(
+E                          ^^^^^^^^^^^^^^^^^^^
+E               File "/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_True_True0/framework/agents/templates/my_agent.py", line 201, in choose_action
+E                 solver = self._ensure_solver(observation)
+E                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E               File "/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_True_True0/framework/agents/templates/my_agent.py", line 279, in _ensure_solver
+E                 self._solver = self._solver_factory(
+E                                ^^^^^^^^^^^^^^^^^^^^^
+E               File "/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_True_True0/framework/agents/templates/my_agent.py", line 90, in _default_solver_factory
+E                 return create_solver(
+E                        ^^^^^^^^^^^^^^
+E               File "/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_True_True0/framework/local_solver.py", line 54, in create_solver
+E                 return LocalSolver(
+E                        ^^^^^^^^^^^^
+E               File "/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_True_True0/framework/runtime/local_solver.py", line 234, in __init__
+E                 ready = self._receive("ready")
+E                         ^^^^^^^^^^^^^^^^^^^^^^
+E               File "/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_True_True0/framework/runtime/local_solver.py", line 453, in _receive
+E                 raise LocalSolverError(str(payload.get("message", "worker error")))
+E             runtime.local_solver.LocalSolverError: WorkerError: candidate drift: chassis/solver_agent.py
+E             
+E           assert 1 == 0
+E            +  where 1 = CompletedProcess(args=['/home/pranav/.superset/worktrees/b420fea5-43e0-4bc6-a3d0-0629350d400b/tall-humerus/deployment/...e", "worker error")))\nruntime.local_solver.LocalSolverError: WorkerError: candidate drift: chassis/solver_agent.py\n').returncode
+
+deployment/kaggle/submission-20260910-v9/test_submission.py:231: AssertionError
+----------------------------- Captured stdout call -----------------------------
+INFO:arc_agi.scorecard:Initialized ScorecardManager with idle_for=0:15:00 and max_open_for=3 days, 0:00:00
+------------------------------ Captured log call -------------------------------
+INFO     werkzeug:_internal.py:97 127.0.0.1 - - [10/Sep/2026 18:54:31] "GET /api/games HTTP/1.1" 200 -
+INFO     werkzeug:_internal.py:97 127.0.0.1 - - [10/Sep/2026 18:54:31] "POST /api/scorecard/open HTTP/1.1" 200 -
+INFO     werkzeug:_internal.py:97 127.0.0.1 - - [10/Sep/2026 18:54:31] "GET /api/games/ls20 HTTP/1.1" 200 -
+INFO     werkzeug:_internal.py:97 127.0.0.1 - - [10/Sep/2026 18:54:31] "POST /api/cmd/RESET HTTP/1.1" 200 -
+INFO     werkzeug:_internal.py:97 127.0.0.1 - - [10/Sep/2026 18:54:34] "POST /api/scorecard/close HTTP/1.1" 200 -
+_____________________ test_real_entrypoint[thinking-False] _____________________
+
+tmp_path = PosixPath('/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_thinking_0')
+gateway = False, exhausted = 'thinking', planner = False
+
+    @pytest.mark.parametrize('gateway', [False, True])
+    @pytest.mark.parametrize('exhausted', [False, True, 'thinking', 'slow_http', 'http_error', 'stalled_tool'])
+    def test_real_entrypoint(tmp_path, gateway, exhausted, planner=False):
+        fault = exhausted in ('slow_http', 'http_error', 'stalled_tool')
+        framework = tmp_path/'framework'
+        (framework/'agents/templates').mkdir(parents=True)
+        for name in ['agent.py', 'recorder.py', 'tracing.py', 'swarm.py']:
+            shutil.copy2(OFFICIAL/'agents'/name, framework/'agents'/name)
+        (framework/'agents/__init__.py').write_text('from .agent import Agent, Playback\nfrom .swarm import Swarm\n')
+        shutil.copy2(DONOR/'adapter.py', framework/'agents/templates/my_agent.py')
+        (framework/'runtime').mkdir()
+        (framework/'runtime/__init__.py').write_text('')
+        shutil.copy2(DONOR/'shared_local_solver.py', framework/'runtime/local_solver.py')
+        shutil.copy2(DONOR/'local_solver.py', framework/'local_solver.py')
+        requests = []
+        actor_requests = []
+    
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+    
+            def do_POST(self):
+                requests.append(json.loads(self.rfile.read(int(self.headers['Content-Length']))))
+                if exhausted == 'http_error':
+                    self.send_error(503, 'injected qualification transport failure')
+                    return
+                if exhausted == 'slow_http':
+                    time.sleep(5)
+                if len(requests) > 40:
+                    self.send_error(429, 'qualification request cap')
+                    return
+                is_actor = any(t.get('function', {}).get('name') == 'execute_python'
+                               for t in requests[-1].get('tools', []))
+                if is_actor:
+                    actor_requests.append(requests[-1])
+                action = ['UP', 'DOWN', 'LEFT', 'RIGHT'][(len(actor_requests)-1) % 4]
+                reply = dict(id=f'local-{len(requests)}', object='chat.completion', created=1,
+                    model='controlled-local', choices=[dict(index=0, finish_reason='tool_calls', message=dict(
+                        role='assistant', content=None, tool_calls=[dict(id=f'call-{len(requests)}', type='function',
+                        function=dict(name='execute_python', arguments=json.dumps(dict(code=
+                        f'grid=self.model_grid(); self.submit_actions([{action!r}], rationale="predict: controlled movement")'))))]))],
+                    usage=dict(prompt_tokens=22000, completion_tokens=50, total_tokens=22050))
+                if not is_actor:
+                    reply['choices'] = [dict(index=0, finish_reason='stop',
+                        message=dict(role='assistant', content=json.dumps(dict(
+                            value='Controlled summary: mechanics and goal remain unproven.'))))]
+                data=json.dumps(reply).encode()
+                if exhausted == 'thinking':
+                    time.sleep(1)
+                    reply['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = json.dumps(
+                        dict(code='print(self.model_grid())'))
+                    data = json.dumps(reply).encode()
+                if exhausted == 'stalled_tool':
+                    reply['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = json.dumps(
+                        dict(code='while True: pass'))
+                    data = json.dumps(reply).encode()
+                if planner and is_actor:
+                    source = 'def encode(g): return {"x":0}\ndef predict(z,a): return {"x":z["x"]+1}'
+                    code = (f'self.write_helper("world_model.py", {source!r}); '
+                            f'r=self.plan_actions({{"path":["x"],"op":"eq","value":3}}, [{action!r}]); '
+                            'assert r["status"] == "path_found", r; '
+                            'self.submit_actions(r["plan"][:1], rationale="observe a local consequence; objective unknown", search_id=r["search_id"])')
+                    reply['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = json.dumps(dict(code=code))
+                    data = json.dumps(reply).encode()
+                self.send_response(200)
+                self.send_header('Content-Type','application/json')
+                self.send_header('Content-Length',str(len(data)))
+                self.end_headers()
+                try:
+                    self.wfile.write(data)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # Expected for the intentionally timed-out HTTP request.
+    
+        server = ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        thread = threading.Thread(target=server.serve_forever,daemon=True)
+        thread.start()
+        env = dict(os.environ, KAGGLE_IS_COMPETITION_RERUN='true' if gateway else 'false', SUBMISSION_FRAMEWORK=str(framework),
+            SUBMISSION_ENVIRONMENTS=str(ROOT/'environment_files'), SUBMISSION_PUBLIC_GAMES='ls20',
+            NOOA_JOIN_ROOT=str(DONOR), ARC_LLM_MAX_TOKENS='16384', ARC_LLM_RETRIES='0',
+            ARC_LLM_TIMEOUT_SECONDS='30', TYCHO_NOOA_WORKER_TIMEOUT_SECONDS='40',
+            ARC_STALL_REVIEW='0', ARC_DISCOVERY_ARM='a', ARC_SOLVER_ARM='loop', ARC_CONTINGENT_ARM='on', SUBMISSION_ACTION_LIMIT='10',
+            ARC_LLM_EXTRA_BODY='{"chat_template_kwargs":{"enable_thinking":false},"reasoning":{"enabled":false}}')
+        if exhausted:
+            env['SUBMISSION_ADMISSION_CAP_SECONDS'] = '12' if exhausted == 'thinking' else '0'
+        if fault:
+            env['SUBMISSION_ADMISSION_CAP_SECONDS'] = '12'
+            env['ARC_LLM_TIMEOUT_SECONDS'] = '2'
+        if exhausted == 'stalled_tool':
+            # Exercise the actual cell middleware and independent protocol poller.
+            # Accelerate its production 60s deadline, not the generic host timeout.
+            bootstrap = (
+                'import sys,asyncio;sys.path.insert(0,' + repr(str(DONOR)) + ');'
+                'import headless,solver_agent;'
+                'solver_agent._ARC_CELL_CONFIG=solver_agent._ARC_CELL_CONFIG.model_copy('
+                'update={"cell_timeout":0.3});'
+                'sys.argv=["headless","--run-dir","."];asyncio.run(headless.run())'
+            )
+            env['NOOA_AGENT_COMMAND'] = json.dumps([sys.executable, '-c', bootstrap])
+        expected_games = 2 if exhausted is True and not gateway else 1
+        if expected_games == 2:
+            # Two invocations prove the first exhausted game does not abort the loop.
+            env['SUBMISSION_PUBLIC_GAMES'] = 'ls20,ls20'
+        gateway_server = None
+        if gateway:
+            from arc_agi import Arcade, OperationMode
+            from arc_agi.server import create_app
+            from werkzeug.serving import make_server
+            arcade = Arcade(operation_mode=OperationMode.OFFLINE, environments_dir=str(ROOT/'environment_files'))
+            app, _ = create_app(arcade, competition_mode=True)
+            gateway_server = make_server('127.0.0.1', 0, app, threaded=True)
+            gateway_thread = threading.Thread(target=gateway_server.serve_forever, daemon=True)
+            gateway_thread.start()
+            env['SUBMISSION_GATEWAY_BASE_URL'] = f'http://127.0.0.1:{gateway_server.server_port}'
+        try:
+            # Widen the observed finish/cleanup race without bypassing Agent.main.
+            runner = ('import sys,time;sys.path.insert(0,' + repr(str(framework)) + ');'
+                      'from agents.templates.my_agent import MyAgent;'
+                      'original=MyAgent.cleanup;'
+                      'MyAgent.cleanup=lambda self:(time.sleep(1),original(self))[-1];'
+                      'import runpy;runpy.run_path(sys.argv.pop(1),run_name="__main__")')
+            completed = subprocess.run([sys.executable,'-c',runner,str(HERE/'play.py'),
+                '--base-url',f'http://127.0.0.1:{server.server_port}/v1','--model','qwen/qwen3.8-27b',
+                '--workspace-root',str(tmp_path/'workspaces'),'--output',str(tmp_path/'RESULT.json'),
+                '--timeout-s','1200'], env=env, capture_output=True, text=True, timeout=180)
+            (tmp_path/'stdout.log').write_text(completed.stdout)
+            (tmp_path/'stderr.log').write_text(completed.stderr)
+            (tmp_path/'requests.json').write_text(json.dumps(requests,indent=2)+'\n')
+            if fault:
+                assert completed.returncode != 0, 'Injected failure was incorrectly accepted'
+                assert not (tmp_path/'RESULT.json').exists()
+                assert (tmp_path/'RESULT.failure.json').exists()
+                assert requests, 'Fixture failed before reaching injected request'
+                if exhausted == 'stalled_tool':
+                    assert 'timed out' in completed.stderr.lower()
+                    assert not list((tmp_path/'workspaces').rglob('budget_exhausted.json'))
+                    assert len(requests) == 1, 'Timed-out cell issued another model call'
+                    markers = list((tmp_path/'workspaces').rglob('tool_timeout.json'))
+                    assert len(markers) == 1, 'Generic decision timeout is not a cell deadline'
+                    cell = json.loads(markers[0].read_text())
+                    assert cell['timeout_seconds'] == 0.3
+                    assert 0.3 <= cell['elapsed_seconds'] < 3
+                else:
+                    lifecycle = [json.loads(line) for p in (tmp_path/'workspaces').rglob('request_lifecycle.jsonl')
+                                 for line in p.read_text().splitlines()]
+                    assert any(row['event'] == 'failed' for row in lifecycle)
+                    assert len(requests) == 1, 'A failed call made another HTTP attempt'
+                    assert 'Model request failed' in completed.stderr
+                assert not (tmp_path/'game-progress.jsonl').exists(), 'Fault was mistaken for normal game completion'
+                # PIDs recorded by the real worker must be retired before returning.
+                for p in (tmp_path/'workspaces').rglob('worker-metadata.json'):
+                    pid = json.loads(p.read_text())['agent_pid']
+                    with pytest.raises(ProcessLookupError):
+                        os.kill(pid, 0)
+                return
+>           assert completed.returncode == 0, completed.stdout + completed.stderr
+E           AssertionError: INFO:arc_agi.scorecard:Initialized ScorecardManager with idle_for=0:15:00 and max_open_for=3 days, 0:00:00
+E             2026-09-10 18:54:37 | INFO | Created new scorecard: cf653b1d-a024-4be4-87a0-ed341ba78b92
+E             {"game_count": 1, "global_deadline": 72784.868715798}
+E             2026-09-10 18:54:37 | INFO | Successfully loaded game class Ls20 from /home/pranav/.superset/worktrees/b420fea5-43e0-4bc6-a3d0-0629350d400b/tall-humerus/environment_files/ls20/9607627b/ls20.py
+E             2026-09-10 18:54:40 | INFO | Closed scorecard: cf653b1d-a024-4be4-87a0-ed341ba78b92
+E             Traceback (most recent call last):
+E               File "<string>", line 1, in <module>
+E               File "<frozen runpy>", line 287, in run_path
+E               File "<frozen runpy>", line 98, in _run_module_code
+E               File "<frozen runpy>", line 88, in _run_code
+E               File "/home/pranav/.superset/worktrees/b420fea5-43e0-4bc6-a3d0-0629350d400b/tall-humerus/deployment/kaggle/submission-20260910-v9/play.py", line 184, in <module>
+E                 main()
+E               File "/home/pranav/.superset/worktrees/b420fea5-43e0-4bc6-a3d0-0629350d400b/tall-humerus/deployment/kaggle/submission-20260910-v9/play.py", line 176, in main
+E                 run(args)
+E               File "/home/pranav/.superset/worktrees/b420fea5-43e0-4bc6-a3d0-0629350d400b/tall-humerus/deployment/kaggle/submission-20260910-v9/play.py", line 120, in run
+E                 agent.main()
+E               File "/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_thinking_0/framework/agents/tracing.py", line 119, in wrapper
+E                 return func(agent_instance, *args, **kwargs)
+E                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E               File "/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_thinking_0/framework/agents/agent.py", line 76, in main
+E                 action = self.choose_action(
+E                          ^^^^^^^^^^^^^^^^^^^
+E               File "/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_thinking_0/framework/agents/templates/my_agent.py", line 201, in choose_action
+E                 solver = self._ensure_solver(observation)
+E                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E               File "/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_thinking_0/framework/agents/templates/my_agent.py", line 279, in _ensure_solver
+E                 self._solver = self._solver_factory(
+E                                ^^^^^^^^^^^^^^^^^^^^^
+E               File "/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_thinking_0/framework/agents/templates/my_agent.py", line 90, in _default_solver_factory
+E                 return create_solver(
+E                        ^^^^^^^^^^^^^^
+E               File "/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_thinking_0/framework/local_solver.py", line 54, in create_solver
+E                 return LocalSolver(
+E                        ^^^^^^^^^^^^
+E               File "/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_thinking_0/framework/runtime/local_solver.py", line 234, in __init__
+E                 ready = self._receive("ready")
+E                         ^^^^^^^^^^^^^^^^^^^^^^
+E               File "/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_thinking_0/framework/runtime/local_solver.py", line 453, in _receive
+E                 raise LocalSolverError(str(payload.get("message", "worker error")))
+E             runtime.local_solver.LocalSolverError: WorkerError: candidate drift: chassis/solver_agent.py
+E             
+E           assert 1 == 0
+E            +  where 1 = CompletedProcess(args=['/home/pranav/.superset/worktrees/b420fea5-43e0-4bc6-a3d0-0629350d400b/tall-humerus/deployment/...e", "worker error")))\nruntime.local_solver.LocalSolverError: WorkerError: candidate drift: chassis/solver_agent.py\n').returncode
+
+deployment/kaggle/submission-20260910-v9/test_submission.py:231: AssertionError
+_____________________ test_real_entrypoint[thinking-True] ______________________
+
+tmp_path = PosixPath('/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_thinking_1')
+gateway = True, exhausted = 'thinking', planner = False
+
+    @pytest.mark.parametrize('gateway', [False, True])
+    @pytest.mark.parametrize('exhausted', [False, True, 'thinking', 'slow_http', 'http_error', 'stalled_tool'])
+    def test_real_entrypoint(tmp_path, gateway, exhausted, planner=False):
+        fault = exhausted in ('slow_http', 'http_error', 'stalled_tool')
+        framework = tmp_path/'framework'
+        (framework/'agents/templates').mkdir(parents=True)
+        for name in ['agent.py', 'recorder.py', 'tracing.py', 'swarm.py']:
+            shutil.copy2(OFFICIAL/'agents'/name, framework/'agents'/name)
+        (framework/'agents/__init__.py').write_text('from .agent import Agent, Playback\nfrom .swarm import Swarm\n')
+        shutil.copy2(DONOR/'adapter.py', framework/'agents/templates/my_agent.py')
+        (framework/'runtime').mkdir()
+        (framework/'runtime/__init__.py').write_text('')
+        shutil.copy2(DONOR/'shared_local_solver.py', framework/'runtime/local_solver.py')
+        shutil.copy2(DONOR/'local_solver.py', framework/'local_solver.py')
+        requests = []
+        actor_requests = []
+    
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+    
+            def do_POST(self):
+                requests.append(json.loads(self.rfile.read(int(self.headers['Content-Length']))))
+                if exhausted == 'http_error':
+                    self.send_error(503, 'injected qualification transport failure')
+                    return
+                if exhausted == 'slow_http':
+                    time.sleep(5)
+                if len(requests) > 40:
+                    self.send_error(429, 'qualification request cap')
+                    return
+                is_actor = any(t.get('function', {}).get('name') == 'execute_python'
+                               for t in requests[-1].get('tools', []))
+                if is_actor:
+                    actor_requests.append(requests[-1])
+                action = ['UP', 'DOWN', 'LEFT', 'RIGHT'][(len(actor_requests)-1) % 4]
+                reply = dict(id=f'local-{len(requests)}', object='chat.completion', created=1,
+                    model='controlled-local', choices=[dict(index=0, finish_reason='tool_calls', message=dict(
+                        role='assistant', content=None, tool_calls=[dict(id=f'call-{len(requests)}', type='function',
+                        function=dict(name='execute_python', arguments=json.dumps(dict(code=
+                        f'grid=self.model_grid(); self.submit_actions([{action!r}], rationale="predict: controlled movement")'))))]))],
+                    usage=dict(prompt_tokens=22000, completion_tokens=50, total_tokens=22050))
+                if not is_actor:
+                    reply['choices'] = [dict(index=0, finish_reason='stop',
+                        message=dict(role='assistant', content=json.dumps(dict(
+                            value='Controlled summary: mechanics and goal remain unproven.'))))]
+                data=json.dumps(reply).encode()
+                if exhausted == 'thinking':
+                    time.sleep(1)
+                    reply['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = json.dumps(
+                        dict(code='print(self.model_grid())'))
+                    data = json.dumps(reply).encode()
+                if exhausted == 'stalled_tool':
+                    reply['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = json.dumps(
+                        dict(code='while True: pass'))
+                    data = json.dumps(reply).encode()
+                if planner and is_actor:
+                    source = 'def encode(g): return {"x":0}\ndef predict(z,a): return {"x":z["x"]+1}'
+                    code = (f'self.write_helper("world_model.py", {source!r}); '
+                            f'r=self.plan_actions({{"path":["x"],"op":"eq","value":3}}, [{action!r}]); '
+                            'assert r["status"] == "path_found", r; '
+                            'self.submit_actions(r["plan"][:1], rationale="observe a local consequence; objective unknown", search_id=r["search_id"])')
+                    reply['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = json.dumps(dict(code=code))
+                    data = json.dumps(reply).encode()
+                self.send_response(200)
+                self.send_header('Content-Type','application/json')
+                self.send_header('Content-Length',str(len(data)))
+                self.end_headers()
+                try:
+                    self.wfile.write(data)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # Expected for the intentionally timed-out HTTP request.
+    
+        server = ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        thread = threading.Thread(target=server.serve_forever,daemon=True)
+        thread.start()
+        env = dict(os.environ, KAGGLE_IS_COMPETITION_RERUN='true' if gateway else 'false', SUBMISSION_FRAMEWORK=str(framework),
+            SUBMISSION_ENVIRONMENTS=str(ROOT/'environment_files'), SUBMISSION_PUBLIC_GAMES='ls20',
+            NOOA_JOIN_ROOT=str(DONOR), ARC_LLM_MAX_TOKENS='16384', ARC_LLM_RETRIES='0',
+            ARC_LLM_TIMEOUT_SECONDS='30', TYCHO_NOOA_WORKER_TIMEOUT_SECONDS='40',
+            ARC_STALL_REVIEW='0', ARC_DISCOVERY_ARM='a', ARC_SOLVER_ARM='loop', ARC_CONTINGENT_ARM='on', SUBMISSION_ACTION_LIMIT='10',
+            ARC_LLM_EXTRA_BODY='{"chat_template_kwargs":{"enable_thinking":false},"reasoning":{"enabled":false}}')
+        if exhausted:
+            env['SUBMISSION_ADMISSION_CAP_SECONDS'] = '12' if exhausted == 'thinking' else '0'
+        if fault:
+            env['SUBMISSION_ADMISSION_CAP_SECONDS'] = '12'
+            env['ARC_LLM_TIMEOUT_SECONDS'] = '2'
+        if exhausted == 'stalled_tool':
+            # Exercise the actual cell middleware and independent protocol poller.
+            # Accelerate its production 60s deadline, not the generic host timeout.
+            bootstrap = (
+                'import sys,asyncio;sys.path.insert(0,' + repr(str(DONOR)) + ');'
+                'import headless,solver_agent;'
+                'solver_agent._ARC_CELL_CONFIG=solver_agent._ARC_CELL_CONFIG.model_copy('
+                'update={"cell_timeout":0.3});'
+                'sys.argv=["headless","--run-dir","."];asyncio.run(headless.run())'
+            )
+            env['NOOA_AGENT_COMMAND'] = json.dumps([sys.executable, '-c', bootstrap])
+        expected_games = 2 if exhausted is True and not gateway else 1
+        if expected_games == 2:
+            # Two invocations prove the first exhausted game does not abort the loop.
+            env['SUBMISSION_PUBLIC_GAMES'] = 'ls20,ls20'
+        gateway_server = None
+        if gateway:
+            from arc_agi import Arcade, OperationMode
+            from arc_agi.server import create_app
+            from werkzeug.serving import make_server
+            arcade = Arcade(operation_mode=OperationMode.OFFLINE, environments_dir=str(ROOT/'environment_files'))
+            app, _ = create_app(arcade, competition_mode=True)
+            gateway_server = make_server('127.0.0.1', 0, app, threaded=True)
+            gateway_thread = threading.Thread(target=gateway_server.serve_forever, daemon=True)
+            gateway_thread.start()
+            env['SUBMISSION_GATEWAY_BASE_URL'] = f'http://127.0.0.1:{gateway_server.server_port}'
+        try:
+            # Widen the observed finish/cleanup race without bypassing Agent.main.
+            runner = ('import sys,time;sys.path.insert(0,' + repr(str(framework)) + ');'
+                      'from agents.templates.my_agent import MyAgent;'
+                      'original=MyAgent.cleanup;'
+                      'MyAgent.cleanup=lambda self:(time.sleep(1),original(self))[-1];'
+                      'import runpy;runpy.run_path(sys.argv.pop(1),run_name="__main__")')
+            completed = subprocess.run([sys.executable,'-c',runner,str(HERE/'play.py'),
+                '--base-url',f'http://127.0.0.1:{server.server_port}/v1','--model','qwen/qwen3.8-27b',
+                '--workspace-root',str(tmp_path/'workspaces'),'--output',str(tmp_path/'RESULT.json'),
+                '--timeout-s','1200'], env=env, capture_output=True, text=True, timeout=180)
+            (tmp_path/'stdout.log').write_text(completed.stdout)
+            (tmp_path/'stderr.log').write_text(completed.stderr)
+            (tmp_path/'requests.json').write_text(json.dumps(requests,indent=2)+'\n')
+            if fault:
+                assert completed.returncode != 0, 'Injected failure was incorrectly accepted'
+                assert not (tmp_path/'RESULT.json').exists()
+                assert (tmp_path/'RESULT.failure.json').exists()
+                assert requests, 'Fixture failed before reaching injected request'
+                if exhausted == 'stalled_tool':
+                    assert 'timed out' in completed.stderr.lower()
+                    assert not list((tmp_path/'workspaces').rglob('budget_exhausted.json'))
+                    assert len(requests) == 1, 'Timed-out cell issued another model call'
+                    markers = list((tmp_path/'workspaces').rglob('tool_timeout.json'))
+                    assert len(markers) == 1, 'Generic decision timeout is not a cell deadline'
+                    cell = json.loads(markers[0].read_text())
+                    assert cell['timeout_seconds'] == 0.3
+                    assert 0.3 <= cell['elapsed_seconds'] < 3
+                else:
+                    lifecycle = [json.loads(line) for p in (tmp_path/'workspaces').rglob('request_lifecycle.jsonl')
+                                 for line in p.read_text().splitlines()]
+                    assert any(row['event'] == 'failed' for row in lifecycle)
+                    assert len(requests) == 1, 'A failed call made another HTTP attempt'
+                    assert 'Model request failed' in completed.stderr
+                assert not (tmp_path/'game-progress.jsonl').exists(), 'Fault was mistaken for normal game completion'
+                # PIDs recorded by the real worker must be retired before returning.
+                for p in (tmp_path/'workspaces').rglob('worker-metadata.json'):
+                    pid = json.loads(p.read_text())['agent_pid']
+                    with pytest.raises(ProcessLookupError):
+                        os.kill(pid, 0)
+                return
+>           assert completed.returncode == 0, completed.stdout + completed.stderr
+E           AssertionError: INFO:arc_agi.scorecard:Initialized ScorecardManager with idle_for=0:15:00 and max_open_for=3 days, 0:00:00
+E             2026-09-10 18:54:43 | INFO | Successfully fetched 1 environment(s) from API
+E             2026-09-10 18:54:43 | INFO | Created new scorecard: 32422e4d-3681-4512-9245-4843e1bf201c
+E             {"game_count": 1, "global_deadline": 72790.459857194}
+E             2026-09-10 18:54:43 | INFO | Successfully fetched metadata for game ls20
+E             2026-09-10 18:54:43 | INFO | Successfully reset game ls20-9607627b, guid=c4d59c2e-d879-4a8d-bb2e-5516f7f747a7, scorecard_id=32422e4d-3681-4512-9245-4843e1bf201c
+E             2026-09-10 18:54:45 | INFO | Closed scorecard: 32422e4d-3681-4512-9245-4843e1bf201c
+E             Traceback (most recent call last):
+E               File "<string>", line 1, in <module>
+E               File "<frozen runpy>", line 287, in run_path
+E               File "<frozen runpy>", line 98, in _run_module_code
+E               File "<frozen runpy>", line 88, in _run_code
+E               File "/home/pranav/.superset/worktrees/b420fea5-43e0-4bc6-a3d0-0629350d400b/tall-humerus/deployment/kaggle/submission-20260910-v9/play.py", line 184, in <module>
+E                 main()
+E               File "/home/pranav/.superset/worktrees/b420fea5-43e0-4bc6-a3d0-0629350d400b/tall-humerus/deployment/kaggle/submission-20260910-v9/play.py", line 176, in main
+E                 run(args)
+E               File "/home/pranav/.superset/worktrees/b420fea5-43e0-4bc6-a3d0-0629350d400b/tall-humerus/deployment/kaggle/submission-20260910-v9/play.py", line 120, in run
+E                 agent.main()
+E               File "/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_thinking_1/framework/agents/tracing.py", line 119, in wrapper
+E                 return func(agent_instance, *args, **kwargs)
+E                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E               File "/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_thinking_1/framework/agents/agent.py", line 76, in main
+E                 action = self.choose_action(
+E                          ^^^^^^^^^^^^^^^^^^^
+E               File "/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_thinking_1/framework/agents/templates/my_agent.py", line 201, in choose_action
+E                 solver = self._ensure_solver(observation)
+E                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E               File "/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_thinking_1/framework/agents/templates/my_agent.py", line 279, in _ensure_solver
+E                 self._solver = self._solver_factory(
+E                                ^^^^^^^^^^^^^^^^^^^^^
+E               File "/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_thinking_1/framework/agents/templates/my_agent.py", line 90, in _default_solver_factory
+E                 return create_solver(
+E                        ^^^^^^^^^^^^^^
+E               File "/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_thinking_1/framework/local_solver.py", line 54, in create_solver
+E                 return LocalSolver(
+E                        ^^^^^^^^^^^^
+E               File "/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_thinking_1/framework/runtime/local_solver.py", line 234, in __init__
+E                 ready = self._receive("ready")
+E                         ^^^^^^^^^^^^^^^^^^^^^^
+E               File "/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_thinking_1/framework/runtime/local_solver.py", line 453, in _receive
+E                 raise LocalSolverError(str(payload.get("message", "worker error")))
+E             runtime.local_solver.LocalSolverError: WorkerError: candidate drift: chassis/solver_agent.py
+E             
+E           assert 1 == 0
+E            +  where 1 = CompletedProcess(args=['/home/pranav/.superset/worktrees/b420fea5-43e0-4bc6-a3d0-0629350d400b/tall-humerus/deployment/...e", "worker error")))\nruntime.local_solver.LocalSolverError: WorkerError: candidate drift: chassis/solver_agent.py\n').returncode
+
+deployment/kaggle/submission-20260910-v9/test_submission.py:231: AssertionError
+----------------------------- Captured stdout call -----------------------------
+INFO:arc_agi.scorecard:Initialized ScorecardManager with idle_for=0:15:00 and max_open_for=3 days, 0:00:00
+------------------------------ Captured log call -------------------------------
+INFO     werkzeug:_internal.py:97 127.0.0.1 - - [10/Sep/2026 18:54:43] "GET /api/games HTTP/1.1" 200 -
+INFO     werkzeug:_internal.py:97 127.0.0.1 - - [10/Sep/2026 18:54:43] "POST /api/scorecard/open HTTP/1.1" 200 -
+INFO     werkzeug:_internal.py:97 127.0.0.1 - - [10/Sep/2026 18:54:43] "GET /api/games/ls20 HTTP/1.1" 200 -
+INFO     werkzeug:_internal.py:97 127.0.0.1 - - [10/Sep/2026 18:54:43] "POST /api/cmd/RESET HTTP/1.1" 200 -
+INFO     werkzeug:_internal.py:97 127.0.0.1 - - [10/Sep/2026 18:54:45] "POST /api/scorecard/close HTTP/1.1" 200 -
+____________________ test_real_entrypoint[slow_http-False] _____________________
+
+tmp_path = PosixPath('/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_slow_http0')
+gateway = False, exhausted = 'slow_http', planner = False
+
+    @pytest.mark.parametrize('gateway', [False, True])
+    @pytest.mark.parametrize('exhausted', [False, True, 'thinking', 'slow_http', 'http_error', 'stalled_tool'])
+    def test_real_entrypoint(tmp_path, gateway, exhausted, planner=False):
+        fault = exhausted in ('slow_http', 'http_error', 'stalled_tool')
+        framework = tmp_path/'framework'
+        (framework/'agents/templates').mkdir(parents=True)
+        for name in ['agent.py', 'recorder.py', 'tracing.py', 'swarm.py']:
+            shutil.copy2(OFFICIAL/'agents'/name, framework/'agents'/name)
+        (framework/'agents/__init__.py').write_text('from .agent import Agent, Playback\nfrom .swarm import Swarm\n')
+        shutil.copy2(DONOR/'adapter.py', framework/'agents/templates/my_agent.py')
+        (framework/'runtime').mkdir()
+        (framework/'runtime/__init__.py').write_text('')
+        shutil.copy2(DONOR/'shared_local_solver.py', framework/'runtime/local_solver.py')
+        shutil.copy2(DONOR/'local_solver.py', framework/'local_solver.py')
+        requests = []
+        actor_requests = []
+    
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+    
+            def do_POST(self):
+                requests.append(json.loads(self.rfile.read(int(self.headers['Content-Length']))))
+                if exhausted == 'http_error':
+                    self.send_error(503, 'injected qualification transport failure')
+                    return
+                if exhausted == 'slow_http':
+                    time.sleep(5)
+                if len(requests) > 40:
+                    self.send_error(429, 'qualification request cap')
+                    return
+                is_actor = any(t.get('function', {}).get('name') == 'execute_python'
+                               for t in requests[-1].get('tools', []))
+                if is_actor:
+                    actor_requests.append(requests[-1])
+                action = ['UP', 'DOWN', 'LEFT', 'RIGHT'][(len(actor_requests)-1) % 4]
+                reply = dict(id=f'local-{len(requests)}', object='chat.completion', created=1,
+                    model='controlled-local', choices=[dict(index=0, finish_reason='tool_calls', message=dict(
+                        role='assistant', content=None, tool_calls=[dict(id=f'call-{len(requests)}', type='function',
+                        function=dict(name='execute_python', arguments=json.dumps(dict(code=
+                        f'grid=self.model_grid(); self.submit_actions([{action!r}], rationale="predict: controlled movement")'))))]))],
+                    usage=dict(prompt_tokens=22000, completion_tokens=50, total_tokens=22050))
+                if not is_actor:
+                    reply['choices'] = [dict(index=0, finish_reason='stop',
+                        message=dict(role='assistant', content=json.dumps(dict(
+                            value='Controlled summary: mechanics and goal remain unproven.'))))]
+                data=json.dumps(reply).encode()
+                if exhausted == 'thinking':
+                    time.sleep(1)
+                    reply['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = json.dumps(
+                        dict(code='print(self.model_grid())'))
+                    data = json.dumps(reply).encode()
+                if exhausted == 'stalled_tool':
+                    reply['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = json.dumps(
+                        dict(code='while True: pass'))
+                    data = json.dumps(reply).encode()
+                if planner and is_actor:
+                    source = 'def encode(g): return {"x":0}\ndef predict(z,a): return {"x":z["x"]+1}'
+                    code = (f'self.write_helper("world_model.py", {source!r}); '
+                            f'r=self.plan_actions({{"path":["x"],"op":"eq","value":3}}, [{action!r}]); '
+                            'assert r["status"] == "path_found", r; '
+                            'self.submit_actions(r["plan"][:1], rationale="observe a local consequence; objective unknown", search_id=r["search_id"])')
+                    reply['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = json.dumps(dict(code=code))
+                    data = json.dumps(reply).encode()
+                self.send_response(200)
+                self.send_header('Content-Type','application/json')
+                self.send_header('Content-Length',str(len(data)))
+                self.end_headers()
+                try:
+                    self.wfile.write(data)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # Expected for the intentionally timed-out HTTP request.
+    
+        server = ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        thread = threading.Thread(target=server.serve_forever,daemon=True)
+        thread.start()
+        env = dict(os.environ, KAGGLE_IS_COMPETITION_RERUN='true' if gateway else 'false', SUBMISSION_FRAMEWORK=str(framework),
+            SUBMISSION_ENVIRONMENTS=str(ROOT/'environment_files'), SUBMISSION_PUBLIC_GAMES='ls20',
+            NOOA_JOIN_ROOT=str(DONOR), ARC_LLM_MAX_TOKENS='16384', ARC_LLM_RETRIES='0',
+            ARC_LLM_TIMEOUT_SECONDS='30', TYCHO_NOOA_WORKER_TIMEOUT_SECONDS='40',
+            ARC_STALL_REVIEW='0', ARC_DISCOVERY_ARM='a', ARC_SOLVER_ARM='loop', ARC_CONTINGENT_ARM='on', SUBMISSION_ACTION_LIMIT='10',
+            ARC_LLM_EXTRA_BODY='{"chat_template_kwargs":{"enable_thinking":false},"reasoning":{"enabled":false}}')
+        if exhausted:
+            env['SUBMISSION_ADMISSION_CAP_SECONDS'] = '12' if exhausted == 'thinking' else '0'
+        if fault:
+            env['SUBMISSION_ADMISSION_CAP_SECONDS'] = '12'
+            env['ARC_LLM_TIMEOUT_SECONDS'] = '2'
+        if exhausted == 'stalled_tool':
+            # Exercise the actual cell middleware and independent protocol poller.
+            # Accelerate its production 60s deadline, not the generic host timeout.
+            bootstrap = (
+                'import sys,asyncio;sys.path.insert(0,' + repr(str(DONOR)) + ');'
+                'import headless,solver_agent;'
+                'solver_agent._ARC_CELL_CONFIG=solver_agent._ARC_CELL_CONFIG.model_copy('
+                'update={"cell_timeout":0.3});'
+                'sys.argv=["headless","--run-dir","."];asyncio.run(headless.run())'
+            )
+            env['NOOA_AGENT_COMMAND'] = json.dumps([sys.executable, '-c', bootstrap])
+        expected_games = 2 if exhausted is True and not gateway else 1
+        if expected_games == 2:
+            # Two invocations prove the first exhausted game does not abort the loop.
+            env['SUBMISSION_PUBLIC_GAMES'] = 'ls20,ls20'
+        gateway_server = None
+        if gateway:
+            from arc_agi import Arcade, OperationMode
+            from arc_agi.server import create_app
+            from werkzeug.serving import make_server
+            arcade = Arcade(operation_mode=OperationMode.OFFLINE, environments_dir=str(ROOT/'environment_files'))
+            app, _ = create_app(arcade, competition_mode=True)
+            gateway_server = make_server('127.0.0.1', 0, app, threaded=True)
+            gateway_thread = threading.Thread(target=gateway_server.serve_forever, daemon=True)
+            gateway_thread.start()
+            env['SUBMISSION_GATEWAY_BASE_URL'] = f'http://127.0.0.1:{gateway_server.server_port}'
+        try:
+            # Widen the observed finish/cleanup race without bypassing Agent.main.
+            runner = ('import sys,time;sys.path.insert(0,' + repr(str(framework)) + ');'
+                      'from agents.templates.my_agent import MyAgent;'
+                      'original=MyAgent.cleanup;'
+                      'MyAgent.cleanup=lambda self:(time.sleep(1),original(self))[-1];'
+                      'import runpy;runpy.run_path(sys.argv.pop(1),run_name="__main__")')
+            completed = subprocess.run([sys.executable,'-c',runner,str(HERE/'play.py'),
+                '--base-url',f'http://127.0.0.1:{server.server_port}/v1','--model','qwen/qwen3.8-27b',
+                '--workspace-root',str(tmp_path/'workspaces'),'--output',str(tmp_path/'RESULT.json'),
+                '--timeout-s','1200'], env=env, capture_output=True, text=True, timeout=180)
+            (tmp_path/'stdout.log').write_text(completed.stdout)
+            (tmp_path/'stderr.log').write_text(completed.stderr)
+            (tmp_path/'requests.json').write_text(json.dumps(requests,indent=2)+'\n')
+            if fault:
+                assert completed.returncode != 0, 'Injected failure was incorrectly accepted'
+                assert not (tmp_path/'RESULT.json').exists()
+                assert (tmp_path/'RESULT.failure.json').exists()
+>               assert requests, 'Fixture failed before reaching injected request'
+E               AssertionError: Fixture failed before reaching injected request
+E               assert []
+
+deployment/kaggle/submission-20260910-v9/test_submission.py:208: AssertionError
+_____________________ test_real_entrypoint[slow_http-True] _____________________
+
+tmp_path = PosixPath('/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_slow_http1')
+gateway = True, exhausted = 'slow_http', planner = False
+
+    @pytest.mark.parametrize('gateway', [False, True])
+    @pytest.mark.parametrize('exhausted', [False, True, 'thinking', 'slow_http', 'http_error', 'stalled_tool'])
+    def test_real_entrypoint(tmp_path, gateway, exhausted, planner=False):
+        fault = exhausted in ('slow_http', 'http_error', 'stalled_tool')
+        framework = tmp_path/'framework'
+        (framework/'agents/templates').mkdir(parents=True)
+        for name in ['agent.py', 'recorder.py', 'tracing.py', 'swarm.py']:
+            shutil.copy2(OFFICIAL/'agents'/name, framework/'agents'/name)
+        (framework/'agents/__init__.py').write_text('from .agent import Agent, Playback\nfrom .swarm import Swarm\n')
+        shutil.copy2(DONOR/'adapter.py', framework/'agents/templates/my_agent.py')
+        (framework/'runtime').mkdir()
+        (framework/'runtime/__init__.py').write_text('')
+        shutil.copy2(DONOR/'shared_local_solver.py', framework/'runtime/local_solver.py')
+        shutil.copy2(DONOR/'local_solver.py', framework/'local_solver.py')
+        requests = []
+        actor_requests = []
+    
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+    
+            def do_POST(self):
+                requests.append(json.loads(self.rfile.read(int(self.headers['Content-Length']))))
+                if exhausted == 'http_error':
+                    self.send_error(503, 'injected qualification transport failure')
+                    return
+                if exhausted == 'slow_http':
+                    time.sleep(5)
+                if len(requests) > 40:
+                    self.send_error(429, 'qualification request cap')
+                    return
+                is_actor = any(t.get('function', {}).get('name') == 'execute_python'
+                               for t in requests[-1].get('tools', []))
+                if is_actor:
+                    actor_requests.append(requests[-1])
+                action = ['UP', 'DOWN', 'LEFT', 'RIGHT'][(len(actor_requests)-1) % 4]
+                reply = dict(id=f'local-{len(requests)}', object='chat.completion', created=1,
+                    model='controlled-local', choices=[dict(index=0, finish_reason='tool_calls', message=dict(
+                        role='assistant', content=None, tool_calls=[dict(id=f'call-{len(requests)}', type='function',
+                        function=dict(name='execute_python', arguments=json.dumps(dict(code=
+                        f'grid=self.model_grid(); self.submit_actions([{action!r}], rationale="predict: controlled movement")'))))]))],
+                    usage=dict(prompt_tokens=22000, completion_tokens=50, total_tokens=22050))
+                if not is_actor:
+                    reply['choices'] = [dict(index=0, finish_reason='stop',
+                        message=dict(role='assistant', content=json.dumps(dict(
+                            value='Controlled summary: mechanics and goal remain unproven.'))))]
+                data=json.dumps(reply).encode()
+                if exhausted == 'thinking':
+                    time.sleep(1)
+                    reply['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = json.dumps(
+                        dict(code='print(self.model_grid())'))
+                    data = json.dumps(reply).encode()
+                if exhausted == 'stalled_tool':
+                    reply['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = json.dumps(
+                        dict(code='while True: pass'))
+                    data = json.dumps(reply).encode()
+                if planner and is_actor:
+                    source = 'def encode(g): return {"x":0}\ndef predict(z,a): return {"x":z["x"]+1}'
+                    code = (f'self.write_helper("world_model.py", {source!r}); '
+                            f'r=self.plan_actions({{"path":["x"],"op":"eq","value":3}}, [{action!r}]); '
+                            'assert r["status"] == "path_found", r; '
+                            'self.submit_actions(r["plan"][:1], rationale="observe a local consequence; objective unknown", search_id=r["search_id"])')
+                    reply['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = json.dumps(dict(code=code))
+                    data = json.dumps(reply).encode()
+                self.send_response(200)
+                self.send_header('Content-Type','application/json')
+                self.send_header('Content-Length',str(len(data)))
+                self.end_headers()
+                try:
+                    self.wfile.write(data)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # Expected for the intentionally timed-out HTTP request.
+    
+        server = ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        thread = threading.Thread(target=server.serve_forever,daemon=True)
+        thread.start()
+        env = dict(os.environ, KAGGLE_IS_COMPETITION_RERUN='true' if gateway else 'false', SUBMISSION_FRAMEWORK=str(framework),
+            SUBMISSION_ENVIRONMENTS=str(ROOT/'environment_files'), SUBMISSION_PUBLIC_GAMES='ls20',
+            NOOA_JOIN_ROOT=str(DONOR), ARC_LLM_MAX_TOKENS='16384', ARC_LLM_RETRIES='0',
+            ARC_LLM_TIMEOUT_SECONDS='30', TYCHO_NOOA_WORKER_TIMEOUT_SECONDS='40',
+            ARC_STALL_REVIEW='0', ARC_DISCOVERY_ARM='a', ARC_SOLVER_ARM='loop', ARC_CONTINGENT_ARM='on', SUBMISSION_ACTION_LIMIT='10',
+            ARC_LLM_EXTRA_BODY='{"chat_template_kwargs":{"enable_thinking":false},"reasoning":{"enabled":false}}')
+        if exhausted:
+            env['SUBMISSION_ADMISSION_CAP_SECONDS'] = '12' if exhausted == 'thinking' else '0'
+        if fault:
+            env['SUBMISSION_ADMISSION_CAP_SECONDS'] = '12'
+            env['ARC_LLM_TIMEOUT_SECONDS'] = '2'
+        if exhausted == 'stalled_tool':
+            # Exercise the actual cell middleware and independent protocol poller.
+            # Accelerate its production 60s deadline, not the generic host timeout.
+            bootstrap = (
+                'import sys,asyncio;sys.path.insert(0,' + repr(str(DONOR)) + ');'
+                'import headless,solver_agent;'
+                'solver_agent._ARC_CELL_CONFIG=solver_agent._ARC_CELL_CONFIG.model_copy('
+                'update={"cell_timeout":0.3});'
+                'sys.argv=["headless","--run-dir","."];asyncio.run(headless.run())'
+            )
+            env['NOOA_AGENT_COMMAND'] = json.dumps([sys.executable, '-c', bootstrap])
+        expected_games = 2 if exhausted is True and not gateway else 1
+        if expected_games == 2:
+            # Two invocations prove the first exhausted game does not abort the loop.
+            env['SUBMISSION_PUBLIC_GAMES'] = 'ls20,ls20'
+        gateway_server = None
+        if gateway:
+            from arc_agi import Arcade, OperationMode
+            from arc_agi.server import create_app
+            from werkzeug.serving import make_server
+            arcade = Arcade(operation_mode=OperationMode.OFFLINE, environments_dir=str(ROOT/'environment_files'))
+            app, _ = create_app(arcade, competition_mode=True)
+            gateway_server = make_server('127.0.0.1', 0, app, threaded=True)
+            gateway_thread = threading.Thread(target=gateway_server.serve_forever, daemon=True)
+            gateway_thread.start()
+            env['SUBMISSION_GATEWAY_BASE_URL'] = f'http://127.0.0.1:{gateway_server.server_port}'
+        try:
+            # Widen the observed finish/cleanup race without bypassing Agent.main.
+            runner = ('import sys,time;sys.path.insert(0,' + repr(str(framework)) + ');'
+                      'from agents.templates.my_agent import MyAgent;'
+                      'original=MyAgent.cleanup;'
+                      'MyAgent.cleanup=lambda self:(time.sleep(1),original(self))[-1];'
+                      'import runpy;runpy.run_path(sys.argv.pop(1),run_name="__main__")')
+            completed = subprocess.run([sys.executable,'-c',runner,str(HERE/'play.py'),
+                '--base-url',f'http://127.0.0.1:{server.server_port}/v1','--model','qwen/qwen3.8-27b',
+                '--workspace-root',str(tmp_path/'workspaces'),'--output',str(tmp_path/'RESULT.json'),
+                '--timeout-s','1200'], env=env, capture_output=True, text=True, timeout=180)
+            (tmp_path/'stdout.log').write_text(completed.stdout)
+            (tmp_path/'stderr.log').write_text(completed.stderr)
+            (tmp_path/'requests.json').write_text(json.dumps(requests,indent=2)+'\n')
+            if fault:
+                assert completed.returncode != 0, 'Injected failure was incorrectly accepted'
+                assert not (tmp_path/'RESULT.json').exists()
+                assert (tmp_path/'RESULT.failure.json').exists()
+>               assert requests, 'Fixture failed before reaching injected request'
+E               AssertionError: Fixture failed before reaching injected request
+E               assert []
+
+deployment/kaggle/submission-20260910-v9/test_submission.py:208: AssertionError
+----------------------------- Captured stdout call -----------------------------
+INFO:arc_agi.scorecard:Initialized ScorecardManager with idle_for=0:15:00 and max_open_for=3 days, 0:00:00
+------------------------------ Captured log call -------------------------------
+INFO     werkzeug:_internal.py:97 127.0.0.1 - - [10/Sep/2026 18:54:53] "GET /api/games HTTP/1.1" 200 -
+INFO     werkzeug:_internal.py:97 127.0.0.1 - - [10/Sep/2026 18:54:53] "POST /api/scorecard/open HTTP/1.1" 200 -
+INFO     werkzeug:_internal.py:97 127.0.0.1 - - [10/Sep/2026 18:54:53] "GET /api/games/ls20 HTTP/1.1" 200 -
+INFO     werkzeug:_internal.py:97 127.0.0.1 - - [10/Sep/2026 18:54:53] "POST /api/cmd/RESET HTTP/1.1" 200 -
+INFO     werkzeug:_internal.py:97 127.0.0.1 - - [10/Sep/2026 18:54:56] "POST /api/scorecard/close HTTP/1.1" 200 -
+____________________ test_real_entrypoint[http_error-False] ____________________
+
+tmp_path = PosixPath('/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_http_erro0')
+gateway = False, exhausted = 'http_error', planner = False
+
+    @pytest.mark.parametrize('gateway', [False, True])
+    @pytest.mark.parametrize('exhausted', [False, True, 'thinking', 'slow_http', 'http_error', 'stalled_tool'])
+    def test_real_entrypoint(tmp_path, gateway, exhausted, planner=False):
+        fault = exhausted in ('slow_http', 'http_error', 'stalled_tool')
+        framework = tmp_path/'framework'
+        (framework/'agents/templates').mkdir(parents=True)
+        for name in ['agent.py', 'recorder.py', 'tracing.py', 'swarm.py']:
+            shutil.copy2(OFFICIAL/'agents'/name, framework/'agents'/name)
+        (framework/'agents/__init__.py').write_text('from .agent import Agent, Playback\nfrom .swarm import Swarm\n')
+        shutil.copy2(DONOR/'adapter.py', framework/'agents/templates/my_agent.py')
+        (framework/'runtime').mkdir()
+        (framework/'runtime/__init__.py').write_text('')
+        shutil.copy2(DONOR/'shared_local_solver.py', framework/'runtime/local_solver.py')
+        shutil.copy2(DONOR/'local_solver.py', framework/'local_solver.py')
+        requests = []
+        actor_requests = []
+    
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+    
+            def do_POST(self):
+                requests.append(json.loads(self.rfile.read(int(self.headers['Content-Length']))))
+                if exhausted == 'http_error':
+                    self.send_error(503, 'injected qualification transport failure')
+                    return
+                if exhausted == 'slow_http':
+                    time.sleep(5)
+                if len(requests) > 40:
+                    self.send_error(429, 'qualification request cap')
+                    return
+                is_actor = any(t.get('function', {}).get('name') == 'execute_python'
+                               for t in requests[-1].get('tools', []))
+                if is_actor:
+                    actor_requests.append(requests[-1])
+                action = ['UP', 'DOWN', 'LEFT', 'RIGHT'][(len(actor_requests)-1) % 4]
+                reply = dict(id=f'local-{len(requests)}', object='chat.completion', created=1,
+                    model='controlled-local', choices=[dict(index=0, finish_reason='tool_calls', message=dict(
+                        role='assistant', content=None, tool_calls=[dict(id=f'call-{len(requests)}', type='function',
+                        function=dict(name='execute_python', arguments=json.dumps(dict(code=
+                        f'grid=self.model_grid(); self.submit_actions([{action!r}], rationale="predict: controlled movement")'))))]))],
+                    usage=dict(prompt_tokens=22000, completion_tokens=50, total_tokens=22050))
+                if not is_actor:
+                    reply['choices'] = [dict(index=0, finish_reason='stop',
+                        message=dict(role='assistant', content=json.dumps(dict(
+                            value='Controlled summary: mechanics and goal remain unproven.'))))]
+                data=json.dumps(reply).encode()
+                if exhausted == 'thinking':
+                    time.sleep(1)
+                    reply['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = json.dumps(
+                        dict(code='print(self.model_grid())'))
+                    data = json.dumps(reply).encode()
+                if exhausted == 'stalled_tool':
+                    reply['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = json.dumps(
+                        dict(code='while True: pass'))
+                    data = json.dumps(reply).encode()
+                if planner and is_actor:
+                    source = 'def encode(g): return {"x":0}\ndef predict(z,a): return {"x":z["x"]+1}'
+                    code = (f'self.write_helper("world_model.py", {source!r}); '
+                            f'r=self.plan_actions({{"path":["x"],"op":"eq","value":3}}, [{action!r}]); '
+                            'assert r["status"] == "path_found", r; '
+                            'self.submit_actions(r["plan"][:1], rationale="observe a local consequence; objective unknown", search_id=r["search_id"])')
+                    reply['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = json.dumps(dict(code=code))
+                    data = json.dumps(reply).encode()
+                self.send_response(200)
+                self.send_header('Content-Type','application/json')
+                self.send_header('Content-Length',str(len(data)))
+                self.end_headers()
+                try:
+                    self.wfile.write(data)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # Expected for the intentionally timed-out HTTP request.
+    
+        server = ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        thread = threading.Thread(target=server.serve_forever,daemon=True)
+        thread.start()
+        env = dict(os.environ, KAGGLE_IS_COMPETITION_RERUN='true' if gateway else 'false', SUBMISSION_FRAMEWORK=str(framework),
+            SUBMISSION_ENVIRONMENTS=str(ROOT/'environment_files'), SUBMISSION_PUBLIC_GAMES='ls20',
+            NOOA_JOIN_ROOT=str(DONOR), ARC_LLM_MAX_TOKENS='16384', ARC_LLM_RETRIES='0',
+            ARC_LLM_TIMEOUT_SECONDS='30', TYCHO_NOOA_WORKER_TIMEOUT_SECONDS='40',
+            ARC_STALL_REVIEW='0', ARC_DISCOVERY_ARM='a', ARC_SOLVER_ARM='loop', ARC_CONTINGENT_ARM='on', SUBMISSION_ACTION_LIMIT='10',
+            ARC_LLM_EXTRA_BODY='{"chat_template_kwargs":{"enable_thinking":false},"reasoning":{"enabled":false}}')
+        if exhausted:
+            env['SUBMISSION_ADMISSION_CAP_SECONDS'] = '12' if exhausted == 'thinking' else '0'
+        if fault:
+            env['SUBMISSION_ADMISSION_CAP_SECONDS'] = '12'
+            env['ARC_LLM_TIMEOUT_SECONDS'] = '2'
+        if exhausted == 'stalled_tool':
+            # Exercise the actual cell middleware and independent protocol poller.
+            # Accelerate its production 60s deadline, not the generic host timeout.
+            bootstrap = (
+                'import sys,asyncio;sys.path.insert(0,' + repr(str(DONOR)) + ');'
+                'import headless,solver_agent;'
+                'solver_agent._ARC_CELL_CONFIG=solver_agent._ARC_CELL_CONFIG.model_copy('
+                'update={"cell_timeout":0.3});'
+                'sys.argv=["headless","--run-dir","."];asyncio.run(headless.run())'
+            )
+            env['NOOA_AGENT_COMMAND'] = json.dumps([sys.executable, '-c', bootstrap])
+        expected_games = 2 if exhausted is True and not gateway else 1
+        if expected_games == 2:
+            # Two invocations prove the first exhausted game does not abort the loop.
+            env['SUBMISSION_PUBLIC_GAMES'] = 'ls20,ls20'
+        gateway_server = None
+        if gateway:
+            from arc_agi import Arcade, OperationMode
+            from arc_agi.server import create_app
+            from werkzeug.serving import make_server
+            arcade = Arcade(operation_mode=OperationMode.OFFLINE, environments_dir=str(ROOT/'environment_files'))
+            app, _ = create_app(arcade, competition_mode=True)
+            gateway_server = make_server('127.0.0.1', 0, app, threaded=True)
+            gateway_thread = threading.Thread(target=gateway_server.serve_forever, daemon=True)
+            gateway_thread.start()
+            env['SUBMISSION_GATEWAY_BASE_URL'] = f'http://127.0.0.1:{gateway_server.server_port}'
+        try:
+            # Widen the observed finish/cleanup race without bypassing Agent.main.
+            runner = ('import sys,time;sys.path.insert(0,' + repr(str(framework)) + ');'
+                      'from agents.templates.my_agent import MyAgent;'
+                      'original=MyAgent.cleanup;'
+                      'MyAgent.cleanup=lambda self:(time.sleep(1),original(self))[-1];'
+                      'import runpy;runpy.run_path(sys.argv.pop(1),run_name="__main__")')
+            completed = subprocess.run([sys.executable,'-c',runner,str(HERE/'play.py'),
+                '--base-url',f'http://127.0.0.1:{server.server_port}/v1','--model','qwen/qwen3.8-27b',
+                '--workspace-root',str(tmp_path/'workspaces'),'--output',str(tmp_path/'RESULT.json'),
+                '--timeout-s','1200'], env=env, capture_output=True, text=True, timeout=180)
+            (tmp_path/'stdout.log').write_text(completed.stdout)
+            (tmp_path/'stderr.log').write_text(completed.stderr)
+            (tmp_path/'requests.json').write_text(json.dumps(requests,indent=2)+'\n')
+            if fault:
+                assert completed.returncode != 0, 'Injected failure was incorrectly accepted'
+                assert not (tmp_path/'RESULT.json').exists()
+                assert (tmp_path/'RESULT.failure.json').exists()
+>               assert requests, 'Fixture failed before reaching injected request'
+E               AssertionError: Fixture failed before reaching injected request
+E               assert []
+
+deployment/kaggle/submission-20260910-v9/test_submission.py:208: AssertionError
+____________________ test_real_entrypoint[http_error-True] _____________________
+
+tmp_path = PosixPath('/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_http_erro1')
+gateway = True, exhausted = 'http_error', planner = False
+
+    @pytest.mark.parametrize('gateway', [False, True])
+    @pytest.mark.parametrize('exhausted', [False, True, 'thinking', 'slow_http', 'http_error', 'stalled_tool'])
+    def test_real_entrypoint(tmp_path, gateway, exhausted, planner=False):
+        fault = exhausted in ('slow_http', 'http_error', 'stalled_tool')
+        framework = tmp_path/'framework'
+        (framework/'agents/templates').mkdir(parents=True)
+        for name in ['agent.py', 'recorder.py', 'tracing.py', 'swarm.py']:
+            shutil.copy2(OFFICIAL/'agents'/name, framework/'agents'/name)
+        (framework/'agents/__init__.py').write_text('from .agent import Agent, Playback\nfrom .swarm import Swarm\n')
+        shutil.copy2(DONOR/'adapter.py', framework/'agents/templates/my_agent.py')
+        (framework/'runtime').mkdir()
+        (framework/'runtime/__init__.py').write_text('')
+        shutil.copy2(DONOR/'shared_local_solver.py', framework/'runtime/local_solver.py')
+        shutil.copy2(DONOR/'local_solver.py', framework/'local_solver.py')
+        requests = []
+        actor_requests = []
+    
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+    
+            def do_POST(self):
+                requests.append(json.loads(self.rfile.read(int(self.headers['Content-Length']))))
+                if exhausted == 'http_error':
+                    self.send_error(503, 'injected qualification transport failure')
+                    return
+                if exhausted == 'slow_http':
+                    time.sleep(5)
+                if len(requests) > 40:
+                    self.send_error(429, 'qualification request cap')
+                    return
+                is_actor = any(t.get('function', {}).get('name') == 'execute_python'
+                               for t in requests[-1].get('tools', []))
+                if is_actor:
+                    actor_requests.append(requests[-1])
+                action = ['UP', 'DOWN', 'LEFT', 'RIGHT'][(len(actor_requests)-1) % 4]
+                reply = dict(id=f'local-{len(requests)}', object='chat.completion', created=1,
+                    model='controlled-local', choices=[dict(index=0, finish_reason='tool_calls', message=dict(
+                        role='assistant', content=None, tool_calls=[dict(id=f'call-{len(requests)}', type='function',
+                        function=dict(name='execute_python', arguments=json.dumps(dict(code=
+                        f'grid=self.model_grid(); self.submit_actions([{action!r}], rationale="predict: controlled movement")'))))]))],
+                    usage=dict(prompt_tokens=22000, completion_tokens=50, total_tokens=22050))
+                if not is_actor:
+                    reply['choices'] = [dict(index=0, finish_reason='stop',
+                        message=dict(role='assistant', content=json.dumps(dict(
+                            value='Controlled summary: mechanics and goal remain unproven.'))))]
+                data=json.dumps(reply).encode()
+                if exhausted == 'thinking':
+                    time.sleep(1)
+                    reply['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = json.dumps(
+                        dict(code='print(self.model_grid())'))
+                    data = json.dumps(reply).encode()
+                if exhausted == 'stalled_tool':
+                    reply['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = json.dumps(
+                        dict(code='while True: pass'))
+                    data = json.dumps(reply).encode()
+                if planner and is_actor:
+                    source = 'def encode(g): return {"x":0}\ndef predict(z,a): return {"x":z["x"]+1}'
+                    code = (f'self.write_helper("world_model.py", {source!r}); '
+                            f'r=self.plan_actions({{"path":["x"],"op":"eq","value":3}}, [{action!r}]); '
+                            'assert r["status"] == "path_found", r; '
+                            'self.submit_actions(r["plan"][:1], rationale="observe a local consequence; objective unknown", search_id=r["search_id"])')
+                    reply['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = json.dumps(dict(code=code))
+                    data = json.dumps(reply).encode()
+                self.send_response(200)
+                self.send_header('Content-Type','application/json')
+                self.send_header('Content-Length',str(len(data)))
+                self.end_headers()
+                try:
+                    self.wfile.write(data)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # Expected for the intentionally timed-out HTTP request.
+    
+        server = ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        thread = threading.Thread(target=server.serve_forever,daemon=True)
+        thread.start()
+        env = dict(os.environ, KAGGLE_IS_COMPETITION_RERUN='true' if gateway else 'false', SUBMISSION_FRAMEWORK=str(framework),
+            SUBMISSION_ENVIRONMENTS=str(ROOT/'environment_files'), SUBMISSION_PUBLIC_GAMES='ls20',
+            NOOA_JOIN_ROOT=str(DONOR), ARC_LLM_MAX_TOKENS='16384', ARC_LLM_RETRIES='0',
+            ARC_LLM_TIMEOUT_SECONDS='30', TYCHO_NOOA_WORKER_TIMEOUT_SECONDS='40',
+            ARC_STALL_REVIEW='0', ARC_DISCOVERY_ARM='a', ARC_SOLVER_ARM='loop', ARC_CONTINGENT_ARM='on', SUBMISSION_ACTION_LIMIT='10',
+            ARC_LLM_EXTRA_BODY='{"chat_template_kwargs":{"enable_thinking":false},"reasoning":{"enabled":false}}')
+        if exhausted:
+            env['SUBMISSION_ADMISSION_CAP_SECONDS'] = '12' if exhausted == 'thinking' else '0'
+        if fault:
+            env['SUBMISSION_ADMISSION_CAP_SECONDS'] = '12'
+            env['ARC_LLM_TIMEOUT_SECONDS'] = '2'
+        if exhausted == 'stalled_tool':
+            # Exercise the actual cell middleware and independent protocol poller.
+            # Accelerate its production 60s deadline, not the generic host timeout.
+            bootstrap = (
+                'import sys,asyncio;sys.path.insert(0,' + repr(str(DONOR)) + ');'
+                'import headless,solver_agent;'
+                'solver_agent._ARC_CELL_CONFIG=solver_agent._ARC_CELL_CONFIG.model_copy('
+                'update={"cell_timeout":0.3});'
+                'sys.argv=["headless","--run-dir","."];asyncio.run(headless.run())'
+            )
+            env['NOOA_AGENT_COMMAND'] = json.dumps([sys.executable, '-c', bootstrap])
+        expected_games = 2 if exhausted is True and not gateway else 1
+        if expected_games == 2:
+            # Two invocations prove the first exhausted game does not abort the loop.
+            env['SUBMISSION_PUBLIC_GAMES'] = 'ls20,ls20'
+        gateway_server = None
+        if gateway:
+            from arc_agi import Arcade, OperationMode
+            from arc_agi.server import create_app
+            from werkzeug.serving import make_server
+            arcade = Arcade(operation_mode=OperationMode.OFFLINE, environments_dir=str(ROOT/'environment_files'))
+            app, _ = create_app(arcade, competition_mode=True)
+            gateway_server = make_server('127.0.0.1', 0, app, threaded=True)
+            gateway_thread = threading.Thread(target=gateway_server.serve_forever, daemon=True)
+            gateway_thread.start()
+            env['SUBMISSION_GATEWAY_BASE_URL'] = f'http://127.0.0.1:{gateway_server.server_port}'
+        try:
+            # Widen the observed finish/cleanup race without bypassing Agent.main.
+            runner = ('import sys,time;sys.path.insert(0,' + repr(str(framework)) + ');'
+                      'from agents.templates.my_agent import MyAgent;'
+                      'original=MyAgent.cleanup;'
+                      'MyAgent.cleanup=lambda self:(time.sleep(1),original(self))[-1];'
+                      'import runpy;runpy.run_path(sys.argv.pop(1),run_name="__main__")')
+            completed = subprocess.run([sys.executable,'-c',runner,str(HERE/'play.py'),
+                '--base-url',f'http://127.0.0.1:{server.server_port}/v1','--model','qwen/qwen3.8-27b',
+                '--workspace-root',str(tmp_path/'workspaces'),'--output',str(tmp_path/'RESULT.json'),
+                '--timeout-s','1200'], env=env, capture_output=True, text=True, timeout=180)
+            (tmp_path/'stdout.log').write_text(completed.stdout)
+            (tmp_path/'stderr.log').write_text(completed.stderr)
+            (tmp_path/'requests.json').write_text(json.dumps(requests,indent=2)+'\n')
+            if fault:
+                assert completed.returncode != 0, 'Injected failure was incorrectly accepted'
+                assert not (tmp_path/'RESULT.json').exists()
+                assert (tmp_path/'RESULT.failure.json').exists()
+>               assert requests, 'Fixture failed before reaching injected request'
+E               AssertionError: Fixture failed before reaching injected request
+E               assert []
+
+deployment/kaggle/submission-20260910-v9/test_submission.py:208: AssertionError
+----------------------------- Captured stdout call -----------------------------
+INFO:arc_agi.scorecard:Initialized ScorecardManager with idle_for=0:15:00 and max_open_for=3 days, 0:00:00
+------------------------------ Captured log call -------------------------------
+INFO     werkzeug:_internal.py:97 127.0.0.1 - - [10/Sep/2026 18:55:13] "GET /api/games HTTP/1.1" 200 -
+INFO     werkzeug:_internal.py:97 127.0.0.1 - - [10/Sep/2026 18:55:13] "POST /api/scorecard/open HTTP/1.1" 200 -
+INFO     werkzeug:_internal.py:97 127.0.0.1 - - [10/Sep/2026 18:55:13] "GET /api/games/ls20 HTTP/1.1" 200 -
+INFO     werkzeug:_internal.py:97 127.0.0.1 - - [10/Sep/2026 18:55:13] "POST /api/cmd/RESET HTTP/1.1" 200 -
+INFO     werkzeug:_internal.py:97 127.0.0.1 - - [10/Sep/2026 18:55:16] "POST /api/scorecard/close HTTP/1.1" 200 -
+___________________ test_real_entrypoint[stalled_tool-False] ___________________
+
+tmp_path = PosixPath('/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_stalled_t0')
+gateway = False, exhausted = 'stalled_tool', planner = False
+
+    @pytest.mark.parametrize('gateway', [False, True])
+    @pytest.mark.parametrize('exhausted', [False, True, 'thinking', 'slow_http', 'http_error', 'stalled_tool'])
+    def test_real_entrypoint(tmp_path, gateway, exhausted, planner=False):
+        fault = exhausted in ('slow_http', 'http_error', 'stalled_tool')
+        framework = tmp_path/'framework'
+        (framework/'agents/templates').mkdir(parents=True)
+        for name in ['agent.py', 'recorder.py', 'tracing.py', 'swarm.py']:
+            shutil.copy2(OFFICIAL/'agents'/name, framework/'agents'/name)
+        (framework/'agents/__init__.py').write_text('from .agent import Agent, Playback\nfrom .swarm import Swarm\n')
+        shutil.copy2(DONOR/'adapter.py', framework/'agents/templates/my_agent.py')
+        (framework/'runtime').mkdir()
+        (framework/'runtime/__init__.py').write_text('')
+        shutil.copy2(DONOR/'shared_local_solver.py', framework/'runtime/local_solver.py')
+        shutil.copy2(DONOR/'local_solver.py', framework/'local_solver.py')
+        requests = []
+        actor_requests = []
+    
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+    
+            def do_POST(self):
+                requests.append(json.loads(self.rfile.read(int(self.headers['Content-Length']))))
+                if exhausted == 'http_error':
+                    self.send_error(503, 'injected qualification transport failure')
+                    return
+                if exhausted == 'slow_http':
+                    time.sleep(5)
+                if len(requests) > 40:
+                    self.send_error(429, 'qualification request cap')
+                    return
+                is_actor = any(t.get('function', {}).get('name') == 'execute_python'
+                               for t in requests[-1].get('tools', []))
+                if is_actor:
+                    actor_requests.append(requests[-1])
+                action = ['UP', 'DOWN', 'LEFT', 'RIGHT'][(len(actor_requests)-1) % 4]
+                reply = dict(id=f'local-{len(requests)}', object='chat.completion', created=1,
+                    model='controlled-local', choices=[dict(index=0, finish_reason='tool_calls', message=dict(
+                        role='assistant', content=None, tool_calls=[dict(id=f'call-{len(requests)}', type='function',
+                        function=dict(name='execute_python', arguments=json.dumps(dict(code=
+                        f'grid=self.model_grid(); self.submit_actions([{action!r}], rationale="predict: controlled movement")'))))]))],
+                    usage=dict(prompt_tokens=22000, completion_tokens=50, total_tokens=22050))
+                if not is_actor:
+                    reply['choices'] = [dict(index=0, finish_reason='stop',
+                        message=dict(role='assistant', content=json.dumps(dict(
+                            value='Controlled summary: mechanics and goal remain unproven.'))))]
+                data=json.dumps(reply).encode()
+                if exhausted == 'thinking':
+                    time.sleep(1)
+                    reply['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = json.dumps(
+                        dict(code='print(self.model_grid())'))
+                    data = json.dumps(reply).encode()
+                if exhausted == 'stalled_tool':
+                    reply['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = json.dumps(
+                        dict(code='while True: pass'))
+                    data = json.dumps(reply).encode()
+                if planner and is_actor:
+                    source = 'def encode(g): return {"x":0}\ndef predict(z,a): return {"x":z["x"]+1}'
+                    code = (f'self.write_helper("world_model.py", {source!r}); '
+                            f'r=self.plan_actions({{"path":["x"],"op":"eq","value":3}}, [{action!r}]); '
+                            'assert r["status"] == "path_found", r; '
+                            'self.submit_actions(r["plan"][:1], rationale="observe a local consequence; objective unknown", search_id=r["search_id"])')
+                    reply['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = json.dumps(dict(code=code))
+                    data = json.dumps(reply).encode()
+                self.send_response(200)
+                self.send_header('Content-Type','application/json')
+                self.send_header('Content-Length',str(len(data)))
+                self.end_headers()
+                try:
+                    self.wfile.write(data)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # Expected for the intentionally timed-out HTTP request.
+    
+        server = ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        thread = threading.Thread(target=server.serve_forever,daemon=True)
+        thread.start()
+        env = dict(os.environ, KAGGLE_IS_COMPETITION_RERUN='true' if gateway else 'false', SUBMISSION_FRAMEWORK=str(framework),
+            SUBMISSION_ENVIRONMENTS=str(ROOT/'environment_files'), SUBMISSION_PUBLIC_GAMES='ls20',
+            NOOA_JOIN_ROOT=str(DONOR), ARC_LLM_MAX_TOKENS='16384', ARC_LLM_RETRIES='0',
+            ARC_LLM_TIMEOUT_SECONDS='30', TYCHO_NOOA_WORKER_TIMEOUT_SECONDS='40',
+            ARC_STALL_REVIEW='0', ARC_DISCOVERY_ARM='a', ARC_SOLVER_ARM='loop', ARC_CONTINGENT_ARM='on', SUBMISSION_ACTION_LIMIT='10',
+            ARC_LLM_EXTRA_BODY='{"chat_template_kwargs":{"enable_thinking":false},"reasoning":{"enabled":false}}')
+        if exhausted:
+            env['SUBMISSION_ADMISSION_CAP_SECONDS'] = '12' if exhausted == 'thinking' else '0'
+        if fault:
+            env['SUBMISSION_ADMISSION_CAP_SECONDS'] = '12'
+            env['ARC_LLM_TIMEOUT_SECONDS'] = '2'
+        if exhausted == 'stalled_tool':
+            # Exercise the actual cell middleware and independent protocol poller.
+            # Accelerate its production 60s deadline, not the generic host timeout.
+            bootstrap = (
+                'import sys,asyncio;sys.path.insert(0,' + repr(str(DONOR)) + ');'
+                'import headless,solver_agent;'
+                'solver_agent._ARC_CELL_CONFIG=solver_agent._ARC_CELL_CONFIG.model_copy('
+                'update={"cell_timeout":0.3});'
+                'sys.argv=["headless","--run-dir","."];asyncio.run(headless.run())'
+            )
+            env['NOOA_AGENT_COMMAND'] = json.dumps([sys.executable, '-c', bootstrap])
+        expected_games = 2 if exhausted is True and not gateway else 1
+        if expected_games == 2:
+            # Two invocations prove the first exhausted game does not abort the loop.
+            env['SUBMISSION_PUBLIC_GAMES'] = 'ls20,ls20'
+        gateway_server = None
+        if gateway:
+            from arc_agi import Arcade, OperationMode
+            from arc_agi.server import create_app
+            from werkzeug.serving import make_server
+            arcade = Arcade(operation_mode=OperationMode.OFFLINE, environments_dir=str(ROOT/'environment_files'))
+            app, _ = create_app(arcade, competition_mode=True)
+            gateway_server = make_server('127.0.0.1', 0, app, threaded=True)
+            gateway_thread = threading.Thread(target=gateway_server.serve_forever, daemon=True)
+            gateway_thread.start()
+            env['SUBMISSION_GATEWAY_BASE_URL'] = f'http://127.0.0.1:{gateway_server.server_port}'
+        try:
+            # Widen the observed finish/cleanup race without bypassing Agent.main.
+            runner = ('import sys,time;sys.path.insert(0,' + repr(str(framework)) + ');'
+                      'from agents.templates.my_agent import MyAgent;'
+                      'original=MyAgent.cleanup;'
+                      'MyAgent.cleanup=lambda self:(time.sleep(1),original(self))[-1];'
+                      'import runpy;runpy.run_path(sys.argv.pop(1),run_name="__main__")')
+            completed = subprocess.run([sys.executable,'-c',runner,str(HERE/'play.py'),
+                '--base-url',f'http://127.0.0.1:{server.server_port}/v1','--model','qwen/qwen3.8-27b',
+                '--workspace-root',str(tmp_path/'workspaces'),'--output',str(tmp_path/'RESULT.json'),
+                '--timeout-s','1200'], env=env, capture_output=True, text=True, timeout=180)
+            (tmp_path/'stdout.log').write_text(completed.stdout)
+            (tmp_path/'stderr.log').write_text(completed.stderr)
+            (tmp_path/'requests.json').write_text(json.dumps(requests,indent=2)+'\n')
+            if fault:
+                assert completed.returncode != 0, 'Injected failure was incorrectly accepted'
+                assert not (tmp_path/'RESULT.json').exists()
+                assert (tmp_path/'RESULT.failure.json').exists()
+>               assert requests, 'Fixture failed before reaching injected request'
+E               AssertionError: Fixture failed before reaching injected request
+E               assert []
+
+deployment/kaggle/submission-20260910-v9/test_submission.py:208: AssertionError
+___________________ test_real_entrypoint[stalled_tool-True] ____________________
+
+tmp_path = PosixPath('/tmp/pytest-of-pranav/pytest-30/test_real_entrypoint_stalled_t1')
+gateway = True, exhausted = 'stalled_tool', planner = False
+
+    @pytest.mark.parametrize('gateway', [False, True])
+    @pytest.mark.parametrize('exhausted', [False, True, 'thinking', 'slow_http', 'http_error', 'stalled_tool'])
+    def test_real_entrypoint(tmp_path, gateway, exhausted, planner=False):
+        fault = exhausted in ('slow_http', 'http_error', 'stalled_tool')
+        framework = tmp_path/'framework'
+        (framework/'agents/templates').mkdir(parents=True)
+        for name in ['agent.py', 'recorder.py', 'tracing.py', 'swarm.py']:
+            shutil.copy2(OFFICIAL/'agents'/name, framework/'agents'/name)
+        (framework/'agents/__init__.py').write_text('from .agent import Agent, Playback\nfrom .swarm import Swarm\n')
+        shutil.copy2(DONOR/'adapter.py', framework/'agents/templates/my_agent.py')
+        (framework/'runtime').mkdir()
+        (framework/'runtime/__init__.py').write_text('')
+        shutil.copy2(DONOR/'shared_local_solver.py', framework/'runtime/local_solver.py')
+        shutil.copy2(DONOR/'local_solver.py', framework/'local_solver.py')
+        requests = []
+        actor_requests = []
+    
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+    
+            def do_POST(self):
+                requests.append(json.loads(self.rfile.read(int(self.headers['Content-Length']))))
+                if exhausted == 'http_error':
+                    self.send_error(503, 'injected qualification transport failure')
+                    return
+                if exhausted == 'slow_http':
+                    time.sleep(5)
+                if len(requests) > 40:
+                    self.send_error(429, 'qualification request cap')
+                    return
+                is_actor = any(t.get('function', {}).get('name') == 'execute_python'
+                               for t in requests[-1].get('tools', []))
+                if is_actor:
+                    actor_requests.append(requests[-1])
+                action = ['UP', 'DOWN', 'LEFT', 'RIGHT'][(len(actor_requests)-1) % 4]
+                reply = dict(id=f'local-{len(requests)}', object='chat.completion', created=1,
+                    model='controlled-local', choices=[dict(index=0, finish_reason='tool_calls', message=dict(
+                        role='assistant', content=None, tool_calls=[dict(id=f'call-{len(requests)}', type='function',
+                        function=dict(name='execute_python', arguments=json.dumps(dict(code=
+                        f'grid=self.model_grid(); self.submit_actions([{action!r}], rationale="predict: controlled movement")'))))]))],
+                    usage=dict(prompt_tokens=22000, completion_tokens=50, total_tokens=22050))
+                if not is_actor:
+                    reply['choices'] = [dict(index=0, finish_reason='stop',
+                        message=dict(role='assistant', content=json.dumps(dict(
+                            value='Controlled summary: mechanics and goal remain unproven.'))))]
+                data=json.dumps(reply).encode()
+                if exhausted == 'thinking':
+                    time.sleep(1)
+                    reply['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = json.dumps(
+                        dict(code='print(self.model_grid())'))
+                    data = json.dumps(reply).encode()
+                if exhausted == 'stalled_tool':
+                    reply['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = json.dumps(
+                        dict(code='while True: pass'))
+                    data = json.dumps(reply).encode()
+                if planner and is_actor:
+                    source = 'def encode(g): return {"x":0}\ndef predict(z,a): return {"x":z["x"]+1}'
+                    code = (f'self.write_helper("world_model.py", {source!r}); '
+                            f'r=self.plan_actions({{"path":["x"],"op":"eq","value":3}}, [{action!r}]); '
+                            'assert r["status"] == "path_found", r; '
+                            'self.submit_actions(r["plan"][:1], rationale="observe a local consequence; objective unknown", search_id=r["search_id"])')
+                    reply['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = json.dumps(dict(code=code))
+                    data = json.dumps(reply).encode()
+                self.send_response(200)
+                self.send_header('Content-Type','application/json')
+                self.send_header('Content-Length',str(len(data)))
+                self.end_headers()
+                try:
+                    self.wfile.write(data)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # Expected for the intentionally timed-out HTTP request.
+    
+        server = ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        thread = threading.Thread(target=server.serve_forever,daemon=True)
+        thread.start()
+        env = dict(os.environ, KAGGLE_IS_COMPETITION_RERUN='true' if gateway else 'false', SUBMISSION_FRAMEWORK=str(framework),
+            SUBMISSION_ENVIRONMENTS=str(ROOT/'environment_files'), SUBMISSION_PUBLIC_GAMES='ls20',
+            NOOA_JOIN_ROOT=str(DONOR), ARC_LLM_MAX_TOKENS='16384', ARC_LLM_RETRIES='0',
+            ARC_LLM_TIMEOUT_SECONDS='30', TYCHO_NOOA_WORKER_TIMEOUT_SECONDS='40',
+            ARC_STALL_REVIEW='0', ARC_DISCOVERY_ARM='a', ARC_SOLVER_ARM='loop', ARC_CONTINGENT_ARM='on', SUBMISSION_ACTION_LIMIT='10',
+            ARC_LLM_EXTRA_BODY='{"chat_template_kwargs":{"enable_thinking":false},"reasoning":{"enabled":false}}')
+        if exhausted:
+            env['SUBMISSION_ADMISSION_CAP_SECONDS'] = '12' if exhausted == 'thinking' else '0'
+        if fault:
+            env['SUBMISSION_ADMISSION_CAP_SECONDS'] = '12'
+            env['ARC_LLM_TIMEOUT_SECONDS'] = '2'
+        if exhausted == 'stalled_tool':
+            # Exercise the actual cell middleware and independent protocol poller.
+            # Accelerate its production 60s deadline, not the generic host timeout.
+            bootstrap = (
+                'import sys,asyncio;sys.path.insert(0,' + repr(str(DONOR)) + ');'
+                'import headless,solver_agent;'
+                'solver_agent._ARC_CELL_CONFIG=solver_agent._ARC_CELL_CONFIG.model_copy('
+                'update={"cell_timeout":0.3});'
+                'sys.argv=["headless","--run-dir","."];asyncio.run(headless.run())'
+            )
+            env['NOOA_AGENT_COMMAND'] = json.dumps([sys.executable, '-c', bootstrap])
+        expected_games = 2 if exhausted is True and not gateway else 1
+        if expected_games == 2:
+            # Two invocations prove the first exhausted game does not abort the loop.
+            env['SUBMISSION_PUBLIC_GAMES'] = 'ls20,ls20'
+        gateway_server = None
+        if gateway:
+            from arc_agi import Arcade, OperationMode
+            from arc_agi.server import create_app
+            from werkzeug.serving import make_server
+            arcade = Arcade(operation_mode=OperationMode.OFFLINE, environments_dir=str(ROOT/'environment_files'))
+            app, _ = create_app(arcade, competition_mode=True)
+            gateway_server = make_server('127.0.0.1', 0, app, threaded=True)
+            gateway_thread = threading.Thread(target=gateway_server.serve_forever, daemon=True)
+            gateway_thread.start()
+            env['SUBMISSION_GATEWAY_BASE_URL'] = f'http://127.0.0.1:{gateway_server.server_port}'
+        try:
+            # Widen the observed finish/cleanup race without bypassing Agent.main.
+            runner = ('import sys,time;sys.path.insert(0,' + repr(str(framework)) + ');'
+                      'from agents.templates.my_agent import MyAgent;'
+                      'original=MyAgent.cleanup;'
+                      'MyAgent.cleanup=lambda self:(time.sleep(1),original(self))[-1];'
+                      'import runpy;runpy.run_path(sys.argv.pop(1),run_name="__main__")')
+            completed = subprocess.run([sys.executable,'-c',runner,str(HERE/'play.py'),
+                '--base-url',f'http://127.0.0.1:{server.server_port}/v1','--model','qwen/qwen3.8-27b',
+                '--workspace-root',str(tmp_path/'workspaces'),'--output',str(tmp_path/'RESULT.json'),
+                '--timeout-s','1200'], env=env, capture_output=True, text=True, timeout=180)
+            (tmp_path/'stdout.log').write_text(completed.stdout)
+            (tmp_path/'stderr.log').write_text(completed.stderr)
+            (tmp_path/'requests.json').write_text(json.dumps(requests,indent=2)+'\n')
+            if fault:
+                assert completed.returncode != 0, 'Injected failure was incorrectly accepted'
+                assert not (tmp_path/'RESULT.json').exists()
+                assert (tmp_path/'RESULT.failure.json').exists()
+>               assert requests, 'Fixture failed before reaching injected request'
+E               AssertionError: Fixture failed before reaching injected request
+E               assert []
+
+deployment/kaggle/submission-20260910-v9/test_submission.py:208: AssertionError
+----------------------------- Captured stdout call -----------------------------
+INFO:arc_agi.scorecard:Initialized ScorecardManager with idle_for=0:15:00 and max_open_for=3 days, 0:00:00
+------------------------------ Captured log call -------------------------------
+INFO     werkzeug:_internal.py:97 127.0.0.1 - - [10/Sep/2026 18:55:24] "GET /api/games HTTP/1.1" 200 -
+INFO     werkzeug:_internal.py:97 127.0.0.1 - - [10/Sep/2026 18:55:24] "POST /api/scorecard/open HTTP/1.1" 200 -
+INFO     werkzeug:_internal.py:97 127.0.0.1 - - [10/Sep/2026 18:55:24] "GET /api/games/ls20 HTTP/1.1" 200 -
+INFO     werkzeug:_internal.py:97 127.0.0.1 - - [10/Sep/2026 18:55:24] "POST /api/cmd/RESET HTTP/1.1" 200 -
+INFO     werkzeug:_internal.py:97 127.0.0.1 - - [10/Sep/2026 18:55:27] "POST /api/scorecard/close HTTP/1.1" 200 -
+_________________ test_planner_through_real_codeact_entrypoint _________________
+
+tmp_path = PosixPath('/tmp/pytest-of-pranav/pytest-30/test_planner_through_real_code0')
+
+    def test_planner_through_real_codeact_entrypoint(tmp_path):
+>       test_real_entrypoint(tmp_path, gateway=False, exhausted=False, planner=True)
+
+deployment/kaggle/submission-20260910-v9/test_submission.py:268: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+tmp_path = PosixPath('/tmp/pytest-of-pranav/pytest-30/test_planner_through_real_code0')
+gateway = False, exhausted = False, planner = True
+
+    @pytest.mark.parametrize('gateway', [False, True])
+    @pytest.mark.parametrize('exhausted', [False, True, 'thinking', 'slow_http', 'http_error', 'stalled_tool'])
+    def test_real_entrypoint(tmp_path, gateway, exhausted, planner=False):
+        fault = exhausted in ('slow_http', 'http_error', 'stalled_tool')
+        framework = tmp_path/'framework'
+        (framework/'agents/templates').mkdir(parents=True)
+        for name in ['agent.py', 'recorder.py', 'tracing.py', 'swarm.py']:
+            shutil.copy2(OFFICIAL/'agents'/name, framework/'agents'/name)
+        (framework/'agents/__init__.py').write_text('from .agent import Agent, Playback\nfrom .swarm import Swarm\n')
+        shutil.copy2(DONOR/'adapter.py', framework/'agents/templates/my_agent.py')
+        (framework/'runtime').mkdir()
+        (framework/'runtime/__init__.py').write_text('')
+        shutil.copy2(DONOR/'shared_local_solver.py', framework/'runtime/local_solver.py')
+        shutil.copy2(DONOR/'local_solver.py', framework/'local_solver.py')
+        requests = []
+        actor_requests = []
+    
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+    
+            def do_POST(self):
+                requests.append(json.loads(self.rfile.read(int(self.headers['Content-Length']))))
+                if exhausted == 'http_error':
+                    self.send_error(503, 'injected qualification transport failure')
+                    return
+                if exhausted == 'slow_http':
+                    time.sleep(5)
+                if len(requests) > 40:
+                    self.send_error(429, 'qualification request cap')
+                    return
+                is_actor = any(t.get('function', {}).get('name') == 'execute_python'
+                               for t in requests[-1].get('tools', []))
+                if is_actor:
+                    actor_requests.append(requests[-1])
+                action = ['UP', 'DOWN', 'LEFT', 'RIGHT'][(len(actor_requests)-1) % 4]
+                reply = dict(id=f'local-{len(requests)}', object='chat.completion', created=1,
+                    model='controlled-local', choices=[dict(index=0, finish_reason='tool_calls', message=dict(
+                        role='assistant', content=None, tool_calls=[dict(id=f'call-{len(requests)}', type='function',
+                        function=dict(name='execute_python', arguments=json.dumps(dict(code=
+                        f'grid=self.model_grid(); self.submit_actions([{action!r}], rationale="predict: controlled movement")'))))]))],
+                    usage=dict(prompt_tokens=22000, completion_tokens=50, total_tokens=22050))
+                if not is_actor:
+                    reply['choices'] = [dict(index=0, finish_reason='stop',
+                        message=dict(role='assistant', content=json.dumps(dict(
+                            value='Controlled summary: mechanics and goal remain unproven.'))))]
+                data=json.dumps(reply).encode()
+                if exhausted == 'thinking':
+                    time.sleep(1)
+                    reply['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = json.dumps(
+                        dict(code='print(self.model_grid())'))
+                    data = json.dumps(reply).encode()
+                if exhausted == 'stalled_tool':
+                    reply['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = json.dumps(
+                        dict(code='while True: pass'))
+                    data = json.dumps(reply).encode()
+                if planner and is_actor:
+                    source = 'def encode(g): return {"x":0}\ndef predict(z,a): return {"x":z["x"]+1}'
+                    code = (f'self.write_helper("world_model.py", {source!r}); '
+                            f'r=self.plan_actions({{"path":["x"],"op":"eq","value":3}}, [{action!r}]); '
+                            'assert r["status"] == "path_found", r; '
+                            'self.submit_actions(r["plan"][:1], rationale="observe a local consequence; objective unknown", search_id=r["search_id"])')
+                    reply['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = json.dumps(dict(code=code))
+                    data = json.dumps(reply).encode()
+                self.send_response(200)
+                self.send_header('Content-Type','application/json')
+                self.send_header('Content-Length',str(len(data)))
+                self.end_headers()
+                try:
+                    self.wfile.write(data)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # Expected for the intentionally timed-out HTTP request.
+    
+        server = ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        thread = threading.Thread(target=server.serve_forever,daemon=True)
+        thread.start()
+        env = dict(os.environ, KAGGLE_IS_COMPETITION_RERUN='true' if gateway else 'false', SUBMISSION_FRAMEWORK=str(framework),
+            SUBMISSION_ENVIRONMENTS=str(ROOT/'environment_files'), SUBMISSION_PUBLIC_GAMES='ls20',
+            NOOA_JOIN_ROOT=str(DONOR), ARC_LLM_MAX_TOKENS='16384', ARC_LLM_RETRIES='0',
+            ARC_LLM_TIMEOUT_SECONDS='30', TYCHO_NOOA_WORKER_TIMEOUT_SECONDS='40',
+            ARC_STALL_REVIEW='0', ARC_DISCOVERY_ARM='a', ARC_SOLVER_ARM='loop', ARC_CONTINGENT_ARM='on', SUBMISSION_ACTION_LIMIT='10',
+            ARC_LLM_EXTRA_BODY='{"chat_template_kwargs":{"enable_thinking":false},"reasoning":{"enabled":false}}')
+        if exhausted:
+            env['SUBMISSION_ADMISSION_CAP_SECONDS'] = '12' if exhausted == 'thinking' else '0'
+        if fault:
+            env['SUBMISSION_ADMISSION_CAP_SECONDS'] = '12'
+            env['ARC_LLM_TIMEOUT_SECONDS'] = '2'
+        if exhausted == 'stalled_tool':
+            # Exercise the actual cell middleware and independent protocol poller.
+            # Accelerate its production 60s deadline, not the generic host timeout.
+            bootstrap = (
+                'import sys,asyncio;sys.path.insert(0,' + repr(str(DONOR)) + ');'
+                'import headless,solver_agent;'
+                'solver_agent._ARC_CELL_CONFIG=solver_agent._ARC_CELL_CONFIG.model_copy('
+                'update={"cell_timeout":0.3});'
+                'sys.argv=["headless","--run-dir","."];asyncio.run(headless.run())'
+            )
+            env['NOOA_AGENT_COMMAND'] = json.dumps([sys.executable, '-c', bootstrap])
+        expected_games = 2 if exhausted is True and not gateway else 1
+        if expected_games == 2:
+            # Two invocations prove the first exhausted game does not abort the loop.
+            env['SUBMISSION_PUBLIC_GAMES'] = 'ls20,ls20'
+        gateway_server = None
+        if gateway:
+            from arc_agi import Arcade, OperationMode
+            from arc_agi.server import create_app
+            from werkzeug.serving import make_server
+            arcade = Arcade(operation_mode=OperationMode.OFFLINE, environments_dir=str(ROOT/'environment_files'))
+            app, _ = create_app(arcade, competition_mode=True)
+            gateway_server = make_server('127.0.0.1', 0, app, threaded=True)
+            gateway_thread = threading.Thread(target=gateway_server.serve_forever, daemon=True)
+            gateway_thread.start()
+            env['SUBMISSION_GATEWAY_BASE_URL'] = f'http://127.0.0.1:{gateway_server.server_port}'
+        try:
+            # Widen the observed finish/cleanup race without bypassing Agent.main.
+            runner = ('import sys,time;sys.path.insert(0,' + repr(str(framework)) + ');'
+                      'from agents.templates.my_agent import MyAgent;'
+                      'original=MyAgent.cleanup;'
+                      'MyAgent.cleanup=lambda self:(time.sleep(1),original(self))[-1];'
+                      'import runpy;runpy.run_path(sys.argv.pop(1),run_name="__main__")')
+            completed = subprocess.run([sys.executable,'-c',runner,str(HERE/'play.py'),
+                '--base-url',f'http://127.0.0.1:{server.server_port}/v1','--model','qwen/qwen3.8-27b',
+                '--workspace-root',str(tmp_path/'workspaces'),'--output',str(tmp_path/'RESULT.json'),
+                '--timeout-s','1200'], env=env, capture_output=True, text=True, timeout=180)
+            (tmp_path/'stdout.log').write_text(completed.stdout)
+            (tmp_path/'stderr.log').write_text(completed.stderr)
+            (tmp_path/'requests.json').write_text(json.dumps(requests,indent=2)+'\n')
+            if fault:
+                assert completed.returncode != 0, 'Injected failure was incorrectly accepted'
+                assert not (tmp_path/'RESULT.json').exists()
+                assert (tmp_path/'RESULT.failure.json').exists()
+                assert requests, 'Fixture failed before reaching injected request'
+                if exhausted == 'stalled_tool':
+                    assert 'timed out' in completed.stderr.lower()
+                    assert not list((tmp_path/'workspaces').rglob('budget_exhausted.json'))
+                    assert len(requests) == 1, 'Timed-out cell issued another model call'
+                    markers = list((tmp_path/'workspaces').rglob('tool_timeout.json'))
+                    assert len(markers) == 1, 'Generic decision timeout is not a cell deadline'
+                    cell = json.loads(markers[0].read_text())
+                    assert cell['timeout_seconds'] == 0.3
+                    assert 0.3 <= cell['elapsed_seconds'] < 3
+                else:
+                    lifecycle = [json.loads(line) for p in (tmp_path/'workspaces').rglob('request_lifecycle.jsonl')
+                                 for line in p.read_text().splitlines()]
+                    assert any(row['event'] == 'failed' for row in lifecycle)
+                    assert len(requests) == 1, 'A failed call made another HTTP attempt'
+                    assert 'Model request failed' in completed.stderr
+                assert not (tmp_path/'game-progress.jsonl').exists(), 'Fault was mistaken for normal game completion'
+                # PIDs recorded by the real worker must be retired before returning.
+                for p in (tmp_path/'workspaces').rglob('worker-metadata.json'):
+                    pid = json.loads(p.read_text())['agent_pid']
+                    with pytest.raises(ProcessLookupError):
+                        os.kill(pid, 0)
+                return
+>           assert completed.returncode == 0, completed.stdout + completed.stderr
+E           AssertionError: INFO:arc_agi.scorecard:Initialized ScorecardManager with idle_for=0:15:00 and max_open_for=3 days, 0:00:00
+E             2026-09-10 18:55:30 | INFO | Created new scorecard: a18c1238-a064-40cb-b3a3-bf278d92cc26
+E             {"game_count": 1, "global_deadline": 72837.853262704}
+E             2026-09-10 18:55:30 | INFO | Successfully loaded game class Ls20 from /home/pranav/.superset/worktrees/b420fea5-43e0-4bc6-a3d0-0629350d400b/tall-humerus/environment_files/ls20/9607627b/ls20.py
+E             2026-09-10 18:55:33 | INFO | Closed scorecard: a18c1238-a064-40cb-b3a3-bf278d92cc26
+E             Traceback (most recent call last):
+E               File "<string>", line 1, in <module>
+E               File "<frozen runpy>", line 287, in run_path
+E               File "<frozen runpy>", line 98, in _run_module_code
+E               File "<frozen runpy>", line 88, in _run_code
+E               File "/home/pranav/.superset/worktrees/b420fea5-43e0-4bc6-a3d0-0629350d400b/tall-humerus/deployment/kaggle/submission-20260910-v9/play.py", line 184, in <module>
+E                 main()
+E               File "/home/pranav/.superset/worktrees/b420fea5-43e0-4bc6-a3d0-0629350d400b/tall-humerus/deployment/kaggle/submission-20260910-v9/play.py", line 176, in main
+E                 run(args)
+E               File "/home/pranav/.superset/worktrees/b420fea5-43e0-4bc6-a3d0-0629350d400b/tall-humerus/deployment/kaggle/submission-20260910-v9/play.py", line 120, in run
+E                 agent.main()
+E               File "/tmp/pytest-of-pranav/pytest-30/test_planner_through_real_code0/framework/agents/tracing.py", line 119, in wrapper
+E                 return func(agent_instance, *args, **kwargs)
+E                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E               File "/tmp/pytest-of-pranav/pytest-30/test_planner_through_real_code0/framework/agents/agent.py", line 76, in main
+E                 action = self.choose_action(
+E                          ^^^^^^^^^^^^^^^^^^^
+E               File "/tmp/pytest-of-pranav/pytest-30/test_planner_through_real_code0/framework/agents/templates/my_agent.py", line 201, in choose_action
+E                 solver = self._ensure_solver(observation)
+E                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E               File "/tmp/pytest-of-pranav/pytest-30/test_planner_through_real_code0/framework/agents/templates/my_agent.py", line 279, in _ensure_solver
+E                 self._solver = self._solver_factory(
+E                                ^^^^^^^^^^^^^^^^^^^^^
+E               File "/tmp/pytest-of-pranav/pytest-30/test_planner_through_real_code0/framework/agents/templates/my_agent.py", line 90, in _default_solver_factory
+E                 return create_solver(
+E                        ^^^^^^^^^^^^^^
+E               File "/tmp/pytest-of-pranav/pytest-30/test_planner_through_real_code0/framework/local_solver.py", line 54, in create_solver
+E                 return LocalSolver(
+E                        ^^^^^^^^^^^^
+E               File "/tmp/pytest-of-pranav/pytest-30/test_planner_through_real_code0/framework/runtime/local_solver.py", line 234, in __init__
+E                 ready = self._receive("ready")
+E                         ^^^^^^^^^^^^^^^^^^^^^^
+E               File "/tmp/pytest-of-pranav/pytest-30/test_planner_through_real_code0/framework/runtime/local_solver.py", line 453, in _receive
+E                 raise LocalSolverError(str(payload.get("message", "worker error")))
+E             runtime.local_solver.LocalSolverError: WorkerError: candidate drift: chassis/solver_agent.py
+E             
+E           assert 1 == 0
+E            +  where 1 = CompletedProcess(args=['/home/pranav/.superset/worktrees/b420fea5-43e0-4bc6-a3d0-0629350d400b/tall-humerus/deployment/...e", "worker error")))\nruntime.local_solver.LocalSolverError: WorkerError: candidate drift: chassis/solver_agent.py\n').returncode
+
+deployment/kaggle/submission-20260910-v9/test_submission.py:231: AssertionError
+=========================== short test summary info ============================
+FAILED deployment/kaggle/submission-20260910-v9/test_submission.py::test_real_entrypoint[True-True]
+FAILED deployment/kaggle/submission-20260910-v9/test_submission.py::test_real_entrypoint[thinking-False]
+FAILED deployment/kaggle/submission-20260910-v9/test_submission.py::test_real_entrypoint[thinking-True]
+FAILED deployment/kaggle/submission-20260910-v9/test_submission.py::test_real_entrypoint[slow_http-False]
+FAILED deployment/kaggle/submission-20260910-v9/test_submission.py::test_real_entrypoint[slow_http-True]
+FAILED deployment/kaggle/submission-20260910-v9/test_submission.py::test_real_entrypoint[http_error-False]
+FAILED deployment/kaggle/submission-20260910-v9/test_submission.py::test_real_entrypoint[http_error-True]
+FAILED deployment/kaggle/submission-20260910-v9/test_submission.py::test_real_entrypoint[stalled_tool-False]
+FAILED deployment/kaggle/submission-20260910-v9/test_submission.py::test_real_entrypoint[stalled_tool-True]
+FAILED deployment/kaggle/submission-20260910-v9/test_submission.py::test_planner_through_real_codeact_entrypoint
+10 failed, 25 passed in 100.39s (0:01:40)

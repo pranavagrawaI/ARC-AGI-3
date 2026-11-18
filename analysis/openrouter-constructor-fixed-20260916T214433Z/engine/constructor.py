@@ -1,0 +1,417 @@
+from __future__ import annotations
+
+import copy
+import os
+import json
+import time
+from request_contract import validate_request
+from protocol import assistant_message
+from pathlib import Path
+
+ROUTING = {}  # logical relay marker, never a gateway provider claim
+from dataclasses import dataclass, field
+from typing import Any
+
+from real_trace import RealTraceCase
+from integration_boundary import evaluate_candidate, execute_inspection
+
+from constructor_contract import SYSTEM, runtime_contract  # noqa: E402
+
+
+def construction_messages(
+    case: RealTraceCase, feedback: dict[str, Any] | None
+) -> list[dict[str, str]]:
+    packet = case.compact_view()
+    user = {
+        "visible_case": packet,
+        "required_submission": {
+            "work_item": {
+                "decision": "decision blocked by the current model",
+                "obstacle": "candidate explanation, not host-established diagnosis",
+                "operation": "ground | contrast | close | compose | test",
+                "claim": "narrow model component being constructed",
+                "evidence_refs": "nonempty list of integers: visible step numbers only",
+                "dependencies": "nonempty list of strings naming declared quantities and their suppliers",
+                "completion_checks": "nonempty list of integers: visible step numbers to check",
+                "remaining_scope": "unsupported conditions",
+                "reasoning_need": (
+                    "needs_computation | needs_observation | does_not_block_decision"
+                ),
+            },
+            "candidate_source": "complete Python source implementing the ABI",
+        },
+    }
+    if feedback is not None:
+        user["candidate_feedback"] = feedback
+    return [
+        {"role": "system", "content": SYSTEM},
+        {"role": "user", "content": json.dumps(user, separators=(",", ":"))},
+    ]
+
+
+
+WORK_ITEM_FIELDS = (
+    "decision", "obstacle", "operation", "claim", "evidence_refs", "dependencies",
+    "completion_checks", "remaining_scope", "reasoning_need",
+)
+OPERATIONS = ("ground", "contrast", "close", "compose", "test")
+REASONING_NEEDS = ("needs_computation", "needs_observation", "does_not_block_decision")
+
+
+def work_item_schema(frontier=None):
+    """Expose the existing validator, including its legacy True-as-step-1 case."""
+    text = {"type": "string", "minLength": 1, "pattern": r"\S"}
+    step = {"type": "integer", "minimum": 1}
+    if frontier is not None:
+        step["maximum"] = frontier
+    # bool is an int in the inherited validator: True is accepted as step 1.
+    # Preserve that acceptance boundary rather than silently hardening policy.
+    refs = {"type": "array", "minItems": 1,
+            "items": {"anyOf": [step, {"const": True}]}}
+    properties = {key: copy.deepcopy(text) for key in ("decision", "obstacle", "claim", "remaining_scope")}
+    properties.update(
+        operation={"type": "string", "enum": list(OPERATIONS)},
+        reasoning_need={"type": "string", "enum": list(REASONING_NEEDS)},
+        evidence_refs=copy.deepcopy(refs), completion_checks=copy.deepcopy(refs),
+        dependencies={"type": "array", "minItems": 1, "items": copy.deepcopy(text)},
+    )
+    return {"type": "object", "properties": properties, "required": list(WORK_ITEM_FIELDS),
+            "additionalProperties": False,
+            "description": "Nested object at arguments.work_item, not JSON text and not fields flattened into arguments. Step references cite the visible prefix."}
+
+
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_python",
+            "description": "Run bounded Python against /evidence/case.json, which contains only constructor-visible evidence.",
+            "parameters": {
+                "type": "object",
+                "properties": {"code": {"type": "string"}},
+                "required": ["code"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "submit_candidate",
+            "description": "Submit one selected work item and complete candidate source for visible-prefix checks.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "work_item": work_item_schema(),
+                    "candidate_source": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}], "description": "Complete source as text with real newlines, or a list of source lines (preferred). Never double-escape line separators."},
+                },
+                "required": ["work_item", "candidate_source"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "request_evidence",
+            "description": "Stop with an explicit observation request when computation cannot resolve a decision-blocking obstacle.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "obstacle": {"type": "string"},
+                    "needed_observation": {"type": "string"},
+                    "decision_relevance": {"type": "string"},
+                },
+                "required": ["obstacle", "needed_observation", "decision_relevance"],
+                "additionalProperties": False,
+            },
+        },
+    },
+]
+
+
+@dataclass(frozen=True)
+class ConstructionLimits:
+    max_model_requests: int = 16
+    max_inspections: int = 10
+    max_submissions: int = 4
+    max_completion_tokens: int = 24576
+    max_prompt_tokens: int = 600000
+    wall_seconds: int = 900
+    reserve_requests: int = 2
+    reserve_completion_tokens: int = 4096
+    max_dollars: float = 2.0
+
+
+@dataclass
+class ConstructionResult:
+    status: str
+    candidate_source: str | None = None
+    work_item: dict[str, Any] | None = None
+    evaluation: dict[str, Any] | None = None
+    evidence_request: dict[str, Any] | None = None
+    model_requests: int = 0
+    inspections: int = 0
+    submissions: int = 0
+    requested_tokens: int = 0
+    usage: dict[str, int] = field(default_factory=dict)
+    transcript: list[dict[str, Any]] = field(default_factory=list)
+    tool_events: list[dict[str, Any]] = field(default_factory=list)
+
+
+def _json_kind(value):
+    if value is None:
+        return "null"
+    return {str: "string", dict: "object", list: "array", bool: "boolean",
+            int: "integer", float: "number"}.get(type(value), type(value).__name__)
+
+
+def _validate_work_item(value: Any, frontier: int) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("arguments.work_item must be an object; received " + _json_kind(value)
+                         + ". Send the fields inside arguments.work_item, not as JSON text or top-level argument fields. No conversion is performed.")
+    missing = set(WORK_ITEM_FIELDS) - set(value)
+    extra = set(value) - set(WORK_ITEM_FIELDS)
+    if missing or extra:
+        parts = []
+        if missing:
+            parts.append("missing keys: " + ", ".join(sorted(missing)))
+        if extra:
+            parts.append("extra keys: " + ", ".join(sorted(extra)))
+        raise ValueError("arguments.work_item has " + "; ".join(parts)
+                         + ". Put exactly these fields directly inside arguments.work_item: "
+                         + ", ".join(WORK_ITEM_FIELDS) + ". Do not add another work_item wrapper.")
+    for key, choices in (("operation", OPERATIONS), ("reasoning_need", REASONING_NEEDS)):
+        if not isinstance(value[key], str):
+            raise ValueError("work_item." + key + " must be a string; received " + _json_kind(value[key]))
+        if value[key] not in choices:
+            raise ValueError("work_item." + key + " must be one of: " + ", ".join(choices))
+    for key in ("decision", "obstacle", "claim", "remaining_scope"):
+        if not isinstance(value[key], str):
+            raise ValueError("work_item." + key + " must be a string; received " + _json_kind(value[key]))
+        if not value[key].strip():
+            raise ValueError("work_item." + key + " must contain non-whitespace text")
+    for key in ("evidence_refs", "completion_checks"):
+        values = value[key]
+        if not isinstance(values, list) or not values:
+            raise ValueError("work_item." + key + " must be a nonempty array of visible step integers")
+        for i, item in enumerate(values):
+            path = "work_item." + key + "[" + str(i) + "]"
+            if not isinstance(item, int):
+                raise ValueError(path + " must be an integer; received " + _json_kind(item))
+            if not 1 <= item <= frontier:
+                raise ValueError(path + " must cite a visible step in 1.." + str(frontier))
+    dependencies = value["dependencies"]
+    if not isinstance(dependencies, list) or not dependencies:
+        raise ValueError("work_item.dependencies must be a nonempty array of nonblank strings")
+    for i, item in enumerate(dependencies):
+        path = "work_item.dependencies[" + str(i) + "]"
+        if not isinstance(item, str):
+            raise ValueError(path + " must be a string; received " + _json_kind(item))
+        if not item.strip():
+            raise ValueError(path + " must contain non-whitespace text")
+    return value
+
+
+def _tool_result(call_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "role": "tool",
+        "tool_call_id": call_id,
+        "content": json.dumps(payload, separators=(",", ":"), sort_keys=True),
+    }
+
+
+def run_construction(
+    case: RealTraceCase,
+    *,
+    transport,
+    limits: ConstructionLimits | None = None,
+    event_sink=None,
+    progress_sink=None,
+    result=None,
+) -> ConstructionResult:
+    limits = limits or ConstructionLimits()
+    messages: list[dict[str, Any]] = list(construction_messages(case, feedback=None))
+    messages.append({"role": "user", "content": json.dumps({"runtime_contract": runtime_contract(limits)}, separators=(",", ":"))})
+    result = result or ConstructionResult(status="WORKING")
+    def checkpoint():
+        if progress_sink is not None:
+            progress_sink(copy.deepcopy(result))
+    started = time.monotonic()
+    commit_phase = False
+    seen_call_ids: set[str] = set()
+
+    inspected = False
+    prose_failures = 0
+    while result.model_requests < limits.max_model_requests:
+        remaining_tokens = limits.max_completion_tokens - result.usage.get('completion_tokens', 0)
+        remaining_requests = limits.max_model_requests - result.model_requests
+        seconds = limits.wall_seconds - (time.monotonic() - started)
+        if remaining_tokens <= 0 or seconds <= 20:
+            break
+        commit_phase = commit_phase or remaining_requests <= limits.reserve_requests or remaining_tokens <= limits.reserve_completion_tokens + 4096 or result.inspections >= limits.max_inspections or seconds <= 180
+        request_tokens = min(4096, remaining_tokens if commit_phase else remaining_tokens - limits.reserve_completion_tokens)
+        if commit_phase and remaining_requests >= 2 and remaining_tokens >= 4096:
+            request_tokens = min(request_tokens, remaining_tokens - 2048)
+        tools = [tool for tool in TOOLS if tool['function']['name'] != 'execute_python' or not commit_phase]
+        tools = [tool for tool in tools if tool['function']['name'] != 'submit_candidate' or (inspected and result.submissions < limits.max_submissions)]
+        telemetry = {
+            'phase': 'commit' if commit_phase else 'explore',
+            'seconds_remaining': 240 if result.model_requests == 0 else round(seconds, 3), 'requests_remaining': remaining_requests,
+            'completion_tokens_remaining': remaining_tokens,
+            'prompt_tokens_remaining': limits.max_prompt_tokens - result.usage.get('prompt_tokens', 0),
+            'inspections_remaining': 0 if commit_phase else limits.max_inspections-result.inspections,
+            'submissions_remaining': limits.max_submissions-result.submissions,
+            'reserved_requests': limits.reserve_requests, 'reserved_completion_tokens': limits.reserve_completion_tokens,
+            'current_completion_reservation': request_tokens,
+            'dollars_remaining_conservative': round(limits.max_dollars - result.usage.get('prompt_tokens',0)*1e-6 - result.usage.get('completion_tokens',0)*1e-5, 6),
+        }
+        body = {
+            'model': 'qwen/qwen3.8-27b',
+            'messages': copy.deepcopy(messages) + [{'role': 'user', 'content': json.dumps({'budget': telemetry}, separators=(',', ':'))}],
+            'tools': copy.deepcopy(tools), 'tool_choice': 'required',
+            'provider': copy.deepcopy(ROUTING),
+            'max_tokens': request_tokens, 'reasoning': {'enabled': False},
+        }
+        for tool in body['tools']:
+            if tool['function']['name'] == 'submit_candidate':
+                tool['function']['parameters']['properties']['work_item'] = work_item_schema(case.frontier)
+        # UTF-8 bytes plus 4096 framing tokens is a deliberately loose token
+        # upper bound for this text-only Qwen request, checked against usage.
+        prompt_reservation = len(json.dumps(body, ensure_ascii=False).encode()) + 4096
+        if prompt_reservation + result.usage.get('prompt_tokens', 0) > limits.max_prompt_tokens:
+            break
+        worst_cost = (prompt_reservation + result.usage.get('prompt_tokens',0))*1e-6 + (request_tokens + result.usage.get('completion_tokens',0))*1e-5
+        if worst_cost > limits.max_dollars:
+            break
+        validate_request(body)
+        result.model_requests += 1
+        result.requested_tokens += request_tokens
+        checkpoint()
+        os.environ["ARC_CONSTRUCTOR_REQUEST_REMAINING"] = str(max(.001, seconds))
+        response = transport(body)
+        result.transcript.append({'request': body, 'response': response})
+        checkpoint()
+        usage = response.get('usage')
+        if not isinstance(usage, dict) or any(type(usage.get(k)) is not int or usage[k] < 0 for k in ('prompt_tokens','completion_tokens')) or usage['completion_tokens'] > request_tokens or usage['prompt_tokens'] > prompt_reservation:
+            result.status = 'INVALID_USAGE'
+            return result
+        for key in ('prompt_tokens', 'completion_tokens'):
+            result.usage[key] = result.usage.get(key, 0) + usage[key]
+        checkpoint()
+        choices = response.get("choices") or []
+        if not choices or not isinstance(choices[0].get("message"), dict):
+            result.status = "INVALID_RESPONSE"
+            return result
+        assistant = choices[0]["message"]
+        outbound = assistant_message(assistant)
+        messages.append(outbound)
+        calls = assistant.get("tool_calls") or []
+        if not calls:
+            prose_failures += 1
+            if prose_failures >= 2:
+                result.status = 'INVALID_RESPONSE'
+                return result
+            commit_phase = True
+            messages.append({'role': 'user', 'content': 'A tool call is required: submit_candidate or request_evidence.'})
+            continue
+        response_ids = [call.get("id") for call in calls]
+        if any(not isinstance(value, str) or not value for value in response_ids):
+            raise ValueError("tool call id is missing")
+        if len(response_ids) != len(set(response_ids)) or any(value in seen_call_ids for value in response_ids):
+            raise ValueError("duplicate tool call id")
+        # Provider call IDs are opaque. Preserve response-list order for dispatch;
+        # enforce only nonempty identity and uniqueness, never an invented ordinal.
+        seen_call_ids.update(response_ids)
+        for call in calls:
+            function = call.get("function") or {}
+            name = function.get("name")
+            call_id = call.get("id") or "missing-call-id"
+            # Charge recognized attempts before parsing or executing untrusted input.
+            exhausted = False
+            if name == "execute_python":
+                exhausted = commit_phase or result.inspections >= limits.max_inspections
+                if not exhausted:
+                    result.inspections += 1
+            elif name == "submit_candidate":
+                exhausted = result.submissions >= limits.max_submissions
+                if not exhausted:
+                    result.submissions += 1
+            tool_started = time.monotonic()
+            try:
+                if exhausted:
+                    raise ValueError("tool attempt budget exhausted")
+                arguments = json.loads(function.get("arguments") or "{}")
+                if not isinstance(arguments, dict):
+                    raise ValueError("tool arguments must be a JSON object")
+                if name == "execute_python":
+                    if exhausted:
+                        payload = {"status": "budget_exhausted", "kind": "inspection"}
+                    else:
+                        code = arguments.get("code")
+                        if not isinstance(code, str):
+                            raise ValueError("execute_python code must be text")
+                        payload = execute_inspection(code, case)
+                        inspected = inspected or payload.get("status") == "completed"
+                elif name == "submit_candidate":
+                    if exhausted:
+                        payload = {"status": "budget_exhausted", "kind": "candidate_submission"}
+                    else:
+                        if not inspected:
+                            raise ValueError("successful execute_python inspection required before submission")
+                        if "work_item" not in arguments:
+                            raise ValueError("arguments.work_item is missing. Nest the required fields in an object at arguments.work_item, alongside candidate_source; do not flatten them into arguments.")
+                        work_item = _validate_work_item(arguments["work_item"], case.frontier)
+                        source = arguments.get("candidate_source")
+                        if isinstance(source, list) and source and all(isinstance(line, str) for line in source):
+                            source = "\n".join(source) + "\n"
+                        if not isinstance(source, str) or not source.strip():
+                            raise ValueError("candidate_source must be nonempty text")
+                        if len(source.encode()) > 200_000:
+                            raise ValueError("candidate_source exceeds 200,000 bytes")
+                        try:
+                            compile(source, "candidate.py", "exec")
+                        except SyntaxError as error:
+                            raise ValueError(f"candidate source syntax/serialization error: {error}; send candidate_source as a list of actual Python lines, or JSON text with real newline separators. Literal backslash-n separators are not decoded by the host.") from error
+                        evaluation = evaluate_candidate(source, case, include_suffix=False)
+                        payload = {"status": "evaluated", "visible_evaluation": {key: copy.deepcopy(value) for key, value in evaluation.items() if key != "suffix"}}
+                        if (
+                            evaluation["visible"]["status"] == "passed"
+                            and not evaluation["coverage"]["missing_required"]
+                        ):
+                            result.status = "CANDIDATE_READY"
+                            result.candidate_source = source
+                            result.work_item = work_item
+                            result.evaluation = evaluation
+                elif name == "request_evidence":
+                    expected = {"obstacle", "needed_observation", "decision_relevance"}
+                    if set(arguments) != expected or any(
+                        not isinstance(arguments[key], str) or not arguments[key].strip()
+                        for key in expected
+                    ):
+                        raise ValueError("evidence request is malformed")
+                    payload = {"status": "accepted", "request": arguments}
+                    result.status = "NEEDS_EVIDENCE"
+                    result.evidence_request = arguments
+                else:
+                    raise ValueError(f"unknown construction tool {name!r}")
+            except Exception as error:  # fail closed and let the model repair its request
+                payload = {"status": "rejected", "error": f"{type(error).__name__}: {error}"}
+            rendered_result = _tool_result(call_id, payload)
+            messages.append(rendered_result)
+            result.tool_events.append(
+                {
+                    "call": call,
+                    "rendered_result_message": rendered_result,
+                    "wall_seconds": round(time.monotonic() - tool_started, 6),
+                }
+            )
+            if event_sink is not None:
+                checkpoint()
+                event_sink(copy.deepcopy(result.tool_events[-1]))
+            checkpoint()
+            if result.status in {"CANDIDATE_READY", "NEEDS_EVIDENCE"}:
+                return result
+
+    result.status = "BUDGET_EXHAUSTED"
+    return result

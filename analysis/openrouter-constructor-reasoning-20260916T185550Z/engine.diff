@@ -1,0 +1,88 @@
+--- r10a/constructor.py
++++ or-pair/constructor.py
+@@ -5,6 +5,7 @@
+ import json
+ import time
+ from request_contract import validate_request
++from protocol import assistant_message
+ from pathlib import Path
+ 
+ ROUTING = {}  # logical relay marker, never a gateway provider claim
+@@ -210,7 +211,7 @@
+         tools = [tool for tool in tools if tool['function']['name'] != 'submit_candidate' or (inspected and result.submissions < limits.max_submissions)]
+         telemetry = {
+             'phase': 'commit' if commit_phase else 'explore',
+-            'seconds_remaining': round(seconds, 3), 'requests_remaining': remaining_requests,
++            'seconds_remaining': 240 if result.model_requests == 0 else round(seconds, 3), 'requests_remaining': remaining_requests,
+             'completion_tokens_remaining': remaining_tokens,
+             'prompt_tokens_remaining': limits.max_prompt_tokens - result.usage.get('prompt_tokens', 0),
+             'inspections_remaining': 0 if commit_phase else limits.max_inspections-result.inspections,
+@@ -249,25 +250,12 @@
+         for key in ('prompt_tokens', 'completion_tokens'):
+             result.usage[key] = result.usage.get(key, 0) + usage[key]
+         checkpoint()
+-        if (usage.get('completion_tokens_details') or {}).get('reasoning_tokens', 0):
+-            result.status = 'INVALID_REASONING'
+-            return result
+         choices = response.get("choices") or []
+         if not choices or not isinstance(choices[0].get("message"), dict):
+             result.status = "INVALID_RESPONSE"
+             return result
+         assistant = choices[0]["message"]
+-        if any(assistant.get(k) for k in ('reasoning','reasoning_content','reasoning_details')):
+-            result.status = 'INVALID_REASONING'
+-            return result
+-        # Raw response remains lossless in transcript; outbound messages use only
+-        # reviewed request fields. Provider response tool indices are not inputs.
+-        outbound = {'role': 'assistant', 'content': assistant.get('content')}
+-        if assistant.get('tool_calls'):
+-            outbound['tool_calls'] = [
+-                {'id': c['id'], 'type': c['type'],
+-                 'function': {k: c['function'][k] for k in ('name', 'arguments')}}
+-                for c in assistant['tool_calls']]
++        outbound = assistant_message(assistant)
+         messages.append(outbound)
+         calls = assistant.get("tool_calls") or []
+         if not calls:
+--- r10a/constructor_contract.py
++++ or-pair/constructor_contract.py
+@@ -116,8 +116,8 @@
+ Prompt admission reserves serialized request UTF-8 bytes + 4096 framing tokens;
+ actual validated prompt/completion usage is charged, not unused reservation.
+ The conservative dollar counter uses prompt tokens * 1e-6 + completion tokens *
+-1e-5; it is a local admission proxy, NOT billed cost for this local GPU run.
+-Missing/invalid usage or returned reasoning is fatal. Finish with submit_candidate
++1e-5; it is a local admission proxy, NOT billed cost for this hosted run. Actual endpoint exposure is reserved separately.
++Missing/invalid usage is fatal. Reasoning policy is controlled by the API; returned reasoning is preserved separately from tool arguments. Finish with submit_candidate
+ or request_evidence; CANDIDATE_READY or NEEDS_EVIDENCE ends this episode.
+ """
+ 
+@@ -132,13 +132,11 @@
+         "wrapped_source_overhead_bytes": overhead,
+         "effective_candidate_source_max_bytes": 200_000 - overhead,
+         "package_envelope": {
+-            "constructor_hard_seconds": 245, "http_post_seconds": 30,
+-            "constructor_relay_client_seconds": 35,
+-            "server_requests_including_one_warmup": 259,
+-            "application_requests": 258, "per_arm_requests": 129,
+-            "constructor_requests": 6, "executed_environment_actions_per_arm": 200,
+-            "model_admission_seconds_per_arm": 600, "server_startup_seconds": 1200,
+-            "supervisor_request_timeout_seconds": 180, "gpu_reservation_seconds": 3600,
++            "constructor_hard_seconds": 245, "constructor_soft_seconds": 240,
++            "constructor_requests": 6, "pair_dollars": 2,
++            "completion_tokens_per_request_including_reasoning": 4096,
++            "transport": "OpenRouter hosted FP8; reasoning policy controlled by API",
++            "http_post_seconds": "remaining local soft deadline; no retries",
+         },
+-        "scope": "Package limits are ceilings, not guaranteed remaining allowance; shared relay may stop earlier. No provider cancellation or launch authority.",
++        "scope": "Requested combined output cap and observed validity threshold; provider hard stop not guaranteed. Local deadline does not establish remote cancellation. No gameplay or suffix assessment.",
+     }
+--- r10a/request_contract.py
++++ or-pair/request_contract.py
+@@ -1,5 +1,5 @@
+ """Constructor logical relay contract; no gateway routing or billing."""
+-from local_wire import project_messages
++from protocol import project_messages
+ 
+ def validate_request(body):
+     if set(body) != {'model', 'messages', 'provider', 'tools', 'tool_choice', 'max_tokens', 'reasoning'}:

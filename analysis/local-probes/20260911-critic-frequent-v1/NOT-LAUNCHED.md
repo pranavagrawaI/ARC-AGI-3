@@ -1,0 +1,1 @@
+Preflight found only LS20 in local environment bundle. No paid calls or started card. Superseded by frequent-ls20-v2 with two LS20 replicates. Click data forwarding repaired in new runner before launch.

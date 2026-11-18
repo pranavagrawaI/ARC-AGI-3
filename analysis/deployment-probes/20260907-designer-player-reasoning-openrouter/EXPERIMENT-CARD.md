@@ -1,0 +1,11 @@
+# Reasoning-on real-worker qualification
+Question: Can both existing solver arms reason and return executable tool calls through the actual client/worker, then commit and reconcile actions?
+Posture: compatibility and first-action/continuation qualification, not gameplay efficacy.
+Contrast: fresh loop then mindset public ls20; reasoning enabled in both. Same new candidate, 16384 total completion allowance, temperature1/top_p.95/top_k20. No reasoning-on/off causal claim.
+Prediction: positive reported reasoning or nonempty reasoning field, usable execute_python responses, two legal actions per arm, no integrity failure merely for reasoning.
+Measure: real outgoing settings asserted BEFORE relay forwarding; raw responses/reasoning.jsonl and successful model-call recorder entries; actions/transitions and launch source/arm. Separate completion from delivery. Unknown token counts stay unknown, never substitute character counts.
+Cap: USD3 conservative reservation total; 900s per arm plus up to300s final in-flight HTTP retirement, two arms; 2 environment actions each; 48 admitted calls per arm is a safety backstop, NOT the behavioral stopping metric. 16384 completion tokens/request includes reasoning,120000 input bytes,300s HTTP. Input ceiling .42/M,output3/M,request0 plus .01 reserve. Single CoreWeave FP8 endpoint; no fallback/forwarding retry. No Kaggle upload/launch.
+Stop: two actions reconciled, terminal game, time/spend/backstop cap; provider failure stops arm without retry; source/rendered-settings/integrity failure stops experiment. No automatic extensions.
+Invalid if: missing reasoning evidence, incorrect settings, no usable action or unattributed completion. Budget-censored behavior is inconclusive, not proof of inability. Provider model does not prove exact Kaggle numerics.
+Result map: both reason+act with intact evidence -> rebuild reasoning-on Kaggle notebook as qualification candidate; reasoning+tools but no actions -> record compatibility only; provider failure -> retain error and finish local notebook checks with live gate incomplete; no reasoning -> configuration gate failed. No serving speed/score claim.
+Outputs: this directory, frozen STARTED.json/runner.py plus complete public-game worker IPC. No credentials saved or forwarded to Actor. User authorized reasoning and tests; Kaggle launch remains separate.

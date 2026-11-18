@@ -1,0 +1,11 @@
+# Remote version 2: notebook complete, submission withheld
+
+The successor-admission correction passed the final outer lifecycle gate: root exit 0, TERM-only closure, no owned processes/listeners/GPU processes remaining. Kaggle marked version 2 COMPLETE and emitted submission.parquet. Public observations: LS20 2 actions, S5I5 4 actions, CD82 1 action; zero levels. 54 completed model-call records matched 54 successful Solver accesses plus 1 warmup. Total notebook log elapsed 701.89s; play elapsed 333.46s.
+
+This does not qualify the full game-boundary lifecycle. Whole server.log contains deleted TokenizerManager request-state notices at lines 31054 and 31193 (22:18:31 and 22:20:01), at earlier game boundaries. The final teardown-only gate missed these; completed-call accounting does not enumerate canceled requests. Those missing lifecycle records prevent the requested clean request accounting and withhold submission despite the aggregate pass. Do not relabel the run clean.
+
+Source inspection: NOOA SummarizationAgent._handle_after_turn schedules _run_summarization with asyncio.create_task. This can outlive action submission independently of the successor-triggered Actor dispatch. The first correction therefore did not eliminate all asynchronous model work at game stop. The next narrow candidate disables the background summarizer for the short, fresh-session baseline; it retains the successor admission correction. This changes runtime/configuration and requires a new card and run. It does not prove suitability for long games without context compression.
+
+Evidence archived fully in kaggle-public-v3/ before another upload. Latest remote source readback matches all notebook cell sources exactly; every declared packaged runtime hash matches contract de91c8dd7097a7cdc40ef8332a97f362d9251837f9830b4a6b4d6b4bbb74640c. Explicit version-suffixed source pull returned HTTP403; the successful latest readback was performed while version 2 was current and no newer version existed.
+
+No competition submission made. The next candidate is submission-20260910-v4 with submission-runtime-20260910-v2. Earlier failed mock-summary comparison is retained: it returned non-JSON for a JSON-schema response and is not valid evidence about the original solver's performance.

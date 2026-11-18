@@ -1,0 +1,38 @@
+# R10b implementation preparation — purpose-built consolidation
+
+Status: card and implementation contracts prepared, **not a runnable Kaggle package**. This R10-PREP dispatch delivers R10a's repaired package and R10b's separate preparation. No constructor inheritance is intended. Independent package review must inspect a later complete R10b implementation; this document and the spec review do not substitute for it.
+
+## Frozen requirements for the next build (card remains unfrozen)
+
+One new capability: immutable evidence → consolidator → versioned WORLD_THEORY → ordinary Actor context. No frozen predictor, candidate execution, sealed RPC, action veto, confirmation step, or weakening of existing machinery. Preserve the exact system prompt in EXPERIMENT-CARD.md. Both arms keep the R9 chassis, experiment scorer, objection ledger and epistemic critic on. R10a code is a mechanics repair baseline, not the design of this treatment.
+
+## Concrete integration points inspected
+
+All references below describe a NEW isolated R10b package copied from the preserved R9 incumbent. Do not edit shared or frozen source.
+
+1. `nooa-join/headless.py`: before `await agent.handle(notification)`, process host-delivered transitions, coalesce triggers and run serial consolidation if admitted. After completion update the *actual* admission deadline and outer work deadline by measured blocking time. Do not block inside execute_python: `consolidate()` only schedules intent. Actor cells remain bounded by the existing 60s guard. `set_experiment` remains unchanged; add sidecar `link_theory_prediction(claim_id, version, experiment_id, prediction_label, scope)` that records before execution and rejects a missing/not-supported version or already-executed experiment.
+2. `nooa-join/chassis/solver_agent.py`: subclass only, additive `knowledge_api` docs and a normal Context block rendering the last accepted version. Use the existing `Context(expr=...)` mechanism. Record version/digest at model request assembly, not merely when a theory file is written. Keep original format_game_context, set_experiment, objections, critic and all submit gates intact.
+3. Evidence packet builder: allow only same-arm/session `ipc/transitions.jsonl`, `states.jsonl`, `decision_experiments.jsonl`, `experiment_results.jsonl` records from the supplied cutoff. Every record retains source filename, line number, exact bytes SHA256, step and arm/session. Capture immutable prefix bytes; reject tampering with an already-captured prefix while allowing host append. No game files, future records, cross-arm reads, arbitrary paths or model-request tools. Prior accepted theory is separately labeled treatment-derived, not raw evidence. Log full packet before requesting.
+4. Dedicated consolidator transport: logical purpose `consolidator`, same mounted model identity, reasoning off, no tools, JSON text output <=4096 tokens. Retain raw provider response + validated usage and request receipts. Existing `local_wire.request_purpose` would classify an unmarked no-tool request as summarizer; add an explicit reviewed route/role at the relay, not a max-token heuristic. Project provider metadata at the wire boundary exactly as for Actor traffic.
+5. `gameplay_play.py`: separate `incumbent_calls[A/B] <=129` from `consolidator_attempts[B] <=12`; constructor absent in both arms. Total admitted <=270 plus one warmup. B-only consolidation request route must be rejected in A. Count malformed/time-out/rejected attempts in the attempt purse; reconcile server admissions and validated response usage separately. Only monotonic measured serial blocking receives compensation. At most120s cumulative includes preparation, queue, cancellation, validation and publication. Reserve remaining wall before each attempt and enforce hard deadline <=min(40, remaining purse); soft30 closes waiting/cancels. An unknown billed/admitted result or cleanup failure invalidates; no uncounted retries.
+6. Actual deadline propagation: relay admission window, Actor model-admission check, adapter gameplay wall, outer worker deadline and global launcher reserve all need the SAME measured extension. Current R9 uses fixed env deadlines and a snapshot in shared_local_solver; changing an env var alone cannot implement this contract. Add an append-only host-owned credit ledger consumed by these guards, with per-interval IDs preventing duplicate credit. A stays600s; B max720s. Absolute kernel work3100/guardian3500 remain unchanged. If remaining launcher time cannot reserve both the Actor600s and B120s maximum plus request/cleanup tails, stop before admission.
+7. Publication: parse output without execution; validate schema/citations/parent/IDs against the captured packet; exclusive append version and receipt; publish current version only after durable successful validation. Rejected/late output leaves previous version. No mutable model access to host evidence. No scalar confidence. Existing claim IDs survive equivalent rewording only with recorded revision; replacements/splits/merges explicit.
+8. Collection/reporting: record exact sessions and every packet, receipt, version, link, context snapshot and credit ledger path. Produce the specified claim-survival table and two evidence tiers. Use control-arm discovery/use review too. Raw reference counts are distinct from reviewed use and causal benefit. No boundary → cross-level hypothesis not tested.
+
+## Required discriminating qualification before package review
+
+- Real headless→relay→scripted HTTP consolidation→normal Actor request trace. The Actor's next request contains the accepted version; rejection preserves old context. A cannot reach consolidation. No helper-only substitute.
+- Four triggers through their real host paths: level boundary, Actor scheduling, failed prospectively linked typed prediction, twelve executed transitions. Coalesce collisions, no-new-evidence noop, exhaustion and late-result refusal.
+- Existing typed scorer with a matching declared label and with a failed linked implication; no semantic verdict attached to claim prose. Missing/wrong/late links cannot trigger host contradiction.
+- Capability parity adversaries: future step, foreign session/arm, game-source path, fabricated line/hash/ref, altered prior prefix, hidden substantive bucket text, confidence field, broken parent/ID lineage. Log rejection; retain last accepted version.
+- Actual deadline observations: slow success, soft/hard timeout, rejected schema, exhausted120s, attempt12/13, A-route refusal, partial HTTP failure and missing usage. Assert all deadline guards see the same credit once, Actor purse remains129, server max271, cleanup is charged. No fake clock as sole integration evidence.
+- Full incumbent gameplay smoke/containment suite, official recording/progress reconciliation, paired environment diff, exact source/notebook inventory and source protection checks.
+- Fresh independent package-byte review, later freeze instruction, exact frozen launch review, Hermes absolute gate/hash/SDK attachment verification. **R10a acceptance additionally gates R10b RUN.**
+
+## Deliverables prepared now
+
+- `EXPERIMENT-CARD.md`: exact prompt, approvals, schema/trigger/budget/metric decisions and result map.
+- `world_theory_schema.py`: executable strict envelope validator for the prepared schema; structural contract only, not a semantic oracle or live integration.
+- `test_world_theory_schema.py`: adversarial structure/reference/lineage fixtures. These do not qualify the future transport, deadline, or Actor-context integration.
+
+Next action: build those concrete seams in an isolated R10b package, then run the listed real integration checks. Do not freeze or run on the strength of this preparation.

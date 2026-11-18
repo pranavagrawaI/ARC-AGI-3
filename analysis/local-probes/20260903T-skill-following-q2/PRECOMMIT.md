@@ -147,3 +147,47 @@ Two observations that are already evidence, before the gate is scored:
    attempt, unlike V15's actor, which reached `run_python` twice in eleven calls.
 2. It writes cells that can run unbounded. If the target design ships, per-cell timeouts are not
    optional hardening; they are load-bearing.
+
+## Addendum 4 — reasoning off is a treatment change, not a transport repair
+
+`q2c` was killed on `EmptyContentError`: OpenRouter's default-on thinking put every token in
+`reasoning` and left `content` null; NOOA retries that three times and fails the turn. The turns
+never returned. A conclusion from that session — that this executor computes fluently and cannot
+terminate a turn — is retracted. It is not supported.
+
+The hatch that stops the error is `ARC_LLM_EXTRA_BODY={"reasoning": {"enabled": false}}` in
+`~/projects/arc-agi-3-reference/nooa/examples/arc_agi_3/arc_llm.py` (uncommitted). Verified live
+through `CompletionClient.call()`: with the hatch, a short "OK" costs 2 completion tokens and 0
+reasoning tokens; without it, 164 completion / 145 reasoning and a leading blank `content`.
+
+That is a different actor. The original gate asked whether this executor follows a short
+procedural skill. With thinking disabled it is a faster actor, and given the tempo evidence it is
+the actor the rest of the month needs to know about. It is **not** the same treatment as `q2c`.
+Log it here rather than let it pass as a repair of `q2c`.
+
+`q2c` numbers that survive because they do not depend on a completed turn contract (measured from
+emitted cell source and OTel usage, 2026-09-03 scorer): compute_rate 0.727; 98 of 109 emitted
+cells (90%) touch `grid_array` / numpy; no `encode`/`predict` helper; 1 agent submission against
+11 env steps (the rest are harness force-advances); 267,057 output tokens of which 243,114 are
+reasoning, for 10 gameplay steps ≈ 26,700 output tokens per env action. Son Pham & Mark Barney's
+state-graph variant died at 644 tokens/action. That ratio is why this actor, not the thinking-on
+one, is the next measurement.
+
+Arm `q2d`, same skill / game / sandbox / visual-off / caps as above, plus:
+
+4. **`ARC_LLM_EXTRA_BODY={"reasoning": {"enabled": false}}`.** Thinking off for every call.
+5. **`--effort-ladder ''`.** `run_solver.py` defaults to `600:medium`, which injects
+   `reasoning_effort` on later calls of a long turn. Leaving that default on would re-open the
+   treatment after ten minutes. Empty string keeps a single fixed (off) effort.
+
+Same gate, same 15-turn inconclusive floor, same $6 spend cap. Invalid if `EmptyContentError`
+still dominates, or if usage shows reasoning tokens returning. Tokens per committed environment
+action are reported next to the gate; they are not the gate.
+
+`--sandbox drop` still needs root, hence `inproc`. Unbounded CodeAct cells still hang, hence
+`--sandbox-cells --sandbox-require --sandbox-cpu-s 60`.
+
+`20260903_160506_ls20_mdfiles_q2d` is **VOID**. `run_solver.py` sets `PR_SET_PDEATHSIG` to
+SIGTERM, so when the launch shell exited the kernel killed the orchestrator. Two CodeAct cells
+ran; no gate-length trace. Not a model result. Relaunch is daemonized (double-fork, parent PID 1)
+so that signal cannot fire. Same tag `q2d`; timestamp distinguishes the dirs.

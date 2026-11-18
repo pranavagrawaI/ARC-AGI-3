@@ -1,0 +1,13 @@
+# Recovery result: startup failure, no remote integration qualification
+
+Authentication restored. Current-identity status returns KernelWorkerStatus.ERROR. Current source/metadata retrieval succeeds, and the complete notebook compares equal after the CLI's documented list-to-string source serialization. Metadata matches private=true, GPU=true, internet=false, TPU=false, requested NvidiaRtxPro6000, pinned image, exact required competition and the four datasets (provider reordered dataset list).
+
+First failing boundary in recovered log: official_launcher_runtime.py rejects --r8-l3b with --request-timeout-s30. Its parser requires --startup-timeout-s1200 and --request-timeout-s180. donor_bootstrap.py supplies1200 and30. Failure occurs around34.39seconds in the notebook log, after wheelhouse verification and solver-venv installation, before run_probe/model serving. A local invocation of the actual frozen supervisor independently reproduces exit2 and the exact same parser error; see local-startup-reproduction.json.
+
+This is a packaging/qualification miss. Passing application/supervisor-body fixtures and a bootstrap fixture ending at missing wheels did not exercise the real default supervisor CLI parser. No inference about model/construction competence is supported. Model serving and Actor/critic/construction integration did not begin on the logged path. Exact GPU/seal/cleanup structured receipts were not retrieved; do not promote configured hardware or preceding code-path inference to independently verified device/seal/teardown facts.
+
+Evidence provenance limitation: explicit SDK version_label1 status still returns404; exact-version source pull returns403. Installed CLI ignores parsed version for logs/output/status. Therefore recovered source, status and logs are labeled current-identity supplemental evidence, not exact-version evidence. Only one push was issued by this coordinator, and no retry occurred; the returned version was1. The launched package and consumed marker remain untouched. A filtered output retrieval returned429 and is retained; file listing returned no files. All failed observation receipts remain preserved.
+
+Displayed quota after recovery:1.54h used,28.46h remaining versus1.53h used,28.47h remaining prelaunch. Displayed change0.01h is account-level rounded usage, not an exact isolated charge for this job.
+
+References: recovery-current-status.json, recovery-current-source.json, recovered-source-current/kernel-metadata.json, source-reconciliation.json, recovery-logs-receipt.json, local-startup-reproduction.json, recovery-quota.json. No second push. Future correction must use a new candidate/run identity and authorization; do not edit the consumed launch artifacts.

@@ -1,0 +1,213 @@
+"""Bounded real solver/game contact. Invoke only after local tests, with --execute."""
+import argparse
+import ast
+import hashlib
+import importlib.util
+import json
+import os
+from pathlib import Path
+import signal
+import sys
+import threading
+import time
+import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from probe_lifecycle import AdmissionWindow, shutdown_bounded
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parents[2]
+OUT = ROOT / 'analysis/deployment-probes/20260908-discovery-demo-screen/raw/openrouter'
+CARD = ROOT / 'analysis/deployment-probes/20260908-discovery-demo-screen/EXPERIMENT-CARD.md'
+MODEL = 'qwen/qwen3.8-27b'
+
+
+def request_purpose(payload):
+    """Separate parent Actor work from NOOA's no-tools summarizer call."""
+    names = {
+        item.get('function', {}).get('name')
+        for item in (payload.get('tools') or [])
+        if isinstance(item, dict)
+    }
+    return 'actor' if 'execute_python' in names else 'summarizer'
+
+
+def append(name, row):
+    with (OUT/name).open('a') as f:
+        f.write(json.dumps(row, allow_nan=False)+'\n')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--execute', action='store_true')
+    args = parser.parse_args()
+    from freeze_candidate import verify
+    manifest = verify()
+    if not args.execute:
+        print(json.dumps({'source_verified':manifest['contract_sha256'], 'paid_calls':0})); return
+    OUT.mkdir(parents=True, exist_ok=True)
+    if (OUT/'STARTED.json').exists():
+        raise RuntimeError('Never reuse a started run; a retry needs a new card and directory')
+    for p in (ROOT/'.env', Path('/home/pranav/projects/arc-agi-3/.env')):
+        if p.exists():
+            for line in p.read_text().splitlines():
+                if '=' in line and not line.lstrip().startswith('#'):
+                    k,v=line.split('=',1); os.environ.setdefault(k.strip(),v.strip().strip('\"\''))
+    key = os.environ['OPENROUTER_API_KEY']
+    for name in list(os.environ):
+        if 'KEY' in name or 'TOKEN' in name:
+            del os.environ[name]
+    os.environ.update(LITELLM_LOCAL_MODEL_COST_MAP='True', OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1',
+        MPLCONFIGDIR=str(OUT/'mpl'), ARC_DISABLE_DOTENV='1', ARC_LLM_MODEL=MODEL, ARC_LLM_API_KEY='local-relay',
+        ARC_DISCOVERY_ARM='a',
+        ARC_LLM_EXTRA_BODY='{"reasoning":{"enabled":false},"chat_template_kwargs":{"enable_thinking":false}}', ARC_STALL_REVIEW='0',
+        ARC_LLM_MAX_TOKENS='16384',ARC_LLM_TIMEOUT_SECONDS='300',
+        TYCHO_KAGGLE_MAX_ACTIONS='2', TYCHO_NOOA_WORKER_TIMEOUT_SECONDS='900',
+        NOOA_AGENT_READY_TIMEOUT_SECONDS='30', NOOA_JOIN_ROOT=str(HERE),
+        NOOA_AGENT_COMMAND=json.dumps([sys.executable,str(HERE/'headless.py'),'--run-dir','.']))
+    state = dict(reserved=0., calls=0, arm='', stop=None, fatal=False)
+    window = AdmissionWindow(0)
+    lock = threading.Lock()
+    def abort(reason):
+        window.close(reason)
+        state['stop']=reason
+        for ipc in (OUT/state['arm']).rglob('ipc'):
+            (ipc/'ABORT').write_text(reason)
+    class Relay(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_POST(self):
+            try:
+                with window.admit():
+                    self._forward()
+            except PermissionError as error:
+                self.send_error(429, str(error))
+
+        def _forward(self):
+            length=int(self.headers.get('Content-Length','0'))
+            # The first run stopped at 120k bytes while the model context was
+            # still valid.  This relay cap is sized below the 262k-token server
+            # context limit, and is a transport guard rather than a model limit.
+            if length > 1000000:
+                abort('input cap'); self.send_error(429); return
+            data=self.rfile.read(length)
+            with lock:
+                reserve=length*.00000042 + 16384*.000003 + .01
+                if state['calls']>=32 or state['reserved']+reserve>6 or state['stop']:
+                    abort('call/spend cap'); self.send_error(429); return
+                payload=json.loads(data)
+                # No advertised provider supports this optional OpenAI flag.
+                # Keep tool definitions/choice intact; parser still validates all returned calls.
+                payload.pop('parallel_tool_calls', None)
+                if payload.get('reasoning',{}).get('enabled') is not False or payload.get('chat_template_kwargs',{}).get('enable_thinking') is not False or payload.get('max_tokens')!=16384:
+                    state['fatal']=True;abort('reasoning/output setting lost in real client');self.send_error(500);return
+                payload.update(model=MODEL,stream=False,
+                               temperature=1.0,top_p=.95,top_k=20,
+                               provider={'only':['coreweave/fp8'],'max_price':{'prompt':.42,'completion':3,'request':0},'allow_fallbacks':False,'require_parameters':True})
+                rendered=json.dumps(payload,ensure_ascii=False)
+                factor = state['arm']
+                purpose = request_purpose(payload)
+                expected_evidence = factor in ('b', 'd')
+                expected_demo = factor in ('c', 'd')
+                if purpose == 'actor':
+                    if ('<measured_evidence>' in rendered) != expected_evidence:
+                        state['fatal']=True; abort('rendered evidence-factor mismatch'); self.send_error(500); return
+                    if ('<discovery_demonstration>' in rendered) != expected_demo:
+                        state['fatal']=True; abort('rendered demonstration-factor mismatch'); self.send_error(500); return
+                    if '<decision_workflow>' not in rendered:
+                        state['fatal']=True; abort('missing loop instructions'); self.send_error(500); return
+                state['calls']+=1; state['reserved']+=reserve
+                identity=dict(arm=state['arm'],call=state['calls'],purpose=purpose,time=time.time())
+                append('requests.jsonl',{**identity,'request':payload,'reservation':reserve})
+                try:
+                    request=urllib.request.Request('https://openrouter.ai/api/v1/chat/completions',
+                        data=json.dumps(payload).encode(),headers={'Authorization':'Bearer '+key,'Content-Type':'application/json'})
+                    with urllib.request.urlopen(request,timeout=300) as response: raw=response.read()
+                    parsed=json.loads(raw)
+                    append('responses.jsonl',{**identity,'response':parsed})
+                    if parsed.get('error') or not parsed.get('choices'):
+                        raise ValueError('provider did not return choices')
+                    reasoning=parsed.get('usage',{}).get('completion_tokens_details',{}).get('reasoning_tokens',0)
+                    append('reasoning.jsonl',{**identity,'reasoning_tokens':reasoning,
+                           'reasoning_present':bool(parsed['choices'][0]['message'].get('reasoning') or parsed['choices'][0]['message'].get('reasoning_content')),
+                           'finish_reason':parsed['choices'][0].get('finish_reason')})
+                    try:
+                        self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers(); self.wfile.write(raw)
+                    except (BrokenPipeError, ConnectionResetError):
+                        append('delivery.jsonl',{**identity,'status':'completed_response_not_delivered'})
+                except Exception as error:
+                    body=error.read().decode(errors='replace')[:8000] if hasattr(error,'read') else None
+                    append('errors.jsonl',{**identity,'type':type(error).__name__,'message':str(error),'body':body})
+                    abort('upstream failure; no forwarding retry')
+                    try: self.send_error(502)
+                    except (BrokenPipeError, ConnectionResetError): pass
+    server=HTTPServer(('127.0.0.1',0),Relay)
+    threading.Thread(target=server.serve_forever,daemon=True).start()
+    os.environ['ARC_LLM_BASE_URL']=f'http://127.0.0.1:{server.server_port}/v1'
+    sys.path[:0]=[str(ROOT/'deployment/kaggle/tests'),str(ROOT/'deployment/kaggle')]
+    # Match the packaged adapter and shared transport, not mutable loose-source defaults.
+    spec=importlib.util.spec_from_file_location('runtime.local_solver',HERE/'shared_local_solver.py')
+    runtime=importlib.util.module_from_spec(spec)
+    sys.modules['runtime.local_solver']=runtime; spec.loader.exec_module(runtime)
+    import pytest
+    import test_my_agent
+    test_my_agent.AGENT_PATH=HERE/'adapter.py'
+    import test_nooa_join as join
+    import test_join_qualification as qual
+    from arc_agi import Arcade, OperationMode
+    from arcengine import FrameData, FrameDataRaw
+    join.CANDIDATE=HERE
+    source=ROOT/'analysis/deployment-probes/20260904T-nooa-join-public3-depth/kaggle-output/ARC-AGI-3-Agents/agents/agent.py'
+    assert hashlib.sha256(source.read_bytes()).hexdigest()=='85655f7a11a105e50bba76efd00bebf8056d02ddbae827a8f8a5b46e849fc087'
+    cls=next(n for n in ast.parse(source.read_text()).body if isinstance(n,ast.ClassDef) and n.name=='Agent')
+    method=next(n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name=='_convert_raw_frame_data')
+    ns={'FrameData':FrameData,'FrameDataRaw':FrameDataRaw}
+    exec(compile(ast.Module(body=[method],type_ignores=[]),str(source),'exec'),ns)
+    def convert(raw): return ns['_convert_raw_frame_data'](None,raw)
+    (OUT/'STARTED.json').write_text(json.dumps({'manifest':manifest,'runner_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),'card_sha256':hashlib.sha256(CARD.read_bytes()).hexdigest(),'started':time.time()},indent=2))
+    results=[]
+    try:
+        for arm in ('c', 'd', 'a'):
+            verify()
+            path=OUT/arm; path.mkdir(exist_ok=False)
+            state.update(arm=arm,calls=0,stop=None)
+            window = AdmissionWindow(900)
+            os.environ['ARC_SOLVER_ARM']='loop'
+            os.environ['ARC_DISCOVERY_ARM']=arm
+            arcade=Arcade(operation_mode=OperationMode.OFFLINE,environments_dir=str(ROOT/'environment_files'),recordings_dir=str(path/'recordings'))
+            env=arcade.make('ls20'); current=convert(env.reset())
+            patch=pytest.MonkeyPatch(); agent=qual.build_agent(patch,path,current)
+            start=time.monotonic(); error=None
+            def timeout(*_):
+                # Close admission before cleanup or exception unwinding. The
+                # gate checks its clock too, even if this signal is delayed.
+                abort('900s arm cap')
+                raise TimeoutError('900s arm cap')
+            signal.signal(signal.SIGALRM,timeout); signal.alarm(900)
+            try:
+                for _ in range(22):
+                    if agent.is_done(agent.frames,current): break
+                    action=agent.choose_action(agent.frames,current); agent.action_counter+=1
+                    current=convert(env.step(action)); agent.frames.append(current)
+            except Exception as exc: error=f'{type(exc).__name__}: {exc}'
+            finally:
+                signal.alarm(0)
+                window.close('arm cleanup')
+                if error:
+                    abort(error)
+                try: agent.cleanup(scorecard=None)
+                except Exception as exc: error=error or f'cleanup: {exc}'
+                patch.undo()
+                if not window.wait_idle(305):
+                    error=error or 'provider transport did not retire within cleanup bound'
+                    state['fatal']=True
+            result=dict(arm=arm,decisions=agent._solver_decisions_emitted,levels=current.levels_completed,
+                        calls=state['calls'],wall_seconds=time.monotonic()-start,error=error,stop=state['stop'],reserved_total=state['reserved'])
+            results.append(result); (OUT/'RESULTS.json').write_text(json.dumps(results,indent=2)+'\n')
+            print(json.dumps(result),flush=True)
+            if state['fatal'] or error: break
+    finally:
+        if not shutdown_bounded(server, 2):
+            append('cleanup.jsonl', {'status':'unresolved', 'reason':'HTTP relay shutdown exceeded bound'})
+            raise RuntimeError('Relay transport retirement unresolved; no further arm permitted')
+
+
+if __name__=='__main__': main()

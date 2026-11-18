@@ -1,0 +1,181 @@
+--- runtime-v4/chassis/host_contract.py
++++ runtime-v5/chassis/host_contract.py
+@@ -28,6 +28,11 @@
+ 
+     # -- HUD discovery ----------------------------------------------------
+     def observe(self, prev: list[list[int]], curr: list[list[int]]) -> None:
++        if len(prev) != len(curr) or any(len(a) != len(b) for a, b in zip(prev, curr)):
++            # Row frequencies have no common coordinate frame across a resize.
++            self._row_hits = [0] * len(curr)
++            self._pairs = 0
++            return
+         if not self._row_hits:
+             self._row_hits = [0] * len(curr)
+         self._pairs += 1
+@@ -52,8 +57,7 @@
+     # -- classification ---------------------------------------------------
+     def classify(self, prev: list[list[int]], curr: list[list[int]]) -> str:
+         """Classify exact equality as blocked; all other changes as playfield."""
+-        changed = [r for r, (a, b) in enumerate(zip(prev, curr)) if a != b]
+-        if not changed:
++        if prev == curr:
+             return "blocked"
+         # Frequently changing rows can contain a moving object. Their frequency
+         # cannot establish HUD identity or authorize discarding queued actions.
+@@ -176,7 +180,7 @@
+             "outcome": outcome,
+             "diff_pixels": sum(
+                 a != b for ra, rb in zip(prev, curr) for a, b in zip(ra, rb)
+-            ),
++            ) if len(prev) == len(curr) and all(len(a) == len(b) for a, b in zip(prev, curr)) else None,
+         }
+         self.results.append(result)
+         # Full per-action frames survive batch truncation and terminal cleanup.
+--- runtime-v4/chassis/arc_llm.py
++++ runtime-v5/chassis/arc_llm.py
+@@ -138,7 +138,17 @@
+         drop_params=True,  # the gateway rejects some params on the reasoning route
+         **extra,
+     )
+-    return client_cls(**kwargs)
++    window = os.environ.get('ARC_LLM_CONTEXT_WINDOW')
++    if window is not None:
++        window = int(window)
++        if window <= max_tokens:
++            raise ValueError('ARC_LLM_CONTEXT_WINDOW must exceed the output token allowance')
++    client = client_cls(**kwargs)
++    if window is not None:
++        # NOOA's registry metadata feeds context statistics without passing a
++        # provider-unknown context_window parameter through **client.config.
++        client._registry_config = {'context_window': window}
++    return client
+ 
+ 
+ def llm_uri() -> str:
+--- runtime-v4/chassis/solver_agent.py
++++ runtime-v5/chassis/solver_agent.py
+@@ -42,6 +42,7 @@
+     from stall_contract import StallReview, read_rows, append
+     from integrity_guard import IntegrityGuard
+     from prediction_feedback import PredictionFeedback
++    from host_contract import atomic_json
+     from nooa.context_blocks.formatter import XMLBlockFormatter
+     from nooa.context_blocks import Context
+     import importlib.util
+@@ -162,8 +163,9 @@
+ def _arc_cell_config() -> CodeActConfig:
+     """Build the per-cell CodeAct config, optionally with the OS sandbox backend.
+ 
+-    Default keeps the historical in-process backend: ``cell_timeout`` is advisory
+-    and the module denylist plus the external uid-drop are the guardrails. Enable
++    Default keeps the historical in-process backend. The protocol supervisor
++    enforces ``cell_timeout`` using the per-cell IPC execution record, including
++    synchronous loops that block asyncio cancellation. Enable
+     the per-cell OS sandbox — where ``cell_timeout`` becomes a *hard* kill and the
+     filesystem / network / memory / CPU limits are kernel-enforced (Landlock +
+     seccomp + rlimits) — via ``run_solver.py --sandbox-cells`` (or a run_multi
+@@ -696,6 +698,13 @@
+         # block is purely at the cell-code layer. Defense-in-depth over the uid-drop.
+         async def _guard_cell(ctx, nxt):
+             started = time.monotonic()
++            execution = {
++                'tool_call_id': ctx.params.get('tool_call_id'),
++                'started_at_monotonic': started,
++                'timeout_seconds': _ARC_CELL_CONFIG.cell_timeout,
++                'finished_at_monotonic': None,
++            }
++            atomic_json(self.ipc_dir / 'cell_execution.json', execution)
+             code = getattr(ctx, "code", None)
+             if isinstance(code, str):
+                 bad = _scan_cell(code)
+@@ -708,7 +717,12 @@
+             try:
+                 return await nxt(ctx)
+             finally:
+-                elapsed = time.monotonic() - started
++                finished = time.monotonic()
++                elapsed = finished - started
++                execution['finished_at_monotonic'] = finished
++                atomic_json(self.ipc_dir / 'cell_execution.json', execution)
++                if elapsed >= execution['timeout_seconds']:
++                    (self.ipc_dir / 'ABORT').write_text('Python cell timed out')
+                 self._tool_seconds_since_model += elapsed
+                 append(self.ipc_dir / "tool_calls.jsonl", {
+                     "turn": (self._latest_state() or {}).get("turn"),
+@@ -1025,7 +1039,8 @@
+                 if not line.strip():
+                     continue
+                 r = json.loads(line)
+-                if committed is not None and (r.get("turn") or -1) < committed:
++                rejected_turn = r.get("turn")
++                if committed is not None and rejected_turn is not None and rejected_turn <= committed:
+                     break
+                 since += 1
+             if since >= REJECTION_ABORT:
+@@ -1073,7 +1088,8 @@
+                 a, b = row["before"]["grid"], row["after"]["grid"]
+                 entry = {"step": row["step"], "turn": row["turn"], "action": row["action"],
+                          "levels_completed": row["after"]["levels_completed"],
+-                         "diff_pixels": sum(x != y for ra, rb in zip(a,b) for x,y in zip(ra,rb)),
++                         "diff_pixels": sum(x != y for ra, rb in zip(a,b) for x,y in zip(ra,rb))
++                         if len(a) == len(b) and all(len(x) == len(y) for x,y in zip(a,b)) else None,
+                          "event_frame_count": None}
+                 if include_grids:
+                     entry["before_grid_rows"] = ["".join(format(v,"x") for v in r) for r in a]
+--- runtime-v4/nooa_worker.py
++++ runtime-v5/nooa_worker.py
+@@ -41,7 +41,7 @@
+ HEADLESS = HERE / "headless.py"
+ STUB = HERE / "stub_agent.py"
+ sys.path.insert(0, str(CHASSIS))
+-from host_contract import HostEvidence, score_predicted_path  # noqa: E402
++from host_contract import HostEvidence, score_predicted_path, atomic_json  # noqa: E402
+ from step_check import bind_prediction, check_step  # noqa: E402
+ 
+ CLICK = re.compile(r"^CLICK\s+(\d+)\s+(\d+)$")
+@@ -323,6 +323,21 @@
+     def _wait_batch(self, timeout: float) -> dict[str, Any]:
+         deadline = time.monotonic() + timeout
+         while time.monotonic() < deadline:
++            # This process remains responsive when an Actor cell blocks its
++            # event loop. Do not rely on asyncio.wait_for to interrupt Python
++            # or native computation in that other process.
++            cell_path = self.ipc / 'cell_execution.json'
++            if cell_path.exists():
++                cell = json.loads(cell_path.read_text())
++                ended = cell['finished_at_monotonic']
++                elapsed = (time.monotonic() if ended is None else ended) - cell['started_at_monotonic']
++                if elapsed >= cell['timeout_seconds']:
++                    atomic_json(self.ipc / 'tool_timeout.json', {**cell, 'elapsed_seconds': elapsed})
++                    (self.ipc / 'ABORT').write_text('Python cell timed out')
++                    if self._process is not None and self._process.poll() is None:
++                        self._process.kill()
++                        self._process.wait(timeout=5)
++                    raise WorkerError('Python cell timed out; Actor retired')
+             if (self.ipc / 'request_failure.json').exists():
+                 raise WorkerError('Model request failed: ' + (self.ipc / 'request_failure.json').read_text())
+             if (self.ipc / "ABORT").exists():
+--- runtime-v4/test_step_check.py
++++ runtime-v5/test_step_check.py
+@@ -59,12 +59,20 @@
+ @pytest.mark.parametrize('source,x,status', [(SOURCE, 3, 'mismatch'),
+     ('def encode(grid):\n    raise ValueError("bad")\n', 1, 'unresolved'),
+     ('def encode(grid):\n    while True: pass\n', 1, 'unresolved')])
+-def test_failure_stops_and_publishes_successor(tmp_path, monkeypatch, source, x, status):
++def test_failure_stops_and_defers_successor_until_next_decision(tmp_path, monkeypatch, source, x, status):
+     host = session(tmp_path, monkeypatch, source)
+     observe(host, x)
+     assert host._queue == [] and host._nooa_turn == 1
+     check = json.loads((host.ipc / 'step_checks.jsonl').read_text())
+     assert check['status'] == status and check['skipped_actions'] == 1
++    states = [json.loads(r) for r in host.states_path.read_text().splitlines()]
++    assert len(states) == 1 and states[-1]['turn'] == 0
++    # Reconciliation preserves the observation without admitting more Actor
++    # work. Only the next host decision may publish the successor.
++    with host.actions_path.open('a') as output:
++        output.write(json.dumps({'turn': 1, 'step': 1, 'actions': ['RIGHT'], 'levels_completed': 0})+'\n')
++    host.decide(SimpleNamespace(sequence=3, observation=observation(x), level=0,
++                               decision_timeout_seconds=1))
+     states = [json.loads(r) for r in host.states_path.read_text().splitlines()]
+     assert states[-1]['turn'] == 1 and status in states[-1]['note']
+ 

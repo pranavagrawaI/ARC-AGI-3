@@ -1,0 +1,168 @@
+--- superseded/run_utility.py
++++ candidate/run_utility.py
+@@ -1,5 +1,5 @@
+ """Live-capable once-only pair. The sole credential holder is this provider parent."""
+-import argparse,json,os,selectors,signal,subprocess,sys,time
++import argparse,json,os,selectors,signal,subprocess,sys,time,threading
+ from pathlib import Path
+ HERE=Path(__file__).resolve().parent
+ sys.path[:0]=[str(HERE),str(HERE/'engine')]
+@@ -30,7 +30,14 @@
+  unshare=['unshare']+([] if mapped else ['--user','--map-auto','--map-root-user'])+['--net']
+  return unshare+[sys.executable,'-B',str(HERE/'worker.py'),mode,str(root/'child'),str(prefix),str(freeze),str(limit)]
+ 
++class HardDeadline(BaseException):
++ """Must cross Transport's ordinary exception handling without accepting a late body."""
++
++
+ def supervise(mode,root,prefix,freeze,transport=None,hard=None,limit=100,command=None):
++ # This Unix CLI owns SIGALRM for the phase. Fail before starting a worker if it cannot.
++ if threading.current_thread() is not threading.main_thread() or signal.getitimer(signal.ITIMER_REAL)!=(0.0,0.0):
++  raise Stop('absolute deadline watchdog unavailable')
+  root.mkdir(exist_ok=False);started=time.monotonic();hard=hard or (CAPS[mode]['hard'] if mode in CAPS else 30)
+  command=command or sandbox_command(mode,root,prefix,freeze,limit)
+  put(root/'COMMAND.json',{'argv':command,'environment':{'PATH':'/usr/bin:/bin','LANG':'C.UTF-8','PYTHONDONTWRITEBYTECODE':'1','HOME':str(root),'UTILITY_PARENT_PID':str(os.getpid())},'hard_seconds':hard})
+@@ -39,6 +46,15 @@
+  with (root/'worker.stderr').open('xb') as err,(root/'worker.stdout.raw').open('xb') as rawout:
+   proc=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=err,env=env,start_new_session=True,cwd=HERE)
+   sel=selectors.DefaultSelector();sel.register(proc.stdout,selectors.EVENT_READ)
++  previous_handler=signal.getsignal(signal.SIGALRM)
++  def expire(signum,frame):
++   nonlocal timed_out
++   timed_out=True
++   try:os.killpg(proc.pid,signal.SIGKILL)
++   except ProcessLookupError:pass
++   raise HardDeadline()
++  signal.signal(signal.SIGALRM,expire)
++  signal.setitimer(signal.ITIMER_REAL,max(.000001,hard-(time.monotonic()-started)))
+   try:
+    while True:
+     remaining=hard-(time.monotonic()-started)
+@@ -61,12 +77,16 @@
+      proc.stdin.write(encoded({'response':reply}));proc.stdin.flush()
+    proc.wait(timeout=max(.001,hard-(time.monotonic()-started)))
+    if buffer:raise ValueError('partial worker frame')
++  except HardDeadline:failure='absolute worker hard deadline'
+   except Exception as e:failure=str(e) if isinstance(e,Stop) else type(e).__name__
+   finally:
++   signal.setitimer(signal.ITIMER_REAL,0)
++   signal.signal(signal.SIGALRM,previous_handler)
+    sel.close()
+    try:os.killpg(proc.pid,signal.SIGKILL)
+    except ProcessLookupError:pass
+    proc.wait();proc.stdin.close();proc.stdout.close()
++ timed_out=timed_out or time.monotonic()-started>=hard
+  receipt={'returncode':proc.returncode,'hard_timeout':timed_out,'elapsed_seconds':time.monotonic()-started,'reaped':True,'requests':request_no,'failure':failure}
+  put(root/'SUPERVISION.json',receipt)
+  return receipt
+--- superseded/transport.py
++++ candidate/transport.py
+@@ -70,13 +70,25 @@
+         arm['requests']+=1;state['unknown_exposure_usd']=str(exposure);state['attempts'].append(rec);write(self.ledger,state)
+         started=time.monotonic();response_raw=None;status=None;error=None;headers={}
+         try:
+-            opener=urllib.request.build_opener(NoRedirect)
+-            with opener.open(req,timeout=max(.001,self.deadline-time.monotonic())) as response:
+-                status=response.status;headers={k:response.headers.get(k) for k in ('Date','Retry-After','X-Request-ID') if response.headers.get(k)};response_raw=response.read(8_000_001)
+-        except urllib.error.HTTPError as e:
+-            status=e.code;headers={k:e.headers.get(k) for k in ('Date','Retry-After','X-Request-ID') if e.headers.get(k)};response_raw=e.read(8_000_001);error='HTTPError'
+-        except Exception as e:
+-            error=type(e).__name__  # never exception repr with request/auth state
++            try:
++                opener=urllib.request.build_opener(NoRedirect)
++                with opener.open(req,timeout=max(.001,self.deadline-time.monotonic())) as response:
++                    status=response.status;headers={k:response.headers.get(k) for k in ('Date','Retry-After','X-Request-ID') if response.headers.get(k)};response_raw=response.read(8_000_001)
++            except urllib.error.HTTPError as e:
++                # Error bodies can trickle too; the same absolute watchdog covers this read.
++                with e:
++                    status=e.code;headers={k:e.headers.get(k) for k in ('Date','Retry-After','X-Request-ID') if e.headers.get(k)};response_raw=e.read(8_000_001);error='HTTPError'
++            except Exception as e:
++                error=type(e).__name__  # never exception repr with request/auth state
++        except BaseException as e:
++            # HardDeadline interrupts blocking I/O. The durable reservation remains
++            # unresolved: no complete response, no inferred zero cost, no retry.
++            rec.update(latency_seconds=time.monotonic()-started,http_status=status,
++                       response_headers=headers,error_type=type(e).__name__,
++                       response_complete=False,stop='provider I/O interrupted; usage unresolved')
++            state['stopped']=True
++            write(self.ledger,state);write(stem.with_suffix('.receipt.json'),rec)
++            raise
+         rec['latency_seconds']=time.monotonic()-started;rec['http_status']=status;rec['error_type']=error;rec['response_headers']=headers
+         if response_raw is not None:
+             with stem.with_suffix('.response.raw').open('xb') as f:f.write(response_raw);f.flush();os.fsync(f.fileno())
+--- superseded/test_utility.py
++++ candidate/test_utility.py
+@@ -246,3 +246,46 @@
+   assert len(s.requests)==120
+  state=read(ledger);assert state['arms']['control']['requests']==120 and state['arms']['treatment']['requests']==0
+  assert CAPS['control']['allocation']==CAPS['treatment']['allocation']
++
++@pytest.mark.parametrize('status',[200,429])
++def test_absolute_hard_deadline_during_trickling_body(tmp_path,status):
++ """Actual HTTP success/error body must be interrupted before completion, without retry."""
++ import http.server,threading,os,signal
++ from run_utility import stopped
++ raw=encoded(act());finished=threading.Event();sent=[]
++ class Handler(http.server.BaseHTTPRequestHandler):
++  def log_message(self,*args):pass
++  def do_POST(self):
++   self.rfile.read(int(self.headers['Content-Length']))
++   self.send_response(status);self.send_header('Content-Length',str(len(raw)));self.end_headers()
++   width=(len(raw)+47)//48
++   try:
++    for i in range(0,len(raw),width):
++     time.sleep(.5);self.wfile.write(raw[i:i+width]);self.wfile.flush();sent.append(len(raw[i:i+width]))
++    finished.set()
++   except (BrokenPipeError,ConnectionResetError):pass
++ server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Handler)
++ thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
++ ledger=tmp_path/'ledger.json';initial_ledger(ledger)
++ t=Transport('control',tmp_path/'raw',ledger,time.monotonic()+20.5,fixture_url=f'http://127.0.0.1:{server.server_port}/chat')
++ root=tmp_path/'supervised'
++ # A child-written freeze remains forensic, even though the HTTP body later contains valid usage.
++ code='import pathlib,sys,time; p=pathlib.Path('+repr(str(root/'child'))+');p.mkdir();(p/"FROZEN.json").write_text("{}");(p/"RESULT.json").write_text(\'{"frozen":true}\');print('+repr(json.dumps({'request':body()}))+',flush=True);sys.stdin.readline();(p/"LATE_ACTION").write_text("forbidden");time.sleep(30)'
++ old_handler=signal.getsignal(signal.SIGALRM)
++ try:
++  receipt=supervise('constructor',root,'-','-',t,hard=21,command=[sys.executable,'-B','-c',code])
++  assert receipt['hard_timeout'] and receipt['reaped'] and receipt['returncode']==-signal.SIGKILL
++  assert 20.8<=receipt['elapsed_seconds']<22,receipt
++  assert not finished.is_set() and sum(sent)<len(raw)
++  assert (root/'child/FROZEN.json').exists() and not (root/'child/LATE_ACTION').exists()
++  assert not promote(root,'constructor') and not (root/'FROZEN.json').exists()
++  state=read(ledger);assert stopped(ledger) and state['arms']['control']['requests']==1
++  assert state['known_cost_usd']=='0' and float(state['unknown_exposure_usd'])>0
++  rec=read(tmp_path/'raw/001.receipt.json')
++  assert rec['http_status']==status and rec['error_type']=='HardDeadline' and rec['response_complete'] is False
++  assert rec['status']=='possibly_dispatched' and rec['actual_cost_usd'] is None
++  assert signal.getsignal(signal.SIGALRM)==old_handler and signal.getitimer(signal.ITIMER_REAL)==(0.0,0.0)
++  with pytest.raises(Stop):t(body())
++  assert read(ledger)['arms']['control']['requests']==1
++  put(tmp_path/'SLOW-BODY-RESULT.json',{'fixture_only':True,'http_status':status,'hard_seconds':21,'receipt':receipt,'response_finished_at_return':finished.is_set(),'bytes_sent_at_return':sum(sent),'full_body_bytes':len(raw),'known_cost_usd':state['known_cost_usd'],'unknown_exposure_usd':state['unknown_exposure_usd']})
++ finally:server.shutdown();server.server_close();thread.join()
+--- superseded/make_inventory.py
++++ candidate/make_inventory.py
+@@ -1,9 +1,22 @@
+ """Preparation only; generate candidate bindings before independent review."""
+-import json,sys,sysconfig
++import argparse,json,sys,sysconfig
+ from pathlib import Path
+ from common import HERE,hash_file,put
+ EXCLUDE={'INVENTORY.json','LOCAL-CHECK.json','HERMES-RELEASE.json','PM-CREDENTIAL-APPROVAL.json'}
+-if (HERE/'live').exists() or (HERE/'independent-review/DECISION.json').exists():raise SystemExit('review/live exists; do not regenerate candidate')
++parser=argparse.ArgumentParser()
++parser.add_argument('--superseded',type=Path,help='Existing SUPERSEDED.json binding the archived HOLD inventory/review')
++args=parser.parse_args()
++if (HERE/'live').exists():raise SystemExit('live exists; do not regenerate candidate')
++review=HERE/'independent-review/DECISION.json'
++if review.exists():
++ if args.superseded is None:raise SystemExit('review exists; archive exact HOLD bytes before regeneration')
++ old=json.loads(args.superseded.read_text())
++ if (json.loads(review.read_text()).get('decision')!='HOLD'
++     or old['inventory_sha256']!=hash_file(HERE/'INVENTORY.json')
++     or old['inventory_sha256']!=hash_file(args.superseded.parent/'INVENTORY.json')
++     or old['review_decision_sha256']!=hash_file(review)
++     or old['review_report_sha256']!=hash_file(HERE/'independent-review/REPORT.md')):
++  raise SystemExit('superseded HOLD binding mismatch')
+ files=[p for p in HERE.iterdir() if p.is_file() and p.name not in EXCLUDE]
+ for directory in ['engine','assets','discovery']:
+  files += [p for p in (HERE/directory).rglob('*') if p.is_file() and '__pycache__' not in p.parts]

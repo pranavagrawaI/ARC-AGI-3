@@ -1,0 +1,12 @@
+# Public qualification: successor-admission correction
+Question: Does the corrected submission execute live public-game actions without starting unowned model work at host stop, and shut down cleanly?
+Posture: Integration qualification, not solving-quality evaluation.
+Contrast: none; previous invalid public v1 is diagnostic evidence, not a performance control.
+Prediction: LS20/S5I5/CD82 each execute at least one action; stop at 10 actions, 75s admission or win; all completed calls reconcile and teardown contains no active-request/deleted-state events; cleanup passes.
+Measure: qualification/result.json, game-progress.jsonl, worker IPC, request-count-facts.json, server.log, teardown.log/classification and process/listener/GPU scans, notebook log, conditional submission.parquet.
+Cap: One private Kaggle NvidiaRtxPro6000 session, 3600s platform cap (1 GPU-hour maximum), 3 public games, at most 10 actions/game, 75s admission/game, 120s worker decision timeout, 90s client request timeout, zero retries, max16384 output tokens/request. Existing larger defensive subprocess timeouts are subordinate to the platform cap. No external paid inference or competition submission under this card. Quota before launch: 9.24 GPU hours remaining.
+Stop: Normal all-game completion and clean server teardown; abort on setup/model/worker error, timeout, OOM, failed identity/accounting or containment. No automatic relaunch.
+Invalid if: Wrong artifact/runtime/GPU/model; OOM; timeout; missing game or terminal evidence; request/action mismatch; active or deleted request at final teardown; failed process/port cleanup. Dummy parquet alone is not a pass.
+Result map: Pass permits a separate card and one competition submission of this successful exact version; failure/ambiguous evidence withholds submission and requires diagnosis plus new precommitment before another GPU run. Score and level wins are observations, not operational pass requirements.
+Outputs: analysis/deployment-probes/20260910-first-submission/kaggle-public-v3/ (fresh directory; expected remote version 2, confirm push response).
+Candidate: deployment/kaggle/submission-20260910-v3/submission.ipynb SHA256 345abfcd9407f5b8500975d31ce52e9c9cb362baa3a3197f0c9f9f8e14473930. Runtime contract de91c8dd7097a7cdc40ef8332a97f362d9251837f9830b4a6b4d6b4bbb74640c. Corrected local suite passed 9 tests; original-runtime comparison reproduced 11 requests for 10 actions versus corrected 10 for 10.

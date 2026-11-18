@@ -1,0 +1,11 @@
+# Public v1: operational qualification failed
+
+Kaggle version 1 ended ERROR. Full output download completed before any subsequent version was pushed; raw output is kaggle-public-v1/ and an independent terminal log copy is terminal-log-v1/.
+
+All three games executed 10 Solver actions, with zero levels completed: LS20 545.85s, S5I5 cumulative 1273.00s, CD82 cumulative 2338.63s. There were 205 completed model-call records (including 29 summarizer calls), matching 205 successful Solver HTTP accesses plus one runtime warmup. This reconciles completed calls only: it did not prove absence of in-flight work. The server log contains two deleted-request-state notices and shows an active request at final SIGTERM. Teardown classification rejected that activity. Resources closed, root exit code 0, no owned processes/listeners/GPU processes remained. A text scan found no out-of-memory markers in server.log; that does not repair the lifecycle failure.
+
+Cause supported by source and reproduction: nooa_worker.observe publishes the final successor before host stop/admission is decided. That wakes another Actor turn. Local one-second delayed cleanup reproduced 11 model requests for 10 actions under the original runtime; the copied runtime defers successor publication until decide() and passed both entrypoints with exactly 10 requests for 10 actions. Authoritative transitions remain recorded immediately. Corrected local suite: 9 passed in 24.78s. The first original-runtime comparison failed due to a relative path before execution and is retained as invalid; original-v2 reproduced the actual race.
+
+Original source and cards remain unchanged. Budget-only candidate submission-20260910-v2 was never uploaded and is superseded by submission-20260910-v3 plus submission-runtime-20260910. New runtime contract de91c8dd7097a7cdc40ef8332a97f362d9251837f9830b4a6b4d6b4bbb74640c. This is no longer the byte-identical original runtime; only successor admission and identity freeze metadata changed.
+
+Permitted next action: separately precommitted public qualification of the corrected candidate. No competition submission is licensed by this failed run. The inherited result claim_ceiling prose says the lifecycle gate was satisfied even when status=failed; that prose is false for this run and is not a verdict.

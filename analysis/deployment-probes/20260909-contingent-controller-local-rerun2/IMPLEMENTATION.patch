@@ -1,0 +1,738 @@
+--- deployment/kaggle/designer-player-discovery-20260908-v2/build_notebook.py
++++ deployment/kaggle/contingent-controller-20260909/build_notebook.py
+@@ -51,6 +51,7 @@
+ }
+ JOIN_FILES = (
+     "assess_candidate.py",
++    "chassis/contingent_controller.py",
+     "chassis/decision_packet.py",
+     "chassis/designer_player.md",
+     "chassis/step_check.py",
+--- deployment/kaggle/designer-player-discovery-20260908-v2/chassis/contingent_controller.py
++++ deployment/kaggle/contingent-controller-20260909/chassis/contingent_controller.py
+@@ -0,0 +1,125 @@
++"""Bounded two-decision planning over proposed worlds, never hidden world IDs.
++
++Completion and costs are model estimates, not measured reward or calibrated RHAE.
++Within each observable branch the same continuation is used for every world.
++"""
++import hashlib
++import json
++import math
++
++from decision_packet import _canonical, _valid_prediction, SUPPORTED_METRICS
++
++
++def _number(value, low=0, high=10000):
++    if type(value) not in (int, float) or not math.isfinite(value) or not low <= value <= high:
++        raise ValueError('Expected a finite bounded numeric estimate')
++    return float(value)
++
++
++def _action(value):
++    if value is None:
++        return
++    if not isinstance(value, str) or len(value) > 32:
++        raise ValueError('Expected a primitive action or null')
++    parts = value.split()
++    if value in ('UP', 'DOWN', 'LEFT', 'RIGHT', 'SPACEBAR', 'USE', 'UNDO', 'RESET'):
++        return
++    if len(parts) == 3 and parts[0] == 'CLICK' and all(p.isdigit() and 0 <= int(p) <= 63 for p in parts[1:]):
++        return
++    raise ValueError('Expected a primitive action or null')
++
++
++def compile_plan(proposal):
++    """Maximize declared expected completion, then minimize declared action cost.
++
++    Max four hypotheses, candidates and continuation actions, one observation
++    branch point. Remaining actions include the proposed continuation primitive;
++    recovery is additional. Equal values favor fewer branches, then input order.
++    """
++    raw = json.dumps(proposal, allow_nan=False)
++    if len(raw) > 24000:
++        raise ValueError('Keep the entire proposal within 24000 characters')
++    proposal = json.loads(raw)
++    if set(proposal) != {'hypotheses', 'candidates'}:
++        raise ValueError('Expected hypotheses and candidates')
++    weights = proposal['hypotheses']
++    if not isinstance(weights, dict) or not 1 <= len(weights) <= 4:
++        raise ValueError('Supply one to four weighted hypotheses')
++    if any(not isinstance(h, str) or not h or len(h) > 120 for h in weights):
++        raise ValueError('Use short hypothesis labels')
++    weights = {h: _number(w, 0.000001, 1) for h, w in weights.items()}
++    total = sum(weights.values())
++    weights = {h: w / total for h, w in weights.items()}
++    candidates = proposal['candidates']
++    if not isinstance(candidates, list) or not 1 <= len(candidates) <= 4:
++        raise ValueError('Supply one to four candidates')
++    evaluations = []
++    ids = set()
++    for candidate in candidates:
++        if set(candidate) != {'id', 'action', 'metric', 'predictions', 'continuations', 'assumptions'}:
++            raise ValueError('Candidate needs id, action, metric, predictions, continuations, assumptions')
++        name = candidate['id']
++        if not isinstance(name, str) or not name or len(name) > 120 or name in ids:
++            raise ValueError('Candidate IDs must be short and unique')
++        ids.add(name)
++        _action(candidate['action'])
++        if candidate['action'] is None:
++            raise ValueError('A root candidate must act')
++        assumptions = candidate['assumptions']
++        if not isinstance(assumptions, list) or not 1 <= len(assumptions) <= 8 or any(
++                not isinstance(a, str) or not a or len(a) > 300 for a in assumptions):
++            raise ValueError('State one to eight provisional plan assumptions')
++        metric, predictions = candidate['metric'], candidate['predictions']
++        if metric not in SUPPORTED_METRICS or not isinstance(predictions, dict) or set(predictions) != set(weights):
++            raise ValueError('Predict one supported metric for every hypothesis')
++        if any(not _valid_prediction(metric, v) for v in predictions.values()):
++            raise ValueError('Invalid typed observable prediction')
++        options = candidate['continuations']
++        if not isinstance(options, list) or not 1 <= len(options) <= 4:
++            raise ValueError('Supply one to four continuation actions')
++        actions = set()
++        for option in options:
++            if set(option) != {'action', 'outcomes'}:
++                raise ValueError('Continuation needs action and per-hypothesis outcomes')
++            _action(option['action'])
++            if option['action'] in actions:
++                raise ValueError('Duplicate continuation action')
++            actions.add(option['action'])
++            if not isinstance(option['outcomes'], dict) or set(option['outcomes']) != set(weights):
++                raise ValueError('Estimate every continuation in every hypothesis')
++            for estimate in option['outcomes'].values():
++                if set(estimate) != {'completion', 'remaining_actions', 'recovery_actions'}:
++                    raise ValueError('Estimate completion, remaining_actions and recovery_actions')
++                _number(estimate['completion'], 0, 1)
++                _number(estimate['remaining_actions'], 0 if option['action'] is None else 1)
++                _number(estimate['recovery_actions'])
++        groups = {}
++        for h, value in predictions.items():
++            groups.setdefault(_canonical(value), []).append(h)
++        branches = []
++        for signature, hypotheses in groups.items():
++            mass = sum(weights[h] for h in hypotheses)
++            scored = []
++            for option in options:
++                completion = sum(weights[h] * option['outcomes'][h]['completion'] for h in hypotheses) / mass
++                cost = sum(weights[h] * (option['outcomes'][h]['remaining_actions'] +
++                            option['outcomes'][h]['recovery_actions']) for h in hypotheses) / mass
++                scored.append({'action': option['action'], 'completion': completion, 'cost': cost})
++            chosen = max(scored, key=lambda x: (x['completion'], -x['cost']))
++            branches.append({'observation': json.loads(signature), 'mass': mass,
++                             'hypotheses': hypotheses, 'options': scored, **chosen})
++        evaluations.append({'id': name, 'action': candidate['action'], 'metric': metric,
++                            'assumptions': assumptions, 'branches': branches,
++                            'completion': sum(b['mass'] * b['completion'] for b in branches),
++                            'cost': 1 + sum(b['mass'] * b['cost'] for b in branches)})
++    selected = max(evaluations, key=lambda x: (x['completion'], -x['cost'], -len(x['branches'])))
++    return {'schema': 'contingent-plan-v1', 'proposal': proposal, 'weights': weights,
++            'selection_rule': 'estimated_completion_then_action_cost',
++            'estimate_status': 'provisional_model_claims', 'evaluations': evaluations,
++            'selected': selected, 'proposal_sha256': hashlib.sha256(raw.encode()).hexdigest()}
++
++
++def select_branch(compiled, observation):
++    """Selection sees only the observation, never the simulator's sampled world."""
++    return next((b for b in compiled['selected']['branches']
++                 if _canonical(b['observation']) == _canonical(observation)), None)
+--- deployment/kaggle/designer-player-discovery-20260908-v2/chassis/solver_agent.py
++++ deployment/kaggle/contingent-controller-20260909/chassis/solver_agent.py
+@@ -143,7 +143,12 @@
+     if kind is None or str(kind).upper() != "WAIT":
+         return
+     state = agent._latest_state()
+-    turn = state.get("turn") if state else None
++    # The host may already have published the successor before this method's
++    # WAIT postcondition runs. Validate the dispatch that just submitted, not
++    # the mutable newest state, or validation retries swallow the next turn.
++    turn = getattr(agent, '_active_dispatch_turn', None)
++    if turn is None:
++        turn = state.get("turn") if state else None
+     if turn is None or agent._last_submitted_turn() == turn:
+         return
+     raise InvariantError(
+@@ -1186,8 +1191,11 @@
+         from prediction_feedback import rows
+         state = self._latest_state() or {}
+         obs = json.loads(self._observations_path.read_text()) if self._observations_path.exists() else {}
+-        return packet(state, rows(self.ipc_dir / 'transitions.jsonl'),
+-                      self.prediction_feedback(), obs, self.helpers_dir, self.ipc_dir)
++        result = packet(state, rows(self.ipc_dir / 'transitions.jsonl'),
++                        self.prediction_feedback(), obs, self.helpers_dir, self.ipc_dir)
++        events = rows(self.ipc_dir / 'contingent_events.jsonl')
++        result['contingent_controller'] = events[-1] if events else None
++        return result
+ 
+     def measured_evidence(self) -> dict:
+         """Return the current host-measured evidence block, separate from beliefs."""
+@@ -1215,6 +1223,136 @@
+         from decision_packet import record_experiment
+         return record_experiment(self.ipc_dir, self._latest_state(), question,
+                                  hypotheses, action, outcomes)
++
++    def compare_contingent_plans(self, proposal: dict) -> dict:
++        """Compare up to four two-decision candidates across up to four weighted
++        hypotheses. No action is submitted. Estimates are conjectures, not reward.
++        proposal={"hypotheses":{"a":0.5,"b":0.5}, "candidates":[
++          {"id":"probe", "action":"UP", "metric":"changed_bbox",
++           "predictions":{"a":[0,0,1,0],"b":[1,0,1,1]},
++           "assumptions":["These alternatives cover the decision"],
++           "continuations":[{"action":"LEFT", "outcomes":{
++             "a":{"completion":1,"remaining_actions":1,"recovery_actions":0},
++             "b":{"completion":0,"remaining_actions":1,"recovery_actions":2}}}]}]}
++        Add other roots and continuation actions to compare choices. A common
++        observation must use one shared next action across all matching worlds.
++        Costs include the next primitive and any further estimated actions.
++        Completion is a provisional probability in [0,1]. Selection maximizes
++        expected completion, then minimizes action plus recovery cost. null next
++        action returns control to the Actor. No entropy bonus or hidden-world policy.
++        """
++        from contingent_controller import compile_plan
++        return compile_plan(proposal)
++
++    def submit_contingent_plan(self, proposal: dict) -> str:
++        """Choose and submit one root action through ordinary gates. After its
++        authoritative successor, the dispatcher can submit at most ONE matching
++        continuation without a model call. Unknown outcomes, boundaries, frozen
++        model failures, new user guidance or rejected actions return to the Actor.
++        No long batch or verified world-model status is earned by this plan.
++        """
++        from prediction_feedback import write_row
++        compiled = self.compare_contingent_plans(proposal)
++        state = self._latest_state()
++        if not state:
++            return "REJECTED: no current observation"
++        pending = self.ipc_dir / 'contingent_pending.json'
++        if pending.exists():
++            return "REJECTED: a contingent decision is already pending"
++        record = {"turn":state['turn'], "step":state['step'],
++                  "levels_completed":state.get('levels_completed',0),
++                  "grid":self.model_grid().tolist(), "plan":compiled}
++        pending.write_text(json.dumps(record, allow_nan=False))
++        write_row(self.ipc_dir / 'contingent_events.jsonl',
++                  {"status":"proposed", **record})
++        try:
++            result = self.submit_actions([compiled['selected']['action']],
++                rationale="predict: contingent root " + compiled['selected']['id'])
++        except _ReturnResultSignal:
++            raise
++        except BaseException:
++            pending.unlink(missing_ok=True)
++            raise
++        pending.unlink(missing_ok=True)
++        write_row(self.ipc_dir / 'contingent_events.jsonl',
++                  {"status":"root_rejected", "turn":state['turn'], "reason":result})
++        return result
++
++    @hidden
++    def _continue_contingent_plan(self, notification: dict) -> bool:
++        """Dispatcher-only fast path; existing submit_actions owns every gate."""
++        from contingent_controller import select_branch
++        from decision_packet import _observed_metric
++        from prediction_feedback import rows, write_row
++        pending = self.ipc_dir / 'contingent_pending.json'
++        if not pending.exists():
++            return False
++        record = json.loads(pending.read_text())
++        state = self._latest_state() or {}
++        event = {"turn":state.get('turn'), "proposal_sha256":record['plan']['proposal_sha256']}
++        def stop(reason):
++            pending.unlink(missing_ok=True)
++            write_row(self.ipc_dir / 'contingent_events.jsonl',
++                      {**event, "status":"stopped", "reason":reason})
++            return False
++        if notification.get('user_messages'):
++            return stop('user_guidance')
++        # Never consume a prospective plan on a repeated root notification.
++        if state.get('turn') == record['turn'] and state.get('step') == record['step']:
++            return False
++        if state.get('turn') != record['turn'] + 1 or state.get('step') != record['step'] + 1:
++            return stop('stale_or_skipped_observation')
++        transitions = rows(self.ipc_dir / 'transitions.jsonl')
++        transition = transitions[-1] if transitions else {}
++        selected = record['plan']['selected']
++        submitted = self._last_action_entry() or {}
++        if (transition.get('turn') != record['turn'] or transition.get('step') != state['step']
++                or transition.get('action') != selected['action']
++                or transition.get('before', {}).get('grid') != record['grid']
++                or transition.get('after', {}).get('grid') != self.model_grid().tolist()
++                or submitted.get('turn') != record['turn']
++                or submitted.get('step') != record['step']
++                or submitted.get('actions') != [selected['action']]):
++            return stop('transition_identity_mismatch')
++        after = transition['after']
++        if (after.get('state') in ('WIN','GAME_OVER')
++                or after.get('levels_completed',0) != record['levels_completed']
++                or state.get('levels_completed',0) != record['levels_completed']):
++            return stop('protocol_boundary')
++        if transition['before']['grid'] == after['grid']:
++            return stop('unchanged_grid')
++        checks = rows(self.ipc_dir / 'step_checks.jsonl')
++        commits = rows(self.ipc_dir / 'model_predictions.jsonl')
++        has_model = any(c.get('turn') == record['turn'] and c.get('step') == record['step']
++                        and c.get('status') == 'committed' for c in commits)
++        current_checks = [c for c in checks if c.get('turn') == record['turn']
++                          and c.get('step') == state['step']]
++        if (has_model and (not current_checks or any(c.get('status') != 'matched' for c in current_checks))
++                or any(c.get('status') in ('mismatch','error','timeout') for c in current_checks)):
++            return stop('frozen_prediction_failed')
++        observed = _observed_metric(selected['metric'], transition, record)
++        branch = select_branch(record['plan'], observed)
++        event.update(metric=selected['metric'], observed=observed)
++        if branch is None:
++            return stop('none_of_predictions')
++        if branch['action'] is None:
++            return stop('planned_handoff')
++        # Consume before publishing. A failed submission hands back to the Actor;
++        # it cannot silently retry or extend this two-decision lease.
++        pending.unlink()
++        write_row(self.ipc_dir / 'contingent_events.jsonl',
++                  {**event, "status":"branch_selected", "action":branch['action'],
++                   "estimates":branch, "assumptions":selected['assumptions']})
++        try:
++            result = self.submit_actions([branch['action']],
++                rationale="predict: observation-contingent continuation for " + selected['id'])
++        except _ReturnResultSignal:
++            write_row(self.ipc_dir / 'contingent_events.jsonl',
++                      {**event, "status":"continuation_submitted", "action":branch['action']})
++            return True
++        write_row(self.ipc_dir / 'contingent_events.jsonl',
++                  {**event, "status":"continuation_rejected", "reason":result})
++        return False
+ 
+     async def deep_investigate(self, question: str, evidence_refs: list[str]) -> dict:
+         """Use one explicitly scoped reasoning-on call for a hard abstraction gap.
+--- deployment/kaggle/designer-player-discovery-20260908-v2/controller_screen.py
++++ deployment/kaggle/contingent-controller-20260909/controller_screen.py
+@@ -0,0 +1,86 @@
++"""Closed finite-world diagnostic. Supplied hypotheses, no neural generalization claim."""
++import json
++from pathlib import Path
++import sys
++
++sys.path.insert(0,str(Path(__file__).resolve().parent/'chassis'))
++from contingent_controller import compile_plan, select_branch
++from test_contingent_controller import relevant_proposal, candidate, outcome
++
++
++class TinyWorld:
++    """Independent primitive executor: a wrong route costs four recovery steps."""
++    def __init__(self, hidden, case):
++        self.hidden, self.case = hidden, case
++        self.phase='root'; self.actions=[]; self.done=False; self.wait=0
++
++    def step(self, action):
++        assert not self.done
++        self.actions.append(action)
++        if self.phase=='root':
++            self.root=action; self.phase='route'
++            if self.case=='all_wrong':return 99
++            if self.case=='wrong_goal':return 0
++            return self.hidden+1 if action in ('UP','DOWN') else 3
++        if self.phase=='route':
++            correct=action==('LEFT' if self.hidden==0 or self.case=='same_route' else 'RIGHT')
++            self.wait=0 if correct else 4
++            if correct and self.case in ('progress','same_route') and self.root=='UP':self.wait+=1
++            self.phase='recovery';self.done=self.wait==0
++        else:
++            assert action=='SPACEBAR'
++            self.wait-=1;self.done=self.wait==0
++        return -1
++
++
++def run(output):
++    output=Path(output);output.mkdir(parents=True,exist_ok=False)
++    records=[]
++    for case in ('relevant','same_route','progress','all_wrong','wrong_goal'):
++        p=relevant_proposal()
++        p['candidates'][0]['predictions']={'a':3,'b':3}
++        if case=='same_route':
++            for c in p['candidates']:
++                c['continuations']=[dict(action='LEFT',outcomes={h:outcome(2 if c['id']=='probe' else 1) for h in p['hypotheses']})]
++        if case=='progress':
++            p['candidates'][1]['continuations'][0]['outcomes']['a']=outcome(2)
++            p['candidates'][1]['continuations'][1]['outcomes']['b']=outcome(2)
++            p['candidates'].append(candidate('progress','DOWN',{'a':1,'b':2},
++                {'LEFT':{'a':1,'b':5},'RIGHT':{'a':5,'b':1}}))
++        if case=='wrong_goal':
++            p['candidates']=p['candidates'][1:]
++            p['candidates'][0]['metric']='levels_completed_delta'
++            p['candidates'][0]['predictions']={'a':1,'b':1}
++        plan=compile_plan(p)
++        (output/f'{case}-plan.json').write_text(json.dumps(plan,indent=2)+'\n')
++        for hidden in (0,1):
++            for policy in ('fixed_commit','controller'):
++                world=TinyWorld(hidden,case)
++                observed=world.step(plan['selected']['action'] if policy=='controller' else 'RIGHT')
++                branch=select_branch(plan,observed) if policy=='controller' else {'action':'LEFT'}
++                if branch:
++                    world.step(branch['action'])
++                    while not world.done and len(world.actions)<8:world.step('SPACEBAR')
++                records.append(dict(case=case,hidden=hidden,policy=policy,observation=observed,
++                    actions=world.actions,completed=world.done,stopped_unknown=branch is None))
++    (output/'trajectories.json').write_text(json.dumps(records,indent=2)+'\n')
++    summary={}
++    for case in ('relevant','same_route','progress','all_wrong','wrong_goal'):
++        summary[case]={}
++        for policy in ('fixed_commit','controller'):
++            rs=[r for r in records if r['case']==case and r['policy']==policy]
++            summary[case][policy]={'completed':sum(r['completed'] for r in rs),
++                'mean_actions':sum(len(r['actions']) for r in rs)/len(rs),
++                'unknown_stops':sum(r['stopped_unknown'] for r in rs)}
++    assert summary['relevant']['controller']==dict(completed=2,mean_actions=2,unknown_stops=0)
++    assert summary['relevant']['fixed_commit']['mean_actions']==4
++    assert summary['same_route']['controller']['mean_actions']==2
++    assert summary['progress']['controller']['mean_actions']==2
++    assert summary['all_wrong']['controller']['unknown_stops']==2
++    assert summary['wrong_goal']['controller']['completed']==0
++    summary['scope']='Five constructed finite cases with supplied hypotheses; action counts are not RHAE. Fixed commit is not the full Qwen baseline.'
++    (output/'RESULTS.json').write_text(json.dumps(summary,indent=2)+'\n')
++    print(json.dumps(summary,indent=2))
++
++
++if __name__=='__main__':run(sys.argv[1])
+--- deployment/kaggle/designer-player-discovery-20260908-v2/freeze_candidate.py
++++ deployment/kaggle/contingent-controller-20260909/freeze_candidate.py
+@@ -6,7 +6,7 @@
+ HERE = Path(__file__).resolve().parent
+ FILES = ['nooa_worker.py','headless.py','state_delivery.py','local_solver.py','stub_agent.py',
+          'assess_candidate.py',
+-         'chassis/decision_packet.py','chassis/designer_player.md','chassis/step_check.py',
++         'chassis/contingent_controller.py','chassis/decision_packet.py','chassis/designer_player.md','chassis/step_check.py',
+          'chassis/evidence_renderer.py','chassis/discovery-demo.md',
+          'nooa_public_probe.py','chassis/arc_llm.py','chassis/solver_agent.py',
+          'chassis/prediction_feedback.py','chassis/host_contract.py','chassis/stall_contract.py','chassis/integrity_guard.py',
+@@ -18,13 +18,14 @@
+ SOURCES.append('procedural_transfer_reliability_probe.py')
+ SOURCES.append('typed_self_test_live_probe.py')
+ SOURCES.append('heterogeneous_self_test_probe.py')
++SOURCES.extend(['controller_screen.py','test_contingent_controller.py','test_contingent_worker.py'])
+ 
+ 
+ def manifest():
+     hashes = lambda names: {name: hashlib.sha256((HERE/name).read_bytes()).hexdigest() for name in names}
+     contents = {'files': hashes(FILES), 'sources': hashes(SOURCES)}
+-    return {'schema':'q6-nooa-candidate-v1', 'identity':'designer-player-discovery-20260908-v2',
+-            'base':'designer-player-reasoning-20260907', 'contract_sha256':hashlib.sha256(json.dumps(contents,sort_keys=True).encode()).hexdigest(), **contents}
++    return {'schema':'q6-nooa-candidate-v1', 'identity':'contingent-controller-20260909',
++            'base':'designer-player-discovery-20260908-v2', 'contract_sha256':hashlib.sha256(json.dumps(contents,sort_keys=True).encode()).hexdigest(), **contents}
+ 
+ 
+ def verify():
+--- deployment/kaggle/designer-player-discovery-20260908-v2/headless.py
++++ deployment/kaggle/contingent-controller-20260909/headless.py
+@@ -87,7 +87,14 @@
+         # for another notification can strand this decision, and replaying it
+         # here could duplicate side effects.
+         try:
+-            result = await agent.handle(notification)
++            continuation = getattr(agent, '_continue_contingent_plan', None)
++            if continuation is not None and continuation(notification):
++                continue
++            agent._active_dispatch_turn = latest.get('turn')
++            try:
++                result = await agent.handle(notification)
++            finally:
++                agent._active_dispatch_turn = None
+         except asyncio.CancelledError:
+             break
+         if getattr(result, "kind", None) == RespondReason.DONE:
+@@ -181,7 +188,13 @@
+         'One Python cell may inspect several local views, update a helper or save_procedure(), '
+         'preflight it, set_experiment(), and submit_actions(). Cross back to the model only '
+         'when a genuinely new semantic decision or environment observation is required. '
+-        'For a new unresolved experiment, call self.set_experiment(question, hypotheses, '
++        'When plausible explanations imply different next actions, use compare_contingent_plans(proposal) '
++        'and submit_contingent_plan(proposal) to compare short observation-contingent choices. '
++        'Supply provisional completion and remaining/recovery action costs for each continuation in every hypothesis. '
++        'The controller may take one matching continuation without another model call, then hands back. '
++        'If these estimates lack a useful basis, use ordinary single-action exploration. '
++        'Do not invent extra hypotheses for an agreed next action. '
++        'For a new unresolved experiment outside a contingent plan, call self.set_experiment(question, hypotheses, '
+         'action, outcomes) in the SAME cell as your justified self.submit_actions(...). '
+         'outcomes must contain target, metric, predictions, updates, and otherwise. Prediction keys and '
+         'update keys exactly match the two or three hypotheses, and predicted values must differ. '
+--- deployment/kaggle/designer-player-discovery-20260908-v2/prepare_candidate.py
++++ deployment/kaggle/contingent-controller-20260909/prepare_candidate.py
+@@ -11,7 +11,7 @@
+ from freeze_candidate import verify
+ 
+ HERE=Path(__file__).resolve().parent
+-OUT=HERE.parents[2]/'analysis/deployment-probes/20260908-discovery-broader-v2-notebook'
++OUT=HERE.parents[2]/'analysis/deployment-probes/20260909-contingent-controller-package'
+ 
+ def build():
+     off='{"chat_template_kwargs":{"enable_thinking":false},"reasoning":{"enabled":false}}'
+@@ -64,8 +64,8 @@
+     launch=dict(kernel=metadata['id'],session_timeout_seconds=10800,arms=['a','b','c','d'],
+         admission_seconds_per_arm=1800,launcher_timeout_seconds_per_arm=1800,actions_per_arm=10,
+         max_output_tokens_per_request=16384,model_context_tokens=262144,
+-        contract_sha256=manifest['contract_sha256'],promotion=False,launch_ready=True,
+-        authorization='Notebook prepared for user upload; this command does not launch it.',
++        contract_sha256=manifest['contract_sha256'],promotion=False,launch_ready=False,
++        authorization='Local controller qualification only; no live gameplay qualification or launch.',
+         openrouter_qualified=False,automatic_retries=0,
+         argv=['kaggle','kernels','push','--path',str(HERE),'--timeout','10800','--accelerator','NvidiaRtxPro6000'],
+         files={name:hashlib.sha256((HERE/name).read_bytes()).hexdigest() for name in ('probe.ipynb','kernel-metadata.json','prepare_candidate.py','KAGGLE-EXPERIMENT-CARD.md','assess_candidate.py','verify_candidate.py')})
+--- deployment/kaggle/designer-player-discovery-20260908-v2/test_contingent_controller.py
++++ deployment/kaggle/contingent-controller-20260909/test_contingent_controller.py
+@@ -0,0 +1,161 @@
++import copy
++import json
++import sys
++from pathlib import Path
++
++import pytest
++
++HERE = Path(__file__).resolve().parent
++sys.path.insert(0, str(HERE/'chassis'))
++from contingent_controller import compile_plan, select_branch
++
++
++def outcome(cost, completion=1, recovery=0):
++    return dict(completion=completion, remaining_actions=cost, recovery_actions=recovery)
++
++
++def candidate(name, action, predictions, costs, metric='changed_cells'):
++    return dict(id=name, action=action, metric=metric, predictions=predictions,
++                assumptions=['Supplied worlds cover this bounded decision; costs are provisional'],
++                continuations=[dict(action=a, outcomes={h: outcome(cost) for h, cost in world_costs.items()})
++                               for a, world_costs in costs.items()])
++
++
++def relevant_proposal():
++    return dict(hypotheses={'a':.5,'b':.5}, candidates=[
++        candidate('commit','RIGHT',{'a':0,'b':0}, {'LEFT':{'a':1,'b':5},'RIGHT':{'a':5,'b':1}}),
++        candidate('probe','UP',{'a':1,'b':2}, {'LEFT':{'a':1,'b':5},'RIGHT':{'a':5,'b':1}})])
++
++
++def test_probe_and_policy_only_observe_public_branch():
++    plan = compile_plan(relevant_proposal())
++    assert plan['selected']['id'] == 'probe'
++    assert plan['selected']['cost'] == 2
++    assert plan['evaluations'][0]['cost'] == 4  # hidden-world oracle would falsely give 2
++    assert select_branch(plan, 1)['action'] == 'LEFT'
++    assert select_branch(plan, 2)['action'] == 'RIGHT'
++    assert select_branch(plan, 3) is None
++
++
++def test_irrelevant_information_and_same_action_reject_probe():
++    p = relevant_proposal()
++    for c in p['candidates']:
++        c['continuations'] = [dict(action='LEFT', outcomes={h:outcome(1 if c['id']=='commit' else 2) for h in p['hypotheses']})]
++    plan = compile_plan(p)
++    assert plan['selected']['id'] == 'commit'
++
++
++def test_progress_that_teaches_beats_dedicated_probe():
++    p = relevant_proposal()
++    p['candidates'][1]['continuations'][0]['outcomes']['a'] = outcome(2)
++    p['candidates'][1]['continuations'][1]['outcomes']['b'] = outcome(2)
++    p['candidates'].append(candidate('progress','DOWN',{'a':1,'b':2},
++        {'LEFT':{'a':1,'b':5},'RIGHT':{'a':5,'b':1}}))
++    assert compile_plan(p)['selected']['id'] == 'progress'
++
++
++def test_recovery_is_cost_and_completion_is_not_pixel_progress():
++    p = relevant_proposal()
++    for option in p['candidates'][1]['continuations']:
++        for estimate in option['outcomes'].values(): estimate['recovery_actions'] = 10
++    assert compile_plan(p)['selected']['id'] == 'commit'
++    for option in p['candidates'][0]['continuations']:
++        for estimate in option['outcomes'].values(): estimate['completion'] = .5
++    assert compile_plan(p)['selected']['id'] == 'probe'
++
++
++@pytest.mark.parametrize('bad', [float('nan'),float('inf'),True,-1])
++def test_invalid_estimates_rejected(bad):
++    p = relevant_proposal();p['candidates'][0]['continuations'][0]['outcomes']['a']['completion']=bad
++    with pytest.raises(ValueError): compile_plan(p)
++
++
++def test_bounds_and_no_mutation():
++    p=relevant_proposal(); original=copy.deepcopy(p);plan=compile_plan(p)
++    assert p==original
++    p['candidates'][0]['predictions']['a']=99
++    assert plan['proposal']==original
++    p['candidates'] *= 3
++    with pytest.raises(ValueError):compile_plan(p)
++
++
++async def make_agent(tmp_path):
++    from nooa.unifiedllm import FakeLLMClient
++    from solver_agent import MdArcSolverAgent
++    a=MdArcSolverAgent(llm=FakeLLMClient(),run_dir=tmp_path,game_id='opaque',alias='game')
++    state={'turn':0,'step':0,'levels_completed':0,'state':'NOT_FINISHED',
++           'grid_rows':['00','00'],'available_actions':['UP','LEFT','RIGHT','DOWN']}
++    (a.ipc_dir/'states.jsonl').write_text(json.dumps(state)+'\n')
++    return a,state
++
++
++def advance(a,state, after=None, **changes):
++    state={**state,'turn':1,'step':1,'grid_rows':['10','00'],**changes}
++    before={'grid':[[0,0],[0,0]],'levels_completed':0,'state':'NOT_FINISHED'}
++    after=after or {'grid':[[1,0],[0,0]],'levels_completed':state['levels_completed'],'state':state['state']}
++    row={'turn':0,'step':1,'action':'UP','before':before,'after':after}
++    (a.ipc_dir/'transitions.jsonl').write_text(json.dumps(row)+'\n')
++    with (a.ipc_dir/'states.jsonl').open('a') as f:f.write(json.dumps(state)+'\n')
++    return row
++
++
++@pytest.mark.asyncio
++async def test_actual_methods_submit_one_branch_only_and_keep_evidence(tmp_path):
++    from solver_agent import _ReturnResultSignal
++    a,state=await make_agent(tmp_path)
++    try:
++        with pytest.raises(_ReturnResultSignal):a.submit_contingent_plan(relevant_proposal())
++        advance(a,state)
++        assert a._continue_contingent_plan({'game_states':['successor']})
++        assert not a._continue_contingent_plan({'game_states':['duplicate']})
++        actions=[json.loads(l) for l in (a.ipc_dir/'actions.jsonl').read_text().splitlines()]
++        assert [x['actions'] for x in actions]==[['UP'],['LEFT']]
++        assert a.decision_packet()['contingent_controller']['status']=='continuation_submitted'
++    finally:await a.queue_manager.shutdown()
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize('reason', ['unknown','boundary','stale','guidance','illegal','known_bad','wrong_action','mismatch','unresolved_model','no_change'])
++async def test_stop_and_existing_gates(tmp_path,reason):
++    from solver_agent import _ReturnResultSignal
++    a,state=await make_agent(tmp_path)
++    try:
++        with pytest.raises(_ReturnResultSignal):a.submit_contingent_plan(relevant_proposal())
++        notification={'game_states':['successor']}
++        if reason=='unknown':
++            advance(a,state,{'grid':[[1,1],[1,0]],'levels_completed':0,'state':'NOT_FINISHED'},grid_rows=['11','10'])
++        elif reason=='boundary':advance(a,state,levels_completed=1)
++        elif reason=='stale':advance(a,state,step=2)
++        elif reason=='illegal':advance(a,state,available_actions=['UP'])
++        elif reason=='no_change':advance(a,state,{'grid':[[0,0],[0,0]],'levels_completed':0},grid_rows=['00','00'])
++        else:advance(a,state)
++        if reason=='guidance':notification['user_messages']=['stop']
++        if reason=='known_bad':
++            (a.ipc_dir/'observations.json').write_text(json.dumps({'known_from_here':{'LEFT':'fatal'}}))
++        if reason=='wrong_action':
++            p=a.ipc_dir/'transitions.jsonl';row=json.loads(p.read_text());row['action']='DOWN';p.write_text(json.dumps(row)+'\n')
++        if reason=='unresolved_model':
++            (a.ipc_dir/'model_predictions.jsonl').write_text(json.dumps({'turn':0,'step':0,'status':'committed'})+'\n')
++            (a.ipc_dir/'step_checks.jsonl').write_text(json.dumps({'turn':0,'step':1,'status':'unresolved'})+'\n')
++        if reason=='mismatch':
++            (a.ipc_dir/'step_checks.jsonl').write_text(json.dumps({'turn':0,'step':1,'status':'mismatch'})+'\n')
++        assert not a._continue_contingent_plan(notification)
++        assert len((a.ipc_dir/'actions.jsonl').read_text().splitlines())==1
++        assert not (a.ipc_dir/'contingent_pending.json').exists()
++    finally:await a.queue_manager.shutdown()
++
++
++def test_fast_successor_cannot_reopen_the_just_submitted_actor_turn():
++    from types import SimpleNamespace
++    from solver_agent import _wait_requires_submission, InvariantError
++    agent=SimpleNamespace(_active_dispatch_turn=0,
++        _latest_state=lambda: {'turn':1}, _last_submitted_turn=lambda:0)
++    _wait_requires_submission(agent, {'kind':'WAIT'}, None)
++    # The old mutable-latest-state check reproduced the spurious rejection.
++    agent._active_dispatch_turn=None
++    with pytest.raises(InvariantError):
++        _wait_requires_submission(agent, {'kind':'WAIT'}, None)
++    agent._active_dispatch_turn=0
++    agent._last_submitted_turn=lambda:None
++    with pytest.raises(InvariantError):
++        _wait_requires_submission(agent, {'kind':'WAIT'}, None)
+--- deployment/kaggle/designer-player-discovery-20260908-v2/test_contingent_worker.py
++++ deployment/kaggle/contingent-controller-20260909/test_contingent_worker.py
+@@ -0,0 +1,83 @@
++"""Actual adapter, transport, host, dispatcher and CodeAct; deterministic HTTP model."""
++import importlib.util
++import json
++from pathlib import Path
++import sys
++import threading
++from http.server import BaseHTTPRequestHandler, HTTPServer
++
++import pytest
++
++from test_contingent_controller import relevant_proposal
++
++HERE=Path(__file__).resolve().parent
++ROOT=HERE.parents[2]
++
++
++@pytest.mark.parametrize('controller,changed', [(False,1),(True,1),(True,2),(True,3)])
++def test_actual_contingent_worker(monkeypatch,tmp_path,controller,changed):
++    unexpected = changed == 3
++    sys.path[:0]=[str(ROOT/'deployment/kaggle/tests'),str(ROOT/'deployment/kaggle')]
++    import test_my_agent, test_nooa_join, test_join_qualification as qual
++    spec=importlib.util.spec_from_file_location('runtime.local_solver',HERE/'shared_local_solver.py')
++    runtime=importlib.util.module_from_spec(spec);monkeypatch.setitem(sys.modules,'runtime.local_solver',runtime);spec.loader.exec_module(runtime)
++    monkeypatch.setattr(test_my_agent,'AGENT_PATH',HERE/'adapter.py')
++    monkeypatch.setattr(test_nooa_join,'CANDIDATE',HERE)
++    seen=[]
++    class Handler(BaseHTTPRequestHandler):
++        def log_message(self,*_):pass
++        def do_POST(self):
++            body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
++            seen.append(body)
++            if len(seen)>2:
++                self.send_error(500, 'fixture call cap exceeded'); return
++            with (tmp_path/'requests.jsonl').open('a') as f:f.write(json.dumps(body)+'\n')
++            if len(seen)==1:
++                code=('self.submit_contingent_plan('+repr(relevant_proposal())+')' if controller else
++                      'self.submit_actions(["UP"], rationale="predict: fixture probe")')
++            else:
++                code='self.submit_actions(["'+('DOWN' if unexpected else ('RIGHT' if changed == 2 else 'LEFT'))+'"], rationale="predict: fixture continuation")'
++            reply={'id':f'fixture-{len(seen)}','object':'chat.completion','created':1,'model':'fixture',
++                'choices':[{'index':0,'finish_reason':'tool_calls','message':{'role':'assistant','content':None,
++                'tool_calls':[{'id':f'c{len(seen)}','type':'function','function':{
++                    'name':'execute_python','arguments':json.dumps({'code':code})}}]}}],
++                'usage':{'prompt_tokens':100,'completion_tokens':50,'total_tokens':150}}
++            with (tmp_path/'responses.jsonl').open('a') as f:f.write(json.dumps(reply)+'\n')
++            raw=json.dumps(reply).encode()
++            self.send_response(200);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
++    server=HTTPServer(('127.0.0.1',0),Handler)
++    thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
++    settings={'ARC_DISABLE_DOTENV':'1','ARC_LLM_MODEL':'qwen/qwen3.8-27b','ARC_LLM_API_KEY':'fixture',
++        'ARC_LLM_BASE_URL':f'http://127.0.0.1:{server.server_port}/v1',
++        'ARC_LLM_EXTRA_BODY':'{"reasoning":{"enabled":false}}','ARC_LLM_MAX_TOKENS':'1024',
++        'ARC_SOLVER_ARM':'loop','ARC_PROCEDURAL_DIAGNOSTIC':'0','ARC_DISCOVERY_ARM':'a',
++        'NOOA_JOIN_ROOT':str(HERE),'NOOA_AGENT_COMMAND':json.dumps([sys.executable,str(HERE/'headless.py'),'--run-dir','.']),
++        'TYCHO_NOOA_WORKER_TIMEOUT_SECONDS':'30','LITELLM_LOCAL_MODEL_COST_MAP':'True',
++        'TYCHO_KAGGLE_MAX_ACTIONS':'2','ARC_STALL_REVIEW':'0'}
++    for k,v in settings.items():monkeypatch.setenv(k,v)
++    frame=lambda grid: test_my_agent.frame(grid, actions=tuple(getattr(test_my_agent.GameAction, f'ACTION{i}') for i in range(1,5)))
++    first=frame([[0,0],[0,0]])
++    agent=qual.build_agent(monkeypatch,tmp_path,first)
++    try:
++        action=agent.choose_action(agent.frames,first)
++        assert action.name=='ACTION1'
++        second=frame([[1,1],[1,0]] if unexpected else ([[1,1],[0,0]] if changed == 2 else [[1,0],[0,0]]))
++        agent.action_counter += 1
++        agent.frames.append(second)
++        action2=agent.choose_action(agent.frames,second)
++        assert action2.name==('ACTION2' if unexpected else ('ACTION4' if changed == 2 else 'ACTION3'))
++        agent.action_counter += 1
++        agent.frames.append(frame([[0,1],[0,0]]))
++    finally:
++        try: agent.cleanup(scorecard=None)
++        finally: server.shutdown();thread.join(timeout=2)
++    expected=1 if controller and not unexpected else 2
++    assert len(seen)==expected
++    actions=[json.loads(l) for p in tmp_path.rglob('actions.jsonl') for l in p.read_text().splitlines()]
++    assert len(actions)==2
++    assert not list(tmp_path.rglob('ABORT'))
++    events=[json.loads(l) for p in tmp_path.rglob('contingent_events.jsonl') for l in p.read_text().splitlines()]
++    if controller:
++        assert any(e['status']==('stopped' if unexpected else 'continuation_submitted') for e in events)
++    (tmp_path/'RESULT.json').write_text(json.dumps({'controller':controller,'unexpected':unexpected,
++        'model_calls':len(seen),'actions':actions,'events':events,'claim':'protocol feasibility; scripted model, no Qwen quality evidence'},indent=2)+'\n')
+--- deployment/kaggle/designer-player-discovery-20260908-v2/test_worker_path.py
++++ deployment/kaggle/contingent-controller-20260909/test_worker_path.py
+@@ -27,7 +27,7 @@
+     monkeypatch.setenv('LITELLM_LOCAL_MODEL_COST_MAP','True')
+     test_join_qualification.test_ordinary_play_holds_continuity_across_many_turns(tmp_path,None,monkeypatch)
+     metadata=[json.loads(p.read_text()) for p in tmp_path.rglob('worker-metadata.json')]
+-    assert metadata and all(m['chassis']=='designer-player-discovery-20260908-v2' for m in metadata)
++    assert metadata and all(m['chassis']=='contingent-controller-20260909' for m in metadata)
+     launches=[json.loads(p.read_text()) for p in tmp_path.rglob('launch.json')]
+     assert launches and all(m['solver_arm']=='mindset' for m in launches)
+ 

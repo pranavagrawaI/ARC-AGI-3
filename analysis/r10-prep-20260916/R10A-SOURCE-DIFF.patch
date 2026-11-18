@@ -1,0 +1,543 @@
+--- deployment/kaggle/actor-critic-construction-kaggle-r9-cd82/audit.py
++++ analysis/r10-prep-20260916/r10a-package/audit.py
+@@ -4,6 +4,7 @@
+ 
+ import hashlib
+ import json
++import re
+ from pathlib import Path
+ from typing import Any
+ 
+@@ -57,29 +58,35 @@
+     return rows
+ 
+ 
++def session_freeze_record(session: Path) -> dict[str, Any] | None:
++    """Only successful parent publication at the Actor's session root is live."""
++    session = Path(session)
++    for name in ("CONSTRUCTION.json", "RESULT.json"):
++        status = _read_json(session / name)
++        if not isinstance(status, dict) or status.get("construction_status") != "CANDIDATE_READY" or status.get("frozen") is not True:
++            return None
++    path = session / "FROZEN.json"
++    raw = _read_json(path)
++    if not isinstance(raw, dict):
++        return None
++    source = raw.get("candidate_source")
++    if not isinstance(source, str) or not source.strip():
++        return None
++    digest = hashlib.sha256(source.encode()).hexdigest()
++    if raw.get("source_digest") != digest:
++        return None
++    return {"source_digest": digest, "candidate_source": source, "path": str(path)}
++
++
+ def freeze_record(run_dir: Path) -> dict[str, Any] | None:
+-    seen: list[dict[str, Any]] = []
+-    paths = [run_dir / "FROZEN.json", *run_dir.rglob("FROZEN.json")]
+-    unique = []
+-    for path in paths:
+-        if path in unique or not path.is_file():
+-            continue
+-        unique.append(path)
+-        raw = _read_json(path)
+-        if not isinstance(raw, dict):
+-            continue
+-        source = raw.get("candidate_source")
+-        digest = raw.get("source_digest")
+-        if not isinstance(source, str) or not source.strip():
+-            continue
+-        expected = hashlib.sha256(source.encode()).hexdigest()
+-        if digest != expected:
+-            continue
+-        seen.append({"source_digest": expected, "candidate_source": source, "path": str(path)})
+-    digests = {row["source_digest"] for row in seen}
+-    if len(digests) != 1:
+-        return None
+-    return seen[0]
++    run_dir = Path(run_dir)
++    # Callers pass either one recorded session or its arm workspace. Never scan
++    # arbitrary descendants such as constructor-job for publication authority.
++    sessions = [run_dir] if (run_dir / "ipc").is_dir() else [
++        p for p in run_dir.iterdir() if p.is_dir() and (p / "ipc").is_dir()
++    ]
++    seen = [record for session in sessions if (record := session_freeze_record(session)) is not None]
++    return seen[0] if len(seen) == 1 else None
+ 
+ 
+ def normalize_action(action: Any) -> str | None:
+@@ -87,6 +94,8 @@
+         return None
+     if action.startswith("ACTION") and action[6:].isdigit():
+         return ARC_ACTION_ID_TO_NAME.get(int(action[6:]))
++    if re.fullmatch(r"CLICK\s+\d+\s+\d+", action):
++        return action
+     if action in ARC_ACTION_ID_TO_NAME.values():
+         return action
+     return None
+@@ -192,6 +201,8 @@
+                 except (ValueError, TypeError):
+                     continue
+                 source = arguments.get("candidate_source") if isinstance(arguments, dict) else None
++                if isinstance(source, list) and source and all(isinstance(line, str) for line in source):
++                    source = "\n".join(source) + "\n"
+                 if isinstance(source, str) and hashlib.sha256(source.encode()).hexdigest() == digest:
+                     return True
+     return False
+--- deployment/kaggle/actor-critic-construction-kaggle-r9-cd82/construction_service.py
++++ analysis/r10-prep-20260916/r10a-package/construction_service.py
+@@ -42,8 +42,8 @@
+ def _limits() -> ConstructionLimits:
+     # Donor stops when remaining wall <= 20s, so wall must exceed 20 or zero requests run.
+     return ConstructionLimits(
+-        wall_seconds=int(os.environ.get("ARC_CONSTRUCTOR_WALL_SECONDS", "45")),
+-        max_model_requests=int(os.environ.get("ARC_CONSTRUCTOR_MAX_REQUESTS", "2")),
++        wall_seconds=int(os.environ.get("ARC_CONSTRUCTOR_WALL_SECONDS", "240")),
++        max_model_requests=int(os.environ.get("ARC_CONSTRUCTOR_MAX_REQUESTS", "6")),
+     )
+ 
+ 
+@@ -109,8 +109,11 @@
+             "playable": True,
+             "error": f"{type(error).__name__}: {error}",
+         }
+-    hard = float(os.environ.get("ARC_CONSTRUCTOR_HARD_SECONDS", "50"))
+-    work = Path(tempfile.mkdtemp(prefix="construction-job-"))
++    # Persist one-shot admission before spawning; failure/crash cannot retry this episode.
++    marker.write_text(json.dumps({"construction_status": "WORKING", "frozen": False, "capped": True, "playable": True}) + "\n")
++    hard = float(os.environ.get("ARC_CONSTRUCTOR_HARD_SECONDS", "245"))
++    work = run_dir / "constructor-job"
++    work.mkdir(exist_ok=False)
+     env = os.environ.copy()
+     env["PYTHONPATH"] = str(Path(__file__).resolve().parent) + os.pathsep + env.get("PYTHONPATH", "")
+     proc = subprocess.Popen(
+@@ -126,13 +129,15 @@
+             proc.wait(timeout=hard)
+         except subprocess.TimeoutExpired:
+             _reap(proc)
++            marker.write_text(json.dumps({"construction_status": "FAILED", "frozen": False, "capped": True, "playable": True, "error": f"HARD_DEADLINE:{hard}", "evidence_directory": str(work)}) + "\n")
+             return {
+                 "construction_status": "FAILED",
+                 "frozen": False,
+                 "supported_model": False,
+-                "capped": False,
++                "capped": True,
+                 "playable": True,
+                 "error": f"HARD_DEADLINE:{hard}",
++                "evidence_directory": str(work),
+                 "worker_pid": pid,
+                 "worker_alive": _alive(pid),
+             }
+@@ -144,13 +149,15 @@
+         job_error = work / "JOB-ERROR.json"
+         if job_error.is_file():
+             error = json.loads(job_error.read_text()).get("error", error)
++        marker.write_text(json.dumps({"construction_status": "FAILED", "frozen": False, "capped": True, "playable": True, "error": error, "evidence_directory": str(work)}) + "\n")
+         return {
+             "construction_status": "FAILED",
+             "frozen": False,
+             "supported_model": False,
+-            "capped": False,
++            "capped": True,
+             "playable": True,
+             "error": error,
++            "evidence_directory": str(work),
+             "worker_pid": pid,
+             "worker_alive": _alive(pid),
+         }
+--- deployment/kaggle/actor-critic-construction-kaggle-r9-cd82/constructor.py
++++ analysis/r10-prep-20260916/r10a-package/constructor.py
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+ 
+ import copy
++import os
+ import json
+ import time
+ from request_contract import validate_request
+@@ -70,7 +71,7 @@
+                 "type": "object",
+                 "properties": {
+                     "work_item": {"type": "object"},
+-                    "candidate_source": {"type": "string"},
++                    "candidate_source": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}], "description": "Complete source as text with real newlines, or a list of source lines (preferred). Never double-escape line separators."},
+                 },
+                 "required": ["work_item", "candidate_source"],
+                 "additionalProperties": False,
+@@ -102,12 +103,12 @@
+     max_model_requests: int = 16
+     max_inspections: int = 10
+     max_submissions: int = 4
+-    max_completion_tokens: int = 16384
+-    max_prompt_tokens: int = 300000
++    max_completion_tokens: int = 24576
++    max_prompt_tokens: int = 600000
+     wall_seconds: int = 900
+     reserve_requests: int = 2
+     reserve_completion_tokens: int = 4096
+-    max_dollars: float = 0.50
++    max_dollars: float = 2.0
+ 
+ 
+ @dataclass
+@@ -193,6 +194,7 @@
+     commit_phase = False
+     seen_call_ids: set[str] = set()
+ 
++    inspected = False
+     prose_failures = 0
+     while result.model_requests < limits.max_model_requests:
+         remaining_tokens = limits.max_completion_tokens - result.usage.get('completion_tokens', 0)
+@@ -205,7 +207,7 @@
+         if commit_phase and remaining_requests >= 2 and remaining_tokens >= 4096:
+             request_tokens = min(request_tokens, remaining_tokens - 2048)
+         tools = [tool for tool in TOOLS if tool['function']['name'] != 'execute_python' or not commit_phase]
+-        tools = [tool for tool in tools if tool['function']['name'] != 'submit_candidate' or result.submissions < limits.max_submissions]
++        tools = [tool for tool in tools if tool['function']['name'] != 'submit_candidate' or (inspected and result.submissions < limits.max_submissions)]
+         telemetry = {
+             'phase': 'commit' if commit_phase else 'explore',
+             'seconds_remaining': round(seconds, 3), 'requests_remaining': remaining_requests,
+@@ -236,6 +238,7 @@
+         result.model_requests += 1
+         result.requested_tokens += request_tokens
+         checkpoint()
++        os.environ["ARC_CONSTRUCTOR_REQUEST_REMAINING"] = str(max(.001, seconds))
+         response = transport(body)
+         result.transcript.append({'request': body, 'response': response})
+         checkpoint()
+@@ -312,16 +315,25 @@
+                         if not isinstance(code, str):
+                             raise ValueError("execute_python code must be text")
+                         payload = execute_inspection(code, case)
++                        inspected = inspected or payload.get("status") == "completed"
+                 elif name == "submit_candidate":
+                     if exhausted:
+                         payload = {"status": "budget_exhausted", "kind": "candidate_submission"}
+                     else:
++                        if not inspected:
++                            raise ValueError("successful execute_python inspection required before submission")
+                         work_item = _validate_work_item(arguments.get("work_item"), case.frontier)
+                         source = arguments.get("candidate_source")
++                        if isinstance(source, list) and source and all(isinstance(line, str) for line in source):
++                            source = "\n".join(source) + "\n"
+                         if not isinstance(source, str) or not source.strip():
+                             raise ValueError("candidate_source must be nonempty text")
+                         if len(source.encode()) > 200_000:
+                             raise ValueError("candidate_source exceeds 200,000 bytes")
++                        try:
++                            compile(source, "candidate.py", "exec")
++                        except SyntaxError as error:
++                            raise ValueError(f"candidate source syntax/serialization error: {error}; send candidate_source as a list of actual Python lines, or JSON text with real newline separators. Literal backslash-n separators are not decoded by the host.") from error
+                         evaluation = evaluate_candidate(source, case, include_suffix=False)
+                         payload = {"status": "evaluated", "visible_evaluation": {key: copy.deepcopy(value) for key, value in evaluation.items() if key != "suffix"}}
+                         if (
+--- deployment/kaggle/actor-critic-construction-kaggle-r9-cd82/constructor_contract.py
++++ analysis/r10-prep-20260916/r10a-package/constructor_contract.py
+@@ -30,8 +30,8 @@
+   list. This generic checker does not validate its element types or completeness;
+   use meaningful string names as declarations, not claims of host verification.
+   Extra branch keys are allowed. Branch state may be any JSON value in visible
+-  replay; use a non-null dict for compatibility with the frozen query client's
+-  pending-state sentinel. initialize and assimilate MUST return dicts.
++  replay and prospective queries, including JSON null. Pending presence is bound
++  to the action/step key, independently of state. initialize and assimilate MUST return dicts.
+ - assimilate(predicted_state, observation, verdict) -> dict (JSON object).
+   predicted_state is the branch's already-predicted successor, not the old state.
+   verdict is exactly {"status":"unscored"}; there is no measurement or semantic
+@@ -102,10 +102,11 @@
+ All reasoning/tool selection shares the same budget. Numeric budget telemetry is
+ sent before EVERY request; follow current tools and remaining counters, not donor
+ defaults. Commit phase is irreversible; execute_python is removed and rejected.
+-In this package construction starts in COMMIT phase (45 seconds and two requests),
+-so no inspection is available despite the prefix packet advertising its path.
+-Submit a candidate/repair from supplied visible information or request_evidence;
+-do not attempt another channel to inspect the prefix. Full chronological frames
++This package starts with 240 seconds and six requests. Perform a successful
++execute_python inspection before submitting. Submission is unavailable until
++inspection succeeds. Source may be a list of Python lines (preferred) or text
++with real newline separators; literal backslash-n line separators are rejected
++with repair feedback and never silently unescaped. Full chronological frames
+ are not in the compact prompt (only initial/current grids and step/action summaries).
+ Phase enters commit at requests_remaining <= reserve_requests, completion tokens
+ <= reserve_completion_tokens + 4096, inspection cap, or seconds_remaining <= 180.
+@@ -131,18 +132,13 @@
+         "wrapped_source_overhead_bytes": overhead,
+         "effective_candidate_source_max_bytes": 200_000 - overhead,
+         "package_envelope": {
+-            "constructor_hard_seconds": 50,
+-            "http_post_seconds": 30,
+-            "server_requests_including_one_warmup": 24,
+-            "application_requests": 23,
+-            "actor_plus_summarizer_requests": 20,
+-            "constructor_requests": 2,
+-            "critic_requests": "shared application ceiling; no independent critic relay cap",
+-            "executed_environment_actions": 8,
+-            "model_admission_seconds": 900,
+-            "server_startup_seconds": 1200,
+-            "supervisor_request_timeout_seconds": 180,
+-            "gpu_reservation_seconds": 3600,
++            "constructor_hard_seconds": 245, "http_post_seconds": 30,
++            "constructor_relay_client_seconds": 35,
++            "server_requests_including_one_warmup": 259,
++            "application_requests": 258, "per_arm_requests": 129,
++            "constructor_requests": 6, "executed_environment_actions_per_arm": 200,
++            "model_admission_seconds_per_arm": 600, "server_startup_seconds": 1200,
++            "supervisor_request_timeout_seconds": 180, "gpu_reservation_seconds": 3600,
+         },
+         "scope": "Package limits are ceilings, not guaranteed remaining allowance; shared relay may stop earlier. No provider cancellation or launch authority.",
+     }
+--- deployment/kaggle/actor-critic-construction-kaggle-r9-cd82/frozen_client.py
++++ analysis/r10-prep-20260916/r10a-package/frozen_client.py
+@@ -17,7 +17,7 @@
+     def __init__(self, run_dir: Path):
+         self.run_dir = Path(run_dir)
+         self._state: dict[str, Any] | None = None
+-        self._pending: dict[str, Any] | None = None
++        self._pending: Any = None  # JSON null is a valid admitted state; key owns presence.
+         self._pending_key: tuple[str, int] | None = None
+         self._levels_completed: int | None = None
+ 
+@@ -78,7 +78,7 @@
+             return "NO_FROZEN_MODEL"
+         except ValueError as error:
+             return str(error)
+-        if self._pending is not None:
++        if self._pending_key is not None:
+             return "PREDICT_WITHOUT_ASSIMILATE"
+         rpc = self._rpc(source)
+         if self._state is None:
+@@ -107,7 +107,7 @@
+             return "NO_FROZEN_MODEL"
+         except ValueError as error:
+             return str(error)
+-        if self._pending_key is None or self._pending is None:
++        if self._pending_key is None:
+             return "AMBIGUOUS_PENDING"
+         if not isinstance(executed_action, str) or not isinstance(executed_step, int):
+             return "REJECT_UNKNOWN_TRANSITION"
+--- deployment/kaggle/actor-critic-construction-kaggle-r9-cd82/gameplay_play.py
++++ analysis/r10-prep-20260916/r10a-package/gameplay_play.py
+@@ -47,9 +47,9 @@
+ ARM_CALL_CAP = {"A": 129, "B": 129}  # symmetric by ruling: any per-arm purse difference invalidates the pairing
+ TOTAL_CALL_CAP = 258  # + 1 runtime-owned warmup = 259 server chat requests
+ HTTP_POST_SECONDS = {"actor": 90, "summarizer": 90, "critic": 90, "constructor": 30}
+-CONSTRUCTOR_WALL = 45
+-CONSTRUCTOR_HARD = 50
+-CONSTRUCTOR_MAX_REQUESTS = 2
++CONSTRUCTOR_WALL = 240
++CONSTRUCTOR_HARD = 245
++CONSTRUCTOR_MAX_REQUESTS = 6
+ REQUEST_RESERVE_SECONDS = 15
+ CLEANUP_RESERVE_SECONDS = 30
+ STOP_REASONS = {"win", "step_budget", "wall_budget", "model_admission_budget", "call_cap"}
+@@ -164,6 +164,8 @@
+ 
+ def session_directories(workspace: Path) -> list[dict]:
+     """Name every solver session directory under an arm workspace so its ipc files are addressable."""
++    from audit import session_freeze_record
++
+     rows = []
+     for path in sorted(p for p in workspace.iterdir() if p.is_dir() and p.name != "recordings"):
+         ipc = path / "ipc"
+@@ -171,9 +173,11 @@
+             "session_dir": path.name,
+             "ipc_files": sorted(p.name for p in ipc.iterdir()) if ipc.is_dir() else [],
+             "files": sorted(p.name for p in path.iterdir() if p.is_file()),
+-            "frozen": (path / "FROZEN.json").is_file() or any(path.rglob("FROZEN.json")),
++            "frozen": session_freeze_record(path) is not None,
++            "child_freeze_artifacts": [str(p.relative_to(workspace)) for p in (path / "constructor-job").rglob("FROZEN.json")],
+             "host_events": [str(p.relative_to(workspace)) for p in path.rglob("host-events.jsonl")],
+             "constructor_results": [str(p.relative_to(workspace)) for p in path.rglob("RESULT.json")],
++            "constructor_files": sorted(str(p.relative_to(workspace)) for p in (path / "constructor-job").rglob("*") if p.is_file()),
+         })
+     return rows
+ 
+--- deployment/kaggle/actor-critic-construction-kaggle-r9-cd82/headless.py
++++ analysis/r10-prep-20260916/r10a-package/headless.py
+@@ -71,14 +71,14 @@
+         os.environ["ARC_CONSTRUCTOR_FIXTURE"] = args.constructor_fixture
+     if args.constructor_url:
+         os.environ["ARC_CONSTRUCTOR_URL"] = args.constructor_url
+-    os.environ.setdefault("ARC_CONSTRUCTOR_WALL_SECONDS", "45")
+-    os.environ.setdefault("ARC_CONSTRUCTOR_HARD_SECONDS", "50")
+-    os.environ.setdefault("ARC_CONSTRUCTOR_MAX_REQUESTS", "2")
++    os.environ.setdefault("ARC_CONSTRUCTOR_WALL_SECONDS", "240")
++    os.environ.setdefault("ARC_CONSTRUCTOR_HARD_SECONDS", "245")
++    os.environ.setdefault("ARC_CONSTRUCTOR_MAX_REQUESTS", "6")
+     if args.constructor_wall_seconds is not None:
+         os.environ["ARC_CONSTRUCTOR_WALL_SECONDS"] = str(args.constructor_wall_seconds)
+     if args.constructor_hard_seconds is not None:
+-        if args.constructor_hard_seconds > 60:
+-            raise ValueError("constructor hard seconds exceed the incumbent 60s cell")
++        if args.constructor_hard_seconds > 245:
++            raise ValueError("constructor hard seconds exceed the R10a 245s host-job bound")
+         os.environ["ARC_CONSTRUCTOR_HARD_SECONDS"] = str(args.constructor_hard_seconds)
+     if args.constructor_max_requests is not None:
+         os.environ["ARC_CONSTRUCTOR_MAX_REQUESTS"] = str(args.constructor_max_requests)
+--- deployment/kaggle/actor-critic-construction-kaggle-r9-cd82/host.py
++++ analysis/r10-prep-20260916/r10a-package/host.py
+@@ -76,7 +76,7 @@
+             headers={"Content-Type": "application/json"},
+             method="POST",
+         )
+-        with urllib.request.urlopen(request, timeout=30) as response:
++        with urllib.request.urlopen(request, timeout=min(35, float(os.environ.get("ARC_CONSTRUCTOR_REQUEST_REMAINING", "35")))) as response:
+             return json.loads(response.read().decode())
+ 
+ 
+@@ -94,8 +94,8 @@
+     output = Path(output)
+     output.mkdir(parents=True, exist_ok=True)
+     limits = limits or ConstructionLimits(
+-        wall_seconds=int(os.environ.get("ARC_CONSTRUCTOR_WALL_SECONDS", "45")),
+-        max_model_requests=int(os.environ.get("ARC_CONSTRUCTOR_MAX_REQUESTS", "2")),
++        wall_seconds=int(os.environ.get("ARC_CONSTRUCTOR_WALL_SECONDS", "240")),
++        max_model_requests=int(os.environ.get("ARC_CONSTRUCTOR_MAX_REQUESTS", "6")),
+     )
+     with bound_constructor():
+         result: ConstructionResult = run_construction(case, transport=transport, limits=limits)
+--- deployment/kaggle/actor-critic-construction-kaggle-r9-cd82/live_agent.py
++++ analysis/r10-prep-20260916/r10a-package/live_agent.py
+@@ -5,6 +5,8 @@
+ import hashlib
+ from functools import wraps
+ import json
++import re
++import time
+ from pathlib import Path
+ 
+ from nooa import hidden
+@@ -25,6 +27,7 @@
+ 
+ def _append_host_event(run_dir: Path, row: dict) -> None:
+     path = Path(run_dir) / "host-events.jsonl"
++    row = {"monotonic": time.monotonic(), **row}
+     with path.open("a") as handle:
+         handle.write(json.dumps(row, sort_keys=True) + "\n")
+ 
+@@ -40,7 +43,7 @@
+     def format_game_context(self) -> str:
+         context = super().format_game_context()
+         row = last_executed_row(self.ipc_dir)
+-        if row is not None and not getattr(self, "_construction_attempted", False):
++        if row is not None and not getattr(self, "_construction_attempted", False) and not self._in_actor_cell():
+             self._construction_attempted = True
+             self._construction_status = self.request_construction()
+         client = getattr(self, "_frozen_client", None)
+@@ -65,7 +68,10 @@
+             return "FROZEN_DIAGNOSTIC_REQUIRES_ONE_ACTOR_SELECTED_ACTION"
+         state = self._latest_state() or {}
+         action = actions[0]
+-        if action not in (state.get("available_actions") or []):
++        base = action.split()[0] if isinstance(action, str) and action.strip() else ""
++        click = re.fullmatch(r"CLICK\s+(\d+)\s+(\d+)", action.strip()) if base == "CLICK" else None
++        legal = base in (state.get("available_actions") or []) and (base != "CLICK" or (click is not None and all(0 <= int(v) <= 63 for v in click.groups())))
++        if not legal:
+             return super().submit_actions(actions, *args, **kwargs)
+         step = int(state.get("step") or 0)
+         client = getattr(self, "_frozen_client", None)
+@@ -79,7 +85,11 @@
+             client._pending = None
+             client._pending_key = None
+             self._record("prediction_cancelled", "COMPLETED", action=pending[0], step=step)
+-        raw = self.query_frozen_predict(action)
++        self._automatic_query = True
++        try:
++            raw = self.query_frozen_predict(action)
++        finally:
++            self._automatic_query = False
+         self._construction_status = raw
+         try:
+             prediction = json.loads(raw)
+@@ -107,7 +117,20 @@
+         row = {"event": event, "status": status, **fields}
+         _append_host_event(self.run_dir, row)
+ 
++    def _in_actor_cell(self) -> bool:
++        path = Path(self.ipc_dir) / "cell_execution.json"
++        if not path.is_file():
++            return False
++        record = json.loads(path.read_text())
++        return record.get("finished_at_monotonic") is None
++
+     def request_construction(self) -> str:
++        # A 240s host job must never run inside the incumbent 60s Actor cell.
++        # Context rendering after that cell performs the one automatic episode.
++        if self._in_actor_cell():
++            self._record("construction_scheduled", "PENDING_HOST_CONTEXT")
++            return json.dumps({"construction_status": "SCHEDULED_HOST_CONTEXT", "playable": True})
++        begun = time.monotonic()
+         raw = super().request_construction()
+         digest = self._source_digest()
+         last = None
+@@ -130,6 +153,7 @@
+             step=None if last is None else last.get("step"),
+             source_digest=digest,
+             tool_result=raw,
++            wall_seconds=time.monotonic() - begun,
+         )
+         return raw
+ 
+@@ -151,6 +175,11 @@
+             step=step,
+             source_digest=digest,
+             tool_result=raw,
++            observation=self._latest_state(),
++            decision_leverage={"action": action, "host_intervened": False,
++                "path": "automatic_postselection" if getattr(self, "_automatic_query", False) else "explicit_actor_query",
++                "same_action_decision_opportunity": "not_available_on_automatic_path" if getattr(self, "_automatic_query", False) else "actor_cell_continues",
++                "semantic_verdict": "unscored"},
+         )
+         return raw
+ 
+@@ -176,6 +205,7 @@
+             action=None if last is None else last.get("action"),
+             step=None if last is None else last.get("step"),
+             source_digest=digest,
++            executed_transition=last,
+             tool_result=raw,
+         )
+         return raw
+--- deployment/kaggle/actor-critic-construction-kaggle-r9-cd82/local_accounting.py
++++ analysis/r10-prep-20260916/r10a-package/local_accounting.py
+@@ -59,7 +59,7 @@
+             or record.get("receipted") != n or not isinstance(receipts, list) or len(receipts) != n
+             or not isinstance(roles, dict) or set(roles) != {"actor", "summarizer", "constructor", "critic"}
+             or any(type(v) is not int or v < 0 for v in roles.values()) or sum(roles.values()) != n
+-            or roles["constructor"] > 2 * len(result.get("games") or [])
++            or roles["constructor"] > 6
+             or [r.get("call") for r in receipts] != list(range(1, n + 1))):
+         raise ValueError("local request accounting does not reconcile")
+     games = result.get("games")
+--- deployment/kaggle/actor-critic-construction-kaggle-r9-cd82/persist.py
++++ analysis/r10-prep-20260916/r10a-package/persist.py
+@@ -34,6 +34,7 @@
+             "usage": result.usage,
+             "frozen": False,
+             "tool_event_count": len(result.tool_events),
++            "transcript": result.transcript,
+         }
+         progress_path.write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n")
+ 
+@@ -41,8 +42,8 @@
+         _append_jsonl(events_path, event)
+ 
+     limits = limits or ConstructionLimits(
+-        wall_seconds=int(os.environ.get("ARC_CONSTRUCTOR_WALL_SECONDS", "45")),
+-        max_model_requests=int(os.environ.get("ARC_CONSTRUCTOR_MAX_REQUESTS", "2")),
++        wall_seconds=int(os.environ.get("ARC_CONSTRUCTOR_WALL_SECONDS", "240")),
++        max_model_requests=int(os.environ.get("ARC_CONSTRUCTOR_MAX_REQUESTS", "6")),
+     )
+     with bound_constructor():
+         result = run_construction(
+@@ -58,6 +59,10 @@
+         "frozen": False,
+         "tool_event_count": len(result.tool_events),
+         "model_requests": result.model_requests,
++        "inspections": result.inspections,
++        "submissions": result.submissions,
++        "usage": result.usage,
++        "construction_repair": {"failed_submissions": sum(e["call"]["function"]["name"] == "submit_candidate" and (json.loads(e["rendered_result_message"]["content"]).get("status") == "rejected" or json.loads(e["rendered_result_message"]["content"]).get("visible_evaluation", {}).get("visible", {}).get("status") == "failed") for e in result.tool_events), "accepted_after_repair": result.status == "CANDIDATE_READY" and result.submissions > 1},
+     }
+     if result.status == "CANDIDATE_READY" and isinstance(result.candidate_source, str):
+         evaluation = result.evaluation or {}

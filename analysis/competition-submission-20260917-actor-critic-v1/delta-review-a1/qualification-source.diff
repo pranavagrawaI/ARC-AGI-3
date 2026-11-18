@@ -1,0 +1,61 @@
+--- before/qualify_gateway.py
++++ after/qualify_gateway.py
+@@ -24,7 +24,7 @@
+ """
+ 
+ def main():
+-    parser=argparse.ArgumentParser();parser.add_argument('--output',type=Path,required=True);parser.add_argument('--games',type=int,default=110);parser.add_argument('--mode',choices=['normal','reserve','critic-cap'],default='normal')
++    parser=argparse.ArgumentParser();parser.add_argument('--output',type=Path,required=True);parser.add_argument('--games',type=int,default=110);parser.add_argument('--mode',choices=['normal','reserve','critic-cap','deep'],default='normal')
+     args=parser.parse_args();out=args.output.resolve();out.mkdir(parents=True,exist_ok=False)
+     competition=out/'competition';games=competition/'environment_files';games.mkdir(parents=True)
+     official=competition/'ARC-AGI-3-Agents'
+@@ -71,8 +71,9 @@
+             with (out/'model-requests.jsonl').open('a') as f:f.write(json.dumps(requests[-1])+'\n')
+             msg={'role':'assistant','content':json.dumps(dict(claim_ref='',question='',reason=''))}
+             if not actor and args.mode=='critic-cap':msg['content']='invalid critic output fixture'
++            deep = actor and args.mode=='deep' and sum(x['purpose']=='actor' for x in requests)==1
+             if actor:
+-                msg.update(content=None,tool_calls=[dict(id=f'call{len(requests)}',type='function',function=dict(name='execute_python',arguments=json.dumps(dict(code=('print(self.model_grid().shape)' if args.mode!='normal' else 'self.submit_actions(["UP"], rationale="predict: fixture step")')))))])
++                msg.update(content=None,tool_calls=[dict(id=f'call{len(requests)}',type='function',function=dict(name='execute_python',arguments=json.dumps(dict(code=('r = await self.deep_investigate("Which rule moves the piece?", ["decision_packet"]); print(r["id"])' if deep else 'print(self.model_grid().shape)' if args.mode not in ('normal','deep') else 'self.submit_actions(["UP"], rationale="predict: fixture step")')))))])
+             data=json.dumps(dict(id=f'fixture{len(requests)}',object='chat.completion',created=1,model='controlled-local',choices=[dict(index=0,finish_reason='tool_calls' if actor else 'stop',message=msg)],usage=dict(prompt_tokens=100,completion_tokens=50,total_tokens=150))).encode()
+             self.send_response(200);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
+     model=ThreadingHTTPServer(('127.0.0.1',0),Model);mt=threading.Thread(target=model.serve_forever,daemon=True);mt.start()
+@@ -87,7 +88,7 @@
+         assert result.returncode==0, f'notebook exit {result.returncode}; see {out}/stderr.log'
+         q=materialized/'working/qualification';r=json.loads((q/'launcher-result.json').read_text())
+         assert len(r['games'])==args.games
+-        if args.mode=='normal':
++        if args.mode in ('normal','deep'):
+             assert all(g['state']=='WIN' and g['levels_completed']==2 for g in r['games'])
+         else:
+             assert all(g['stop_reason']=='model_admission_budget' for g in r['games'])
+@@ -96,6 +97,18 @@
+         assert sum(x['purpose']=='actor' for x in requests)>=args.games
+         assert sum(x['purpose']=='critic' for x in requests)>=args.games
+         sys.path.insert(0,str(materialized));import official_launcher_runtime as outer
++        if args.mode=='deep':
++            ledgers=[json.loads(line) for path in q.glob('request-budget-*.jsonl') for line in path.read_text().splitlines()]
++            deep_files=list(q.rglob('deep_investigations.jsonl'))
++            deep_requests=[x for x in requests if not x['request'].get('tools') and x['request'].get('max_tokens')!=192]
++            summary=dict(server_requests_total=len(requests),shared_ledger_rows=len(ledgers),
++                         expected_launcher_solver_requests=outer.expected_launcher_solver_requests(r),
++                         deep_model_requests=len(deep_requests),deep_investigation_files=len(deep_files),
++                         refusal_observed='deep investigation is disabled under competition request accounting' in json.dumps(requests))
++            (out/'DEEP-SUMMARY.json').write_text(json.dumps(summary,indent=2)+'\n')
++            assert summary['refusal_observed'], 'Deep call did not reach the fail-closed guard'
++            assert not deep_files and not deep_requests, summary
++            assert len(requests)==len(ledgers)==summary['expected_launcher_solver_requests'],summary
+         facts=outer.reconcile_launcher_request_count(r,dict(chat_completion_accesses=1,successful_chat_completion_accesses=1),dict(chat_completion_accesses=1+len(requests),successful_chat_completion_accesses=1+len(requests),successful_freeze_gc_accesses=1,ready_marker_count=1))
+         for delta in (-1,1):
+             try:outer.reconcile_launcher_request_count(r,dict(chat_completion_accesses=1,successful_chat_completion_accesses=1),dict(chat_completion_accesses=1+len(requests)+delta,successful_chat_completion_accesses=1+len(requests),successful_freeze_gc_accesses=1,ready_marker_count=1))
+--- before/freeze.py
++++ after/freeze.py
+@@ -5,7 +5,7 @@
+ def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
+ if __name__=='__main__':
+     files=[p for p in P.rglob('*') if p.is_file()]
+-    files += [RUN/n for n in ('EXPERIMENT-CARD.md','launch_control.py','test_gate.py','freeze.py','qualify_gateway.py','test_local.py','exact_version.py','test_entrypoints.py','test_deadlines.py','test_budget_accounting.py','test_adapter.py','finalize.py')]
++    files += [RUN/n for n in ('EXPERIMENT-CARD.md','launch_control.py','test_gate.py','freeze.py','qualify_gateway.py','test_local.py','exact_version.py','test_entrypoints.py','test_deadlines.py','test_budget_accounting.py','test_adapter.py','finalize.py','finalize_a1.py')]
+     import launch_control as gate
+     m=dict(schema=1,identity=gate.IDENTITY,target=gate.TARGET,run_dir=str(RUN),package_dir=str(P),command=gate.COMMAND,metadata=json.loads((P/'kernel-metadata.json').read_text()),card_sha256=sha(RUN/'EXPERIMENT-CARD.md'),notebook_sha256=sha(P/'submission.ipynb'),sources={str(p.relative_to(ROOT)):sha(p) for p in sorted(files)})
+     (RUN/'manifest.json').write_text(json.dumps(m,indent=2)+'\n')

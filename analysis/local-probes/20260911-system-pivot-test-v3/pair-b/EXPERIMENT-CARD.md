@@ -1,0 +1,11 @@
+# System pivot comparison v3: pair-b
+Question: Does frequent reasoning-off review reduce time/actions to warranted, retained correction, regardless of insight origin?
+Posture: Controlled restart comparison after v1 oversized-seed and v2 volatile-seed invalidations.
+Contrast: Identical seven-action LS20 successor and compact cacheable notes/measurements; fresh empty Python workers; frequent critic versus baseline. Order=baseline-first; pair B reverses it. Evaluator diagnosis is absent from model context.
+Prediction: Review reduces elapsed time to a correction confirmed in three later executed decisions without adding false pivots.
+Measure: Source-bound grading of observable Actor outputs and executed decisions. Record first warranted correction, actions/time to it, three-decision retention, regressions, false pivots, critic time, total time, and cost. Insight origin is irrelevant; acknowledgement earns nothing; missing follow-up is unresolved. Every Actor request must retain all three evidence markers, checked before spend reservation.
+Cap: Per arm600s plus95s retirement,64 actions,96 Actor calls,20 critic calls,$0.50 admission ceiling. Four arms <=$2. Actor4096 and critic384 completion tokens, reasoning off, Qwen3.8-27B/CoreWeave FP8 only, zero retries/fallback. Reviews after2 Actor calls or2 actions. Continue fixed window after correction to observe relapse.
+Stop: Terminal/cap or operational failure. Abort pair on transport/unresolved accounting; do not start another pair after unresolved failure. No relaunch of started card.
+Invalid if: Replay differs; required evidence absent before any Actor reservation; source/input drift; diagnosis leaks; wrong provider/reasoning mode; unaccounted request; unresolved retirement. Missing pair arm prevents paired benefit. Output failure is separate from semantic quality.
+Result map: Faster retained correction without additional harmful pivots -> expand across new cases; same -> no benefit demonstrated; worse -> no promotion; censored/invalid -> unresolved. Compare whole-system time including review; separate-role value versus equal-compute self-review remains untested.
+Outputs: This directory plus the immutable v2 compact fixture contain inputs, source hashes, exact requests/responses, actions/grids, snapshots, timestamps, grades and scorer output. No Kaggle launch.

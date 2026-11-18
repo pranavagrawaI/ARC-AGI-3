@@ -1,0 +1,123 @@
+--- previous/audit.py
++++ current/audit.py
+@@ -58,29 +58,35 @@
+     return rows
+ 
+ 
++def session_freeze_record(session: Path) -> dict[str, Any] | None:
++    """Only successful parent publication at the Actor's session root is live."""
++    session = Path(session)
++    for name in ("CONSTRUCTION.json", "RESULT.json"):
++        status = _read_json(session / name)
++        if not isinstance(status, dict) or status.get("construction_status") != "CANDIDATE_READY" or status.get("frozen") is not True:
++            return None
++    path = session / "FROZEN.json"
++    raw = _read_json(path)
++    if not isinstance(raw, dict):
++        return None
++    source = raw.get("candidate_source")
++    if not isinstance(source, str) or not source.strip():
++        return None
++    digest = hashlib.sha256(source.encode()).hexdigest()
++    if raw.get("source_digest") != digest:
++        return None
++    return {"source_digest": digest, "candidate_source": source, "path": str(path)}
++
++
+ def freeze_record(run_dir: Path) -> dict[str, Any] | None:
+-    seen: list[dict[str, Any]] = []
+-    paths = [run_dir / "FROZEN.json", *run_dir.rglob("FROZEN.json")]
+-    unique = []
+-    for path in paths:
+-        if path in unique or not path.is_file():
+-            continue
+-        unique.append(path)
+-        raw = _read_json(path)
+-        if not isinstance(raw, dict):
+-            continue
+-        source = raw.get("candidate_source")
+-        digest = raw.get("source_digest")
+-        if not isinstance(source, str) or not source.strip():
+-            continue
+-        expected = hashlib.sha256(source.encode()).hexdigest()
+-        if digest != expected:
+-            continue
+-        seen.append({"source_digest": expected, "candidate_source": source, "path": str(path)})
+-    digests = {row["source_digest"] for row in seen}
+-    if len(digests) != 1:
+-        return None
+-    return seen[0]
++    run_dir = Path(run_dir)
++    # Callers pass either one recorded session or its arm workspace. Never scan
++    # arbitrary descendants such as constructor-job for publication authority.
++    sessions = [run_dir] if (run_dir / "ipc").is_dir() else [
++        p for p in run_dir.iterdir() if p.is_dir() and (p / "ipc").is_dir()
++    ]
++    seen = [record for session in sessions if (record := session_freeze_record(session)) is not None]
++    return seen[0] if len(seen) == 1 else None
+ 
+ 
+ def normalize_action(action: Any) -> str | None:
+--- previous/constructor_contract.py
++++ current/constructor_contract.py
+@@ -30,8 +30,8 @@
+   list. This generic checker does not validate its element types or completeness;
+   use meaningful string names as declarations, not claims of host verification.
+   Extra branch keys are allowed. Branch state may be any JSON value in visible
+-  replay; use a non-null dict for compatibility with the frozen query client's
+-  pending-state sentinel. initialize and assimilate MUST return dicts.
++  replay and prospective queries, including JSON null. Pending presence is bound
++  to the action/step key, independently of state. initialize and assimilate MUST return dicts.
+ - assimilate(predicted_state, observation, verdict) -> dict (JSON object).
+   predicted_state is the branch's already-predicted successor, not the old state.
+   verdict is exactly {"status":"unscored"}; there is no measurement or semantic
+--- previous/frozen_client.py
++++ current/frozen_client.py
+@@ -17,7 +17,7 @@
+     def __init__(self, run_dir: Path):
+         self.run_dir = Path(run_dir)
+         self._state: dict[str, Any] | None = None
+-        self._pending: dict[str, Any] | None = None
++        self._pending: Any = None  # JSON null is a valid admitted state; key owns presence.
+         self._pending_key: tuple[str, int] | None = None
+         self._levels_completed: int | None = None
+ 
+@@ -78,7 +78,7 @@
+             return "NO_FROZEN_MODEL"
+         except ValueError as error:
+             return str(error)
+-        if self._pending is not None:
++        if self._pending_key is not None:
+             return "PREDICT_WITHOUT_ASSIMILATE"
+         rpc = self._rpc(source)
+         if self._state is None:
+@@ -107,7 +107,7 @@
+             return "NO_FROZEN_MODEL"
+         except ValueError as error:
+             return str(error)
+-        if self._pending_key is None or self._pending is None:
++        if self._pending_key is None:
+             return "AMBIGUOUS_PENDING"
+         if not isinstance(executed_action, str) or not isinstance(executed_step, int):
+             return "REJECT_UNKNOWN_TRANSITION"
+--- previous/gameplay_play.py
++++ current/gameplay_play.py
+@@ -164,6 +164,8 @@
+ 
+ def session_directories(workspace: Path) -> list[dict]:
+     """Name every solver session directory under an arm workspace so its ipc files are addressable."""
++    from audit import session_freeze_record
++
+     rows = []
+     for path in sorted(p for p in workspace.iterdir() if p.is_dir() and p.name != "recordings"):
+         ipc = path / "ipc"
+@@ -171,7 +173,8 @@
+             "session_dir": path.name,
+             "ipc_files": sorted(p.name for p in ipc.iterdir()) if ipc.is_dir() else [],
+             "files": sorted(p.name for p in path.iterdir() if p.is_file()),
+-            "frozen": (path / "FROZEN.json").is_file() or any(path.rglob("FROZEN.json")),
++            "frozen": session_freeze_record(path) is not None,
++            "child_freeze_artifacts": [str(p.relative_to(workspace)) for p in (path / "constructor-job").rglob("FROZEN.json")],
+             "host_events": [str(p.relative_to(workspace)) for p in path.rglob("host-events.jsonl")],
+             "constructor_results": [str(p.relative_to(workspace)) for p in path.rglob("RESULT.json")],
+             "constructor_files": sorted(str(p.relative_to(workspace)) for p in (path / "constructor-job").rglob("*") if p.is_file()),

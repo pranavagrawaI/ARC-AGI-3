@@ -1,0 +1,12 @@
+# OpenRouter q6 exploratory capability probes
+Question: What behaviors does the repaired q6 actor actually demonstrate with live Qwen3.8-27B replies?
+Contrast: two independent short local ls20 runs: control, then treatment; diagnostic examples only, no causal inference from n=1 or comparison to Kaggle FP8.
+Prediction: legal CodeAct submissions and some evidence inspection; useful prediction/revision is uncertain.
+Measure: raw API requests/responses (no credentials), worker states/actions/transitions/authority/integrity records, notes, errors, actions, levels, call counts, provider-reported usage cost. Report observed behavior with examples and missing evidence explicitly.
+Cap: qwen/qwen3.8-27b, reasoning disabled, max4096 output tokens per request, at most10 forwarded requests per run,40 Solver decisions per run,600s wall per run,120s HTTP request timeout, one live HTTP attempt per forwarded request, total at most$1.50 conservative reservation across both runs. Reserve request UTF-8 bytes times published input token price plus4096 times output price plus$0.01 per request; reject oversized requests above120000 bytes. No forwarding after a budget/request cap, and latch worker ABORT. No GPU or Kaggle execution. User explicitly requested OpenRouter probes.
+Stop: WIN/action/call/wall/budget cap or host/integrity failure; no retry of an uncertain paid request. Retain interrupted sessions as capped diagnostic traces.
+Invalid if: wrong model, reasoning output, missing raw artifacts, unbounded forwarding, or host failure. These exploratory traces are not q6 experimental replicates; cap-truncated traces do not establish inability.
+Result map: observed coherent prediction/revision -> identify a longer targeted trial; action-only or repeated unsupported moves -> locate the missing capability; no actions due runtime error -> fix protocol before evaluating model; insufficient horizon -> inconclusive, report only demonstrated behavior.
+Outputs: this directory/control and treatment, requests.jsonl, responses.jsonl, RESULTS.json. Frozen Kaggle source unchanged. Local environment differs in hash from Kaggle; exact environment parity is not claimed.
+
+Provider routing caps prompt at $0.42/M and completion at $3/M, per-request price zero, with fallback disabled. Reference: https://openrouter.ai/docs/guides/routing/provider-selection . No byte changes to this card after first forwarding.

@@ -1,0 +1,1 @@
+Two complete raw-frame trials failed independent grounding and measurement checks. Full results, costs, limitations and follow-up: ../20260905-discriminating-test-exact-diff/RESULT.md. Raw plans, reviews and transitions remain here; measure.py regenerates MEASUREMENTS.json.

@@ -1,0 +1,11 @@
+# Designer-player OpenRouter contact v1
+Question: Does the actual repaired CodeAct solver reach valid actions and prospective experiment records with and without designer-player framing?
+Posture: bounded integration and behavioral feasibility, not promotion or inference speed qualification.
+Contrast: loop versus mindset, in that fixed order, each fresh ls20 episode; identical candidate source, client sampling and caps. Only designer_player context differs. One episode per arm cannot establish a general causal gain.
+Prediction: packet and experiment methods are reachable in both; mindset produces an observable objective conjecture and a test rather than only dynamics bookkeeping.
+Measure: requests.jsonl and responses.jsonl; actual worker IPC actions, transitions, decision_experiments, step_checks, integrity and model_calls. Score actual action/measurement choice, not designer vocabulary. Provider model identity and zero reasoning tokens required. Budget exhaustion is censoring.
+Cap: two arms; 12 upstream calls per arm, 10 environment actions per arm, 600 seconds per arm, 4096 output tokens/request, 120000 serialized input bytes/request. Total conservative spend reservations at most USD 2, input USD .42/M and output USD 3/M price ceiling plus .01/request reserve. Zero forwarding retries, no provider fallback. No Kaggle calls.
+Stop: call/action/time/spend cap; terminal game; upstream failure stops that arm without retry; integrity, source drift, or unexpected reasoning stops experiment. Never extend this run.
+Invalid if: source mismatch, missing request/response accounting, leaked credential, hidden fallback, or no attributable worker lifecycle. No completed action means integration not qualified, not a score for reasoning quality.
+Result map: both act with intact evidence -> prepare Kaggle comparison, no deployment promotion; policy methods unexercised -> retain result as inconclusive and do not assert mindset tested; runtime/transport failure -> diagnose locally before any new paid card; poorer policy behavior -> retain loop and label candidate unselected.
+Outputs: this directory, with frozen run-source hashes and original errors. Full provider responses contain only public game traffic. Credentials remain in relay, never Actor environment or saved headers.

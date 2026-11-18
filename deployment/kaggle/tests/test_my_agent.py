@@ -255,13 +255,23 @@ def test_game_over_reset_does_not_let_the_official_backstop_truncate_solver_cap(
     solver = FakeSolver(
         [ActionDecision(action="UP"), ActionDecision(action="UP")]
     )
-    agent = new_agent(module, RecordingFactory(solver), tmp_path)
+    factory = RecordingFactory(solver)
+    agent = new_agent(module, factory, tmp_path)
+    agent.action_counter = 1
 
     assert agent.MAX_ACTIONS == 5
+
     assert agent.choose_action(agent.frames, frame([[1]])) is GameAction.ACTION1
     game_over = frame([[2]], state=GameState.GAME_OVER)
     assert agent.choose_action(agent.frames, game_over) is GameAction.RESET
+    assert solver.close_calls == 1
+    assert len(factory.calls) == 1
     assert agent.choose_action(agent.frames, frame([[3]])) is GameAction.ACTION1
+    assert len(factory.calls) == 2
+    assert factory.calls[1]["initial_observation"].decision_frame == [[3]]
+    # The budget is game-wide: two Solver decisions were emitted across the two
+    # episodes, and the limit is 2. A GAME_OVER restart does not refund actions.
+    assert agent._solver_decisions_emitted == 2
     assert agent.is_done(agent.frames, frame([[4]])) is True
     assert [kind for kind, _ in solver.events] == [
         "decide",

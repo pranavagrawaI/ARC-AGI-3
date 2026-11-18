@@ -1,0 +1,122 @@
+import base64,hashlib,json,os,re,subprocess,sys,tempfile,threading,time,unittest
+from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+from pathlib import Path
+from unittest import mock
+
+HERE=Path(__file__).resolve().parents[1];PACKAGE=HERE.parents[1]/'deployment/kaggle'/HERE.name
+sys.path.insert(0,str(HERE))
+from constructor import ConstructionResult
+from integration import FixtureTransport,IntegrationHost,load_case
+from integration_boundary import SealedBoundary,execute_inspection
+from local_transport import LocalHTTPTransport,MAX_RESPONSE_BYTES
+from request_contract import LOCAL_MODEL,logical_to_local_request,validate_local_request
+from test_integration import CANDIDATE,WORK,call,response
+
+
+def logical(): return IntegrationHost(load_case(),FixtureTransport([]),Path(tempfile.mkdtemp())).next_request([])
+def local_response(tool_call):
+ return {'id':'chatcmpl-sglang','object':'chat.completion','created':123,'model':LOCAL_MODEL,'system_fingerprint':'sglang','choices':[{'index':0,'finish_reason':'tool_calls','logprobs':None,'message':{'role':'assistant','content':None,'reasoning_content':None,'tool_calls':[{**tool_call,'index':0}]}}],'usage':{'prompt_tokens':100,'completion_tokens':30,'total_tokens':130,'completion_tokens_details':{'reasoning_tokens':0}}}
+
+class ScriptedServer:
+ def __init__(self,responses,delay=0):
+  self.requests=[];outer=self
+  class Handler(BaseHTTPRequestHandler):
+   def do_POST(self):
+    n=int(self.headers['Content-Length']);raw=self.rfile.read(n);outer.requests.append(raw)
+    if delay: time.sleep(delay)
+    item=responses[len(outer.requests)-1]
+    if isinstance(item,tuple): status,rawout=item
+    else: status,rawout=200,json.dumps(item,separators=(',',':')).encode()
+    self.send_response(status);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(rawout)));self.end_headers()
+    try:self.wfile.write(rawout)
+    except (BrokenPipeError,ConnectionResetError):pass
+   def log_message(self,*args): pass
+  self.server=ThreadingHTTPServer(('127.0.0.1',0),Handler);self.thread=threading.Thread(target=self.server.serve_forever,daemon=True);self.thread.start()
+ @property
+ def base(self): return f'http://127.0.0.1:{self.server.server_port}/v1'
+ def close(self): self.server.shutdown();self.server.server_close();self.thread.join()
+
+class LocalWireTests(unittest.TestCase):
+ def test_actual_v15_embedded_supervisor_contract_is_the_derived_source(self):
+  repo=HERE.parents[1];notebook=json.loads((repo/'deployment/kaggle/submission-20260912-v15/submission.ipynb').read_text())
+  assets=''.join(notebook['cells'][1]['source'])
+  match=re.search(r"Path\('/tmp/official_launcher_runtime\.py'\)\.write_bytes\(base64\.b64decode\('([^']+)'\)\)",assets)
+  if match is None:self.fail('v15 embedded official launcher missing')
+  source=base64.b64decode(match.group(1))
+  self.assertEqual(hashlib.sha256(source).hexdigest(),'fa7a1519595ba7f7306b2071931dc70c6784738da1f720398b0db5b1c8348afd')
+  text=source.decode();self.assertIn('models = readiness["models"].get("data", [])',text)
+  self.assertIn('launcher_result_path = output_dir / "official-launcher-result.json"',text)
+  for option in ('"--base-url"','"--model"','"--workspace-root"','"--output"','"--timeout-s"'):self.assertIn(option,text)
+  self.assertIn('if launcher_result.get("status") != "passed":',text)
+ def test_adapter_is_separate_exact_and_rejects_drift(self):
+  body=logical();wire=logical_to_local_request(body,local_model=LOCAL_MODEL)
+  self.assertEqual(set(wire),{'model','messages','tools','tool_choice','max_tokens','reasoning','chat_template_kwargs'})
+  self.assertNotIn('provider',wire);self.assertEqual(wire['messages'],body['messages']);self.assertEqual(wire['tools'],body['tools'])
+  self.assertEqual(wire['reasoning'],{'enabled':False});self.assertEqual(wire['chat_template_kwargs'],{'enable_thinking':False})
+  for mutation,pattern in [(lambda x:x.pop('chat_template_kwargs'),'local wire fields'),(lambda x:x.update(provider={}), 'local wire fields'),(lambda x:x.update(model='wrong'),'identity')]:
+   bad=json.loads(json.dumps(wire));mutation(bad)
+   with self.assertRaisesRegex(ValueError,pattern): validate_local_request(bad,expected_model=LOCAL_MODEL)
+  with self.assertRaisesRegex(ValueError,'identity'): logical_to_local_request(body,local_model='wrong')
+ def test_real_http_continuation_and_exact_official_launcher_cli(self):
+  rs=[local_response({'id':'call_abc123','type':'function','function':{'name':'execute_python','arguments':json.dumps({'code':"import json;print(len(json.load(open('/evidence/case.json'))['visible_transitions']))"})}}),local_response({'id':'opaque-Z9','type':'function','function':{'name':'execute_python','arguments':json.dumps({'code':"import json;print(json.load(open('/evidence/case.json'))['frontier'])"})}}),local_response({'id':'submit.uuid/7','type':'function','function':{'name':'submit_candidate','arguments':json.dumps({'work_item':WORK,'candidate_source':CANDIDATE})}})]
+  server=ScriptedServer(rs)
+  try:
+   with tempfile.TemporaryDirectory() as directory:
+    root=Path(directory);output=root/'official-launcher-result.json';workspace=root/'solver-workspaces'
+    env=dict(os.environ,CONSTRUCTION_ASSET_ROOT=str(HERE));env.pop('CONSTRUCTION_FIXTURE',None)
+    command=[sys.executable,str(PACKAGE/'remote_entry.py'),'--base-url',server.base,'--model',LOCAL_MODEL,'--workspace-root',str(workspace),'--output',str(output),'--timeout-s','30']
+    completed=subprocess.run(command,capture_output=True,text=True,timeout=60,env=env)
+    self.assertEqual(completed.returncode,0,completed.stderr+completed.stdout)
+    launcher=json.loads(output.read_text());self.assertEqual(launcher['status'],'passed');self.assertIsNone(launcher['gameplay_result'])
+    self.assertEqual(len(server.requests),3)
+    wires=[json.loads(raw) for raw in server.requests]
+    for raw,wire in zip(server.requests,wires):
+     self.assertEqual(raw,json.dumps(wire,separators=(',',':'),ensure_ascii=False).encode());validate_local_request(wire)
+     self.assertNotIn('provider',wire);self.assertNotIn('credential',raw.decode().lower());self.assertNotIn('evaluator_payload',raw.decode().lower());self.assertNotIn('/work/suffix',raw.decode().lower());self.assertNotIn('/work/verifier',raw.decode().lower())
+    latest=[next(message for message in reversed(wire['messages']) if message['role']=='assistant') for wire in wires[1:]]
+    self.assertEqual([message['tool_calls'][0]['id'] for message in latest],['call_abc123','opaque-Z9'])
+    self.assertEqual(set(latest[0]),{'role','content','tool_calls'});self.assertNotIn('index',latest[0]['tool_calls'][0])
+    evidence=workspace/'construction-evidence';self.assertEqual((evidence/'local-wire/00.body').read_bytes(),server.requests[0]);self.assertTrue((evidence/'raw-http/02.body').is_file())
+    events=[json.loads(x)['event'] for x in (evidence/'lifecycle.jsonl').read_text().splitlines()];self.assertIn('request_attempt_persisted',events);self.assertIn('local_wire_persisted',events);self.assertIn('terminal',events)
+  finally: server.close()
+ def test_http_failure_malformed_timeout_and_oversize_are_durable_no_retry(self):
+  scenarios=[([(503,b'no')],1,'HTTP Error 503'),([(200,b'{')],1,'malformed'),([(200,b'x'*(MAX_RESPONSE_BYTES+1))],1,'byte cap')]
+  for responses,timeout,pattern in scenarios:
+   server=ScriptedServer(responses)
+   try:
+    with tempfile.TemporaryDirectory() as directory:
+     t=LocalHTTPTransport(base_url=server.base,model=LOCAL_MODEL,output=Path(directory),timeout_s=timeout)
+     with self.assertRaisesRegex(Exception,pattern): t(logical())
+     self.assertEqual(len(server.requests),1);self.assertTrue(any((Path(directory)/'http-failures').iterdir()))
+   finally: server.close()
+  server=ScriptedServer([local_response(call('x','request_evidence',{'obstacle':'x','needed_observation':'y','decision_relevance':'z'}))],delay=.2)
+  try:
+   with tempfile.TemporaryDirectory() as directory:
+    t=LocalHTTPTransport(base_url=server.base,model=LOCAL_MODEL,output=Path(directory),timeout_s=.02)
+    with self.assertRaises(Exception): t(logical())
+    self.assertEqual(len(server.requests),1);self.assertTrue(any((Path(directory)/'http-failures').iterdir()))
+  finally: server.close()
+ def test_host_transport_failure_terminal_and_single_owner(self):
+  class Boom:
+   def __init__(self):self.calls=0
+   def __call__(self,body):self.calls+=1;raise OSError('offline')
+  with tempfile.TemporaryDirectory() as directory:
+   out=Path(directory)/'e';boom=Boom();host=IntegrationHost(load_case(),boom,out)
+   with self.assertRaises(OSError):host.run()
+   self.assertEqual(boom.calls,1);self.assertEqual(json.loads((out/'RESULT.json').read_text())['failure_type'],'OSError')
+   with self.assertRaises(FileExistsError):host.run()
+   self.assertEqual(boom.calls,1)
+ def test_boundary_baseline_budgets_args_and_advertised_inspection_path(self):
+  boundary=SealedBoundary();self.assertGreater(boundary.deadline-time.monotonic(),14);self.assertEqual(boundary.call_seconds,3)
+  value=boundary.invoke('def initialize(o): return len(o["x"])\ndef predict(s,a):return []\ndef assimilate(s,o,v):return s\n','initialize',[{'x':'a'*17000}])
+  self.assertEqual(value,17000)
+  inspected=execute_inspection("import json;print(json.load(open('/evidence/case.json'))['frontier'])",load_case());self.assertEqual(inspected['stdout'].strip(),'5')
+ def test_fresh_suffix_boundary_after_delayed_construction_and_irreversible_attempt(self):
+  ready=ConstructionResult(status='CANDIDATE_READY',candidate_source=CANDIDATE,evaluation={'visible':{'status':'passed'},'coverage':{'missing_required':[]}})
+  seen=[]
+  def fake_run(*args,**kwargs): time.sleep(.03);return ready
+  def fake_eval(source,case,include_suffix,boundary): seen.append(boundary.deadline-time.monotonic());return {'suffix':{'compatible_depth':2},'rpc_methods':[]}
+  with tempfile.TemporaryDirectory() as directory,mock.patch('integration.run_construction',fake_run),mock.patch('integration.evaluate_candidate',fake_eval):
+   out=Path(directory)/'e';result=IntegrationHost(load_case(),FixtureTransport([]),out).run();self.assertGreater(seen[0],14);self.assertEqual(result['suffix_attempts'],1);self.assertTrue((out/'SUFFIX-ATTEMPT.json').exists())
+
+if __name__=='__main__':unittest.main()

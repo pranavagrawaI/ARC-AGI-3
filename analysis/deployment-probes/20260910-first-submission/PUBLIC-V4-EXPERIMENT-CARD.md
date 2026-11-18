@@ -1,0 +1,12 @@
+# Public qualification: no background summarizer
+Question: Can the short-session submission baseline execute all three public games with no abandoned request at any game boundary?
+Posture: Operational qualification.
+Contrast: none; no solving or performance comparison.
+Prediction: At least one Solver action in each LS20/S5I5/CD82; all stops at 75s admission, 10 actions or win; no summary requests; exact request/action evidence and clean server shutdown.
+Measure: Whole qualification/server.log (not only teardown suffix), model_calls.jsonl by purpose, game-progress.jsonl, stop.json, transitions, result.json, request-count-facts.json, all lifecycle scans and notebook log. Check every declared payload hash against the frozen runtime and source readback.
+Cap: One private Kaggle NvidiaRtxPro6000 run; 3600s platform cap (1 GPU-hour maximum), 3 games, at most 10 Solver actions each, 75s admission per game, 120s worker decision timeout, 90s model timeout, retries0, output16384/request. No background summarizer; fresh worker per game. Zero external paid inference and zero competition submissions under this card. Quota before launch 9.05 GPU hours.
+Stop: All-game completion and teardown; abort on setup/worker/model error, timeout, OOM, failed identity/accounting/containment. Zero automatic relaunches.
+Invalid if: Wrong candidate/model/GPU/runtime, OOM anywhere, deleted request state or abandoned/active request at any game boundary, missing requests/actions/game/terminal evidence, timeout or failed process/port cleanup. A green notebook or dummy parquet is insufficient.
+Result map: Pass permits one separately precommitted competition submission of this exact successful notebook version; failure or ambiguous evidence withholds submission and requires diagnosis plus a new card before another GPU attempt. Zero wins is not an operational failure and is not evidence of dependable solving.
+Outputs: analysis/deployment-probes/20260910-first-submission/kaggle-public-v4/ (fresh). Expected remote notebook version 3; confirm push response. Previous remote version 2 fully archived.
+Candidate: deployment/kaggle/submission-20260910-v4/submission.ipynb SHA256 3c03eb71a7f461bd95705c1b7f2d19ad5d628c2103accc4bff4aa6c24a3c9728; runtime contract 8fa8984d934ca393c35d2bb5692e54e7c8004e1c12c0be0a918f57685a42406d. summary-local-corrected-v2 passed 9 tests in 25.50s with 22000 reported prompt tokens. Original comparison reached 10 actions with 17 calls (10 Actor, 7 summary), corrected direct/gateway each 10 Actor calls and zero summaries.

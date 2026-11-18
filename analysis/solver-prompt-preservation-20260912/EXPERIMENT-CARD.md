@@ -1,0 +1,11 @@
+# solver-prompt-preservation-local-v1
+Question: Does the candidate preserve the exact Actor request messages and every rendered tool-result message in the durable model-call record without changing the real Actor-to-worker-to-host outcome?
+Posture: local diagnostic and harness qualification
+Contrast: incumbent runtime v10 model-call schema versus candidate runtime v11 model-call schema on the same scripted DONE-refusal interaction
+Prediction: v10 lacks request_messages and tool_results; before implementation the v11 regression test fails on those missing fields; after the smallest logging change, every v11 Actor row equals the messages observed at the HTTP boundary, tool_results equals the role=tool subset, and the host still executes ACTION1 after refusing DONE.
+Measure: pytest output for test_done_refusal.py plus the model_calls.jsonl rows produced in pytest's temporary run directory; interpret exact equality with the HTTP request bodies as prompt preservation and exact role=tool filtering as tool-result preservation.
+Cap: 0 external model calls; 0 ARC environment calls; 10 minutes test wall time; 2 local pytest executions for the red/green cycle; spend $0.
+Stop: success when the targeted test is observed failing for absent evidence and then passing with exact request/tool-result equality; futility after two implementation attempts or if NOOA does not expose the messages sent to the completion client; abort on any external endpoint request or mutation outside runtime v11 and this analysis directory.
+Invalid if: the test does not traverse the real Actor-to-worker-to-host path; the fixture HTTP server does not capture the request body independently; any model_calls row is synthesized by the test; or an external model/environment call occurs.
+Result map: positive → keep v10 as gameplay incumbent, qualify v11 as the observability successor, and use the preserved schema for a separately carded LS20 replay; negative → instrument the completion-client boundary instead of model_calls; ambiguous → keep v10 and design a lower-level serialization probe before any replay.
+Outputs: analysis/solver-prompt-preservation-20260912/RESULT.md; deployment/kaggle/submission-runtime-20260912-v11 test artifacts; pytest console output quoted in RESULT.md.

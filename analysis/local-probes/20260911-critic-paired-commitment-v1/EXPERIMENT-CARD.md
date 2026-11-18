@@ -1,0 +1,25 @@
+# critic-paired-commitment-v1
+
+Question: At a captured statement restricting inquiry, does a separate epistemic critic identify a warranted concern, and does its feedback produce a warranted local change in the Actor's proposed continuation?
+
+Posture: Diagnostic comparison of proposed continuations only. No gameplay, code execution, deployed change, or Kaggle run.
+
+Contrast: Unreviewed ordinary Actor request versus that identical request with one critic review and a bounded response instruction appended. Both Actor calls receive the same captured context and generation settings: max_tokens1024, temperature1, top_p.95, top_k20. The critic is a separate instance of the same Qwen3.8-27B on the existing CoreWeave FP8 OpenRouter route, no tools, its own epistemic system instruction. Neither critic nor reviewed Actor sees the control output or evaluator rubric. The whole intervention includes extra inference and explicit reconsideration; no attribution to separate role alone.
+
+Source: v4 skill-arm captured request17, immediately after Actor cell16 wrote hypotheses.md. Selected material is the complete cell16, not an evaluator-authored paraphrase. It includes the commitment 'no alignment hypothesis is testable without knowing target.' The exact entire request17 is supplied as critic evidence. That request already contains a prior self-review skill; this is an incremental review conditional on that history, not a pristine Actor baseline.
+
+Reproduction boundary: The in-process Python namespace was not checkpointed. No generated Actor code is executed, no workspace mutations or environment consequences are inferred, and final workspace files are not supplied as a substitute. Matching request contexts supports proposed-continuation comparison only. Do not claim retained repair or game outcome improvement.
+
+Prediction: A critic may identify that uncertainty about the true target does not rule out specifying candidate targets for investigation. It must distinguish this from the legitimate need to operationalize an unspecified alignment conjecture. Because the source wording is ambiguous, a reasoned narrower reading or insufficient_context may leave the diagnosis unresolved rather than constitute a failed detection. See separately frozen GRADING.json; it is never model input.
+
+Measure: Exact prompts, source references and Unicode quote spans, raw replies, usage (all completion tokens including any reasoning), cost, timing, host execution statuses, and explicit proposed Actor notes/commitments/actions. Compare warranted belief revision and bounded decision, not agreement language or action difference alone. Quote matching proves source fidelity only.
+
+Cap: Three calls total: control Actor, critic, reviewed Actor. $0.25 aggregate conservative reservation; provider max_price prompt.42/completion3/request0 per million-token billing where applicable. Critic max_tokens384, each Actor max_tokens1024; these cover all generated completion tokens, not just final text. Reasoning disabled and any reasoning content/tokens invalidates the run. Critic quote<=25 words, other explanatory fields<=90 words; reviewed Actor response target<=60 words before its proposed action or blocker. One review round. 45s hard deadline per request, 150s total admission/transport budget. No retry, fallback, model substitution, generated-code execution, or game actions.
+
+Stop: Finish after three complete calls. Abort on transport failure, truncation, malformed critic schema, non-unique/nonexistent supplied quotation, critic tool call, wrong provider/accounting, unexpected reasoning, or budget breach. Preserve partial outputs. No relaunch under this ID. Actor noncompliance with review content is a behavioral result, not an epistemic approval or fabricated transport failure.
+
+Invalid if: Evaluator diagnosis or later/control output enters either treatment input; Actor starting contexts differ beyond appended review and response instruction; source changed without a new card; execution failure is relabeled as an assessment; budget breached; proposed code is claimed as executed. Ambiguous source meaning limits semantic interpretation rather than invalidating capture.
+
+Result map: Grounded concern + warranted proposed revision + unchanged faulty commitment in control supports local proposed-repair benefit only. Grounded concern + agreement only separates detection from failed correction. Unsupported concern adopted by Actor is harmful proposed intervention. Both independently repair => no demonstrated incremental benefit. Ambiguous target meaning, insufficient context, or proposals that defer the issue => inconclusive; do not expand architecture or claim efficacy. No positive finding establishes overall benefit, false-intervention rate, retained repair, or independent-role advantage.
+
+Outputs: This directory. FROZEN.json binds CONTRACT.md, GRADING.json, complete source context/material, critic prompt, Actor template, control/critic requests, and runner. STARTED.json binds frozen manifest before the first call. Only critic output is substituted into the precommitted reviewed-Actor template after inference.

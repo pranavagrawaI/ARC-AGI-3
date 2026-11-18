@@ -1,0 +1,12 @@
+# Deliberation diagnostic v1
+Question: Does bounded thinking or an explicit review-target statement improve epistemic judgment over direct JSON?
+Contrast: Direct thinking-off / thinking-on / thinking-off plus commitment and grounds wrapper. Same framework prompt otherwise, same evidence and 2048 total completion ceiling. Four new authored faulty/sound cases, two samples per arm, cyclic order. The direct ceiling differs from earlier 384-token runs; comparisons are within this card.
+Posture: Diagnostic, not gameplay efficacy.
+Prediction: Thinking or explicit identification increases grounded fault detection and valid revisions without false objections on sound controls.
+Measure: Final critique assessment, quote binding, supported gap and revision, sound-control restraint, repeat stability, delivery compliance, latency, total/reasoning tokens. Grade final output only; do not use private reasoning text as substitute for a final critique. Preserve raw provider response as evidence.
+Cap: 24 calls, $0.25 conservative reservation, 900-second admission window, 45 seconds per request, 2048 total generated tokens each, zero environment actions, same Qwen3.8-27B/CoreWeave FP8 route, no fallback or retries.
+Stop: Complete calls or abort on transport/provider/accounting failure. If a thinking-on response reports no positive reasoning tokens, or a thinking-off response reports reasoning, stop: mode comparison unresolved. Truncation is an output failure and does not trigger retry; continue to measure bounded-mode feasibility.
+Invalid if: Input drift, evaluator labels leaked, wrong model/provider, missing costs or requests. Truncated/malformed/overlong output never becomes no_concern. Reasoning-budget exhaustion limits conclusions to this bounded configuration.
+Result map: Better grounded stable responses with acceptable cost -> fresh full-context/Actor uptake test; no improvement -> no promotion; mode unsupported -> report unavailable comparison; truncation -> report bounded-mode infeasibility, no silent budget increase. Single pairs and two repeats cannot establish general reliability.
+Outputs: This directory: frozen prompts/requests/cases/order, raw responses and accounting, mechanical audit and manual grades.
+API reference: https://openrouter.ai/docs/guides/best-practices/reasoning-tokens ; actual response accounting, not requested flags alone, establishes mode exposure.

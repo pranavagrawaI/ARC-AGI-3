@@ -1,5 +1,12 @@
 # Tools
 
+## Experiment evidence checks
+
+[`experiment_checks.py`](experiment_checks.py) checks Flash-Next invalidators,
+batch-permission evidence, fixture context coverage and non-overwriting artifact
+preservation. See [commands, rule coverage and limits](EXPERIMENT-CHECKS.md).
+Missing evidence stays unresolved; a completed probe cannot override an OOM.
+
 ## Failure-atlas packets and offline branch replay
 
 `failure_atlas.py` converts a preserved Tycho-NOOA run into physically separate

@@ -1,0 +1,245 @@
+#!/usr/bin/env python3
+"""Build the Kaggle r9 gameplay packages (official Agent.main, paired arms, one pinned game each) from an allowlist. Does not push."""
+
+from __future__ import annotations
+
+import ast
+import base64
+import hashlib
+import json
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]
+HERE = Path(__file__).resolve().parent
+PLAY_GAMES = ("s5i5", "cd82")
+PACKAGES = {game: REPO / f"deployment/kaggle/actor-critic-construction-kaggle-r9-{game}" for game in PLAY_GAMES}
+PACKAGE = PACKAGES["s5i5"]
+DONOR_NB = REPO / "deployment/kaggle/construction-policy-live-20260914T093351Z/construction.ipynb"
+DONOR_META = REPO / "deployment/kaggle/construction-policy-live-20260914T093351Z/kernel-metadata.json"
+DONOR_NB_SHA = "50d345ec00f2a5d089e19b4ee74412576f54a3902ba67859bd4bf9258d02dbd6"
+V2 = REPO / "analysis/actor-critic-construction-live-launch-v2"
+OVERLAY = REPO / "analysis/actor-critic-construction-integrated"
+DONOR_SRC = REPO / "analysis/construction-policy-live-20260914T093351Z"
+V11 = REPO / "deployment/kaggle/submission-runtime-20260912-v11"
+TESTS = REPO / "deployment/kaggle/tests"
+
+ALLOWLIST = [
+    (HERE / "local_wire.py", "local_wire.py"),
+    (HERE / "gameplay_play.py", "gameplay_play.py"),
+    (V2 / "audit.py", "audit.py"),
+    (HERE / "live_agent.py", "live_agent.py"),
+    (V2 / "headless.py", "headless.py"),
+    (V2 / "persist.py", "persist.py"),
+    (V2 / "persist_job.py", "persist_job.py"),
+    (OVERLAY / "construction_agent.py", "construction_agent.py"),
+    (OVERLAY / "construction_service.py", "construction_service.py"),
+    (OVERLAY / "construction_job.py", "construction_job.py"),
+    (OVERLAY / "host.py", "host.py"),
+    (OVERLAY / "observation_abi.py", "observation_abi.py"),
+    (OVERLAY / "prefix.py", "prefix.py"),
+    (OVERLAY / "evaluate_visible.py", "evaluate_visible.py"),
+    (OVERLAY / "frozen_client.py", "frozen_client.py"),
+    (DONOR_SRC / "accelerator.py", "accelerator.py"),
+    (DONOR_SRC / "constructor.py", "constructor.py"),
+    (DONOR_SRC / "request_contract.py", "request_contract.py"),
+    (DONOR_SRC / "real_trace.py", "real_trace.py"),
+    (DONOR_SRC / "integration_boundary.py", "integration_boundary.py"),
+    (DONOR_SRC / "inspection_runner.py", "inspection_runner.py"),
+    (DONOR_SRC / "containment_base.py", "containment_base.py"),
+    (DONOR_SRC / "qualified_runner.py", "qualified_runner.py"),
+    (V11 / "probe_lifecycle.py", "probe_lifecycle.py"),
+]
+
+
+def sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def selected(path, names):
+    tree = ast.parse(path.read_text())
+    return '\n\n'.join(ast.unparse(n) for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in names) + '\n'
+
+
+def replace_once(source, old, new):
+    if source.count(old) != 1:
+        raise RuntimeError('source adaptation anchor drift: ' + old[:80])
+    return source.replace(old, new)
+
+
+def build(package=PACKAGE, *, write_manifest=True, play_game="s5i5"):
+    PACKAGE = Path(package)
+    if play_game not in PLAY_GAMES:
+        raise RuntimeError("unknown play game: " + repr(play_game))
+    identity = f"actor-critic-construction-kaggle-r9-{play_game}"
+    if sha(DONOR_NB) != DONOR_NB_SHA:
+        raise RuntimeError('donor hash drift')
+    if PACKAGE.is_symlink():
+        raise RuntimeError('symlink package root')
+    PACKAGE.mkdir(parents=True, exist_ok=True)
+    assets, origins = {}, {}
+
+    def put(name, text, source=None):
+        raw = text.encode() if isinstance(text, str) else text
+        assets[name] = raw
+        if source:
+            origins[str(source.relative_to(REPO))] = sha(source)
+
+    put("EXPERIMENT-CARD.md", (HERE / f"EXPERIMENT-CARD-{play_game}.md").read_bytes(), HERE / f"EXPERIMENT-CARD-{play_game}.md")
+    for source, name in ALLOWLIST:
+        text = source.read_text()
+        if name == 'gameplay_play.py':
+            text = replace_once(text, 'PLAY_GAME = "ls20"  # BUILD-PARAMETER', f'PLAY_GAME = {play_game!r}  # BUILD-PARAMETER')
+        if name == 'headless.py':
+            text = replace_once(text, 'V11 = ROOT / "deployment/kaggle/submission-runtime-20260912-v11"', 'V11 = Path(__file__).resolve().parent / "nooa-join"')
+            text = replace_once(text, 'OVERLAY = Path(__file__).resolve().parent.parent / "actor-critic-construction-integrated"', 'OVERLAY = Path(__file__).resolve().parent')
+        if name == 'constructor.py':
+            text = replace_once(text, "ROUTING = json.loads((Path(__file__).resolve().parent / 'PROVIDER-SELECTION.json').read_text())['routing']", 'ROUTING = {}  # logical relay marker, never a gateway provider claim')
+            # R5 disclosure only. Replace the donor SYSTEM, not append conflicting
+            # semantic promises; leave all evaluator/runtime/admission code intact.
+            tree = ast.parse(text)
+            system = next(n for n in tree.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'SYSTEM' for t in n.targets))
+            lines = text.splitlines(keepends=True)
+            lines[system.lineno - 1:system.end_lineno] = ['from constructor_contract import SYSTEM, runtime_contract  # noqa: E402\n']
+            text = ''.join(lines)
+            text = replace_once(text,
+                '    messages: list[dict[str, Any]] = list(construction_messages(case, feedback=None))',
+                '    messages: list[dict[str, Any]] = list(construction_messages(case, feedback=None))\n    messages.append({"role": "user", "content": json.dumps({"runtime_contract": runtime_contract(limits)}, separators=(",", ":"))})')
+        if name == 'request_contract.py':
+            text = '''"""Constructor logical relay contract; no gateway routing or billing."""
+from local_wire import project_messages
+
+def validate_request(body):
+    if set(body) != {'model', 'messages', 'provider', 'tools', 'tool_choice', 'max_tokens', 'reasoning'}:
+        raise ValueError('constructor fields')
+    if body['model'] != 'qwen/qwen3.8-27b' or body['provider'] != {} or body['reasoning'] != {'enabled': False}:
+        raise ValueError('constructor logical identity/control')
+    if type(body['max_tokens']) is not int or not 1 <= body['max_tokens'] <= 4096 or body['tool_choice'] != 'required':
+        raise ValueError('constructor bound')
+    if project_messages(body['messages']) != body['messages']:
+        raise ValueError('unprojected constructor messages')
+    names = {t['function']['name'] for t in body['tools']}
+    if not names <= {'execute_python', 'submit_candidate', 'request_evidence'} or 'request_evidence' not in names:
+        raise ValueError('constructor tools')
+    return {'passed': True, 'wire': 'logical-local-relay'}
+'''
+        if name == 'audit.py':
+            start = text.index('def request_response_accounted(')
+            end = text.index('\ndef bound_use(', start)
+            text = text[:start] + 'def request_response_accounted(run_dir):\n    from local_accounting import accounting\n    return accounting(run_dir)["complete"]\n\n' + text[end:]
+        # Every copied overlay now resolves its siblings inside this flat capsule.
+        for line in text.splitlines():
+            if line.startswith(('LIVE = ', 'OVERLAY = ')) and any(s in line for s in ('construction-policy-live-', 'actor-critic-construction-integrated')):
+                text = text.replace(line, line.split('=')[0] + '= __import__("pathlib").Path(__file__).resolve().parent')
+        put(name, text, source)
+    for name in ('constructor_contract.py', 'game_preflight.py', 'game_registry.py', 'local_accounting.py', 'containment_preflight.py', 'process_guard.py', 'donor_bootstrap.py', 'runtime_install.py'):
+        put(name, (HERE / name).read_bytes(), HERE / name)
+    runtime_names = ('headless.py', 'local_solver.py', 'shared_local_solver.py', 'nooa_worker.py', 'state_delivery.py', 'adapter.py', 'probe_lifecycle.py')
+    runtime_sources = [V11 / name for name in runtime_names]
+    runtime_sources += [p for p in (V11 / 'chassis').rglob('*') if p.is_file() and p.suffix in {'.py', '.md'}]
+    for path in runtime_sources:
+        put('nooa-join/' + str(path.relative_to(V11)), path.read_bytes(), path)
+    chassis = json.loads((V11 / 'CHASSIS.json').read_text())
+    put('nooa-join/CHASSIS.json', json.dumps({'schema': 'packaged-v11-closure-v1', 'identity': identity, 'contract_sha256': chassis['contract_sha256'], 'files': {name.removeprefix('nooa-join/'): hashlib.sha256(raw).hexdigest() for name, raw in assets.items() if name.startswith('nooa-join/')}}, indent=2), V11 / 'CHASSIS.json')
+    # Decode ONLY the hashed runtime supervisor and model manifest. No donor case/archive/entry.
+    tree = ast.parse(''.join(json.loads(DONOR_NB.read_text())['cells'][1]['source']))
+    branch = next(n for n in tree.body if isinstance(n, ast.If))
+    nested = ast.parse(branch.orelse[0].value.args[0].value)
+    for n in nested.body:
+        if not isinstance(n, ast.Expr) or not isinstance(n.value, ast.Call) or not isinstance(n.value.func, ast.Attribute) or n.value.func.attr != 'write_bytes':
+            continue
+        name = Path(n.value.func.value.args[0].value).name
+        if name not in {'official_launcher_runtime.py', 'PROTOTYPE-qwen3_8_fp8-manifest.json'}:
+            continue
+        raw = base64.b64decode(n.value.args[0].args[0].value)
+        if name.endswith('.json'):
+            put('model-metadata.json', raw)
+            continue
+        text = raw.decode()
+        start = text.index('def expected_launcher_solver_requests(')
+        end = text.index('\ndef reconcile_launcher_request_count(', start)
+        text = text[:start] + 'def expected_launcher_solver_requests(launcher_result):\n    from local_accounting import expected_requests\n    return expected_requests(launcher_result)\n\n' + text[end:]
+        claim_start = text.index('    if args.official_launcher_probe:\n        claim_ceiling =')
+        claim_end = text.index('    elif args.readiness_only:', claim_start)
+        text = text[:claim_start] + '''    if args.official_launcher_probe:
+        claim_ceiling = (
+            "Official Agent.main gameplay on public LS20 through the MyAgent adapter under OFFLINE Arcade, "
+            "two arms (baseline Actor; the same Actor under the construction overlay) sharing one served local model. "
+            "Passing requires both arms to end by a recognized stop, local receipt accounting and lifecycle retirement. "
+            "It does not establish prediction accuracy, general competence, submission acceptance, or that either arm is better."
+        )
+''' + text[claim_end:]
+        text = replace_once(text, '                    str(launcher_timeout - 60),', '                    str(launcher_timeout - 60),\n                    "--startup-argv-json",\n                    json.dumps(command),')
+        text = replace_once(text, '            launcher_result = json.loads(launcher_result_path.read_text())', '            launcher_result = json.loads(launcher_result_path.read_text())\n            from local_accounting import accounting\n            if launcher_result.get("local_requests") != accounting(solver_workspace / "raw"):\n                raise RuntimeError("launcher local evidence differs from persisted receipts")')
+        text = replace_once(text, 'output_dir / "server.log", process, expected_count=2', 'output_dir / "server.log", process, expected_count=1 + expected_launcher_solver_requests(launcher_result)')
+        text = text.replace('"TYCHO_KAGGLE_HARDENED_HOST": "1"', '"TYCHO_KAGGLE_HARDENED_HOST": "0"')
+        put(name, text)
+    hashes = {name: hashlib.sha256(raw).hexdigest() for name, raw in assets.items()}
+    put('ASSET-HASHES.json', json.dumps(hashes, indent=2, sort_keys=True) + '\n')
+    for name, raw in assets.items():
+        target = PACKAGE / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(raw)
+    # Refuse hidden stale deploy assets rather than silently upload them.
+    permitted = set(assets) | {'construction.ipynb', 'kernel-metadata.json', 'MANIFEST.json'}
+    for path in PACKAGE.rglob('*'):
+        if path.is_file() and str(path.relative_to(PACKAGE)) not in permitted and '__pycache__' not in path.parts:
+            raise RuntimeError('stale package file: ' + str(path))
+    meta = json.loads(DONOR_META.read_text())
+    meta.update(id='pranavagrawai/' + identity, title=identity, code_file='construction.ipynb', is_private=True, enable_gpu=True, enable_internet=False, competition_sources=['arc-prize-2026-arc-agi-3'])
+    (PACKAGE / 'kernel-metadata.json').write_text(json.dumps(meta, indent=2) + '\n')
+    embedded = {name: base64.b64encode(raw).decode() for name, raw in assets.items()}
+    materialize = '''import base64, hashlib, json, os, subprocess, sys
+from pathlib import Path
+working = Path('/kaggle/working')
+root = working / 'actor-critic-construction'
+ASSETS = EMBEDDED_PLACEHOLDER
+EXPECTED = HASH_PLACEHOLDER
+if root.is_symlink():
+    raise RuntimeError('symlink capsule root')
+root.mkdir(parents=True, exist_ok=True)
+for path in root.rglob('*'):
+    if path.is_symlink():
+        raise RuntimeError('symlink in capsule')
+for name, value in ASSETS.items():
+    path = root / name
+    raw = base64.b64decode(value, validate=True)
+    if hashlib.sha256(raw).hexdigest() != EXPECTED[name]:
+        raise RuntimeError('embedded source drift: ' + name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink() or (path.exists() and path.read_bytes() != raw):
+        raise RuntimeError('existing asset differs: ' + name)
+    if not path.exists():
+        path.write_bytes(raw)
+for path in root.rglob('*'):
+    if path.is_file() and str(path.relative_to(root)) not in ASSETS:
+        raise RuntimeError('unexpected existing capsule file: ' + str(path))
+'''.replace('EMBEDDED_PLACEHOLDER', repr(embedded)).replace('HASH_PLACEHOLDER', repr({name: hashlib.sha256(raw).hexdigest() for name, raw in assets.items()}))
+    launch = '''# Fresh isolated guardian and bootstrap ignore cached notebook modules.
+env = {'PATH': '/opt/bin:/usr/local/bin:/usr/bin:/bin', 'HOME': str(root), 'LANG': 'C.UTF-8', 'PYTHONUNBUFFERED': '1', 'ARC_DISABLE_DOTENV': '1'}
+subprocess.run([sys.executable, '-I', '-S', '-B', str(root / 'process_guard.py'), str(os.getpid()), '3500', str(root / 'PROCESS-GUARD.json'), sys.executable, '-I', '-S', '-B', str(root / 'donor_bootstrap.py')], env=env, check=True)
+'''
+    notebook = {'nbformat': 4, 'nbformat_minor': 5, 'metadata': {'kernelspec': {'display_name': 'python3', 'language': 'python', 'name': 'python3'}}, 'cells': [
+        {'cell_type': 'markdown', 'metadata': {}, 'source': [f'# Actor–critic construction: paired gameplay on public {play_game.upper()}\nPrivate local Qwen; official Agent.main via MyAgent under OFFLINE Arcade; arm A baseline, arm B construction overlay. No submission or launch authorization.\n']},
+        *[{'cell_type': 'code', 'metadata': {}, 'execution_count': None, 'outputs': [], 'source': code.splitlines(keepends=True)} for code in (materialize, launch)]]}
+    (PACKAGE / 'construction.ipynb').write_text(json.dumps(notebook, indent=1) + '\n')
+    manifest = {'identity': identity, 'play_game': play_game, 'complete': False, 'push': False,
+        'note': 'Packaging only; local checks and remote prerequisites tracked separately. Requires coordinator exact-hash review/launch gate.',
+        'donor_notebook_sha256': DONOR_NB_SHA, 'origins': origins,
+        'assets': {name: sha(PACKAGE / name) for name in assets},
+        'files': {name: sha(PACKAGE / name) for name in ('construction.ipynb', 'kernel-metadata.json')},
+        'builder_sha256': sha(HERE / 'build.py'),
+        'openrouter_manifest_sha256': '6fb19b860a7bce1a104e5e2dc2f5f9210aca201d929ab545e5480018ef9e0661',
+        'caps': {'boot_seconds': 1200, 'arms': ['A', 'B'], 'games': ['ls20', 's5i5', 'cd82'], 'play_game': play_game, 'admission_seconds_per_arm': 600, 'actions_per_arm': 200, 'calls_total_including_warmup': 259, 'arm_call_cap': {'A': 129, 'B': 129}, 'llm_timeout_seconds': 90, 'actor_max_tokens': 16384, 'critic_max_tokens': 192, 'constructor_requests_per_arm': 2, 'constructor_wall_seconds': 45, 'constructor_hard_seconds': 50, 'constructor_http_post_seconds': 30, 'launcher_timeout_seconds': 1800, 'supervisor_request_timeout_seconds': 180, 'reservation_seconds': 3600, 'budget': 'gpu-wall'},
+        'driver': f'official Agent.main (pinned ARC-AGI-3-Agents agents/agent.py) via MyAgent adapter; OFFLINE Arcade on {play_game}; paired arms A (baseline) and B (construction overlay)'}
+    (PACKAGE / 'MANIFEST.json').write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n')
+    if write_manifest:
+        (HERE / f'MANIFEST-{play_game}.json').write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n')
+    return manifest
+
+
+if __name__ == '__main__':
+    for game in PLAY_GAMES:
+        result = build(PACKAGES[game], play_game=game)
+        print(json.dumps({'play_game': game, 'assets': len(result['assets']), 'complete': result['complete'], 'push': result['push']}))
+
+

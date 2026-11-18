@@ -1,0 +1,190 @@
+--- prior/run_pair.py
++++ fixed/run_pair.py
+@@ -22,7 +22,7 @@
+     sha=verify_inventory()
+     for path,role,decision in [(review,'independent-reviewer','PASS'),(release,'Hermes','RELEASE')]:
+         d=json.loads(Path(path).read_text())
+-        if d.get('role')!=role or d.get('decision')!=decision or d.get('inventory_sha256')!=sha or d.get('endpoint')!=ENDPOINT or d.get('task')!='OR-CONSTRUCTOR-REASONING-PAIR':raise Stop('missing/mismatched independent gate')
++        if d.get('role')!=role or d.get('decision')!=decision or d.get('inventory_sha256')!=sha or d.get('endpoint')!=ENDPOINT or d.get('task')!='OR-CONSTRUCTOR-SCHEMA-FIX-REPEAT':raise Stop('missing/mismatched independent gate')
+     return sha
+ 
+ def stop_ledger(path,reason):
+@@ -83,7 +83,7 @@
+     p=argparse.ArgumentParser();p.add_argument('--execute',action='store_true');p.add_argument('--worker',choices=['off','on']);p.add_argument('--review',type=Path,required=True);p.add_argument('--release',type=Path,required=True);p.add_argument('--credential-approval',type=Path,required=True);args=p.parse_args()
+     sha=gates(args.review,args.release)
+     permission=json.loads(args.credential_approval.read_text())
+-    if permission.get('task')!='OR-CONSTRUCTOR-REASONING-PAIR' or permission.get('credential_use')!='sole-key-existing-loader' or permission.get('decision')!='APPROVED' or permission.get('role')!='PM':raise Stop('credential-use approval pending')
++    if permission.get('task')!='OR-CONSTRUCTOR-SCHEMA-FIX-REPEAT' or permission.get('credential_use')!='sole-key-existing-loader' or permission.get('decision')!='APPROVED' or permission.get('role')!='PM':raise Stop('credential-use approval pending')
+     live=HERE/'live'
+     if args.worker:
+         if not (live/'CONSUMED.json').is_file():raise Stop('no parent admission')
+--- prior/make_inventory.py
++++ fixed/make_inventory.py
+@@ -6,7 +6,7 @@
+ files=[p for p in P.iterdir() if p.is_file() and p.name not in {'INVENTORY.json','HANDOFF.md','LOCAL-CHECK.json'} and not p.name.startswith('tests-')]
+ files += list((P/'engine').glob('*.py'))+list((P/'discovery').glob('*'))
+ files=sorted(set(files))
+-value={'schema':'or-pair-candidate-inventory-v1','task':'OR-CONSTRUCTOR-REASONING-PAIR','endpoint':'reka/fp8','files':{str(p.relative_to(P)):hashlib.sha256(p.read_bytes()).hexdigest() for p in files}}
++value={'schema':'or-pair-candidate-inventory-v1','task':'OR-CONSTRUCTOR-SCHEMA-FIX-REPEAT','endpoint':'reka/fp8','files':{str(p.relative_to(P)):hashlib.sha256(p.read_bytes()).hexdigest() for p in files}}
+ raw=(json.dumps(value,indent=2,sort_keys=True)+'\n').encode()
+ (P/'INVENTORY.json').write_bytes(raw)
+ print(hashlib.sha256(raw).hexdigest(),len(files))
+--- prior/engine/constructor.py
++++ fixed/engine/constructor.py
+@@ -49,6 +49,37 @@
+     ]
+ 
+ 
++
++WORK_ITEM_FIELDS = (
++    "decision", "obstacle", "operation", "claim", "evidence_refs", "dependencies",
++    "completion_checks", "remaining_scope", "reasoning_need",
++)
++OPERATIONS = ("ground", "contrast", "close", "compose", "test")
++REASONING_NEEDS = ("needs_computation", "needs_observation", "does_not_block_decision")
++
++
++def work_item_schema(frontier=None):
++    """Expose the existing validator, including its legacy True-as-step-1 case."""
++    text = {"type": "string", "minLength": 1, "pattern": r"\S"}
++    step = {"type": "integer", "minimum": 1}
++    if frontier is not None:
++        step["maximum"] = frontier
++    # bool is an int in the inherited validator: True is accepted as step 1.
++    # Preserve that acceptance boundary rather than silently hardening policy.
++    refs = {"type": "array", "minItems": 1,
++            "items": {"anyOf": [step, {"const": True}]}}
++    properties = {key: copy.deepcopy(text) for key in ("decision", "obstacle", "claim", "remaining_scope")}
++    properties.update(
++        operation={"type": "string", "enum": list(OPERATIONS)},
++        reasoning_need={"type": "string", "enum": list(REASONING_NEEDS)},
++        evidence_refs=copy.deepcopy(refs), completion_checks=copy.deepcopy(refs),
++        dependencies={"type": "array", "minItems": 1, "items": copy.deepcopy(text)},
++    )
++    return {"type": "object", "properties": properties, "required": list(WORK_ITEM_FIELDS),
++            "additionalProperties": False,
++            "description": "Nested object at arguments.work_item, not JSON text and not fields flattened into arguments. Step references cite the visible prefix."}
++
++
+ TOOLS = [
+     {
+         "type": "function",
+@@ -71,7 +102,7 @@
+             "parameters": {
+                 "type": "object",
+                 "properties": {
+-                    "work_item": {"type": "object"},
++                    "work_item": work_item_schema(),
+                     "candidate_source": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}], "description": "Complete source as text with real newlines, or a list of source lines (preferred). Never double-escape line separators."},
+                 },
+                 "required": ["work_item", "candidate_source"],
+@@ -128,42 +159,57 @@
+     tool_events: list[dict[str, Any]] = field(default_factory=list)
+ 
+ 
++def _json_kind(value):
++    if value is None:
++        return "null"
++    return {str: "string", dict: "object", list: "array", bool: "boolean",
++            int: "integer", float: "number"}.get(type(value), type(value).__name__)
++
++
+ def _validate_work_item(value: Any, frontier: int) -> dict[str, Any]:
+-    required = {
+-        "decision",
+-        "obstacle",
+-        "operation",
+-        "claim",
+-        "evidence_refs",
+-        "dependencies",
+-        "completion_checks",
+-        "remaining_scope",
+-        "reasoning_need",
+-    }
+-    if not isinstance(value, dict) or set(value) != required:
+-        raise ValueError("work_item must contain the exact required fields")
+-    if value["operation"] not in {"ground", "contrast", "close", "compose", "test"}:
+-        raise ValueError("work_item operation is not in the construction repertoire")
+-    if value["reasoning_need"] not in {
+-        "needs_computation",
+-        "needs_observation",
+-        "does_not_block_decision",
+-    }:
+-        raise ValueError("work_item reasoning_need is invalid")
++    if not isinstance(value, dict):
++        raise ValueError("arguments.work_item must be an object; received " + _json_kind(value)
++                         + ". Send the fields inside arguments.work_item, not as JSON text or top-level argument fields. No conversion is performed.")
++    missing = set(WORK_ITEM_FIELDS) - set(value)
++    extra = set(value) - set(WORK_ITEM_FIELDS)
++    if missing or extra:
++        parts = []
++        if missing:
++            parts.append("missing keys: " + ", ".join(sorted(missing)))
++        if extra:
++            parts.append("extra keys: " + ", ".join(sorted(extra)))
++        raise ValueError("arguments.work_item has " + "; ".join(parts)
++                         + ". Put exactly these fields directly inside arguments.work_item: "
++                         + ", ".join(WORK_ITEM_FIELDS) + ". Do not add another work_item wrapper.")
++    for key, choices in (("operation", OPERATIONS), ("reasoning_need", REASONING_NEEDS)):
++        if not isinstance(value[key], str):
++            raise ValueError("work_item." + key + " must be a string; received " + _json_kind(value[key]))
++        if value[key] not in choices:
++            raise ValueError("work_item." + key + " must be one of: " + ", ".join(choices))
+     for key in ("decision", "obstacle", "claim", "remaining_scope"):
+-        if not isinstance(value[key], str) or not value[key].strip():
+-            raise ValueError(f"work_item {key} must be nonempty text")
++        if not isinstance(value[key], str):
++            raise ValueError("work_item." + key + " must be a string; received " + _json_kind(value[key]))
++        if not value[key].strip():
++            raise ValueError("work_item." + key + " must contain non-whitespace text")
+     for key in ("evidence_refs", "completion_checks"):
+         values = value[key]
+-        if not isinstance(values, list) or not values or any(
+-            not isinstance(item, int) or not 1 <= item <= frontier for item in values
+-        ):
+-            raise ValueError(f"work_item {key} must cite visible step numbers")
++        if not isinstance(values, list) or not values:
++            raise ValueError("work_item." + key + " must be a nonempty array of visible step integers")
++        for i, item in enumerate(values):
++            path = "work_item." + key + "[" + str(i) + "]"
++            if not isinstance(item, int):
++                raise ValueError(path + " must be an integer; received " + _json_kind(item))
++            if not 1 <= item <= frontier:
++                raise ValueError(path + " must cite a visible step in 1.." + str(frontier))
+     dependencies = value["dependencies"]
+-    if not isinstance(dependencies, list) or not dependencies or any(
+-        not isinstance(item, str) or not item.strip() for item in dependencies
+-    ):
+-        raise ValueError("work_item dependencies must be nonempty names")
++    if not isinstance(dependencies, list) or not dependencies:
++        raise ValueError("work_item.dependencies must be a nonempty array of nonblank strings")
++    for i, item in enumerate(dependencies):
++        path = "work_item.dependencies[" + str(i) + "]"
++        if not isinstance(item, str):
++            raise ValueError(path + " must be a string; received " + _json_kind(item))
++        if not item.strip():
++            raise ValueError(path + " must contain non-whitespace text")
+     return value
+ 
+ 
+@@ -227,6 +273,9 @@
+             'provider': copy.deepcopy(ROUTING),
+             'max_tokens': request_tokens, 'reasoning': {'enabled': False},
+         }
++        for tool in body['tools']:
++            if tool['function']['name'] == 'submit_candidate':
++                tool['function']['parameters']['properties']['work_item'] = work_item_schema(case.frontier)
+         # UTF-8 bytes plus 4096 framing tokens is a deliberately loose token
+         # upper bound for this text-only Qwen request, checked against usage.
+         prompt_reservation = len(json.dumps(body, ensure_ascii=False).encode()) + 4096
+@@ -310,7 +359,9 @@
+                     else:
+                         if not inspected:
+                             raise ValueError("successful execute_python inspection required before submission")
+-                        work_item = _validate_work_item(arguments.get("work_item"), case.frontier)
++                        if "work_item" not in arguments:
++                            raise ValueError("arguments.work_item is missing. Nest the required fields in an object at arguments.work_item, alongside candidate_source; do not flatten them into arguments.")
++                        work_item = _validate_work_item(arguments["work_item"], case.frontier)
+                         source = arguments.get("candidate_source")
+                         if isinstance(source, list) and source and all(isinstance(line, str) for line in source):
+                             source = "\n".join(source) + "\n"

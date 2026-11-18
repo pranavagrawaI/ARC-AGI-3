@@ -7,8 +7,8 @@ One agent (no team) plays an ARC-AGI-3 game through a file-IPC harness:
 - the harness appends game states to ``ipc/states.jsonl``; the agent tails that
   file into a ``game_states`` queue, so each new state wakes ``handle()``;
 - the agent analyzes the state in CodeAct (numpy on the grid, persistent helper
-  modules) and answers by calling ``submit_actions([...], rationale)``, which
-  appends to ``ipc/actions.jsonl`` for the harness to execute.
+  modules) and answers by calling ``submit_actions([...], rationale)``, where
+  rationale is a `predict:` plan for the action sequence.
 
 Two knowledge variants share this base:
 
@@ -511,11 +511,12 @@ def _grid_png_bytes(grid, scale: int) -> bytes:
 
 
 class ArcSolverBase(InteractiveAgent):
-    """You are an interactive grid-game-solving agent. You discover the unknown rules of an
-    interactive 64x64 grid game by experimenting, then solve all its levels.
-    Follow the <arc_skill> context block: observe with code (never squint), one
-    experiment per weak hypothesis, keep a world model in helper files, record
-    knowledge after every turn, and always end a turn by submitting actions.
+    """You are an interactive grid-game-solving agent. You discover the unknown rules
+    of an interactive 64x64 grid game by experimenting, then solve all its
+    levels.
+    Follow the <arc_skill> context block: parse grid and state first with code,
+    use helper `encode`/`predict` as your control source, keep notes as the lab
+    book, and always end the turn by submitting a planned action sequence.
     """
 
     # Producer-side channel (hidden) + LLM-facing reader for harness states.
@@ -577,6 +578,16 @@ class ArcSolverBase(InteractiveAgent):
             self._effort_ladder[0][1] if self._effort_ladder else None
         )
         self._ladder_downshifts = 0
+        self._prediction_stable = False
+        self._prediction_stale_reason = (
+            "helper predictions not yet validated: use single-action turns until retrodiction passes"
+        )
+        self._requires_helper_refresh = False
+        self._pending_submit_turn: int | None = None
+        self._pending_submit_count: int | None = None
+        self._pending_submit_actions: list[str] = []
+        self._last_levels_completed: int | None = None
+        self._active_world_model_name: str | None = None
         self.run_dir = Path(run_dir)
         # game_id is the real id (kept off the agent surface). The agent only
         # ever sees `alias` — an opaque per-run handle carrying no game identity
@@ -668,6 +679,20 @@ class ArcSolverBase(InteractiveAgent):
 
         if skill_path is not None:
             self.context["arc_skill"] = Path(skill_path).read_text()
+        self.context["arc_world_model_contract"] = (
+            "WORLD MODEL CONTRACT:\n"
+            "- A helper module must expose `encode(grid)` and `predict(state, action)`.\n"
+            "- `encode(grid)` returns the latent/state object consumed by `predict`.\n"
+            "- `predict(state, action)` must be deterministic and return the next latent/state.\n"
+            "- Accepted return shapes are:\n"
+            "  - `next_state`\n"
+            "  - `(next_state, reward)`\n"
+            "  - `(next_state, reward, done)`\n"
+            "  - `{'next_state': ..., 'reward': ..., 'done': ...}` or any alias in\n"
+            "    `{z, state, next, next_z}` for the next-state field.\n"
+            "- The submission validator extracts `next_state` from these return forms\n"
+            "  and uses it for retrodiction checks."
+        )
         self.context.set_dynamic("arc_game", "self.format_game_context()")
 
         # Step reasoning_effort down the ladder as a turn runs long (wraps
@@ -741,6 +766,215 @@ class ArcSolverBase(InteractiveAgent):
             if line:
                 return json.loads(line).get("turn")
         return None
+
+    def _set_prediction_stability(self, stable: bool, reason: str | None = None) -> None:
+        """Track whether multi-action batches are allowed based on retrodiction checks."""
+        self._prediction_stable = stable
+        if stable:
+            self._prediction_stale_reason = None
+            return
+        if reason:
+            self._prediction_stale_reason = reason
+        elif self._prediction_stale_reason is None:
+            self._prediction_stale_reason = "prediction has not been retrodicted"
+
+    def _state_signature(self, value):
+        if isinstance(value, np.ndarray):
+            return ("ndarray", tuple(value.shape), str(value.dtype), value.tobytes())
+        if isinstance(value, dict):
+            return ("dict", tuple(sorted((k, self._state_signature(v)) for k, v in value.items())))
+        if isinstance(value, (list, tuple)):
+            return ("list", tuple(self._state_signature(v) for v in value))
+        return ("scalar", repr(value))
+
+    def _states_equal(self, left, right) -> bool:
+        left = self._coerce_state_like(left)
+        right = self._coerce_state_like(right)
+        if isinstance(left, np.ndarray) and isinstance(right, np.ndarray):
+            if left.shape != right.shape:
+                return False
+            if np.issubdtype(left.dtype, np.floating) or np.issubdtype(right.dtype, np.floating):
+                return np.allclose(left, right, rtol=0, atol=1e-6, equal_nan=True)
+            return np.array_equal(left, right)
+        if isinstance(left, (list, tuple)) and isinstance(right, (list, tuple)):
+            if len(left) != len(right):
+                return False
+            return all(self._states_equal(a, b) for a, b in zip(left, right))
+        if isinstance(left, dict) and isinstance(right, dict):
+            for key in ("z", "state", "next", "next_state", "next_z", "encoding", "encoded", "pred"):
+                if key in left and key in right:
+                    return self._states_equal(left[key], right[key])
+            if set(left.keys()) != set(right.keys()):
+                return False
+            return all(self._states_equal(left[k], right[k]) for k in left)
+        if isinstance(left, (int, float, np.integer, np.floating)) and isinstance(
+            right, (int, float, np.integer, np.floating)
+        ):
+            return np.isclose(float(left), float(right), rtol=1e-9, atol=1e-9)
+        return self._state_signature(left) == self._state_signature(right)
+
+    def _coerce_state_like(self, value):
+        if isinstance(value, np.ndarray):
+            return value
+        if isinstance(value, dict):
+            for key in ("z", "state", "next", "next_state", "next_z", "encoding", "encoded", "pred"):
+                if key in value:
+                    return self._coerce_state_like(value[key])
+            return {k: self._coerce_state_like(v) for k, v in value.items()}
+        if hasattr(value, "__dict__"):
+            for key in ("z", "state", "next", "next_state", "next_z", "encoding", "encoded", "pred"):
+                if hasattr(value, key):
+                    return self._coerce_state_like(getattr(value, key))
+        if isinstance(value, (list, tuple)):
+            if len(value) == 0:
+                return ()
+            if len(value) >= 2 and not isinstance(value[1], (np.ndarray, list, tuple, dict)):
+                return self._coerce_state_like(value[0])
+            if len(value) > 0 and not isinstance(value[0], (str, bytes, int, float, bool, type(None), np.number)):
+                return self._coerce_state_like(value[0])
+            return tuple(self._coerce_state_like(v) for v in value)
+        if isinstance(value, (int, float, np.integer, np.floating, bool)):
+            return float(value)
+        return value
+
+    def _prediction_payload(self, value):
+        return self._coerce_state_like(value)
+
+    def _prediction_status_line(self) -> str:
+        state = "ok" if self._prediction_stable else "blocked"
+        if not self._prediction_stable and self._prediction_stale_reason:
+            return f"prediction_status={state}|reason={self._prediction_stale_reason}"
+        if self._requires_helper_refresh:
+            return "prediction_status=blocked|reason=helper_refresh_required"
+        return f"prediction_status={state}|reason=none"
+
+    def _world_model(self):
+        """Return a helper module exposing encode/predict, or None."""
+        if self._active_world_model_name:
+            mod = vars(self.h).get(self._active_world_model_name)
+            if mod is not None and hasattr(mod, "encode") and hasattr(mod, "predict"):
+                return mod
+        for name, mod in vars(self.h).items():
+            if name.startswith("_"):
+                continue
+            if hasattr(mod, "encode") and hasattr(mod, "predict"):
+                return mod
+        return None
+
+    def _validate_last_submit_retrodiction(self) -> tuple[bool, str]:
+        if self._pending_submit_turn is None or self._pending_submit_turn <= 0:
+            return True, ""
+        submitted_count = max(0, self._pending_submit_count or 0)
+        if submitted_count <= 0:
+            return True, ""
+
+        state = self._latest_state() or {}
+        action_results = state.get("action_results") or []
+        if not isinstance(action_results, list):
+            return False, "action_results unavailable for retrodiction"
+        if not action_results:
+            return False, "no action_results returned for submitted batch"
+        executed = min(len(action_results), len(self._pending_submit_actions), submitted_count)
+        if executed < submitted_count:
+            return False, (
+                f"submitted {submitted_count} actions but only {executed} were executed "
+                "(submission truncated or preempted)"
+            )
+
+        model = self._world_model()
+        if model is None:
+            return False, "no loaded helper exposes encode/predict for retrodiction"
+
+        traj = self.trajectory(per_step=True, last_n=executed + 1, include_grids=True)
+        if len(traj) < executed + 1:
+            return False, "trajectory missing enough steps to validate the batch"
+
+        start = len(traj) - (executed + 1)
+        for i in range(executed):
+            planned = self._pending_submit_actions[i]
+            observed = action_results[i].get("action") if isinstance(action_results[i], dict) else None
+            if isinstance(observed, str) and observed and observed != planned:
+                return (
+                    False,
+                    f"action/results drift before retrodiction (planned {planned!r}, saw {observed!r})",
+                )
+
+            before_rows = traj[start + i].get("grid_rows")
+            after_rows = traj[start + i + 1].get("grid_rows")
+            if not before_rows or not after_rows:
+                return False, "trajectory rows missing for retrodiction"
+            try:
+                before_grid = self.grid_array(before_rows)
+                after_grid = self.grid_array(after_rows)
+            except Exception as e:
+                return False, f"grid parse failed during retrodiction: {e}"
+
+            try:
+                z = model.encode(before_grid)
+                pred = model.predict(z, planned)
+            except Exception as e:
+                return False, f"world-model call failed in retrodiction at step {i}: {e}"
+            pred_state = self._prediction_payload(pred)
+            try:
+                observed_z = model.encode(after_grid)
+            except Exception as e:
+                return False, f"world-model encode failed on actual state at step {i}: {e}"
+
+            if not self._states_equal(pred_state, observed_z):
+                return False, f"retrodiction mismatch at step {i}: helper-predicted state differs from actual"
+
+        return True, ""
+
+    @hidden
+    def mark_prediction_stale(self, reason: str = "prediction check failed") -> str:
+        self._set_prediction_stability(False, reason)
+        return f"prediction marked stale: {self._prediction_stale_reason}"
+
+    @hidden
+    def mark_prediction_stable(self, note: str = "prediction validated") -> str:
+        self._set_prediction_stability(True)
+        return f"prediction marked stable: {note}"
+
+    def _sync_turn_guards(self, state: dict) -> None:
+        """Infer runtime-safe controls from the latest state before the next decision."""
+        level = state.get("levels_completed")
+        if self._last_levels_completed is None:
+            self._last_levels_completed = level
+        elif level != self._last_levels_completed:
+            self._last_levels_completed = level
+            self._requires_helper_refresh = True
+            self._set_prediction_stability(
+                False,
+                "level changed; rebuild helper and load_helpers() before multi-action batches",
+            )
+
+        turn = state.get("turn")
+        if self._pending_submit_turn is None or turn is None:
+            return
+        if turn <= self._pending_submit_turn:
+            return
+
+        action_results = state.get("action_results") or []
+        pending_count = self._pending_submit_count or 0
+        if not isinstance(action_results, list):
+            action_results = []
+
+        if pending_count >= 1:
+            ok, reason = self._validate_last_submit_retrodiction()
+            if not ok:
+                self._set_prediction_stability(False, reason)
+            else:
+                self._set_prediction_stability(True, "retrodiction validated")
+            if len(action_results) < pending_count:
+                self._set_prediction_stability(False, "previous batch was truncated; retrodict before batching again")
+            elif any(r.get("state") == "GAME_OVER" for r in action_results):
+                self._set_prediction_stability(False, "GAME_OVER observed; retrodict before batching again")
+            elif all(r.get("diff_pixels") == 0 for r in action_results):
+                self._set_prediction_stability(False, "zero-delta outcomes observed; verify helper before batching again")
+
+        self._pending_submit_turn = None
+        self._pending_submit_count = None
+        self._pending_submit_actions = []
 
     def trajectory(
         self,
@@ -842,6 +1076,7 @@ class ArcSolverBase(InteractiveAgent):
         if state is None:
             return f"game={self.alias} — waiting for the first state from the harness."
         submitted = self._last_submitted_turn() == state.get("turn")
+        self._sync_turn_guards(state)
         parts = [
             f"game={self.alias}",
             f"turn={state.get('turn')}",
@@ -903,8 +1138,9 @@ class ArcSolverBase(InteractiveAgent):
         ["UP", "UP", "RIGHT", "USE"] or ["CLICK 32 15"] (CLICK is x y = col row).
         The harness executes them in order (stopping early on level completion,
         WIN or GAME_OVER) and then publishes the next state on ``game_states``.
-        ``rationale``: one or two lines — your prediction of what this sequence
-        will do; you will check it against the next state's action_results.
+        ``rationale``: one or two lines starting with ``predict:`` — your
+        predicted path for this exact sequence; you will check it against the next
+        state's ``action_results``.
 
         A successful submit ENDS your turn (it yields until the next state arrives),
         so do any knowledge/helper writes BEFORE calling this — code after it in the
@@ -914,6 +1150,24 @@ class ArcSolverBase(InteractiveAgent):
         state = self._latest_state()
         if state is None:
             return "REJECTED: no game state received yet."
+        if self._requires_helper_refresh:
+            return (
+                "REJECTED: levels_completed changed since last helper run. Rewrite helper "
+                "world model and call load_helpers() before submitting."
+            )
+        if not isinstance(rationale, str):
+            return "REJECTED: rationale must be text."
+        if not rationale.strip().startswith("predict:"):
+            return (
+                "REJECTED: rationale must start with 'predict:' "
+                "(for example: 'predict: after UP, avatar should move left of obstacle')."
+            )
+        if not self._prediction_stable and len(actions) > 1:
+            reason = self._prediction_stale_reason or "prediction not yet validated"
+            return (
+                f"REJECTED: prediction_stability is false ({reason}); submit 1 action "
+                "until retrodiction is validated and prediction is marked stable."
+            )
         if state.get("state") == "WIN":
             return "REJECTED: game already won — no more actions needed."
         if not actions:
@@ -945,6 +1199,9 @@ class ArcSolverBase(InteractiveAgent):
                 f"; WARNING: batch had {requested} actions — only the first {cap} were "
                 f"submitted, actions {cap + 1}..{requested} were NOT executed"
             )
+        self._pending_submit_turn = turn
+        self._pending_submit_count = len(actions)
+        self._pending_submit_actions = list(actions)
         entry = {"turn": turn, "actions": actions, "rationale": rationale[:2000]}
         if truncation_warning:
             entry["truncated_from"] = requested
@@ -969,7 +1226,14 @@ class ArcSolverBase(InteractiveAgent):
         """Create or overwrite a persistent python helper module in the workspace
         (``helpers/<filename>``). Use for your evolving world model: parsing,
         entity extraction, predict(state, action) functions. Syntax-checked on
-        write; call load_helpers() afterwards to (re)load into ``self.h``."""
+        write; call load_helpers() afterwards to (re)load into ``self.h``.
+
+        World model contract: `predict(state, action)` must be deterministic and
+        return the next state (or return the next state as the first element of a
+        tuple/list, e.g. `(next_state, reward, done)`; or a dict with `next_state`
+        / `next` / `next_z` / `state` / `z`). `encode(grid)` must accept the
+        parsed grid array and return the latent/state used by `predict`.
+        """
         import textwrap
 
         if not _HELPER_NAME.match(filename):
@@ -993,6 +1257,8 @@ class ArcSolverBase(InteractiveAgent):
         Returns the loaded modules and their public functions. Call at the start
         of a turn to reuse the world model you built in earlier turns."""
         report = []
+        had_world_model = False
+        candidates: list[str] = []
         for f in sorted(self.helpers_dir.glob("*.py")):
             # Re-check before executing: a seeded/older helper could predate the
             # write-time guard, so importing it unchecked would reopen the hole.
@@ -1007,9 +1273,25 @@ class ArcSolverBase(InteractiveAgent):
             except Exception as e:
                 report.append(f"{f.name}: FAILED to load — {e!r}")
                 continue
+            if hasattr(mod, "encode") and hasattr(mod, "predict"):
+                candidates.append(f.stem)
+                had_world_model = True
             setattr(self.h, f.stem, mod)
             fns = [n for n in dir(mod) if not n.startswith("_") and callable(getattr(mod, n))]
             report.append(f"{f.name} -> self.h.{f.stem} ({', '.join(fns) or 'no functions'})")
+        if "world_model" in candidates:
+            self._active_world_model_name = "world_model"
+        elif candidates:
+            if self._active_world_model_name not in candidates:
+                self._active_world_model_name = candidates[0]
+        else:
+            self._active_world_model_name = None
+        if self._requires_helper_refresh and had_world_model:
+            self._requires_helper_refresh = False
+            self._set_prediction_stability(
+                False,
+                "helper refreshed; validate predictions before resuming multi-action batches",
+            )
         return "\n".join(report) or "no helper modules yet — write_helper() to create one."
 
     # ----------------------------------------------------------------- turn
@@ -1043,14 +1325,15 @@ class ArcSolverBase(InteractiveAgent):
         1. Parse the newest state; check your previous rationale/prediction
            against action_results and diff_summary. A wrong prediction is
            information — record it.
-        2. Consult your knowledge store (see <knowledge_api>) BEFORE deciding.
-        3. Analyze the grid in code (self.grid_array + numpy; self.load_helpers()
+        2. Analyze the grid in code (self.grid_array + numpy; self.load_helpers()
            to reuse your world model; self.trajectory() for the full history of
            executed actions and their grids — diff any two points in time).
-        4. Record new observations / hypotheses / action semantics per
+        3. Record new observations / hypotheses / action semantics per
            <knowledge_api>; reflect at the cadence the skill prescribes.
+        4. Consult your knowledge store (see <knowledge_api>) when needed as a
+           lab book before deciding broad strategy.
         5. Decide the next experiment or plan step, then END the turn by calling
-           self.submit_actions([...], rationale="prediction...") with at least one
+            self.submit_actions([...], rationale="predict: ...") with at least one
            action — a successful submit yields until the next state arrives (no
            separate return_result call is needed; do steps 1-4 before submitting).
 
@@ -1108,16 +1391,23 @@ class MemArcSolverAgent(ArcSolverBase):
         state = self._latest_state() or {}
         turn = state.get("turn", 0) or 0
         if last is None:
-            return f"memory: no reflection yet (reflect every ~{self.reflect_every} turns)"
-        return f"memory: last reflection at turn {last} (now {turn}; reflect every ~{self.reflect_every})"
+            return (
+                f"memory: no reflection yet (reflect every ~{self.reflect_every} turns) | "
+                f"{self._prediction_status_line()}"
+            )
+        return (
+            f"memory: last reflection at turn {last} (now {turn}; reflect every ~{self.reflect_every}) | "
+            f"{self._prediction_status_line()}"
+        )
 
 
 class MdArcSolverAgent(ArcSolverBase):
-    """You are an interactive grid-game-solving agent. You discover the unknown rules of an
-    interactive 64x64 grid game by experimenting, then solve all its levels.
-    Follow the <arc_skill> context block. Your accumulated knowledge lives in
-    markdown files (read_notes/append_notes/write_notes) — read them before
-    deciding, append after observing, curate them periodically.
+    """You are an interactive grid-game-solving agent. You discover the unknown rules
+    of an interactive 64x64 grid game by experimenting, then solve all its
+    levels.
+    Follow the <arc_skill> context block. Your accumulated knowledge is stored in
+    markdown files (`read_notes`/`append_notes`/`write_notes`) as a lab book; the
+    control source is in your helper model (encode/predict).
     """
 
     knowledge_dir: Annotated[Path, hidden]  # path embeds the run dir — hide it
@@ -1144,8 +1434,21 @@ class MdArcSolverAgent(ArcSolverBase):
     @hidden
     def _knowledge_status_line(self) -> str:
         names = [p.name for p in sorted(self.knowledge_dir.glob("*.md"))]
+        helper_bits = []
+        for name in sorted(vars(self.h).keys()):
+            if name.startswith("_"):
+                continue
+            mod = getattr(self.h, name)
+            fns = [fn for fn in ("encode", "predict") if hasattr(mod, fn)]
+            if fns:
+                helper_bits.append(f"{name}:{','.join(fns)}")
+        helper_line = ", ".join(helper_bits) if helper_bits else "world_model: not loaded"
         last = self.vars.get("last_reflect_turn") if hasattr(self.vars, "get") else None
-        return f"notes: {names or 'none yet'} | last curation turn: {last}"
+        return (
+            f"notes: {names or 'none yet'} | helper_api: {helper_line} | "
+            f"{self._prediction_status_line()} | "
+            f"last curation turn: {last}"
+        )
 
     def list_notes(self) -> list[str]:
         """List the knowledge markdown files in the workspace."""

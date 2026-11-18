@@ -1,0 +1,1 @@
+Full CONSTRUCTOR-PREDICTION-TEST dispatch received. Card selection/scoring definitions written before holdout metadata inspection. Fresh directory only; no credentials, paid/remote run, gameplay or self-review approval.

@@ -1,0 +1,1 @@
+Full OR-CONSTRUCTOR-SCHEMA-FIX-REPEAT dispatch read, including final scope sentence. Fresh candidate only; preserve prior experiment and R10. No paid calls or credential access before exact-byte independent PASS, Hermes gates and PM release.

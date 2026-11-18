@@ -1,0 +1,11 @@
+# System pivot comparison v2: pair-a
+Question: Does frequent reasoning-off review reduce time/actions to warranted, retained correction, regardless of insight origin?
+Posture: Controlled restart comparison after v1 seed-delivery invalidation.
+Contrast: Identical seven-action LS20 successor and compact retained notes/measurements; fresh empty Python workers; baseline versus frequent critic. Order=baseline-first. Pair B reverses order. Evaluator diagnosis is absent from both contexts.
+Prediction: Review reduces elapsed time to a correction confirmed in three later executed decisions, without adding false pivots.
+Measure: Source-bound grading of observable Actor outputs and executed decisions. Record first warranted correction, actions/time to it, three-decision retention, regressions, false pivots, critic time, total time, and cost. Insight origin is irrelevant; acknowledgement alone earns nothing; missing follow-up is unresolved. Verify required evidence markers in every paid Actor request.
+Cap: Per arm 600s plus95s retirement,64 actions,96 Actor calls,20 critic calls,$0.50 admission ceiling. Four arms <=$2. Actor4096 and critic384 completion tokens, reasoning off, Qwen3.8-27B/CoreWeave FP8 only, zero retries/fallback. Reviews after2 Actor calls or2 actions. Fixed window continues after correction to observe relapse.
+Stop: Terminal/cap or operational failure. Abort the pair on failed transport/unresolved accounting; do not start another pair after unresolved failure. No relaunch of a started card.
+Invalid if: Replay differs; any required seed marker is absent from a paid Actor request; source/input drift; diagnosis leaks; wrong provider/reasoning mode; unaccounted request; unresolved retirement. Missing pair arm prevents paired benefit. Output failure remains separate from semantic quality.
+Result map: Faster retained correction without added harmful pivots -> expand across new cases; same -> no benefit demonstrated; worse -> no promotion; censored/invalid -> unresolved. Compare whole-system time including review. Separate-role value versus equal-compute self-review remains untested.
+Outputs: This directory and fixture-v2 contain exact inputs, source hashes, requests/responses, actual actions/grids, notes snapshots, timestamps, grades and scorer output. No Kaggle launch.

@@ -128,7 +128,12 @@ class MyAgent(Agent):
         self._level = 0
         self._turn_in_level = 0
         self._previous_decision: ActionDecision | None = None
+        self._previous_levels_completed: int | None = None
+        # Game-wide budget; `is_done` gates on it and it never restarts.
         self._solver_decisions_emitted = 0
+        # Budget already spent when the current worker was created, so the turn's
+        # session-relative horizon still counts down the game's real remainder.
+        self._decisions_before_session = 0
         self._finished = False
         self._closed = False
 
@@ -151,20 +156,34 @@ class MyAgent(Agent):
             latest_frame.state in (GameState.NOT_PLAYED, GameState.GAME_OVER)
             and self._pending_decision is None
         ):
+            if (
+                latest_frame.state is GameState.GAME_OVER
+                and self._solver is not None
+            ):
+                self._end_solver_episode(
+                    self._last_observation
+                    or _project_frame(latest_frame, previous_levels_completed=None)
+                )
             return GameAction.RESET
 
         observation = self._reconcile_pending(latest_frame)
         if latest_frame.state in (GameState.NOT_PLAYED, GameState.GAME_OVER):
+            if latest_frame.state is GameState.GAME_OVER:
+                self._end_solver_episode(observation)
             return GameAction.RESET
 
         solver = self._ensure_solver(observation)
-        actions_used = self._solver_decisions_emitted
-        actions_remaining = self._solver_action_limit - actions_used
+        # actions_used must equal sequence (GameTurn validator), and sequence is
+        # session-relative. Shrink the advertised limit by what earlier sessions
+        # already spent so the countdown still ends where the game's budget ends.
+        session_limit = self._solver_action_limit - self._decisions_before_session
+        actions_used = self._sequence
+        actions_remaining = session_limit - actions_used
         turn = GameTurn(
             grid=observation.grid,
             available_actions=observation.available_actions,
             sequence=self._sequence,
-            action_limit=self._solver_action_limit,
+            action_limit=session_limit,
             actions_used=actions_used,
             actions_remaining=actions_remaining,
             final_permitted_action=actions_remaining == 1,
@@ -220,6 +239,17 @@ class MyAgent(Agent):
     def _ensure_solver(self, observation: ObservationPayload) -> SolverPort:
         if self._solver is None:
             self._level = observation.levels_completed
+            self._sequence = 0
+            self._turn_in_level = 0
+            self._previous_decision = None
+            # Two different counters were conflated here. GameTurn's action horizon
+            # is session-relative by construction -- the model requires
+            # actions_used == sequence, and sequence restarts with each worker. The
+            # action budget is game-wide. Zeroing the budget to satisfy the horizon
+            # gave every post-GAME_OVER episode a fresh full allowance and disabled
+            # `is_done` as the normal stop condition. Record where this session
+            # starts instead, and express the horizon against the remainder.
+            self._decisions_before_session = self._solver_decisions_emitted
             self._solver = self._solver_factory(
                 game_id=self.game_id,
                 workspace_root=self._workspace_root,
@@ -227,12 +257,47 @@ class MyAgent(Agent):
             )
         return self._solver
 
+    def _end_solver_episode(self, observation: ObservationPayload) -> None:
+        """GAME_OVER RESET is not a Solver decision. Close this worker so the
+        next NOT_FINISHED frame cannot hit LocalSolver continuity against the
+        dead grid (depth v1, s5i5 frame 49 → 50)."""
+        solver = self._solver
+        if solver is None:
+            return
+        try:
+            if not self._finished:
+                solver.finish(
+                    observation,
+                    max(self.action_counter, self._sequence, 1),
+                )
+                self._finished = True
+        finally:
+            if not self._closed:
+                solver.close()
+                self._closed = True
+            self._solver = None
+            self._finished = False
+            self._closed = False
+            self._sequence = 0
+            self._turn_in_level = 0
+            self._previous_decision = None
+            self._previous_levels_completed = None
+            self._clear_pending()
+
     def _reconcile_pending(self, latest_frame: FrameData) -> ObservationPayload:
+        # The official loop reconciles twice per turn: once in ``is_done`` and again
+        # at the top of ``choose_action``. The second call runs with the pending
+        # decision already cleared, so deriving the projection context from
+        # ``_pending_before`` alone silently drops it and re-projects the same frame
+        # without its ``level_advanced`` annotation. That second payload becomes the
+        # next decision's ``before`` and no longer equals the ``after`` the Solver
+        # recorded, which fails continuity on the first completed level.
         previous_levels = (
             self._pending_before.levels_completed
             if self._pending_before is not None
-            else None
+            else self._previous_levels_completed
         )
+        self._previous_levels_completed = previous_levels
         observation = _project_frame(
             latest_frame,
             previous_levels_completed=previous_levels,
