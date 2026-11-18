@@ -1,0 +1,48 @@
+diff --git a/home/pranav/projects/arc-agi-3/analysis/serving-alternatives-20261021/trial-16-candidate-s10-local/primary_bundle.py b/home/pranav/projects/arc-agi-3/analysis/serving-alternatives-20261021/trial-16-candidate-s10-r2-local/primary_bundle.py
+index 2ba4e67..00db0a7 100644
+--- a/home/pranav/projects/arc-agi-3/analysis/serving-alternatives-20261021/trial-16-candidate-s10-local/primary_bundle.py
++++ b/home/pranav/projects/arc-agi-3/analysis/serving-alternatives-20261021/trial-16-candidate-s10-r2-local/primary_bundle.py
+@@ -1,5 +1,5 @@
+ """Small separately retrievable primary evidence; never replaces full raw qualification."""
+-import base64,hashlib,json,time
++import base64,hashlib,json,math,time
+ from pathlib import Path
+ MAX_BYTES=16*1024**2
+ NAME='000-serving-candidate16-primary.json'
+@@ -53,9 +53,11 @@ def write(root,config,end):
+     if time.monotonic()>end:raise TimeoutError('primary bundle late before persistence')
+     target=root.parent.parent/NAME
+     with target.open('xb') as stream:stream.write(raw)
+-    receipt=dict(start=started,path=str(target),bytes=len(raw),sha256=hashlib.sha256(raw).hexdigest(),end=time.monotonic(),deadline=end)
++    receipt=dict(schema='PRIMARY_PUBLICATION_V2',start=started,path=str(target),bytes=len(raw),sha256=hashlib.sha256(raw).hexdigest(),end=time.monotonic(),deadline=end)
+     if receipt['end']>end:raise TimeoutError('primary bundle late persistence')
+     (root/'primary-bundle-receipt.json').write_text(json.dumps(receipt,indent=2)+'\n')
++    receipt['persisted_end']=time.monotonic()
++    if receipt['persisted_end']>end:raise TimeoutError('primary receipt persistence completed late')
+     return receipt
+ 
+ 
+@@ -67,3 +69,23 @@ def verify(raw):
+         data=base64.b64decode(item['base64'],validate=True)
+         if len(data)!=item['bytes'] or hashlib.sha256(data).hexdigest()!=item['sha256']:raise ValueError('primary bytes/hash '+key)
+     return value
++
++
++def verify_publication(root,raw,work_end,seconds):
++    """Independent durable joins; reject an otherwise timely but stale bundle."""
++    root=Path(root);bundle=verify(raw)
++    receipt_path=root/'primary-bundle-receipt.json'
++    receipt_bytes=receipt_path.read_bytes();receipt=json.loads(receipt_bytes)
++    completed=json.loads((root/'primary-publication-completion.json').read_bytes())
++    clocks=[receipt['start'],receipt['end'],receipt['deadline'],completed['helper_persisted_end'],completed['returned_at'],work_end,seconds]
++    if not all(type(value) in (int,float) and math.isfinite(value) for value in clocks):raise ValueError('publication finite clocks')
++    if (receipt['schema']!='PRIMARY_PUBLICATION_V2' or completed['schema']!='PRIMARY_CALLER_COMPLETION_V2'
++        or receipt['sha256']!=hashlib.sha256(raw).hexdigest() or receipt['bytes']!=len(raw)
++        or completed['receipt_sha256']!=hashlib.sha256(receipt_bytes).hexdigest()
++        or completed['deadline']!=receipt['deadline']
++        or not receipt['start']<=receipt['end']<=completed['helper_persisted_end']<=completed['returned_at']<=receipt['deadline']<=min(work_end,receipt['start']+seconds)
++        or Path(receipt['path']).name!=NAME):raise ValueError('primary publication completion/deadline join')
++    actual=json.loads((root/'result.json').read_bytes())
++    published=json.loads(base64.b64decode(bundle['files']['result.json']['base64'],validate=True))
++    if actual!=published or actual.get('primary_bundle_error') or actual.get('late_work'):raise ValueError('stale primary result after publication failure')
++    return dict(helper_persisted_end=completed['helper_persisted_end'],returned_at=completed['returned_at'],deadline=receipt['deadline'])

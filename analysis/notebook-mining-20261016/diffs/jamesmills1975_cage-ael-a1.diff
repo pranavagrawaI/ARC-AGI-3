@@ -1,0 +1,207 @@
+--- base/cell0
++++ other/cell0
+@@ -0,0 +1,177 @@
++%%writefile /kaggle/cage-ael.patch
++diff --git a/ARC3-Inference/inference/agent/action_effect_ledger.py b/ARC3-Inference/inference/agent/action_effect_ledger.py
++new file mode 100644
++index 0000000..e0a7440
++--- /dev/null
+++++ b/ARC3-Inference/inference/agent/action_effect_ledger.py
++@@ -0,0 +1,151 @@
+++"""CAGE Action-Effect Ledger (AEL). Original CAGE code, 2026-10-10.
+++
+++Harness-computed, per-level table of what each action has actually done so
+++far, injected into every analyzer turn when CAGE_AEL=1. Motivation (CAGE
+++ARC-3 rounds 2-10): agents waste most of their budget re-learning control
+++semantics; the LLM's own "Action model" memory section is written in only a
+++third of games. The ledger gives it measured effects for free, every turn:
+++
+++  action | tries | no-op | mean cells changed | mean shift of changed mass (dr,dc)
+++         | level-ups | game-overs
+++
+++Interior-only comparison (border cropped, same idea as the death-ledger hash)
+++so HUD/timer pixels do not count as an effect. Pure function of history;
+++no model calls, no GPU cost.
+++"""
+++from __future__ import annotations
+++
+++import os
+++import re
+++from typing import Any, Iterable
+++
+++_BORDER = 4
+++_NUM = re.compile(r"-?\d+")
+++
+++
+++def enabled() -> bool:
+++    return os.environ.get("CAGE_AEL", "0").strip().lower() in {"1", "on", "true", "yes"}
+++
+++
+++def _interior(grid, border: int):
+++    rows = len(grid)
+++    if rows <= 2 * border:
+++        return [list(r) for r in grid]
+++    out = []
+++    for r in grid[border:rows - border]:
+++        r = list(r)
+++        out.append(r[border:len(r) - border] if len(r) > 2 * border else r)
+++    return out
+++
+++
+++def _bucket(action: str, before_grid) -> str:
+++    """Keyboard actions keep their name. Clicks are bucketed by the colour of
+++    the clicked cell, so 'click on colour 3' becomes one learnable control."""
+++    a = (action or "").strip().upper()
+++    head = a.split()[0].split("(")[0] if a else "?"
+++    if head in {"MOUSE", "CLICK", "ACTION6"}:
+++        nums = [int(x) for x in _NUM.findall(a)]
+++        if len(nums) >= 2 and before_grid is not None:
+++            r, c = nums[-2], nums[-1]
+++            try:
+++                return f"{head}@color{before_grid[r][c]}"
+++            except (IndexError, TypeError):
+++                pass
+++        return head
+++    return head
+++
+++
+++def _diff(before, after, border: int):
+++    bi, ai = _interior(before, border), _interior(after, border)
+++    if len(bi) != len(ai):
+++        return None
+++    changed = []
+++    for r, (rb, ra) in enumerate(zip(bi, ai)):
+++        if len(rb) != len(ra):
+++            return None
+++        for c, (x, y) in enumerate(zip(rb, ra)):
+++            if x != y:
+++                changed.append((r, c, x, y))
+++    return changed
+++
+++
+++def _shift(changed, before, after, border: int) -> tuple[float, float] | None:
+++    """Centroid move of the rarest colour that both left and arrived somewhere
+++    (the background is the most common colour and is skipped this way)."""
+++    if not changed:
+++        return None
+++    moved = {x for _, _, x, _ in changed} & {y for _, _, _, y in changed}
+++    if not moved:
+++        return None
+++    bi, ai = _interior(before, border), _interior(after, border)
+++    def cells(G, col):
+++        return [(r, c) for r, row in enumerate(G) for c, v in enumerate(row) if v == col]
+++    best = None
+++    for col in moved:
+++        b, a = cells(bi, col), cells(ai, col)
+++        if not b or not a:
+++            continue
+++        if best is None or len(b) < best[0]:
+++            dr = sum(p[0] for p in a) / len(a) - sum(p[0] for p in b) / len(b)
+++            dc = sum(p[1] for p in a) / len(a) - sum(p[1] for p in b) / len(b)
+++            best = (len(b), dr, dc)
+++    return None if best is None else (best[1], best[2])
+++
+++
+++def build_ledger(history_entries: Iterable[Any], border: int = _BORDER) -> dict:
+++    entries = list(history_entries or [])
+++    if not entries:
+++        return {"level": None, "rows": {}}
+++    cur_level = getattr(getattr(entries[-1], "frame", None), "level", None)
+++    rows: dict[str, dict] = {}
+++    for prev, nxt in zip(entries, entries[1:]):
+++        pf, nf = getattr(prev, "frame", None), getattr(nxt, "frame", None)
+++        act = str(getattr(nxt, "action", "") or "")
+++        if pf is None or nf is None or not act or act.upper().startswith("RESET"):
+++            continue
+++        if getattr(pf, "level", None) != cur_level:
+++            continue  # current level only; levels can remap controls
+++        key = _bucket(act, pf.grid)
+++        row = rows.setdefault(key, {"n": 0, "noop": 0, "cells": 0, "dr": 0.0, "dc": 0.0,
+++                                     "nshift": 0, "levelup": 0, "gameover": 0})
+++        row["n"] += 1
+++        if getattr(nf, "level", None) != getattr(pf, "level", None):
+++            row["levelup"] += 1
+++            continue
+++        res = getattr(nxt, "result", None) or {}
+++        if isinstance(res, dict) and (res.get("game_over") or str(res.get("state", "")).upper() == "GAME_OVER"):
+++            row["gameover"] += 1
+++        ch = _diff(pf.grid, nf.grid, border)
+++        if ch is None:
+++            continue
+++        if not ch:
+++            row["noop"] += 1
+++            continue
+++        row["cells"] += len(ch)
+++        s = _shift(ch, pf.grid, nf.grid, border)
+++        if s is not None:
+++            row["dr"] += s[0]; row["dc"] += s[1]; row["nshift"] += 1
+++    return {"level": cur_level, "rows": rows}
+++
+++
+++def ledger_lines(history_entries: Iterable[Any], max_rows: int = 12) -> list[str]:
+++    led = build_ledger(history_entries)
+++    rows = led["rows"]
+++    if not rows:
+++        return []
+++    out = [f"Action-effect ledger (harness-measured, level {led['level']}, interior only; "
+++           "trust over guesses, probe untried actions cheaply):"]
+++    for key, r in sorted(rows.items(), key=lambda kv: -kv[1]["n"])[:max_rows]:
+++        eff = r["n"] - r["noop"] - r["levelup"]
+++        mean = r["cells"] / eff if eff > 0 else 0.0
+++        mv = ""
+++        if r["nshift"]:
+++            mv = f", shift (dr,dc)=({r['dr']/r['nshift']:+.1f},{r['dc']/r['nshift']:+.1f})"
+++        extra = ""
+++        if r["levelup"]:
+++            extra += f", LEVEL-UP x{r['levelup']}"
+++        if r["gameover"]:
+++            extra += f", game-over x{r['gameover']}"
+++        out.append(f"- {key}: {r['n']} tries, no-op {r['noop']}/{r['n']}, "
+++                   f"~{mean:.0f} cells/effective{mv}{extra}")
+++    return out
++diff --git a/ARC3-Inference/inference/agent/tool_agent.py b/ARC3-Inference/inference/agent/tool_agent.py
++index 84a9cdd..4e9287c 100644
++--- a/ARC3-Inference/inference/agent/tool_agent.py
+++++ b/ARC3-Inference/inference/agent/tool_agent.py
++@@ -5100,6 +5100,14 @@ class ToolAgent:
++                     current_frame, history_entries, previous_step_summary
++                 )
++             )
+++        # CAGE Action-Effect Ledger (CAGE_AEL=1): measured per-action effects
+++        # on the current level, placed right before the tool description.
+++        try:
+++            from inference.agent import action_effect_ledger as _cage_ael
+++            if _cage_ael.enabled():
+++                lines.extend(_cage_ael.ledger_lines(history_entries))
+++        except Exception:  # advisory only; never break a turn
+++            pass
++         lines.extend(
++             [
++                 "Only tool: `python`. It receives `current_frame`, `previous_frame`, `history`, `transitions`, `last_transition`, `valid_actions`, `last_action_call_result`, `frame_diff(before, after)`, and `action(actions)`.",
+--- base/cell1
++++ other/cell1
+@@ -31,4 +31,7 @@
+ subprocess.run(["git", "apply", "--include=ARC3-Inference/*", "-v", "/kaggle/harness-changes.patch"], cwd=f"{BUNDLE_DIR}/src", check=True)
+ print('harness patch applied successfully')
++# CAGE: apply the CAGE Action-Effect Ledger patch on top (CAGE-original code)
++subprocess.run(["git", "apply", "--include=ARC3-Inference/*", "-v", "/kaggle/cage-ael.patch"], cwd=f"{BUNDLE_DIR}/src", check=True)
++print('cage-ael patch applied successfully')
+ 
+ # True only inside a real competition rerun; switches diagnostics + soft deadline.
+@@ -123,4 +126,7 @@
+     ########## controls ##########
+     'EXPOSE_UNDO': 'on',
++
++    ########## CAGE ##########
++    'CAGE_AEL': '1',
+ }
+ 
+--- base/cell7
++++ other/cell7
+@@ -5,5 +5,5 @@
+ bm.solver.max_actions_per_game = None
+ bm.solver.save_request_logs = True
+-bm.n_passes = 4
++bm.n_passes = 1
+ bm.game_weights = None
+ 

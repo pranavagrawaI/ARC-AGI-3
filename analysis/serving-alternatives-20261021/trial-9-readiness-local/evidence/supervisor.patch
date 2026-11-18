@@ -1,0 +1,176 @@
+--- baseline/supervisor.py	2026-10-23 15:45:33.000754434 +0530
++++ supervisor.py	2026-10-23 15:53:10.013517663 +0530
+@@ -1,6 +1,7 @@
+ """One-shot local process supervisor. No SDK, uploader, installer or model defaults."""
+ import argparse
+ import csv
++from contextlib import contextmanager
+ import hashlib
+ import json
+ import math
+@@ -44,6 +45,7 @@
+         specs.extend(a[p] for p in ('prepare', 'identity', 'server', work_phase(config), 'qualify'))
+         for p in ('ready_seconds', 'request_seconds', 'drain_seconds'):
+             require(positive(a[p]), f'{arm}.{p} missing')
++        require(a.get('ready_retry_http_statuses', []) in ([], [503]), 'only explicit startup HTTP503 retry policy supported')
+         poll = a.get('ready_poll_seconds', 2)
+         require(positive(poll) and (config['mode'] != 'GPU_SCREEN' or poll >= 2), 'GPU readiness cadence must be at least 2 seconds')
+         u = urlsplit(a['ready_url'])
+@@ -85,6 +87,24 @@
+     return sorted(result)
+ 
+ 
++def startup_http_not_ready(code, path, allowed):
++    """Only the pinned empty HTTP503 shape is eligible before first readiness."""
++    if code != 1 or allowed != [503]:
++        return False
++    raw = Path(path).read_bytes()
++    try:
++        first, body = raw.split(b'\n', 1)
++        metadata = json.loads(first)
++        headers = metadata['headers']
++        lengths = [v for k, v in headers if k.lower() == 'content-length']
++        transfer = [v for k, v in headers if k.lower() == 'transfer-encoding']
++        return (metadata['status'] == 503 and metadata['body_limit'] == 65536
++                and metadata['body_format'] == 'raw bytes after first newline'
++                and lengths == ['0'] and not transfer and body == b'')
++    except (ValueError, KeyError, TypeError, AttributeError):
++        return False
++
++
+ class Supervisor:
+     def __init__(self, config, output):
+         self.config = validate(config)
+@@ -94,6 +114,7 @@
+         self.end = self.started + config['total_seconds']
+         self.work_end = self.end - config['cleanup_seconds']
+         self.groups = {}
++        self.cleanup_failures = []
+         self.handles = []
+         self.sequence = 0
+         self.trace = (self.output / 'supervisor.jsonl').open('x')
+@@ -150,13 +171,12 @@
+     def command(self, name, spec, server=None):
+         end = self.deadline(spec['seconds'])
+         p = self.start(name, spec, end)
+-        try:
++        with self.cleanup_scope(name, [p.pid]):
+             self.wait(name, p, end, server)
+-        finally:
+-            self.cleanup([p.pid])
+ 
+     def cleanup(self, groups=None):
+         groups = list(self.groups) if groups is None else groups
++        cleanup_end = min(self.end, time.monotonic() + self.config['cleanup_seconds'])
+         for pgid in groups:
+             before = group_members(pgid)
+             if before:
+@@ -164,7 +184,7 @@
+                     os.killpg(pgid, signal.SIGTERM)
+                 except ProcessLookupError:
+                     pass
+-        grace = min(self.end, time.monotonic() + min(1, self.config['cleanup_seconds'] / 2))
++        grace = min(cleanup_end, time.monotonic() + min(1, self.config['cleanup_seconds'] / 2))
+         while any(group_members(g) for g in groups) and time.monotonic() < grace:
+             time.sleep(.01)
+         for pgid in groups:
+@@ -173,10 +193,15 @@
+                     os.killpg(pgid, signal.SIGKILL)
+                 except ProcessLookupError:
+                     pass
++        # SIGKILL delivery and descendant teardown are asynchronous. Observe the
++        # actual group through one common bounded deadline, not just leader.wait().
++        while any(group_members(g) for g in groups) and time.monotonic() < cleanup_end:
++            time.sleep(min(.01, max(0, cleanup_end - time.monotonic())))
++        for pgid in groups:
+             p = self.groups[pgid]
+             # No unbounded wait. Group kill is recorded even if kernel teardown is delayed.
+             try:
+-                p.wait(timeout=max(0, min(.2, self.end - time.monotonic())))
++                p.wait(timeout=max(0, min(.2, cleanup_end - time.monotonic())))
+             except subprocess.TimeoutExpired:
+                 pass
+             alive = group_members(pgid)
+@@ -185,6 +210,25 @@
+                 self.groups.pop(pgid, None)
+         require(not any(group_members(g) for g in groups), 'process group cleanup incomplete; stop candidate')
+ 
++    @contextmanager
++    def cleanup_scope(self, context, groups=None):
++        primary_error = None
++        try:
++            yield
++        except BaseException as error:
++            primary_error = error
++            raise
++        finally:
++            try:
++                self.cleanup(groups)
++            except BaseException as cleanup_error:
++                record = dict(context=context, error=repr(cleanup_error),
++                              primary_error=repr(primary_error) if primary_error else None)
++                self.cleanup_failures.append(record)
++                self.emit('cleanup_failure', **record)
++                if primary_error is None:
++                    raise
++
+     def hardware(self):
+         self.command('hardware', self.config['hardware'])
+         text = (self.output / 'hardware.stdout').read_text()
+@@ -205,7 +249,7 @@
+             spec = dict(argv=[sys.executable, str(Path(__file__).with_name('http_once.py')), a['ready_url']], seconds=a['request_seconds'])
+             name = f'{arm}.health-{n}'
+             p = self.start(name, spec, request_end)
+-            try:
++            with self.cleanup_scope(name, [p.pid]):
+                 while p.poll() is None:
+                     require(server.poll() is None, f'{arm}: server died during readiness')
+                     require(time.monotonic() < request_end, f'{arm}: health absolute deadline')
+@@ -213,13 +257,16 @@
+                 require(time.monotonic() <= request_end, f'{arm}: late health response')
+                 code = p.returncode
+                 self.emit('exit', phase=name, pid=p.pid, returncode=code)
+-            finally:
+-                self.cleanup([p.pid])
+             if code == 0:
+                 self.emit('ready', arm=arm)
+                 return
+-            # Only connection refusal while a newly started server binds is retryable.
+-            require(code == 75, f'{arm}: health HTTP/error status {code}')
++            # HTTP503 is NOT ready or identified transient. Only explicit pinned
++            # empty503 policy may keep waiting inside the ORIGINAL startup end.
++            not_ready = startup_http_not_ready(code, self.output / (name + '.stdout'),
++                                               a.get('ready_retry_http_statuses', []))
++            require(code == 75 or not_ready, f'{arm}: health HTTP/error status {code}')
++            if not_ready:
++                self.emit('startup_not_ready', arm=arm, phase=name, status=503, deadline=end)
+             require(time.monotonic() < end, f'{arm}: readiness deadline')
+             n += 1
+             time.sleep(min(a.get('ready_poll_seconds', 2), max(0, end - time.monotonic())))
+@@ -236,7 +283,7 @@
+         server = self.start(f'{arm}.server', a['server'], self.work_end)
+         start_identity=Path(f'/proc/{server.pid}/stat').read_text().rsplit(')',1)[1].split()[19]
+         self.emit('startup_deadline', arm=arm, deadline=startup_end)
+-        try:
++        with self.cleanup_scope(arm):
+             self.ready(arm, a, server, startup_end)
+             for phase in (work_phase(self.config), 'qualify'):
+                 spec = dict(a[phase])
+@@ -246,8 +293,6 @@
+                                        SCREEN_SERVER_PGID=str(server.pid),SCREEN_SERVER_START=start_identity)
+                 self.command(f'{arm}.{phase}', spec, server)
+             self.emit('arm_pass', arm=arm)
+-        finally:
+-            self.cleanup()
+ 
+     def run(self):
+         result = dict(run_id=self.config['run_id'], mode=self.config['mode'], pass_=False)
+@@ -267,6 +312,8 @@
+             except BaseException as exc:
+                 result['pass_'] = False
+                 result['cleanup_error'] = repr(exc)
++            if self.cleanup_failures:
++                result['cleanup_failures'] = self.cleanup_failures
+             result.update(elapsed_seconds=time.monotonic() - self.started,
+                           cooperative_cap_seconds=self.config['total_seconds'], surviving_groups=list(self.groups))
+             self.emit('terminal', **result)

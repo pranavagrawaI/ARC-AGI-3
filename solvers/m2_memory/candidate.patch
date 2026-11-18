@@ -1,0 +1,880 @@
+--- a/ARC3-Inference/inference/agent/prompts.py
++++ b/ARC3-Inference/inference/agent/prompts.py
+@@ -1,3 +1,4 @@
++# Modified for M2 basics, 2026-10-01. See solvers/m2_basics/NOTICE.md and candidate.patch.
+ """Prompt templates for the analyzer agent."""
+ 
+ from inference.utils.grid_utils import ARC_COLOR_LEGEND
+@@ -150,6 +151,9 @@
+     "- `last_action` is the most recent real environment action name/display, or `None` before any real action.\n"
+     "- `last_action_frame` is the post-action frame for `last_action`; it matches `current_frame` after a real action.\n"
+     "- `transitions` is a chronological list of actual action transitions, excluding the initial seeded frame. Each transition exposes `.action`, `.before_frame`, `.after_frame`, `.frame` (alias of `.after_frame`), and `.result`. Each `.result` describes that individual action and is retained with its history entry.\n"
++    "- `transition.frames` exposes intermediate animation frames for the last 8 animated actions (up to 32 per action). The before/after endpoints remain on the transition. Check `transition.animation_info`: `sampled` means some frames were omitted; `retained=False` means old evidence was evicted, not that no animation occurred. `indices` locate retained frames within the deduplicated transition chain.\n"
++    "- Frames provide cached `.rows` (ASCII strings), `.grid` (numeric rows), `.counts` (numeric color -> pixel count), and `.cells(color)` (row, column pairs). Rows, grids, and cell coordinates are immutable tuples. History entries also expose `.step` and `.level` for their resulting frame.\n"
++    "- Python variables disappear between calls. Save reusable data explicitly with `save_data(name, value)`; `load_data(name)` returns a record with `value`, `saved_step`, `saved_level`, and `bytes`. These are snapshots, not live board state. Saves survive later errors/timeouts, actions, resets, level changes, and context trimming within this game, but not host restart or a new game. `list_data()` lists names and metadata; `delete_data(name)` frees an item. Accepted values are JSON data (string keys, lists, finite numbers, strings, booleans, null); convert tuples/sets explicitly. Limits: 64 items, 256 KiB each, 1 MiB total; a rejected save leaves the old value intact.\n"
+     "- `last_transition` is `transitions[-1]` or `None`. A refused action creates no transition and does not overwrite existing transition results. For before/after diffs, compare `last_transition.before_frame` to `last_transition.after_frame`; do not compare `current_frame` to `history[-1].frame`.\n"
+     "- `last_action_call_result` contains the result of the latest model-issued `action(...)` call, including batch totals, executed/skipped actions, and stop reasons. `action(...)` returns this result. It remains available across later Python inspection calls and analyzer turns, and is `{}` before any action call result exists.\n"
+     "- On the next analyzer turn after automatic RESET, `current_frame` shows the restarted level. The fatal action and RESET are separate transitions. Each transition result has `automatic=True` for a harness-initiated action and `automatic=False` for a model-issued action. Automatic RESET does not overwrite `last_action_call_result`: it still describes the call that caused death.\n"
+--- a/ARC3-Inference/inference/agent/python_tool_sandbox.py
++++ b/ARC3-Inference/inference/agent/python_tool_sandbox.py
+@@ -1,3 +1,4 @@
++# Modified for M2 basics, 2026-10-01. See solvers/m2_basics/NOTICE.md and candidate.patch.
+ """Lightweight isolated runner for analyzer Python tool calls."""
+ from __future__ import annotations
+ 
+@@ -5,12 +6,13 @@
+ import json
+ import logging
+ import os
+-import queue
++import selectors
+ import signal
+ import subprocess
+ import sys
+ import tempfile
+-import threading
++from contextlib import suppress
++from copy import deepcopy
+ import textwrap
+ import time
+ from typing import Any, Callable
+@@ -165,6 +167,38 @@
+             self.shape = tuple(shape)
+             self._grid = grid
+             self._segmentation = None
++            self._rows = None
++            self._numeric_grid = None
++            self._cells = None
++
++        @property
++        def rows(self):
++            if self._rows is None:
++                self._rows = tuple(self.ascii.splitlines())
++            return self._rows
++
++        @property
++        def grid(self):
++            if self._numeric_grid is None:
++                self._numeric_grid = tuple(tuple(row) for row in self._grid)
++            return self._numeric_grid
++
++        def _index_cells(self):
++            if self._cells is None:
++                cells = {}
++                for r, row in enumerate(self._grid):
++                    for c, color in enumerate(row):
++                        cells.setdefault(color, []).append((r, c))
++                self._cells = {color: tuple(positions) for color, positions in cells.items()}
++
++        @property
++        def counts(self):
++            self._index_cells()
++            return {color: len(cells) for color, cells in self._cells.items()}
++
++        def cells(self, color):
++            self._index_cells()
++            return self._cells.get(color, ())
+ 
+         @property
+         def segmentation(self):
+@@ -180,10 +214,19 @@
+ 
+ 
+     class HistoryEntryView:
+-        def __init__(self, *, action, frame, result=None):
++        def __init__(self, *, action, frame, result=None, animation=None):
+             self.action = action
+             self.frame = frame
+             self.result = dict(result) if isinstance(result, dict) else {}
++            self._animation = dict(animation or {})
++
++        @property
++        def step(self):
++            return self.frame.step
++
++        @property
++        def level(self):
++            return self.frame.level
+ 
+         def __str__(self):
+             return f"AsciiHistoryEntryView(action={self.action!r}, frame={self.frame})"
+@@ -192,12 +235,35 @@
+ 
+ 
+     class TransitionView:
+-        def __init__(self, *, action, before_frame, after_frame, result):
++        def __init__(self, *, action, before_frame, after_frame, result, animation=None):
+             self.action = action
+             self.before_frame = before_frame
+             self.after_frame = after_frame
+             self.frame = after_frame
+             self.result = dict(result) if isinstance(result, dict) else {}
++            self._animation = dict(animation or {})
++            self._frames = None
++
++        @property
++        def animation_info(self):
++            return {k: v for k, v in self._animation.items() if k != "frames"}
++
++        @property
++        def frames(self):
++            if self._frames is not None:
++                return self._frames
++            views = []
++            for encoded in self._animation.get("frames", []):
++                grid = [[int(ch, 16) for ch in row] for row in encoded.split("/")]
++                views.append(FrameView(
++                    ascii="\n".join("".join(COLOR_CHARS[v] for v in row) for row in grid),
++                    step=self.after_frame.step, level=self.after_frame.level,
++                    shape=(len(grid), len(grid[0]) if grid else 0), grid=grid))
++            self._frames = views
++            return self._frames
++
++        intermediate_frames = frames
++        animation_frames = frames
+ 
+         def __str__(self):
+             return (
+@@ -232,6 +298,7 @@
+                     action=str(entry.get("action", "")),
+                     frame=_frame_from_payload(entry.get("frame")),
+                     result=entry.get("result"),
++                    animation=entry.get("animation"),
+                 )
+             )
+         return items
+@@ -250,6 +317,7 @@
+                     before_frame=before_frame,
+                     after_frame=entry.frame,
+                     result=entry.result,
++                    animation=entry._animation,
+                 )
+             )
+         return transitions
+@@ -589,6 +657,49 @@
+             ]
+ 
+         runtime_globals["action"] = action
++        def _data_request(operation, **kwargs):
++            _send({"type": "data", "operation": operation, **kwargs})
++            reply = _recv()
++            if reply.get("error"):
++                raise ValueError(reply["error"])
++            return reply.get("result")
++
++        def save_data(name, value):
++            # JSON must be lossless: reject tuples, non-string keys, NaN, etc.
++            # Check before transport; json.dumps would silently change some types.
++            def check(item):
++                if item is None or type(item) in (bool, int, str):
++                    return
++                if type(item) is float:
++                    if item != item or item in (float("inf"), -float("inf")):
++                        raise ValueError("Saved data must contain finite numbers")
++                    return
++                if type(item) is list:
++                    for v in item:
++                        check(v)
++                    return
++                if type(item) is dict and all(type(k) is str for k in item):
++                    for v in item.values():
++                        check(v)
++                    return
++                raise ValueError("Saved data accepts JSON values only: string keys and lists, not tuples/sets/objects")
++            check(value)
++            encoded = json.dumps(value, allow_nan=False)
++            if len(encoded.encode("utf-8")) > 262144:
++                raise ValueError("Saved item exceeds 256 KiB")
++            return _data_request("save", name=name, value=value)
++
++        def load_data(name):
++            return _data_request("load", name=name)
++
++        def list_data():
++            return _data_request("list")
++
++        def delete_data(name):
++            return _data_request("delete", name=name)
++
++        runtime_globals.update(save_data=save_data, load_data=load_data,
++                               list_data=list_data, delete_data=delete_data)
+         if initial.get("animation_enabled"):
+             # Globals rather than attributes on last_transition: after a death
+             # the harness appends a RESET entry, so last_transition is the
+@@ -627,6 +738,12 @@
+ 
+                 def keys(self):
+                     return self._get().keys()
++
++                def items(self):
++                    return self._get().items()
++
++                def values(self):
++                    return self._get().values()
+ 
+                 def get(self, key, default=None):
+                     return self._get().get(key, default)
+@@ -674,10 +791,10 @@
+                     "retention_rejected": _retention_rejected + rejected,
+                 }
+             except Exception:
+-                # Bookkeeping failures may drop helpers, but must never replace
+-                # the snippet's original error/output or replay its actions.
+-                return {"keepable_functions": [], "retention_rejected": [
+-                    {"name": "all", "reason": "retention failed; redefine needed functions"}]}
++                # Missing snapshot preserves the last committed pool on the host.
++                # Never replace the original error/output or replay its actions.
++                return {"retention_rejected": [
++                    {"name": "all", "reason": "retention bookkeeping failed; previous code preserved"}]}
+ 
+         try:
+             _code_text = str(initial.get("code", ""))
+@@ -744,24 +861,6 @@
+ log = logging.getLogger(__name__)
+ 
+ 
+-def _sanitize_host_error_text(text: str) -> str:
+-    """What the MODEL is told when the sandbox process dies.
+-
+-    Deliberately fixed: the child's traceback carries host paths and internals
+-    that have no business in the model's context. But the text was previously
+-    read and thrown away entirely, so a crash left no trace anywhere - the one
+-    thing that knows what went wrong said nothing. It now goes to the harness
+-    log instead, where it is useful and nobody is prompted by it.
+-    """
+-    detail = str(text or "").strip()
+-    if detail:
+-        log.warning(
+-            "sandbox process died; stderr follows:\n%s",
+-            detail[-4000:],
+-        )
+-    return "Sandbox process exited unexpectedly."
+-
+-
+ def _sandbox_env() -> dict[str, str]:
+     return {
+         "PYTHONUNBUFFERED": "1",
+@@ -773,12 +872,49 @@
+     }
+ 
+ 
+-def _send_json_line(handle: Any, payload: dict[str, Any]) -> None:
+-    handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+-    handle.flush()
+-
+-
+-def _kill_process_group(process: subprocess.Popen[str]) -> None:
++def _wait_for_pipe(selector: selectors.BaseSelector, deadline: float) -> None:
++    remaining = deadline - time.monotonic()
++    if remaining <= 0 or not selector.select(timeout=remaining):
++        raise TimeoutError
++
++def _send_json_line(handle: Any, payload: dict[str, Any], *, deadline: float) -> None:
++    pending = memoryview((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
++    with selectors.DefaultSelector() as selector:
++        selector.register(handle, selectors.EVENT_WRITE)
++        while pending:
++            _wait_for_pipe(selector, deadline)
++            try:
++                written = os.write(handle.fileno(), pending)
++            except BlockingIOError:
++                continue
++            pending = pending[written:]
++
++def _read_sandbox_stdout(handle: Any, pending: bytearray, *, deadline: float) -> bytes | None:
++    search_from = 0
++    with selectors.DefaultSelector() as selector:
++        selector.register(handle, selectors.EVENT_READ)
++        while True:
++            separator = pending.find(b"\n", search_from)
++            if separator >= 0:
++                line = bytes(pending[:separator])
++                del pending[:separator + 1]
++
++                return line
++            _wait_for_pipe(selector, deadline)
++            try:
++                chunk = os.read(handle.fileno(), 65536)
++            except BlockingIOError:
++                continue
++            if not chunk:
++                line = bytes(pending) if pending else None
++                pending.clear()
++
++                return line
++            search_from = len(pending)
++            pending.extend(chunk)
++
++
++def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
+     try:
+         os.killpg(process.pid, signal.SIGKILL)
+     except OSError:
+@@ -788,7 +924,7 @@
+             pass
+ 
+ 
+-def _wait_for_process_exit(process: subprocess.Popen[str], *, timeout: float = 1.0) -> None:
++def _wait_for_process_exit(process: subprocess.Popen[bytes], *, timeout: float = 1.0) -> None:
+     try:
+         process.wait(timeout=timeout)
+         return
+@@ -803,172 +939,152 @@
+         pass
+ 
+ 
++def _data_operation(store, request, frame):
++    """Explicit per-game checkpoints. Validate completely before replacing a key."""
++    operation = request.get("operation")
++    if operation == "list":
++        return {key: {k: v for k, v in record.items() if k != "value"}
++                for key, record in store.items()}
++    name = request.get("name")
++    if not isinstance(name, str) or not name or len(name) > 80:
++        raise ValueError("Saved data names must be nonempty strings of at most 80 characters")
++    if operation == "load":
++        if name not in store:
++            raise ValueError("No saved data named " + name)
++        return deepcopy(store[name])
++    if operation == "delete":
++        return store.pop(name, None) is not None
++    if operation != "save":
++        raise ValueError("Unknown saved data operation")
++    value = request.get("value")
++    encoded = json.dumps(value, allow_nan=False).encode("utf-8")
++    if len(encoded) > 262144:
++        raise ValueError("Saved item exceeds 256 KiB")
++    if name not in store and len(store) >= 64:
++        raise ValueError("Saved data has 64 items; delete an unused item first")
++    total = sum(item["bytes"] for key, item in store.items() if key != name) + len(encoded)
++    if total > 1048576:
++        raise ValueError("Saved data exceeds 1 MiB; delete unused items first")
++    record = {"value": json.loads(encoded), "saved_step": frame.get("step"),
++              "saved_level": frame.get("level"), "bytes": len(encoded)}
++    store[name] = record
++    return {k: v for k, v in record.items() if k != "value"}
++
++
+ def run_sandboxed_python(
+-    *,
+-    code: str,
+-    timeout_seconds: int,
+-    initial_state: dict[str, Any],
++    *, code: str, timeout_seconds: float, initial_state: dict[str, Any],
+     action_handler: Callable[..., dict[str, Any]],
+-    animation_handler: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
++    animation_handler: Callable[[dict[str, Any]], Any] | None = None,
+     kept_functions: list[str] | None = None,
+-    retain_imports: bool = False,
+-    repair_hints: bool = False,
++    retain_imports: bool = False, repair_hints: bool = False,
++    saved_data: dict[str, Any] | None = None,
+ ) -> dict[str, Any]:
++    """Bound pipe I/O and always reap the child; host receipts are authoritative.
++
++    The synchronous environment callback must enforce its own game deadline.
++    Interrupting an in-flight engine mutation in another thread is not safe.
++    """
+     with tempfile.TemporaryDirectory(prefix="rgb_python_tool_") as sandbox_dir:
+-        host_action_results: list[dict[str, Any]] = []
++        data_store = saved_data if saved_data is not None else {}
++        observed_frame = initial_state.get("current_frame") or {}
++        receipts: list[dict[str, Any]] = []
++        def failed(error, **extra):
++            # No retention snapshot means rollback to previously committed code.
++            return {"error": error, "stdout": "", "action_results": receipts, **extra}
+         try:
+             process = subprocess.Popen(
+                 [sys.executable, "-I", "-S", "-c", _SANDBOX_BOOTSTRAP],
+-                stdin=subprocess.PIPE,
+-                stdout=subprocess.PIPE,
+-                stderr=subprocess.PIPE,
+-                text=True,
+-                encoding="utf-8",
+-                cwd=sandbox_dir,
+-                env=_sandbox_env(),
+-                start_new_session=True,
++                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
++                bufsize=0, cwd=sandbox_dir, env=_sandbox_env(), start_new_session=True,
+             )
+         except OSError:
+-            return {
+-                "error": "Sandbox process could not start.",
+-                "stdout": "",
+-                "action_results": [],
+-            }
+-        assert process.stdin is not None
+-        assert process.stdout is not None
+-        assert process.stderr is not None
+-
+-        stdout_queue: queue.Queue[str | None] = queue.Queue()
+-
+-        def _stdout_reader() -> None:
+-            for raw_line in process.stdout:
+-                stdout_queue.put(raw_line)
+-            stdout_queue.put(None)
+-
+-        threading.Thread(target=_stdout_reader, daemon=True).start()
+-
+-        _send_json_line(
+-            process.stdin,
+-            {
+-                "code": code,
+-                "kept_functions": list(kept_functions or []),
+-                "persistence_enabled": kept_functions is not None,
+-                "retain_imports": retain_imports,
+-                "repair_hints": repair_hints,
+-                "animation_enabled": animation_handler is not None,
+-                "timeout_seconds": timeout_seconds,
+-                "sandbox_cwd": sandbox_dir,
+-                "state": initial_state,
+-                "color_chars": ARC_COLOR_CHARS,
+-            },
+-        )
+-
+-        deadline = time.monotonic() + max(1, int(timeout_seconds))
+-        while True:
+-            remaining = deadline - time.monotonic()
+-            if remaining <= 0:
+-                _kill_process_group(process)
+-                _wait_for_process_exit(process)
+-                return {
+-                    "error": f"Tool timed out after {timeout_seconds}s",
+-                    "stdout": "",
+-                    "action_results": list(host_action_results),
+-                }
+-
+-            try:
+-                line = stdout_queue.get(timeout=remaining)
+-            except queue.Empty:
+-                continue
+-            if line is None:
+-                stderr = process.stderr.read()
+-                _wait_for_process_exit(process)
+-                return {
+-                    "error": _sanitize_host_error_text(stderr),
+-                    "stdout": "",
+-                    "action_results": list(host_action_results),
+-                }
+-
+-            try:
+-                message = json.loads(line)
+-            except json.JSONDecodeError:
+-                stderr = process.stderr.read()
+-                _kill_process_group(process)
+-                _wait_for_process_exit(process)
+-                return {
+-                    "error": "Sandbox process returned an invalid response.",
+-                    "stdout": "",
+-                    "action_results": list(host_action_results),
+-                }
+-
+-            msg_type = str(message.get("type", "")).strip()
+-            if msg_type == "animation":
+-                if animation_handler is None:
+-                    _send_json_line(
+-                        process.stdin,
+-                        {"type": "animation_error",
+-                         "error": "Animation frames are not available in this session."},
+-                    )
++            return failed("Sandbox process could not start.")
++        try:
++            deadline = time.monotonic() + max(0.0, float(timeout_seconds))
++            os.set_blocking(process.stdin.fileno(), False)
++            os.set_blocking(process.stdout.fileno(), False)
++            def send(payload):
++                _send_json_line(process.stdin, payload, deadline=deadline)
++            send({"code": code, "kept_functions": list(kept_functions or []),
++                  "persistence_enabled": kept_functions is not None,
++                  "retain_imports": retain_imports, "repair_hints": repair_hints,
++                  "animation_enabled": animation_handler is not None,
++                  "timeout_seconds": timeout_seconds, "sandbox_cwd": sandbox_dir,
++                  "state": initial_state, "color_chars": ARC_COLOR_CHARS})
++            pending = bytearray()
++            while True:
++                if time.monotonic() >= deadline:
++                    raise TimeoutError
++                line = _read_sandbox_stdout(process.stdout, pending, deadline=deadline)
++                if line is None:
++                    return failed("Sandbox process exited unexpectedly.")
++                try:
++                    message = json.loads(line)
++                    if not isinstance(message, dict):
++                        raise ValueError("Expected a protocol object")
++                except (ValueError, UnicodeDecodeError):
++                    return failed("Sandbox process returned an invalid response.")
++                kind = str(message.get("type", "")).strip()
++                if kind == "data":
++                    try:
++                        result = _data_operation(data_store, message, observed_frame)
++                    except (ValueError, TypeError, KeyError, RecursionError) as exc:
++                        send({"type": "data_result", "error": str(exc)})
++                    else:
++                        send({"type": "data_result", "result": result})
+                     continue
+-                try:
+-                    animation_payload = animation_handler(dict(message.get("request") or {}))
+-                except Exception:  # noqa: BLE001
+-                    _send_json_line(
+-                        process.stdin,
+-                        {"type": "animation_error",
+-                         "error": "animation failed in sandbox host."},
+-                    )
++                if kind == "animation":
++                    if animation_handler is None:
++                        send({"type": "animation_error", "error": "Animation frames are not available in this session."})
++                        continue
++                    try:
++                        payload = animation_handler(dict(message.get("request") or {}))
++                    except Exception:
++                        send({"type": "animation_error", "error": "animation failed in sandbox host."})
++                    else:
++                        send({"type": "animation_result", "animation": payload})
+                     continue
+-                _send_json_line(
+-                    process.stdin,
+-                    {"type": "animation_result", "animation": animation_payload},
+-                )
+-                continue
+-            if msg_type == "action":
+-                try:
+-                    # the message carries more than the action list: stale_after
+-                    # tells the solver a previous action in this snippet changed
+-                    # nothing, which it weighs after its own guards
+-                    action_result_payload = action_handler(
+-                        list(message.get("actions") or []),
+-                        stale_after=message.get("stale_after"),
+-                    )
+-                except Exception:  # noqa: BLE001
+-                    _send_json_line(
+-                        process.stdin,
+-                        {
+-                            "type": "action_error",
+-                            "error": "action failed in sandbox host.",
+-                        },
+-                    )
++                if kind == "action":
++                    try:
++                        payload = action_handler(list(message.get("actions") or []),
++                                                 stale_after=message.get("stale_after"))
++                    except Exception:
++                        send({"type": "action_error", "error": "action failed in sandbox host."})
++                        continue
++                    receipt = payload.get("action_result") or {}
++                    observed_frame = (payload.get("state") or {}).get("current_frame") or observed_frame
++                    if isinstance(receipt, dict):
++                        owned = deepcopy(receipt)
++                        # Already printed inside action(); do not echo it twice.
++                        owned.pop("action_echo", None)
++                        receipts.append(owned)
++                    send({"type": "action_result", "action_result": receipt,
++                          "state": payload.get("state") or {}})
+                     continue
+-                raw_action_result = action_result_payload.get("action_result") or {}
+-                if isinstance(raw_action_result, dict):
+-                    host_action_results.append(dict(raw_action_result))
+-                _send_json_line(
+-                    process.stdin,
+-                    {
+-                        "type": "action_result",
+-                        "action_result": raw_action_result,
+-                        "state": action_result_payload.get("state") or {},
+-                    },
+-                )
+-                continue
+-
+-            if msg_type in {"final", "error"}:
+-                _wait_for_process_exit(process)
+-                return {
+-                    "stdout": str(message.get("stdout", "") or ""),
+-                    "result": message.get("result"),
+-                    "error": str(message.get("error", "") or ""),
+-                    "action_results": list(message.get("action_results") or host_action_results),
+-                    "keepable_functions": list(message.get("keepable_functions") or []),
+-                    **({"retention_rejected": message.get("retention_rejected", [])}
+-                       if kept_functions is not None else {}),
+-                }
+-
++                if kind in {"final", "error"}:
++                    return {"stdout": str(message.get("stdout") or ""),
++                            "result": message.get("result"), "error": str(message.get("error") or ""),
++                            "action_results": receipts,
++                            **({"keepable_functions": list(message["keepable_functions"] or [])}
++                               if "keepable_functions" in message else {}),
++                            **({"retention_rejected": message.get("retention_rejected", [])}
++                               if kept_functions is not None else {})}
++                return failed("Sandbox process returned an unknown message type.")
++        except TimeoutError:
++            return failed(f"Tool timed out after {timeout_seconds}s", timed_out=True)
++        except (BrokenPipeError, ConnectionResetError):
++            return failed("Sandbox process disconnected before the tool finished.")
++        finally:
++            _kill_process_group(process)
+             _wait_for_process_exit(process)
+-            return {
+-                "error": "Sandbox process returned an unknown message type.",
+-                "stdout": "",
+-                "action_results": list(host_action_results),
+-            }
++            # Keep crash diagnostics without ever blocking on an open stderr pipe.
++            if process.stderr is not None:
++                with suppress(OSError):
++                    os.set_blocking(process.stderr.fileno(), False)
++                    detail = os.read(process.stderr.fileno(), 4000).decode("utf-8", errors="replace")
++                    if detail.strip():
++                        log.warning("sandbox stderr: %s", detail)
++            for stream in (process.stdin, process.stdout, process.stderr):
++                if stream is not None:
++                    with suppress(OSError):
++                        stream.close()
+--- a/ARC3-Inference/inference/agent/runtime_state.py
++++ b/ARC3-Inference/inference/agent/runtime_state.py
+@@ -1,8 +1,9 @@
++# Modified for M2 basics, 2026-10-01. See solvers/m2_basics/NOTICE.md and candidate.patch.
+ """Structured runtime state shared with created Python tools."""
+ from __future__ import annotations
+ 
+ import json
+-from dataclasses import dataclass, field
++from dataclasses import dataclass, field, replace
+ from pathlib import Path
+ from typing import Any
+ 
+@@ -43,6 +44,18 @@
+     action: str
+     frame: Frame
+     result: dict[str, Any] = field(default_factory=dict)
++    animation: dict[str, Any] = field(default_factory=dict)
++
++
++def append_history_entry(history: list[HistoryEntry], entry: HistoryEntry,
++                         *, keep_animations: int = 8) -> None:
++    """Retain bounded animation data, keeping eviction distinct from no animation."""
++    history.append(entry)
++    animated = [i for i, item in enumerate(history) if getattr(item, "animation", {}).get("frames")]
++    for index in animated[:max(0, len(animated) - keep_animations)]:
++        old = history[index]
++        history[index] = replace(old, animation={**old.animation, "frames": [],
++                                               "indices": [], "retained": False})
+ 
+ 
+ def normalize_grid(raw: Any) -> tuple[tuple[int, ...], ...]:
+@@ -99,6 +112,7 @@
+     return HistoryEntry(
+         action=str(payload.get("action", "")).strip(), frame=frame,
+         result=dict(payload["result"]) if isinstance(payload.get("result"), dict) else {},
++        animation=dict(payload["animation"]) if isinstance(payload.get("animation"), dict) else {},
+     )
+ 
+ 
+@@ -107,6 +121,7 @@
+         "action": entry.action,
+         "frame": frame_to_payload(entry.frame),
+         "result": dict(getattr(entry, "result", {}) or {}),
++        "animation": dict(getattr(entry, "animation", {}) or {}),
+     }
+ 
+ 
+--- a/ARC3-Inference/inference/agent/tool_agent.py
++++ b/ARC3-Inference/inference/agent/tool_agent.py
+@@ -1,3 +1,4 @@
++# Modified for M2 basics, 2026-10-01. See solvers/m2_basics/NOTICE.md and candidate.patch.
+ """Direct OpenAI-compatible tool-calling analyzer for ARC puzzle runs."""
+ from __future__ import annotations
+ 
+@@ -364,7 +365,7 @@
+     """Rendering for a step summary carried over from an earlier exchange of
+     the same turn. States that explicitly instead of re-narrating the old
+     outcome as if it had just happened. Two ways a turn can reach here:
+-    a snippet ran and executed nothing (default wording), or the exchange
++    a Python call executed no game actions (default wording), or the exchange
+     produced no tool call at all (stale_reason='no_tool_call') - in which case
+     claiming a snippet ran would be false."""
+     if summary.get("stale_reason") == "no_tool_call":
+@@ -374,8 +375,7 @@
+         ]
+     else:
+         lines = [
+-            "Your last python snippet executed NO actions (it only computed or "
+-            "inspected state - that is fine)."
++            "Your previous Python tool call executed no game actions."
+         ]
+     executed_actions = summary.get("executed_actions")
+     rendered = ""
+@@ -2849,6 +2849,7 @@
+         payload.append({
+             "action": entry.action, "frame": frame_payload,
+             "result": dict(getattr(entry, "result", {}) or {}),
++            "animation": dict(getattr(entry, "animation", {}) or {}),
+         })
+     return payload
+ 
+@@ -3606,6 +3607,7 @@
+         runtime_dir = state_path.parent
+         if self._session_runtime_dir != runtime_dir:
+             self._session_runtime_dir = runtime_dir
++            self._python_saved_data = {}
+             self._priority_level_count_warned = False
+             if _persistent_functions():
+                 self._kept_functions = {}
+@@ -4613,6 +4615,13 @@
+ 
+     def _record_retained_functions(self, sandbox_result, payload) -> None:
+         if not _persistent_functions():
++            return
++        if "keepable_functions" not in sandbox_result:
++            payload["function_retention"] = (
++                "No completed retention snapshot was received. Previously retained "
++                "functions are unchanged; definitions or deletions in the interrupted "
++                "call were not committed. Executed game actions were not rolled back."
++            )
+             return
+         try:
+             previous = self._kept_functions
+@@ -5716,6 +5725,11 @@
+ 
+     def _run_python_tool(self, state_path: Path, arguments: dict[str, Any]) -> _ToolDispatchResult:
+         self._ensure_session(state_path)
++        # A tool was invoked even if its code is empty, invalid, or interrupted.
++        # Keep the older action outcome, but describe this exchange accurately.
++        if self._last_step_summary:
++            self._last_step_summary = {**self._last_step_summary, "stale": True}
++            self._last_step_summary.pop("stale_reason", None)
+         code = str(arguments.get("code", "")).rstrip()
+         if not code:
+             return _ToolDispatchResult(json.dumps({"error": "python requires a non-empty `code` string."}, indent=2))
+@@ -5893,6 +5907,8 @@
+         # per snippet: a repeat across snippets is the model choosing, not a
+         # loop failing to converge
+         self._repeat_state_seen.clear()
++        if not hasattr(self, "_python_saved_data"):
++            self._python_saved_data = {}
+         sandbox_result = run_sandboxed_python(
+             code=code,
+             timeout_seconds=self._python_timeout,
+@@ -5902,6 +5918,7 @@
+             kept_functions=self._retained_sources(),
+             retain_imports=_get_env_bool("ARC3_PERSISTENT_FUNCTIONS_IMPORTS", False),
+             repair_hints=_get_env_bool("ARC3_PERSISTENT_FUNCTIONS_REPAIR_HINTS", False),
++            saved_data=self._python_saved_data,
+         )
+ 
+         action_results = [
+@@ -5943,10 +5960,6 @@
+         if step_executed:
+             self._last_step_summary = self._summarize_step_sequence(action_results)
+             self._update_summarized_knowledge_from_step_summary()
+-        elif self._last_step_summary and not self._last_step_summary.get("stale"):
+-            # carried over across an exchange that executed nothing: mark it so
+-            # the next prompt reminds instead of re-narrating it as fresh
+-            self._last_step_summary = {**self._last_step_summary, "stale": True}
+         return _ToolDispatchResult(
+             self._render_tool_payload(payload, truncate_fields=("stdout", "error", "result")),
+             step_executed=step_executed,
+--- a/ARC3-Inference/inference/framework/solver.py
++++ b/ARC3-Inference/inference/framework/solver.py
+@@ -1,3 +1,4 @@
++# Modified for M2 basics, 2026-10-01. See solvers/m2_basics/NOTICE.md and candidate.patch.
+ """TAAF solver adapter for the existing tool-using harness."""
+ 
+ from __future__ import annotations
+@@ -28,6 +29,7 @@
+     collapse_frames,
+     normalize_frames,
+     summarize_animation,
++    history_animation,
+ )
+ from inference.agent.action_names import (
+     reset_exposed,
+@@ -40,6 +42,7 @@
+     HistoryEntry,
+     RUNTIME_STATE_FILENAME,
+     write_runtime_state,
++    append_history_entry,
+ )
+ from inference.agent.tool_agent import (
+     _PRIORITY_UNTRIMMED_BASE,
+@@ -1269,6 +1272,7 @@
+         gameplay_changed = _interior_gameplay_changed(previous_grid, new_grid)
+         no_op = gameplay_changed is False
+         animation_summary = None
++        retained_animation = {}
+         if ANIMATION_ENABLED and action.id.name != "RESET":
+             # The auto-reset after a death runs through here too. Letting it
+             # touch the record would clear the fatal action's animation before
+@@ -1277,6 +1281,7 @@
+             # level and the death exists nowhere else.
+             chain = _animation_chain(previous_grid, new_state)
+             animation_summary = summarize_animation(chain)
++            retained_animation = history_animation(chain)
+             # ONE record, replaced by every executed action - animated or not.
+             # A no-op that animated is the case this exists for, and the guards
+             # refuse the NEXT action without executing it, so the record still
+@@ -1336,8 +1341,9 @@
+             "animation", "automatic",
+         )
+         individual_result = copy.deepcopy({k: payload[k] for k in result_keys if k in payload})
+-        self.history_entries.append(
+-            HistoryEntry(action=action_display, frame=current_frame, result=individual_result)
++        append_history_entry(self.history_entries,
++            HistoryEntry(action=action_display, frame=current_frame, result=individual_result,
++                         animation=retained_animation)
+         )
+         self.write_runtime_state()
+         self._append_action_viewer_event(payload, current_frame)
+--- a/ARC3-Inference/inference/utils/animation.py
++++ b/ARC3-Inference/inference/utils/animation.py
+@@ -1,3 +1,4 @@
++# Modified for M2 basics, 2026-10-01. See solvers/m2_basics/NOTICE.md and candidate.patch.
+ """Animation awareness.
+ 
+ ``arcengine`` renders a frame after every internal ``step()``, so a single
+@@ -36,6 +37,26 @@
+ # was read as "those steps had no changes", the exact inverse.
+ ANIMATION_MAX_CELLS_PER_STEP = 24
+ ANIMATION_MAX_TOTAL_CELLS = 80
++
++
++def history_animation(chain: Sequence[Grid], *, max_frames: int = 32) -> dict[str, Any]:
++    """Bound intermediate evidence per action; record sampling explicitly.
++
++    Inspired by sirikilohit's M111. `chain` includes the pre-action board and
++    the final board, already deduplicated by collapse_frames. Neither endpoint
++    is repeated here because both are available on the transition itself.
++    """
++    count = max(0, len(chain) - 2)
++    if not count:
++        return {}
++    if max_frames < 2:
++        raise ValueError("max_frames must preserve both ends of intermediate evidence")
++    indices = (list(range(1, count + 1)) if count <= max_frames else
++               [1 + round(i * (count - 1) / (max_frames - 1)) for i in range(max_frames)])
++    return {"frames": ["/".join("".join(format(v, "x") for v in row)
++                                for row in chain[i]) for i in indices],
++            "indices": indices, "intermediate_count": count,
++            "sampled": len(indices) < count, "retained": True}
+ 
+ 
+ def normalize_frames(raw_frames: Any) -> list[Grid]:
+--- a/ARC3-Inference/inference/utils/retained_functions.py
++++ b/ARC3-Inference/inference/utils/retained_functions.py
+@@ -1,3 +1,4 @@
++# Modified for M2 basics, 2026-10-01. See solvers/m2_basics/NOTICE.md and candidate.patch.
+ """Conservative source-only function retention; no snippet state is serialized.
+ 
+ Also embedded into the isolated Python runner. Keep this module stdlib-only.
+@@ -281,7 +282,13 @@
+         except Exception:
+             # Validation below produces the specific rejection and prunes callers.
+             pass
+-    kept, invalid = prepare_functions(candidates.values(), available, retain_imports=retain_imports)
++    # A provided NAME is insufficient when snippet code rebound that builtin.
++    # Restoration would otherwise silently give a helper a different dependency.
++    builtin_bindings = namespace.get('__builtins__', {})
++    shadowed = {name for name, value in builtin_bindings.items()
++                if name in namespace and namespace[name] is not value}
++    kept, invalid = prepare_functions(candidates.values(), set(available) - shadowed,
++                                      retain_imports=retain_imports)
+     for item in invalid:
+         missing = item.get('missing_dependencies', [])
+         if not missing:

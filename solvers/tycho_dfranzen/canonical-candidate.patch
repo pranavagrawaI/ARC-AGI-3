@@ -1,0 +1,231 @@
+--- a/tycho_nooa/__init__.py
++++ b/tycho_nooa/__init__.py
+@@ -1,6 +1,11 @@
++# Modified for the Tycho/dfranzen candidate; see canonical-candidate.patch.
+ """Tycho's native workspace-tool flow implemented with NOOA."""
+ 
+-from tycho_nooa.agent import TychoNooaAgent
++def __getattr__(name):
++    if name == 'TychoNooaAgent':
++        from tycho_nooa.agent import TychoNooaAgent
++        return TychoNooaAgent
++    raise AttributeError(name)
+ from tycho_nooa.models import ActionDecision, GameTurn
+ 
+ __all__ = ["ActionDecision", "GameTurn", "TychoNooaAgent"]
+--- a/tycho_nooa/action_batch.py
++++ b/tycho_nooa/action_batch.py
+@@ -1,3 +1,4 @@
++# Modified for the Tycho/dfranzen candidate; see canonical-candidate.patch.
+ """A bounded model-authored action queue released through ordinary host turns."""
+ 
+ from __future__ import annotations
+@@ -116,7 +117,8 @@
+             return "successor_observation_mismatch"
+         if (
+             self.batch.stop_on_no_change
+-            and previous_result.after.grid == previous_result.before.grid
++            and not __import__('hybrid.policy', fromlist=['interior_changed']).interior_changed(
++                previous_result.before.grid, previous_result.after.grid)
+         ):
+             return "previous_action_no_change"
+         return None
+--- a/tycho_nooa/agent.py
++++ b/tycho_nooa/agent.py
+@@ -1,3 +1,4 @@
++# Modified for the Tycho/dfranzen candidate; see canonical-candidate.patch.
+ """The persistent solver: a small NOOA agent over Tycho's exact workspace."""
+ 
+ from __future__ import annotations
+@@ -42,7 +43,7 @@
+     generation_max_tokens,
+     generation_max_tokens_after_initial,
+ )
+-from tycho_nooa.llm_trace import LLMTrace
++from hybrid.policy import HybridLLMTrace as LLMTrace
+ from tycho_nooa.models import (
+     ActionDecision,
+     GameTurn,
+@@ -460,6 +461,7 @@
+             self._record_action_batch_event(
+                 "invalidated", turn, pending, offset=offset, reason=reason
+             )
++            __import__('hybrid.policy', fromlist=['BATCH_STOP']).BATCH_STOP = (offset, reason)
+             self._pending_action_batch = None
+             return None
+         self._record_action_batch_event(
+--- a/tycho_nooa/builder.py
++++ b/tycho_nooa/builder.py
+@@ -1,3 +1,4 @@
++# Modified for the Tycho/dfranzen candidate; see canonical-candidate.patch.
+ """A fresh, bounded NOOA builder over Tycho's exact workspace contract."""
+ 
+ from __future__ import annotations
+@@ -700,6 +701,12 @@
+         return builder
+ 
+ 
++class HybridBuilderDispatch(BuilderStrategy):
++    async def execute(self, runtime, call):
++        from hybrid.builder import HybridBuilderStrategy
++        return await HybridBuilderStrategy().execute(runtime, call)
++
++
+ class FocusedBuilder(Agent, context={"self": None, "state": None}):
+     """One invocation of Tycho's builder prompt through a fresh NOOA history."""
+ 
+@@ -727,7 +734,8 @@
+             report_file=REPORT_FILE,
+             meta_reflect=False,
+         )
+-        super().__init__(llm=llm)
++        from hybrid.policy import unbounded_render
++        super().__init__(llm=llm, truncation=unbounded_render())
+         # Upstream's prompt enumerates run_python's preloads as a closed list -- `grid`, `np`,
+         # `wmlib`, `frames`/`transitions` -- written before `symmetry` existed. Appending is not
+         # optional politeness: an authoritative list that excludes a preload actively tells the
+@@ -813,7 +821,7 @@
+             tool_calls=self._tool_surface.turn_tool_calls(),
+         )
+ 
+-    @strategy(BuilderStrategy())
++    @strategy(HybridBuilderDispatch())
+     async def _construct(
+         self, request: BuilderRequest
+     ) -> tuple[str, bool, bool, bool, bool]: ...
+--- a/tycho_nooa/llm.py
++++ b/tycho_nooa/llm.py
+@@ -1,3 +1,4 @@
++# Modified for the Tycho/dfranzen candidate; see canonical-candidate.patch.
+ """Construct the single NOOA model client used by a game-long worker."""
+ 
+ from __future__ import annotations
+@@ -194,6 +195,8 @@
+     use_responses = env.get(
+         "ARC_LLM_USE_RESPONSES", "1" if "gpt-5" in model.lower() else "0"
+     )
++    overrides['extra_body'] = {**overrides.get('extra_body', {}), 'chat_template_kwargs': {'enable_thinking': True}, 'top_k': 20}
++    overrides['top_p'] = 0.95
+     client_type = "responses" if use_responses == "1" else "completion"
+     return get_llm_client(model, client_type=client_type, **overrides), "live"
+ 
+--- a/tycho_nooa/strategy.py
++++ b/tycho_nooa/strategy.py
+@@ -1,3 +1,4 @@
++# Modified for the Tycho/dfranzen candidate; see canonical-candidate.patch.
+ """A NOOA strategy whose planning language is Tycho's native tool surface."""
+ 
+ from __future__ import annotations
+@@ -188,7 +189,7 @@
+         )
+         return {
+             "strategy_prompt": (
+-                f"{strategy_prompt}\n\n"
++                f"{strategy_prompt}\n\n" + __import__("hybrid.policy", fromlist=["system_guidance"]).system_guidance() + "\n\n"
+                 + actor_world_model_paragraph(
+                     mode.wm_variant,
+                     request_builder_instead_of_invoke=treatment.typed_candidate_goals,
+@@ -217,7 +218,8 @@
+         config = _config_for_sequence(config, turn.sequence)
+         runtime.event_manager.add(
+             Task(
+-                prompt=prompt,
++                prompt=prompt + __import__('hybrid.policy', fromlist=['observation_notes']).observation_notes() + '\nOptional computation: run_python preloads dfr; dfr.segment(grid) supplies connected components with numeric colors. See notes/hybrid_tools.md.',
++                images=__import__('hybrid.policy', fromlist=['actor_images']).actor_images(runtime.agent, turn),
+                 metadata={
+                     ELIDED_OBSERVATION: observation.elided,
+                     OBSERVATION_REF: {
+@@ -232,6 +234,7 @@
+             runtime.event_manager,
+             keep=config.history_keep_turns,
+         )
++        __import__('hybrid.lean', fromlist=['prune_for_decision']).prune_for_decision(runtime.event_manager)
+ 
+         for step in range(config.max_tool_steps):
+             self._update_decision_cue(
+@@ -293,6 +296,8 @@
+         )
+         decision = await self._demand_action(runtime, surface, tools, config)
+         if decision is None:
++            decision = await self._demand_action(runtime, surface, tools, config)
++        if decision is None:
+             raise GenerationError(
+                 f"No action was committed within {config.max_tool_steps} native "
+                 "tool steps, and none was committed when take_actions was the only "
+@@ -351,6 +356,7 @@
+         generation_options: dict[str, Any] = {}
+         if config.action_demand_disable_thinking:
+             generation_options["extra_body"] = {
++                "top_k": 20,
+                 "chat_template_kwargs": {"enable_thinking": False}
+             }
+         response, event_id = await runtime.generate(
+--- a/tycho_nooa/treatments.py
++++ b/tycho_nooa/treatments.py
+@@ -1,3 +1,4 @@
++# Modified for the Tycho/dfranzen candidate; see canonical-candidate.patch.
+ """Explicit local treatments layered over Tycho's frozen source modes."""
+ 
+ from __future__ import annotations
+@@ -75,6 +76,10 @@
+         DECISION_DISCIPLINE,
+         decision_discipline=True,
+     ),
++    "no_scribe": TreatmentPolicy("no_scribe",
++        level_boundary_policy=DETERMINISTIC_LEVEL_CHECKPOINT),
++    **__import__('hybrid.lean', fromlist=['treatment_policies']).treatment_policies(
++        TreatmentPolicy, DETERMINISTIC_LEVEL_CHECKPOINT),
+     SINGLE_DECISION_DISCIPLINE: TreatmentPolicy(
+         SINGLE_DECISION_DISCIPLINE,
+         decision_discipline=True,
+--- a/tycho_nooa/wm_probe.py
++++ b/tycho_nooa/wm_probe.py
+@@ -1,3 +1,4 @@
++# Modified for the Tycho/dfranzen candidate; see canonical-candidate.patch.
+ """Tycho's world-model feedback probe, with a goal-satisfiability gate spliced in.
+ 
+ Adaptation of Tycho's `wm_feedback_probe.py.tmpl` (pinned; see PROVENANCE.md).
+@@ -276,7 +277,8 @@
+     generated_source: Path | None = None,
+ ) -> list[str]:
+     venv = Path(sys.prefix).resolve(strict=True)
+-    directories = _mount_parent_directories(workspace, venv)
++    base_python = Path(sys.base_prefix).resolve(strict=True)
++    directories = _mount_parent_directories(workspace, venv, base_python)
+     mounts = [
+         argument
+         for path in protected_paths
+@@ -326,6 +328,9 @@
+         "--ro-bind",
+         str(venv),
+         str(venv),
++        "--ro-bind",
++        str(base_python),
++        str(base_python),
+         "--dev",
+         "/dev",
+         "--proc",
+@@ -398,6 +403,7 @@
+     # model has to remember to import is a helper it does not use; the guards also preserve
+     # exact historical runtimes that predate one of the current modules.
+     _PREAMBLE = ToolExecutor._PREAMBLE + (
++        "import dfranzen_helpers as dfr\n"
+         "try:\n"
+         "    import symmetry\n"
+         "except Exception:\n"
+--- a/tycho_nooa/worker.py
++++ b/tycho_nooa/worker.py
+@@ -1,3 +1,4 @@
++# Modified for the Tycho/dfranzen candidate; see canonical-candidate.patch.
+ """Serve one persistent Tycho-NOOA agent over the ARC-host protocol."""
+ 
+ from __future__ import annotations
+@@ -10,7 +11,7 @@
+ from typing import Any, TextIO
+ 
+ from tycho_nooa.action_batch import MAX_ACTIONS_PER_BATCH
+-from tycho_nooa.agent import TychoNooaAgent
++from hybrid.agent import HybridAgent as TychoNooaAgent
+ from tycho_nooa.llm import (
+     build_llm,
+     generation_action_demand_disable_thinking,

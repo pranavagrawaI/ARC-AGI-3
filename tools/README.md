@@ -1,5 +1,74 @@
 # Tools
 
+## Milestone 2 notebook intake
+
+`milestone2_intake.py` pulls a public Kaggle notebook, inventories its declared
+inputs and visible dependencies, compares its executable cells and runtime
+settings with the Duck, and writes a local private kernel copy. It uses Python's
+standard library plus the authenticated `kaggle` CLI (verified with 2.2.4).
+
+```bash
+python3 tools/milestone2_intake.py OWNER/NOTEBOOK --owner YOUR_KAGGLE_USERNAME
+```
+
+`--owner` defaults to `KAGGLE_USERNAME` or the username in `kaggle.json`.
+The notebook can also be a `https://www.kaggle.com/code/OWNER/NOTEBOOK` URL or
+`OWNER/NOTEBOOK/VERSION`. Query-string version IDs are rejected because they
+are not the same as version numbers. The default comparison is Jeroen Cottaar's
+public June 30 milestone-winning Duck notebook; use `--duck OWNER/NOTEBOOK/VERSION`
+to select a different baseline, including an accessible private incumbent.
+
+Each run creates a new directory under `runs/milestone2-intake/`:
+
+- `candidate/`, `duck/`: exact pulled notebook and metadata bytes.
+- `REPORT.md`, `intake.json`: attachments, imports, install commands, input paths,
+  URLs, secret names, environment lookups, external-code loads, settings changes,
+  provenance and SHA-256 hashes. Imports are module names, not pip requirements.
+- `code.diff`, `settings.diff`: executable cells without outputs, and runtime/input
+  differences. This is a notebook comparison; code inside attached bundles is not diffed.
+- `kernel/`: the private copy and `kernel-metadata.json`, with the donor's numeric
+  `id_no` removed, a new owner/slug and matching title, explicit privacy and runtime
+  flags, preserved input mounts and Docker image, and repaired Python kernelspec
+  and unique cell IDs. Executable cell text is unchanged.
+
+Kaggle's [metadata contract](https://github.com/Kaggle/kaggle-cli/blob/main/docs/kernels_metadata.md)
+gives `id_no` precedence over `id`. The script removes it and preserves
+`machine_shape`, also naming the accelerator in the report's commit command.
+An available Docker image is retained with `docker_image_pinning_type=original`.
+All settings changes are recorded. Internet access is preserved from the donor;
+use `--internet off` or `--internet on` for an explicit override. Missing or
+contradictory accelerator settings block the suggested command; use
+`--accelerator NvidiaRtxPro6000` (or the appropriate Kaggle machine name).
+
+Use `--output NEW_DIRECTORY` and `--slug NEW_PRIVATE_SLUG` to choose names.
+Existing output directories and original kernel IDs are refused. `--timeout SECONDS`
+adds a session limit to the suggested commit command; otherwise the tool does not
+change Kaggle's timeout. The generated default slug is unique; a manually chosen
+slug could refer to an existing kernel, so check it before committing.
+
+For offline reinspection, provide both `--source-dir PULLED_CANDIDATE` and
+`--duck-dir PULLED_DUCK`. Each directory must contain `kernel-metadata.json` and
+its `code_file`, with identity matching the corresponding notebook argument.
+
+The tool **never executes notebook code, installs its dependencies, downloads
+weights, pushes a kernel, or submits to the competition**. The report prints the
+later commit command. A prepared copy is not a verified run: attachment access,
+competition consent, secrets, GPU availability/quota and runtime success still
+need checking. Dataset references may be unversioned; notebook hashes do not pin
+their contents. Inspection covers Python notebooks/scripts only, with explicit
+gaps for dynamic code and unparsed cells.
+
+Exit codes: `0` prepared but unexecuted, `2` report written with configuration
+blockers, `1` intake failure (partial pulls and `ERROR.json` are retained).
+
+```bash
+python3 -m unittest discover -s tools/tests -p test_milestone2_intake.py -v
+```
+
+Run the same tests with the Python environment containing `kaggle` and `nbformat`
+to include real Kaggle request projection and Jupyter schema validation. The
+projection test intercepts the network boundary; no kernel is launched.
+
 ## Failure-atlas packets and offline branch replay
 
 `failure_atlas.py` converts a preserved Tycho-NOOA run into physically separate

@@ -1,0 +1,49 @@
+# Trial16: candidate-alone S10 workload screen — UNASSIGNED
+
+Question: can the exact candidate load and complete the unchanged full1500s production wire window before any control workload? This changes the order/contrast from trials14–15. It cannot identify a cache, memory, NFS, scheduler or loader mechanism, and supplies no paired or historical-rate comparison. No control continuation or reverse handoff exists.
+
+One proposed push, one candidate model load, <=1369 immutable request bodies, <=10 concurrent HTTP requests. Keep the exact catalogue, FIFO/handover behavior, full images, production rendering, full replies, candidate package/loader/cache/flags,600s warmup+900s measurement and1800s startup. No functional extra cases, retry, replay repetition, loader/format/cache intervention, threshold fit, adoption or1.20 decision.
+
+## Decision and invalidity
+
+`CANDIDATE_ALONE_WORKLOAD_FEASIBLE`: full within-arm API/source/window/load/accounting gates, raw host/OOM and independent final resource/ownership/deadline/collection checks pass. Report descriptive `U_resp` only, with aggregate image-accounting and offered-load limitations. No historical comparison or safe peak margin.
+
+`CLOSE_TESTED_BOUNDED_CONFIGURATION`: a complete source/identity/raw-evidence-bound substantive startup-cap, HTTP/API, OOM or within-arm window failure. This closes only this bounded configuration. OOM must be observed after candidate preparation begins; shared cgroup attribution remains unresolved. No automatic retry.
+
+`INVALID_INCONCLUSIVE`: missing/malformed measurements, raw persistence/provenance/collection failure, ambiguous identity, unknown error, unsafe/incomplete cleanup or lateness. A server that disappears before its actual entry/group can be safely bound may conservatively remain inconclusive. Load errors with no complete discriminating receipts are not silently called candidate-negative. The runtime refuses a feasible status when a primary exception remains. Full archive and independent offline reduction are required before accepting the descriptive rate; the small primary bundle cannot qualify it.
+
+## Final resources
+
+After candidate replay/qualification, perform existing targeted whole-group cleanup and the first accepted five-probe observation under ONE absolute end `min(work_end, cleanup_start+180)`. Validate actual replay PGID/starttime/boot/session/GPU against the owned candidate binding and cleanup trace. Preserve query pidfd containment, unknown/reused identity rejection, all fixed ownership and cooperative deadline gates. No native shipping-control graceful marker/proxy and no next-load admission.
+
+Binding predicates: GPU<=2048MiB, empty apps, port8001 explicitly bindable with reuseaddr, /tmp free>=100GiB, complete stable measured cgroup/raw formula, no retained candidate/replay/query/phase ownership, valid OOM evidence without increase for feasibility. Original140GiB is independently computed/reported UNCHANGED, including false, and is NOT an eligibility/pass condition. No active_file credit or cache clearing. Malformed/missing host/OOM invalidates claims; observed OOM is a substantive bounded failure only with sufficient source/lifecycle/cleanup evidence.
+
+## Executable cap reconciliation
+
+Hardware/query30; exact-body preparation240; candidate prepare480; identity120; startup1800; replay/cutoff1510; within-arm reducer60; shared candidate cleanup+resources180; final verification60; observer/diagnostic transitions60; primary publication60 =4600s. Add200 work slack ->4800 work;300 emergency cleanup ->5100 cooperative;300 platform slack ->5400 platform. Every work phase is capped by the original work end. Child cleanup overhead consumes available work/slack; it cannot extend work. A phase missing its local or work deadline cannot qualify, even when emergency cleanup later succeeds. These are ceilings, not a promise all worst cases fit if kernel calls overrun. No hard syscall-bound claim.
+
+## Evidence and collection
+
+Required existing observer is controller-owned, bound to actual candidate cgroup/mount/namespaces and raw input identities,0.5s cadence, <=10201 samples,256MiB series,64KiB/input. Preserve raw current/stat/maximum/meminfo/events, boundaries, process snapshots and available cumulative peak. No peak reset. Samples miss spikes; cumulative peak includes preparation; RSS/HWM includes shared pages and incomplete/disappearing processes; visible cgroup scope is namespace-limited. Optional bounded host I/O pressure/cgroup io.stat at10s cadence supports diagnosis only, no causal claim or extra pass gate. Missing optional I/O is explicitly recorded. No new tracing framework.
+
+Runtime writes <=16MiB `000-serving-candidate16-primary.json` outside the large run tree: exact result/supervisor, phase deadlines, configuration/assignment, source hashes, candidate identity/cleanup/resource receipts, raw host boundaries, series hash and raw OOM projection, health inventory and <=2MiB tail per candidate log. Missing/truncated fields are explicit; full series/log/API raw remains required. A publication failure invalidates the runtime result; it cannot silently preserve a passing claim.
+
+Future collection order: exact terminal current source/id/v1/typed quota -> ONE version-labelled first output page and ONE bounded small-primary download -> coordinator primary/cleanup handoff -> ONE version-bound archive -> independent offline reduction. No pagination/retry on primary failure; no duplicate fetch/collector or archive retry after partial/error. First-page primary ordering is intended by its root-level000 name; platform listing/order and version-label behavior remain runtime questions. Current terminal metadata, exact source and embedded assignment/config bind the primary; eventual archive equality is additionally required.
+
+Archive<=2GiB compressed,<=8GiB extracted,<=30000 members; derived<=2GiB. Local space preflight13GiB = simultaneous2archive+8extract+2derived+1reserve; derived stage separately requires3GiB. Point-in-time free space is not reserved against other writers. Full replies could exhaust declared collection bounds; that is an invalid/inconclusive collection outcome, not a candidate-negative. Original archive members remain immutable; derived reports go in fresh separate directories.
+
+Reproduction after a future accepted attempt (paths absolute; no such collection run now):
+
+```
+python collection_tools/primary.py ABS_TERMINAL_READBACK FRESH_PRIMARY
+python collection_tools/archive.py FRESH_ARCHIVE
+python collection_tools/reduce.py ABS_ARCHIVE ABS_TERMINAL_READBACK ABS_PRIMARY FRESH_DERIVED
+```
+
+Frozen collection independently rederives actual GPU/apps/cgroup/disk/port values, raw OOM consistency across boundaries/series, actual candidate replay/group/starttime cleanup join and configured final180 end. It checks archive SHA/CRC/extracted bytes/inventory, every payload/config/assignment/source, primary/archive equality, terminal typed quota and runtime/raw verdict equality. Missing/nonterminal typed quota is a separate closure-reporting gap; root alone closes/releases a slot.
+
+## Authority and retained limits
+
+Preparation only. New identity `pranavagrawai/serving-candidate-s10-16-20261024`; no assignment, attempt, API call, GPU, launch, staging or commit. Builder produces unassigned notebook that refuses before extraction; owner launcher requires a fresh new coordinator/owner/freeze/source/config/cap assignment and unchanged fresh-check/final-clearance path. No existing assignment can authorize this packet. Proposed sole60s read-only monitor stops on terminal/API error or attempt+5700s, no owner credential repair or duplicate watcher.
+
+Reconciliation binds closed trial15v1/kernel140466291/ERROR, terminal77433.978/reserved0, exact source/closure/partial handoff, plus original scoped trial5 failed-save predicates. Trial15's archive gap and unidentified slow incomplete loading remain; neither memory nor NFS cause is asserted. Preserve all trials1–15 and their failures, original140 failures, trial14 health-only status, inherited64/65 conservative /proc identity abort (NOT full65 pass), arbitrary high-fd/select limit, remote FD/stack and3.12 patch gap, independent UnsafeIdentity555, and delayed precutoff EOF limitation. Local CPU fixtures prove selected paths only; actual nvidia-smi/seccomp compatibility, GPU engine loading, platform collection and candidate-alone production-window feasibility remain runtime questions.

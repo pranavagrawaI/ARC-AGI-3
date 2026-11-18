@@ -1,0 +1,5 @@
+# R4 receipt-only repair
+
+Preserve r3 and all original mislabeled receipts with CORRECTION.md. Use exact HTTP body/status/safeheaders via the existing per-client response_processor, chain/preserve previous callback and restore it, one quota request. Bound persisted body64KiB and safe metadata, verify exact quota endpoint/method/status/content-type and exact SDK response type, parse wire and join typed total_seconds. SDK reserialization is never authority. Current window total/minimum108000, base/reserved0, refreshOct31; historical77433.978 and5400cap unchanged. Launch before/after and collection share this helper.
+
+Pre-mortem: fixture repeats lossy serializer -> genuine requests.Response/installed _prepare_response/send interception; days/fractions lost -> >24h and fractional exact-wire tests; callback overwritten or extra request -> prior callback+restoration+one-send tests; wrong endpoint/type/corrupt/oversize/missing receipt -> fail closed, retain bounded available evidence; query values change -> retain window/usage/chronology rejection suite. Only focused operational checks/SDK binding. No runtime61/65 rerun, ownerAPI/GPU/assignment/launch/stage/commit.

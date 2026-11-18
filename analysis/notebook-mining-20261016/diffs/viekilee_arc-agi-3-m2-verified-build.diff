@@ -1,0 +1,194 @@
+--- base/cell0
++++ other/cell0
+@@ -0,0 +1,17 @@
++########## harness patch integrity (added) ##########
++# The patch is one ~500 KB cell. Check the bytes that actually landed on disk before the
++# bundle is patched, so a corrupted delivery fails here instead of inside the run.
++# This cell runs before section 1, so it imports everything it needs itself.
++import hashlib
++from pathlib import Path
++
++PATCH_PATH = "/kaggle/harness-changes.patch"
++PATCH_SHA256 = "80aef535ee80970622127f3ee1917e1b127db22ebe07ece40fc8558a63b4484d"
++
++_actual = hashlib.sha256(Path(PATCH_PATH).read_bytes()).hexdigest()
++if _actual != PATCH_SHA256:
++    raise RuntimeError(
++        "harness patch integrity check FAILED: " + PATCH_PATH + "\n"
++        f"  expected sha256 {PATCH_SHA256}\n  actual   sha256 {_actual}"
++    )
++print(f"harness patch ok: {PATCH_PATH} sha256={PATCH_SHA256[:12]}...")
+--- base/cell1
++++ other/cell1
+@@ -136,2 +136,10 @@
+ 
+ os.environ.update({k: str(v) for k,v in setup_env.items()})
++########## run-budget accounting (added) ##########
++# The competition rerun gets nine hours of wall-clock (32400 s). Setup -- patch, installs,
++# SGLang build, model load -- is spent inside that budget, so the play window is whatever
++# remains. The priority scheduler derives its shared deadline, and the length of its
++# tail-fade phase, from that play window (section 7 sets it). These constants make the
++# accounting explicit instead of assuming a fixed setup cost.
++NOTEBOOK_BUDGET_S = 32400.0    # Kaggle competition rerun budget (9 h)
++KAGGLE_KILL_RESERVE_S = 120.0  # keep the harness's own shutdown inside the window
+--- base/cell2
++++ other/cell2
+@@ -0,0 +1,81 @@
++########## preflight: fail in seconds, not after nine hours (added) ##########
++# Checks every attached input before any of the expensive work starts. A missing or
++# empty input used to surface only as a crash deep inside the benchmark.
++import json as _json
++from pathlib import Path as _Path
++
++_preflight = {}
++
++
++def _check(name, path, *, pattern=None, min_matches=1):
++    p = _Path(path)
++    entries = sorted(p.rglob("*")) if p.is_dir() else ([p] if p.is_file() else [])
++    matched = [q for q in entries if pattern is None or q.match(pattern)]
++    _preflight[name] = {
++        "path": str(p),
++        "exists": p.exists(),
++        "entries": len(entries),
++        "matched": len(matched) if pattern else len(entries),
++    }
++    if len(matched) < min_matches:
++        raise RuntimeError(
++            f"preflight FAILED for {name}: {p} exists={p.exists()} "
++            f"entries={len(entries)} matched({pattern})={len(matched)} (need >= {min_matches})"
++        )
++    return p
++
++
++_check("wheelhouse", WHEELHOUSE_DIR, pattern="*.whl")
++# Both model mounts must contain weights, not only a config.
++_check("model", MODEL_DIR, pattern="*.safetensors")
++_check("draft_model", DRAFT_MODEL_DIR, pattern="*.safetensors")
++_check("source_bundle", ORIG_BUNDLE_DIR, pattern="setup_commands.json")
++# The two pickles the benchmark is restored from, and the copied/patched source tree.
++_check("benchmark_pickles", ORIG_BUNDLE_DIR, pattern="*.pkl", min_matches=2)
++_check("patched_sources", _Path(BUNDLE_DIR) / "src" / "ARC3-Inference", pattern="pyproject.toml")
++
++# Marker files added by the harness patch: their presence proves the patch really landed.
++_patch_markers = (
++    "agent/action_names.py",
++    "agent/noop_repeat_guard.py",
++    "agent/priority_scheduler.py",
++    "agent/priority_pace_reference.json",
++    "utils/animation.py",
++    "utils/frame_diff.py",
++    "utils/retained_functions.py",
++)
++_inference = _Path(BUNDLE_DIR) / "src" / "ARC3-Inference" / "inference"
++_missing = [m for m in _patch_markers if not (_inference / m).is_file()]
++if _missing:
++    raise RuntimeError(f"preflight FAILED: harness patch markers missing: {_missing}")
++_preflight["patch_markers"] = {"checked": len(_patch_markers), "missing": []}
++
++# Competition environment files: Kaggle has served this competition from more than one
++# mount layout, so resolve the directory instead of assuming a single path.
++COMPETITION_ENV_DIR = None
++for _candidate in (
++    _Path("/kaggle/input/competitions/arc-prize-2026-arc-agi-3/environment_files"),
++    _Path("/kaggle/input/arc-prize-2026-arc-agi-3/environment_files"),
++):
++    if _candidate.is_dir() and any(_candidate.iterdir()):
++        COMPETITION_ENV_DIR = _candidate
++        break
++if COMPETITION_ENV_DIR is None:
++    # Bounded search: <input>/<x>/environment_files and <input>/<x>/<y>/environment_files.
++    for _pattern in ("*/environment_files", "*/*/environment_files"):
++        _hits = sorted(p for p in _Path("/kaggle/input").glob(_pattern) if p.is_dir())
++        if _hits:
++            COMPETITION_ENV_DIR = _hits[0]
++            break
++if COMPETITION_ENV_DIR is not None:
++    _check("competition_env_dir", COMPETITION_ENV_DIR)
++elif not TRUE_SUBMISSION:
++    _searched = [str(p) for p in sorted(_Path("/kaggle/input").glob("*"))][:20]
++    raise RuntimeError(
++        "preflight FAILED: no competition environment_files directory found. "
++        f"Top-level entries under /kaggle/input: {_searched}"
++    )
++
++print("preflight ok:", _json.dumps(_preflight, indent=1))
++if COMPETITION_ENV_DIR is not None:
++    print("competition environment files:", COMPETITION_ENV_DIR)
+--- base/cell8
++++ other/cell8
+@@ -10,4 +10,16 @@
+ demo_excluded_games = [] if TRUE_SUBMISSION else []
+ 
++# --- validation profile (added) ------------------------------------------------------
++# An interactive "Save & Run" does not go through the competition gateway, so it is the
++# only way to smoke-test the pipeline (patch -> source import -> offline SGLang build ->
++# model load -> priority gate -> guards -> diagnostics) before spending a scored rerun.
++# With the published settings that test costs as much GPU time as a scored rerun (the 25
++# demo games, four passes, full nine-hour budget), which leaves nothing to test with.
++# These two limits shorten it. Set VALIDATION_MINUTES_PER_GAME = 0 to reproduce the
++# published nine-hour demo profile exactly. Never applies to a competition rerun.
++VALIDATION_MINUTES_PER_GAME = 10   # per-game cap for interactive runs; 0 = published settings
++VALIDATION_TOTAL_MINUTES = 40      # hard bound on the whole interactive benchmark
++VALIDATION_SOFT_END = None
++
+ if TRUE_SUBMISSION:  # overrides for contest run
+     bm.solver.save_request_logs = False
+@@ -15,9 +27,34 @@
+     if USE_PRIORITY_SCHEDULING:
+         bm.solver.concurrency = 120  # game count should be 110
+-        bm.solver.max_runtime_s_per_game = 532*60
++        # Deadline from the measured setup cost (change 5). The scheduler takes its
++        # shared deadline, and the length of its tail-fade phase, from this value:
++        # the published 532*60 s assumes a fixed ~8-minute setup and therefore ends
++        # after Kaggle's nine-hour kill, losing the tail of the fade phase and having
++        # the process terminated instead of closed.
++        _elapsed_s = time.time() - NOTEBOOK_START_TIME
++        bm.solver.max_runtime_s_per_game = max(
++            600.0, NOTEBOOK_BUDGET_S - _elapsed_s - KAGGLE_KILL_RESERVE_S
++        )
++        print(
++            f'budget: {_elapsed_s:.0f}s spent on setup; per-game deadline set to '
++            f'{bm.solver.max_runtime_s_per_game:.0f}s so that the fade phase ends '
++            f'{KAGGLE_KILL_RESERVE_S:.0f}s before the {NOTEBOOK_BUDGET_S:.0f}s limit'
++        )
+ else:
+     if USE_PRIORITY_SCHEDULING:
+         bm.solver.concurrency = (25 - len(demo_excluded_games)) * bm.n_passes
+-        bm.solver.max_runtime_s_per_game = 532*60 * bm.solver.concurrency // 110
++        if VALIDATION_MINUTES_PER_GAME:
++            bm.n_passes = 1
++            bm.solver.concurrency = (25 - len(demo_excluded_games)) * bm.n_passes
++            bm.solver.max_runtime_s_per_game = VALIDATION_MINUTES_PER_GAME * 60
++            VALIDATION_SOFT_END = datetime.fromtimestamp(NOTEBOOK_START_TIME) + timedelta(
++                minutes=VALIDATION_TOTAL_MINUTES
++            )
++            print(
++                f'validation profile: one pass, {VALIDATION_MINUTES_PER_GAME} min per game, '
++                f'benchmark bounded to {VALIDATION_TOTAL_MINUTES} min'
++            )
++        else:
++            bm.solver.max_runtime_s_per_game = 532*60 * bm.solver.concurrency // 110
+     if float(getattr(target, 'max_runtime_s', 0.0) or 0.0) != 32400.0:
+         raise RuntimeError(
+--- base/cell10
++++ other/cell10
+@@ -71,6 +71,7 @@
+     # Interactive run: play the bundled competition environments offline (no gateway).
+     # The competition's environment files ship alongside the wheelhouse in the competition dataset.
+-    competition_env_files = str(Path("/kaggle/input/competitions/arc-prize-2026-arc-agi-3/arc_agi_3_wheels").parent / "environment_files")
+-    bm.games = _offline_games(competition_env_files)
++    # COMPETITION_ENV_DIR is resolved by the preflight cell, which tries both of
++    # Kaggle's mount layouts for this competition (see section 7 above).
++    bm.games = _offline_games(str(COMPETITION_ENV_DIR))
+ 
+ # Outside a real submission, stop ~10 min before the wall-clock budget for a graceful exit.
+@@ -80,4 +81,8 @@
+     if budget > 0:
+         soft_end = datetime.fromtimestamp(NOTEBOOK_START_EPOCH) + timedelta(seconds=budget - min(600.0, budget / 2))
++    # Validation runs additionally bound the benchmark (added); never set for a
++    # competition rerun, where VALIDATION_SOFT_END stays None.
++    if VALIDATION_SOFT_END is not None and (soft_end is None or VALIDATION_SOFT_END < soft_end):
++        soft_end = VALIDATION_SOFT_END
+ 
+ # Play the benchmark; teardown commands run even if the run raises.

@@ -1,0 +1,96 @@
+--- a/tests/qualify.py
++++ b/tests/qualify.py
+@@ -247,6 +247,15 @@
+                 'donor_segmentation':[['0',2],['1',2]],'scipy_computation_available':True},indent=2)+'\n')
+ 
+     def test_orchestrator_repairs_executable_prediction_over_http(self):
++        self._orchestrator_fixture()
++
++    def test_builder_stops_repeated_inspection_and_hands_off(self):
++        self._orchestrator_fixture(repeated_inspection=True)
++
++    def test_builder_slow_provider_leaves_time_for_handoff(self):
++        self._orchestrator_fixture(slow_provider=True)
++
++    def _orchestrator_fixture(self, repeated_inspection=False, slow_provider=False):
+         os.environ.pop('TYCHO_NOOA_SCRIPTED_TOOL_CALLS',None)
+         os.environ['TYCHO_MODE']='orchestrator'
+         os.environ['TYCHO_NOOA_TREATMENT']='control'
+@@ -306,12 +315,18 @@
+                     counters['builder']+=1
+                     n=counters['builder']
+                     revision=counters['passes']
+-                    if n==1:
++                    if slow_provider and n==2:
++                        time.sleep(9)
++                    if repeated_inspection and n<=5:
++                        message['tool_calls']=tool('run_python',{'code':"print('inspection without progress')"})
++                    elif n==(6 if repeated_inspection else 1):
+                         message['tool_calls']=tool('write_file',{'path':'world_model.py',
+                             'content':model_template.replace('STEP','2' if revision==1 else '1')})
+-                    elif n==2:
++                    elif n==(7 if repeated_inspection else 2):
+                         message['tool_calls']=tool('write_file',{'path':'notes/world_model.md',
+                             'content':f'Fixture model revision {revision}; step is '+('2' if revision==1 else '1')})
++                    elif repeated_inspection and 'Step budget reached.' not in text:
++                        message['tool_calls']=tool('run_python',{'code':"print('more redundant inspection')"})
+                     else:
+                         message['content']=f'confidence: fixture\nmodel: revision {revision}\nrecommended_action: UP'
+                 reply={'id':'fixture-'+str(len(calls)),'object':'chat.completion','created':0,
+@@ -321,7 +336,10 @@
+                              'prompt_tokens_details':{'cached_tokens':20}}}
+                 wire=json.dumps(reply).encode()
+                 self.send_response(200);self.send_header('Content-Type','application/json')
+-                self.send_header('Content-Length',str(len(wire)));self.end_headers();self.wfile.write(wire)
++                self.send_header('Content-Length',str(len(wire)));self.end_headers()
++                try: self.wfile.write(wire)
++                except BrokenPipeError:
++                    if not slow_provider: raise
+         server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+         thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+         os.environ.update(ARC_LLM_MODEL='flashnext',ARC_LLM_API_KEY='loopback-fixture',
+@@ -331,10 +349,10 @@
+         try:
+             with tempfile.TemporaryDirectory() as directory:
+                 root=Path(directory)
+-                game=ExampleGame(target_sequence_per_level=[[arcengine.GameAction.ACTION1]*3],label='orchestrator-fixture')
++                game=ExampleGame(target_sequence_per_level=[[arcengine.GameAction.ACTION1]*(1 if slow_provider else 3)],label='orchestrator-fixture')
+                 bm=Benchmark(games=[game],job_dir=root,solver=HybridSolver(
+                     worker_python=sys.executable,runtime_root=str(HERE/'runtime'),
+-                    max_runtime_s_per_game=60,max_actions_per_game=3,analyzer_timeout=60))
++                    max_runtime_s_per_game=20 if slow_provider else 60,max_actions_per_game=1 if slow_provider else 3,analyzer_timeout=60))
+                 asyncio.run(bm.run())
+                 self.assertEqual(bm.game_runs[0].state,'won',bm.game_runs[0].solver_note)
+                 game_dir=next((root/'hybrid-games').iterdir())
+@@ -353,6 +371,17 @@
+                     for c in calls for m in c['messages']))
+                 traces=[json.loads(line) for line in (game_dir/'tool-trace.jsonl').read_text().splitlines()]
+                 prospective=[t for t in traces if 'PROSPECTIVE 2' in str(t.get('result'))]
++                if slow_provider:
++                    lifecycle=[json.loads(line) for line in (game_dir/'builder-lifecycle.jsonl').read_text().splitlines()]
++                    self.assertTrue(any(t['phase']=='handoff' for t in lifecycle))
++                    self.assertTrue(any(t['phase']=='end' and t['remaining_seconds']>0 for t in lifecycle))
++                    self.assertEqual(sum(t['name']=='invoke_builder' and t['status']=='complete' for t in traces),1)
++                    self.assertEqual(len((game_dir/'host-actions.jsonl').read_text().splitlines()),1)
++                    receipt=json.loads((game_dir/'execution-receipt.json').read_text())
++                    self.assertTrue(receipt['unresolved_provider_usage'])
++                    self.assertEqual(receipt['usage_reconciliation']['interrupted_builder_calls_unknown_usage'],1)
++                    preserve_fixture(game_dir,'builder-slow-provider',root/'benchmark.json')
++                    return
+                 self.assertEqual(len(prospective),2, traces)
+                 receipts=[json.loads(line) for line in (game_dir/'host-actions.jsonl').read_text().splitlines()]
+                 self.assertEqual(len(receipts),3)
+@@ -364,7 +393,12 @@
+                         and t['sequence']==prediction_trace['sequence'])
+                     self.assertLess(prediction_trace['call_index'],action_trace['call_index'])
+                 self.assertEqual(counters['passes'],2)
+-                self.assertLess(compute['roles']['builder']['calls'],12)
++                self.assertLessEqual(compute['roles']['builder']['calls'],26 if repeated_inspection else 11)
++                if repeated_inspection:
++                    lifecycle=[json.loads(line) for line in (game_dir/'builder-lifecycle.jsonl').read_text().splitlines()]
++                    self.assertEqual(sum(t['phase']=='handoff' for t in lifecycle),2)
++                    self.assertTrue(any(c.get('tool_choice')=='required' for c in calls))
++                    preserve_fixture(game_dir,'builder-lifecycle',root/'benchmark.json')
+                 workspace=Path(json.loads((game_dir/'worker-metadata.json').read_text())['workspace'])
+                 self.assertIn(' + 1', (workspace/'world_model.py').read_text())
+                 preserve_fixture(game_dir,'orchestrator-http',root/'benchmark.json')

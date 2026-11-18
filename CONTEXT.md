@@ -92,6 +92,10 @@ _Avoid_: Fixed exploration policy, verification checklist, information gain alon
 The smallest runnable externalization of an emerging causal explanation that can sharpen a prediction, expose missing state, compare alternatives, or improve a real decision. It is expected to be early, partial, provisional, and disposable; it earns elaboration or survival only through prospective usefulness and contact with public evidence.
 _Avoid_: Complete simulator requirement, retrospective code, polished reconstruction
 
+**Historical Counterexample**:
+A recorded admissible action and observed outcome that contradict a particular prediction of an Executable Conjecture, using only evidence available at the decision under study. It establishes a mismatch within the tested conditions, not the impossibility of an entire approach or the correctness of a subsequent repair.
+_Avoid_: Supplied solution, future observation, proof of general impossibility
+
 **Representation Specification**:
 A provenance-bearing semantic commitment that states how machinery should derive neutral candidate structure from a named admissible evidence frontier. It constrains measurement without asserting which candidates are entities or what roles they play.
 _Avoid_: Perception ground truth, hidden host policy, object ontology

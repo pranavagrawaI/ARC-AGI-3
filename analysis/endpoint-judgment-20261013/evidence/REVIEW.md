@@ -1,0 +1,11 @@
+# Scoped review
+
+Reviewed screen.py, worker.py, audit_inputs.py, audit_fidelity.py, providers.json, ENDPOINTS.md, risk.py and test_screen.py against BRIEF.md. The candidate is new, untracked files in the assigned directory; no shared source or git index change is part of this task.
+
+The requirements pass checked the 40-start manifest, native prompt/tool path, RESET/final-level solve semantics, per-start generated-token cap, resumption, provider identity, local quota persistence, 429 backoff, dry backend, evidence reporting and zero-cost execution scope. The correctness pass traced request reservation through pending receipt, received response, tool execution, replay and summary.
+
+Fixed supported defects during review: native Benchmark copies invalidated instance-bound callbacks, so overrides now bind to the played class instance; screen limits now set the native stop event before converting the halt to a normal analyzer error; unknown-usage and over-budget responses remain withheld on cached replay; standard API-key environment names survive dummy-transport wiring; cached replay compares visible context as well as actions/frame; receipt storage is compressed and duplicate native request logs are disabled. All affected behavioral checks passed.
+
+No supported blocking finding remains in the reviewed contract. Real provider tool/vision compatibility, reported-token semantics, account free eligibility, undisclosed precision, and native arbitrary Python nondeterminism remain unqualified. Context comparison rejects observed replay differences after normalizing named clock fields; it does not silently accept a changed tool observation. UTC caps are per run directory, not a global provider account quota; use one directory and subtract outside usage. Missing provider usage produces no efficiency claim. The operator must verify that a live key/route has no spending authority before using the live CLI.
+
+The offline tests and real-engine dry run establish implementation behavior, not endpoint intelligence or hidden competition score. Failed development evidence is retained in development-runs.tar.gz and verified by development-archive.json. No commit was attempted because .git is outside the user's writable directory.

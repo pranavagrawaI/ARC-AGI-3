@@ -1,0 +1,7 @@
+Local preparation only. No API, assignment, GPU, launch, staging or commits.
+
+Four joins: reversed candidate cleanup/admission/actual dispatch; actual two-arm producer-consumer chronology and source/PID identities; shipping second-control environment/registration/replay/native final release; complete bounded primary/current required-file evidence.
+
+Pre-mortem: stale control-first receipts can appear scientifically valid; reject reversed clocks and cross-arm PID/source substitutions. Freshness may expire while opening phase logs; check immediately at Popen and independently reject actual dispatch >2s. Cleanup can consume work boundary; clip shared180 and reject lateness while preserving emergency cleanup. Repeated OOM raises can destroy diagnostics; preserve bounded finalization with no resumed workload. Delayed publication can leave stale feasible bytes; actual independent result and durable caller completion remain required. Two-arm JSON can exceed16MiB; losslessly compressed envelope has hard encoded/decoded bounds and real-shaped pressure proof. A missing scientific dependency or collection cap excess invalidates rather than choosing convenient artifacts.
+
+Use existing ownership/runtime/science functions. New bootstrap remains unassigned and must refuse before extraction. Changed-path CPU checks do not qualify GPU feasibility or remove inherited64/65 conservative identity-abort limitation.

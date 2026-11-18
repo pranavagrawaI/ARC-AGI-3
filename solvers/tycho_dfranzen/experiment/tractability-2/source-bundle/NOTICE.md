@@ -1,0 +1,5 @@
+This local candidate incorporates source from dfranzen's Milestone 2 notebook and its snapshotted Tufa ARC-AGI Framework and ARC3-Inference bundle. The donor repository carries Apache-2.0; its license is included in LICENSE-APACHE-2.0. Donor Python modules are copied without changes. The notebook is modified to install and run the hybrid adapter, with its Duck viewer replaced by artifact pointers.
+
+Canonical Tycho/Nooa solver modules come from this workspace. Modified snapshot files carry a modification notice and their changes appear in canonical-candidate.patch. The canonical working tree is not overwritten. The pinned Tycho and NOOA dependencies retain their own license files inside their wheels.
+
+The new adapter, tests, build script and component decisions were created locally on 2026-10-02. This notice describes provenance; it does not grant rights to model weights or change any dependency's license. Model and serving datasets retain their original donor references. No artifact has been published or uploaded.

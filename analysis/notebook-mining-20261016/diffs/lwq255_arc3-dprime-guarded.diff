@@ -1,0 +1,1092 @@
+--- base/cell0
++++ other/cell0
+@@ -0,0 +1,102 @@
++# =============================================================================
++# Capability guard (added for submission-only operation)
++# -----------------------------------------------------------------------------
++# ARC-AGI-3 is scored in a "Competition Rerun": Kaggle re-executes this notebook
++# with KAGGLE_IS_COMPETITION_RERUN=1 against the hidden game set on the
++# competition's designated accelerator (RTX PRO 6000, Blackwell SM120).
++#
++# The nine-hour interactive pass is pure overhead here -- we only need the
++# notebook to *complete* and leave a submission.parquet behind so this version
++# can be entered into the competition.  So:
++#
++#   * RUN_FULL is true only inside a real rerun AND only when we are not
++#     positively looking at a too-small GPU (a T4 cannot host the 27B server).
++#     An *inconclusive* probe inside the rerun fails open, because silently
++#     degrading to a placeholder would zero the score with no visible error.
++#     Every expensive cell (SGLang install/serve, benchmark) is gated on it.
++#   * Otherwise the guard writes the same one-row placeholder frame the
++#     upstream notebook writes for an offline run, and the heavy cells no-op.
++# =============================================================================
++import os
++import shutil
++import subprocess
++from pathlib import Path
++
++PLACEHOLDER_ROW = [["1_0", "1", True, 1]]
++PLACEHOLDER_COLS = ["row_id", "game_id", "end_of_game", "score"]
++
++MIN_TARGET_MEM_MB = 40000  # RTX PRO 6000 is 96 GiB; a T4 (15 GiB) is far below
++
++
++def _gpu_probe():
++    """(ok, reason) with ok in {True, False, None}.
++
++    True  -> a >=40 GiB GPU is present (the documented rerun accelerator)
++    False -> we can see GPUs and none of them is big enough
++    None  -> inconclusive (no nvidia-smi, unsupported query, unparsable output)
++    """
++    exe = shutil.which("nvidia-smi")
++    if not exe:
++        return None, "nvidia-smi not found"
++    out = None
++    for fields in ("name,compute_cap,memory.total", "name,memory.total", "name"):
++        try:
++            proc = subprocess.run(
++                [exe, "--query-gpu=" + fields, "--format=csv,noheader,nounits"],
++                capture_output=True, text=True, timeout=60,
++            )
++        except Exception as exc:  # noqa: BLE001
++            return None, f"nvidia-smi raised {exc!r}"
++        if proc.returncode == 0 and proc.stdout.strip():
++            out = proc.stdout.strip()
++            break
++    if out is None:
++        return None, "nvidia-smi query unsupported"
++    biggest = 0.0
++    numeric_tokens = 0
++    names = []
++    for line in out.splitlines():
++        parts = [p.strip() for p in line.split(",")]
++        if not parts or not parts[0]:
++            continue
++        names.append(parts[0])
++        for token in parts[1:]:
++            try:
++                value = float(token)
++            except ValueError:
++                continue
++            numeric_tokens += 1
++            biggest = max(biggest, value)
++    if biggest >= MIN_TARGET_MEM_MB:
++        return True, f"{names[0]} ({biggest:.0f} MiB)"
++    if not names or numeric_tokens == 0:
++        return None, f"unparsable nvidia-smi output: {out[:160]}"
++    return False, f"largest GPU only {biggest:.0f} MiB among {names}"
++
++
++_RERUN = os.environ.get("KAGGLE_IS_COMPETITION_RERUN", "").strip().lower() in {"1", "true"}
++_HW_OK, _HW_WHY = _gpu_probe()
++if _RERUN and _HW_OK is not False:
++    # An inconclusive probe inside the documented rerun must not silently
++    # degrade us to a placeholder submission -- trust the competition
++    # accelerator instead.  We only refuse to run when the hardware is
++    # positively too small (e.g. a T4), where the 27B server cannot fit.
++    if _HW_OK is None:
++        _HW_WHY = f"{_HW_WHY} -> assumed target (rerun)"
++    _HW_OK = True
++RUN_FULL = bool(_RERUN and _HW_OK)
++print(f"[guard] rerun={_RERUN} target_gpu={_HW_OK} ({_HW_WHY}) -> RUN_FULL={RUN_FULL}",
++      flush=True)
++
++if not _RERUN:
++    try:
++        import pandas as pd
++
++        _out = Path("/kaggle/working")
++        _out.mkdir(parents=True, exist_ok=True)
++        pd.DataFrame(PLACEHOLDER_ROW, columns=PLACEHOLDER_COLS).to_parquet(
++            _out / "submission.parquet", index=False,
++        )
++        print(f"[guard] wrote placeholder {_out / 'submission.parquet'}", flush=True)
++    except Exception as exc:  # noqa: BLE001
++        print(f"[guard] placeholder write failed: {exc!r}", flush=True)
+--- base/cell5
++++ other/cell5
+@@ -1,257 +1,258 @@
+-# Paste this entire file into the launcher cell.
+-# Required notebook variables: MODEL_DIR, DRAFT_MODEL_DIR, WHEELHOUSE_DIR,
+-# WORKING_DIR, SERVED_MODEL_NAME, SERVED_MODEL_PORT.
+-# MODEL_DIR: Intel AutoRound INT4 target (BF16 PLE or albucino FP8 PLE).
+-# DRAFT_MODEL_DIR: downloaded albucino runtime/mtp-int4-g32, or its dataset root.
+-import os, sys, glob, time, shutil, subprocess, urllib.request, urllib.error
+-import copy, hashlib, json, re, shlex, socket, zipfile
+-from pathlib import Path
+-
+-PREFIX = "/tmp/sgl-intel"       # Separate from the previous fork's /tmp/sgl venv.
+-LOG = str(Path(WORKING_DIR) / "serve.log")
+-CFG = dict(
+-    CTX=(116+12+8)*1024,
+-    MEMFRAC=0.96,
+-    MAXREQ=10,
+-    CUDAGRAPH_MAXBS=10,
+-    MAMBA_CACHE=60,
+-    CHUNK=8192,
+-    MAX_PREFILL=16384,
+-    SPEC=True,
+-    FRSPEC=True,
+-    AUTOTUNE=True,
+-    # Preserve the original Kaggle checkpoint prefetch/cache behavior.
+-    PREFETCH_CHECKPOINTS=True,
+-    DROP_CACHE_AFTER_LOAD=True,
+-    LINEAR_BACKEND="flashinfer",
+-    KVDTYPE="fp8_e4m3",
+-    SSM_DTYPE="bfloat16",
+-    MAMBA_RADIX="extra_buffer",
+-    GDN_MTP_CACHE_MODE="none",
+-    SERVED_NAME=SERVED_MODEL_NAME,
+-    SPEC_ACCEPT_SINGLE=1.0,
+-    SPEC_ACCEPT_ACC=1.0,
+-    SPEC_STEPS=3,
+-)
+-VENV = f"{PREFIX}/venv"
+-PYTHON = f"{VENV}/bin/python"
+-SGLANG = f"{VENV}/bin/sglang"
+-TOKEN_MAP_SHA = "becfa41d394b86c26c632bea8f3c6ea64bbb76d7b238d8673c06afae21269f25"
+-TOKENIZER_SHA = "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523"
+-EXPERT_TARGET = r"re:^mtp\.layers\.0\.mlp\.experts\.[0-9]+\.(gate_proj|up_proj|down_proj)$"
+-DENSE_IGNORE = r"re:^(?!mtp\.layers\.0\.mlp\.experts(?:\.|$)).*"
+-
+-
+-def run(cmd, *, check=True, env=None):
+-    cmd = list(map(str, cmd))
+-    print("$", shlex.join(cmd))
+-    result = subprocess.run(cmd, text=True, capture_output=True, env=env)
+-    if result.stdout.strip(): print(result.stdout.strip()[-6000:])
+-    if result.stderr.strip() and result.returncode: print(result.stderr.strip()[-6000:])
+-    if check and result.returncode:
+-        raise RuntimeError(f"Command failed ({result.returncode}): {shlex.join(cmd)}")
+-    return result
+-
+-
+-def find_unique(root, name, *, directory=False, required=True):
+-    root = Path(root)
+-    direct = root if root.name == name else root / name
+-    valid = lambda p: p.is_dir() if directory else p.is_file()
+-    if valid(direct): return direct
+-    hits = sorted(p for p in root.rglob(name) if valid(p))
+-    if len(hits) > 1:
+-        raise RuntimeError(f"Multiple {name} matches under {root}; use a more specific directory: {hits}")
+-    if hits: return hits[0]
+-    if required: raise FileNotFoundError(f"{name} not found under {root}")
+-    return None
+-
+-
+-def sha256(path):
+-    h = hashlib.sha256()
+-    with Path(path).open("rb") as f:
+-        for block in iter(lambda: f.read(8*1024*1024), b""): h.update(block)
+-    return h.hexdigest()
+-
+-
+-def indexed_shards(root):
+-    root = Path(root)
+-    index = json.loads((root / "model.safetensors.index.json").read_text())
+-    names = sorted(set(index["weight_map"].values()))
+-    if not names: raise RuntimeError(f"Empty weight index: {root}")
+-    for name in names:
+-        rel = Path(name)
+-        if rel.is_absolute() or ".." in rel.parts:
+-            raise RuntimeError(f"Invalid shard path: {name}")
+-        p = root / rel
+-        if not p.is_file() or p.stat().st_size < 8:
+-            raise RuntimeError(f"Missing/empty shard: {p}")
+-    return index, names
+-
+-
+-def prepare_draft_view(target, source_root, work_root):
+-    """Adapt metadata only; link original dataset weights without copying them."""
+-    target, source_root, work_root = map(Path, (target, source_root, work_root))
+-    configs = [source_root / "config.json"] if (source_root / "config.json").is_file() else []
+-    configs += sorted(p for p in source_root.rglob("config.json") if p not in configs)
+-    candidates = []
+-    for path in configs:
+-        cfg = json.loads(path.read_text())
+-        q = cfg.get("quantization_config", {})
+-        if q.get("quant_method") == "compressed-tensors" and "mtp_routed_experts" in q.get("config_groups", {}):
+-            candidates.append((path.parent, cfg))
+-    if len(candidates) != 1:
+-        raise RuntimeError(f"Expected one INT4 g32 MTP checkpoint under DRAFT_MODEL_DIR={source_root}; found {len(candidates)}")
+-    source, cfg = candidates[0]
+-    index, shards = indexed_shards(source)
+-    if not any(k.startswith("mtp.layers.0.mlp.experts.") for k in index["weight_map"]):
+-        raise RuntimeError("Draft index does not contain the expected MTP experts")
+-    cfg = copy.deepcopy(cfg)
+-    q = cfg["quantization_config"]
+-    group = q["config_groups"]["mtp_routed_experts"]
+-    w = group["weights"]
+-    if (w["num_bits"], w["group_size"], w["symmetric"]) != (4, 32, True):
+-        raise RuntimeError("Expected symmetric INT4 group32 draft experts")
+-    if group["targets"] not in (["RoutedExperts"], [EXPERT_TARGET]):
+-        raise RuntimeError(f"Unexpected draft target rules: {group['targets']}")
+-    if q.get("ignore", []) not in ([], [DENSE_IGNORE]):
+-        raise RuntimeError("Unexpected draft ignore rules")
+-    group["targets"] = [EXPERT_TARGET]
+-    q["ignore"] = [DENSE_IGNORE]
+-    # Content/path-specific directory makes notebook reruns idempotent without
+-    # overwriting an unrelated view. We never modify the read-only datasets.
+-    identity = json.dumps({"source": str(source.resolve()), "target": str(target.resolve()), "config": cfg}, sort_keys=True)
+-    suffix = hashlib.sha256(identity.encode()).hexdigest()[:16]
+-    view = work_root / f"draft-view-{suffix}"
+-    view.mkdir(parents=True, exist_ok=True)
+-    config_path = view / "config.json"
+-    config_text = json.dumps(cfg, indent=2) + "\n"
+-    if config_path.exists() or config_path.is_symlink():
+-        if config_path.is_symlink() or config_path.read_text() != config_text:
+-            raise RuntimeError(f"Unexpected existing draft-view config: {config_path}")
++if RUN_FULL:
++    # Paste this entire file into the launcher cell.
++    # Required notebook variables: MODEL_DIR, DRAFT_MODEL_DIR, WHEELHOUSE_DIR,
++    # WORKING_DIR, SERVED_MODEL_NAME, SERVED_MODEL_PORT.
++    # MODEL_DIR: Intel AutoRound INT4 target (BF16 PLE or albucino FP8 PLE).
++    # DRAFT_MODEL_DIR: downloaded albucino runtime/mtp-int4-g32, or its dataset root.
++    import os, sys, glob, time, shutil, subprocess, urllib.request, urllib.error
++    import copy, hashlib, json, re, shlex, socket, zipfile
++    from pathlib import Path
++
++    PREFIX = "/tmp/sgl-intel"       # Separate from the previous fork's /tmp/sgl venv.
++    LOG = str(Path(WORKING_DIR) / "serve.log")
++    CFG = dict(
++        CTX=(116+12+8)*1024,
++        MEMFRAC=0.96,
++        MAXREQ=10,
++        CUDAGRAPH_MAXBS=10,
++        MAMBA_CACHE=60,
++        CHUNK=8192,
++        MAX_PREFILL=16384,
++        SPEC=True,
++        FRSPEC=True,
++        AUTOTUNE=True,
++        # Preserve the original Kaggle checkpoint prefetch/cache behavior.
++        PREFETCH_CHECKPOINTS=True,
++        DROP_CACHE_AFTER_LOAD=True,
++        LINEAR_BACKEND="flashinfer",
++        KVDTYPE="fp8_e4m3",
++        SSM_DTYPE="bfloat16",
++        MAMBA_RADIX="extra_buffer",
++        GDN_MTP_CACHE_MODE="none",
++        SERVED_NAME=SERVED_MODEL_NAME,
++        SPEC_ACCEPT_SINGLE=1.0,
++        SPEC_ACCEPT_ACC=1.0,
++        SPEC_STEPS=3,
++    )
++    VENV = f"{PREFIX}/venv"
++    PYTHON = f"{VENV}/bin/python"
++    SGLANG = f"{VENV}/bin/sglang"
++    TOKEN_MAP_SHA = "becfa41d394b86c26c632bea8f3c6ea64bbb76d7b238d8673c06afae21269f25"
++    TOKENIZER_SHA = "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523"
++    EXPERT_TARGET = r"re:^mtp\.layers\.0\.mlp\.experts\.[0-9]+\.(gate_proj|up_proj|down_proj)$"
++    DENSE_IGNORE = r"re:^(?!mtp\.layers\.0\.mlp\.experts(?:\.|$)).*"
++
++
++    def run(cmd, *, check=True, env=None):
++        cmd = list(map(str, cmd))
++        print("$", shlex.join(cmd))
++        result = subprocess.run(cmd, text=True, capture_output=True, env=env)
++        if result.stdout.strip(): print(result.stdout.strip()[-6000:])
++        if result.stderr.strip() and result.returncode: print(result.stderr.strip()[-6000:])
++        if check and result.returncode:
++            raise RuntimeError(f"Command failed ({result.returncode}): {shlex.join(cmd)}")
++        return result
++
++
++    def find_unique(root, name, *, directory=False, required=True):
++        root = Path(root)
++        direct = root if root.name == name else root / name
++        valid = lambda p: p.is_dir() if directory else p.is_file()
++        if valid(direct): return direct
++        hits = sorted(p for p in root.rglob(name) if valid(p))
++        if len(hits) > 1:
++            raise RuntimeError(f"Multiple {name} matches under {root}; use a more specific directory: {hits}")
++        if hits: return hits[0]
++        if required: raise FileNotFoundError(f"{name} not found under {root}")
++        return None
++
++
++    def sha256(path):
++        h = hashlib.sha256()
++        with Path(path).open("rb") as f:
++            for block in iter(lambda: f.read(8*1024*1024), b""): h.update(block)
++        return h.hexdigest()
++
++
++    def indexed_shards(root):
++        root = Path(root)
++        index = json.loads((root / "model.safetensors.index.json").read_text())
++        names = sorted(set(index["weight_map"].values()))
++        if not names: raise RuntimeError(f"Empty weight index: {root}")
++        for name in names:
++            rel = Path(name)
++            if rel.is_absolute() or ".." in rel.parts:
++                raise RuntimeError(f"Invalid shard path: {name}")
++            p = root / rel
++            if not p.is_file() or p.stat().st_size < 8:
++                raise RuntimeError(f"Missing/empty shard: {p}")
++        return index, names
++
++
++    def prepare_draft_view(target, source_root, work_root):
++        """Adapt metadata only; link original dataset weights without copying them."""
++        target, source_root, work_root = map(Path, (target, source_root, work_root))
++        configs = [source_root / "config.json"] if (source_root / "config.json").is_file() else []
++        configs += sorted(p for p in source_root.rglob("config.json") if p not in configs)
++        candidates = []
++        for path in configs:
++            cfg = json.loads(path.read_text())
++            q = cfg.get("quantization_config", {})
++            if q.get("quant_method") == "compressed-tensors" and "mtp_routed_experts" in q.get("config_groups", {}):
++                candidates.append((path.parent, cfg))
++        if len(candidates) != 1:
++            raise RuntimeError(f"Expected one INT4 g32 MTP checkpoint under DRAFT_MODEL_DIR={source_root}; found {len(candidates)}")
++        source, cfg = candidates[0]
++        index, shards = indexed_shards(source)
++        if not any(k.startswith("mtp.layers.0.mlp.experts.") for k in index["weight_map"]):
++            raise RuntimeError("Draft index does not contain the expected MTP experts")
++        cfg = copy.deepcopy(cfg)
++        q = cfg["quantization_config"]
++        group = q["config_groups"]["mtp_routed_experts"]
++        w = group["weights"]
++        if (w["num_bits"], w["group_size"], w["symmetric"]) != (4, 32, True):
++            raise RuntimeError("Expected symmetric INT4 group32 draft experts")
++        if group["targets"] not in (["RoutedExperts"], [EXPERT_TARGET]):
++            raise RuntimeError(f"Unexpected draft target rules: {group['targets']}")
++        if q.get("ignore", []) not in ([], [DENSE_IGNORE]):
++            raise RuntimeError("Unexpected draft ignore rules")
++        group["targets"] = [EXPERT_TARGET]
++        q["ignore"] = [DENSE_IGNORE]
++        # Content/path-specific directory makes notebook reruns idempotent without
++        # overwriting an unrelated view. We never modify the read-only datasets.
++        identity = json.dumps({"source": str(source.resolve()), "target": str(target.resolve()), "config": cfg}, sort_keys=True)
++        suffix = hashlib.sha256(identity.encode()).hexdigest()[:16]
++        view = work_root / f"draft-view-{suffix}"
++        view.mkdir(parents=True, exist_ok=True)
++        config_path = view / "config.json"
++        config_text = json.dumps(cfg, indent=2) + "\n"
++        if config_path.exists() or config_path.is_symlink():
++            if config_path.is_symlink() or config_path.read_text() != config_text:
++                raise RuntimeError(f"Unexpected existing draft-view config: {config_path}")
++        else:
++            config_path.write_text(config_text)
++        links = {name: source / name for name in shards}
++        links["model.safetensors.index.json"] = source / "model.safetensors.index.json"
++        for name in ("tokenizer.json", "tokenizer_config.json", "chat_template.jinja", "preprocessor_config.json", "generation_config.json"):
++            if (target / name).is_file(): links[name] = target / name
++        for name, src in links.items():
++            dest = view / name
++            dest.parent.mkdir(parents=True, exist_ok=True)
++            if dest.exists() or dest.is_symlink():
++                if not dest.is_symlink() or dest.resolve() != src.resolve():
++                    raise RuntimeError(f"Unexpected existing draft-view file: {dest}")
++            else:
++                dest.symlink_to(src.resolve())
++        print(f"Draft source: {source}\nSGLang draft view: {view} ({len(shards)} linked weight shards)")
++        return view
++
++
++    # ---- validate notebook inputs / identify the offline bundle ----
++    MODEL_DIR = str(Path(MODEL_DIR).expanduser().resolve())
++    assert Path(MODEL_DIR).is_dir(), f"model dir not found: {MODEL_DIR}"
++    assert CFG["CUDAGRAPH_MAXBS"] >= CFG["MAXREQ"], "CUDAGRAPH_MAXBS must cover MAXREQ"
++    assert CFG["CHUNK"] > 0 and CFG["CHUNK"] % 64 == 0
++    # Refuse to start a second server on an occupied port; do not kill other jobs.
++    with socket.socket() as probe:
++        if probe.connect_ex(("127.0.0.1", int(SERVED_MODEL_PORT))) == 0:
++            raise RuntimeError(f"Port {SERVED_MODEL_PORT} is occupied; stop the existing server before rerunning")
++    Path(PREFIX).mkdir(parents=True, exist_ok=True)
++    Path(LOG).parent.mkdir(parents=True, exist_ok=True)
++    WHEELS = find_unique(WHEELHOUSE_DIR, "wheels", directory=True)
++    LOCK = find_unique(WHEELHOUSE_DIR, "requirements.lock")
++    sglang_wheels = sorted(WHEELS.glob("sglang-*.whl"))
++    assert len(sglang_wheels) == 1, f"Expected one SGLang wheel, found {sglang_wheels}"
++    wheel = sglang_wheels[0]
++    install_marker = Path(PREFIX) / "installed-bundle.txt"
++
++    # ---- one-time offline install, isolated from the old mratsim environment ----
++    install_env = dict(os.environ, UV_OFFLINE="1", UV_PYTHON_DOWNLOADS="never", PYTHONNOUSERSITE="1")
++    install_env.pop("PYTHONPATH", None)
++    if not Path(SGLANG).exists() or not install_marker.is_file():
++        print("=== installing Pennyroyal (offline) ===")
++        # Bootstrap uv directly from its wheel; no global pip changes/ensurepip.
++        uv_wheels = sorted(WHEELS.glob("uv-*.whl"))
++        assert len(uv_wheels) == 1, "Expected one bundled uv wheel"
++        uv_binary = Path(PREFIX) / "bin/uv"
++        uv_binary.parent.mkdir(parents=True, exist_ok=True)
++        with zipfile.ZipFile(uv_wheels[0]) as archive:
++            members = [n for n in archive.namelist() if Path(n).name == "uv" and not n.endswith("/")]
++            assert len(members) == 1, "Cannot identify the Linux uv executable in its wheel"
++            binary = archive.read(members[0])
++            assert binary.startswith(b"\x7fELF"), "Bundled uv executable is not a Linux ELF binary"
++            uv_binary.write_bytes(binary)
++        uv_binary.chmod(0o755)
++        uv = [str(uv_binary)]
++        if not Path(PYTHON).exists():
++            run(uv + ["venv", "--python", sys.executable, VENV], env=install_env)
++        install = uv + ["pip", "install", "--python", PYTHON, "--no-index", "--find-links", str(WHEELS)]
++        run(install + ["-r", str(LOCK)], env=install_env)
++        run(install + ["--reinstall", "--no-deps", str(wheel)], env=install_env)
++        install_marker.write_text('install')
+     else:
+-        config_path.write_text(config_text)
+-    links = {name: source / name for name in shards}
+-    links["model.safetensors.index.json"] = source / "model.safetensors.index.json"
+-    for name in ("tokenizer.json", "tokenizer_config.json", "chat_template.jinja", "preprocessor_config.json", "generation_config.json"):
+-        if (target / name).is_file(): links[name] = target / name
+-    for name, src in links.items():
+-        dest = view / name
+-        dest.parent.mkdir(parents=True, exist_ok=True)
+-        if dest.exists() or dest.is_symlink():
+-            if not dest.is_symlink() or dest.resolve() != src.resolve():
+-                raise RuntimeError(f"Unexpected existing draft-view file: {dest}")
+-        else:
+-            dest.symlink_to(src.resolve())
+-    print(f"Draft source: {source}\nSGLang draft view: {view} ({len(shards)} linked weight shards)")
+-    return view
+-
+-
+-# ---- validate notebook inputs / identify the offline bundle ----
+-MODEL_DIR = str(Path(MODEL_DIR).expanduser().resolve())
+-assert Path(MODEL_DIR).is_dir(), f"model dir not found: {MODEL_DIR}"
+-assert CFG["CUDAGRAPH_MAXBS"] >= CFG["MAXREQ"], "CUDAGRAPH_MAXBS must cover MAXREQ"
+-assert CFG["CHUNK"] > 0 and CFG["CHUNK"] % 64 == 0
+-# Refuse to start a second server on an occupied port; do not kill other jobs.
+-with socket.socket() as probe:
+-    if probe.connect_ex(("127.0.0.1", int(SERVED_MODEL_PORT))) == 0:
+-        raise RuntimeError(f"Port {SERVED_MODEL_PORT} is occupied; stop the existing server before rerunning")
+-Path(PREFIX).mkdir(parents=True, exist_ok=True)
+-Path(LOG).parent.mkdir(parents=True, exist_ok=True)
+-WHEELS = find_unique(WHEELHOUSE_DIR, "wheels", directory=True)
+-LOCK = find_unique(WHEELHOUSE_DIR, "requirements.lock")
+-sglang_wheels = sorted(WHEELS.glob("sglang-*.whl"))
+-assert len(sglang_wheels) == 1, f"Expected one SGLang wheel, found {sglang_wheels}"
+-wheel = sglang_wheels[0]
+-install_marker = Path(PREFIX) / "installed-bundle.txt"
+-
+-# ---- one-time offline install, isolated from the old mratsim environment ----
+-install_env = dict(os.environ, UV_OFFLINE="1", UV_PYTHON_DOWNLOADS="never", PYTHONNOUSERSITE="1")
+-install_env.pop("PYTHONPATH", None)
+-if not Path(SGLANG).exists() or not install_marker.is_file():
+-    print("=== installing Pennyroyal (offline) ===")
+-    # Bootstrap uv directly from its wheel; no global pip changes/ensurepip.
+-    uv_wheels = sorted(WHEELS.glob("uv-*.whl"))
+-    assert len(uv_wheels) == 1, "Expected one bundled uv wheel"
+-    uv_binary = Path(PREFIX) / "bin/uv"
+-    uv_binary.parent.mkdir(parents=True, exist_ok=True)
+-    with zipfile.ZipFile(uv_wheels[0]) as archive:
+-        members = [n for n in archive.namelist() if Path(n).name == "uv" and not n.endswith("/")]
+-        assert len(members) == 1, "Cannot identify the Linux uv executable in its wheel"
+-        binary = archive.read(members[0])
+-        assert binary.startswith(b"\x7fELF"), "Bundled uv executable is not a Linux ELF binary"
+-        uv_binary.write_bytes(binary)
+-    uv_binary.chmod(0o755)
+-    uv = [str(uv_binary)]
+-    if not Path(PYTHON).exists():
+-        run(uv + ["venv", "--python", sys.executable, VENV], env=install_env)
+-    install = uv + ["pip", "install", "--python", PYTHON, "--no-index", "--find-links", str(WHEELS)]
+-    run(install + ["-r", str(LOCK)], env=install_env)
+-    run(install + ["--reinstall", "--no-deps", str(wheel)], env=install_env)
+-    install_marker.write_text('install')
+-else:
+-    print(f"Matching offline bundle already installed at {VENV}")
+-
+-# ---- bundled CUDA toolkit and linker symlinks ----
+-cu13 = sorted(Path(VENV).glob("lib/python*/site-packages/nvidia/cu13"))
+-if not cu13 or not (cu13[0] / "bin/nvcc").is_file():
+-    raise RuntimeError("Bundled CUDA 13 nvcc missing; check that the complete Pennyroyal wheelhouse was uploaded")
+-CUDA_HOME = str(cu13[0])
+-libdir = Path(CUDA_HOME) / "lib"
+-lib64 = Path(CUDA_HOME) / "lib64"
+-if not lib64.exists() and not lib64.is_symlink(): lib64.symlink_to("lib")
+-for so in sorted(libdir.glob("*.so.*")):
+-    link = libdir / re.sub(r"\.so\..*$", ".so", so.name)
+-    if not link.exists() and not link.is_symlink(): link.symlink_to(so.name)
+-assert (libdir / "libcudart.so").exists(), "libcudart.so missing: JIT linker cannot find CUDA runtime"
+-if not (libdir / "libcuda.so").exists():
+-    candidates = []
+-    for directory in ("/usr/local/nvidia/lib64", "/usr/local/nvidia/lib", "/usr/lib/x86_64-linux-gnu", "/usr/lib64"):
+-        candidates += sorted(p for p in Path(directory).glob("libcuda.so*") if p.is_file())
+-    if not candidates:
+-        code = 'import torch; torch.cuda.init(); print(open("/proc/self/maps").read())'
+-        maps = run([PYTHON, "-c", code], env=install_env).stdout
+-        candidates = [Path(p) for p in re.findall(r"(/[^\s]*libcuda\.so[^\s]*)", maps)]
+-    if not candidates: raise RuntimeError("GPU driver libcuda.so not found")
+-    link = libdir / "libcuda.so"
+-    if link.is_symlink(): link.unlink()
+-    link.symlink_to(candidates[0].resolve())
+-CXX = next((c for c in ("g++-15", "g++-14", "g++-13", "g++-12", "g++-11", "g++") if shutil.which(c)), None)
+-assert CXX, "Host C++ compiler not found"
+-CC = CXX.replace("g++", "gcc")
+-assert shutil.which(CC), f"Matching C compiler missing: {CC}"
+-
+-# ---- runtime environment ----
+-env = dict(os.environ)
+-env.pop("PYTHONPATH", None)
+-cache = f"{PREFIX}/cache"
+-for name in ("huggingface", "torch", "torchinductor", "triton", "flashinfer", "cuda", "sglang/jit"):
+-    Path(cache, name).mkdir(parents=True, exist_ok=True)
+-env.update({
+-    "PYTHONNOUSERSITE": "1", "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
+-    "HF_DATASETS_OFFLINE": "1", "UV_OFFLINE": "1", "UV_PYTHON_DOWNLOADS": "never",
+-    "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+-    "CUDA_HOME": CUDA_HOME, "CUDACXX": f"{CUDA_HOME}/bin/nvcc",
+-    "PATH": f"{CUDA_HOME}/bin:{VENV}/bin:" + env.get("PATH", ""),
+-    "LD_LIBRARY_PATH": f"{CUDA_HOME}/lib64:{CUDA_HOME}/lib:" + env.get("LD_LIBRARY_PATH", ""),
+-    "CC": CC, "CXX": CXX, "CUDAHOSTCXX": CXX,
+-    "TORCH_CUDA_ARCH_LIST": "12.0",
+-    "HF_HOME": f"{cache}/huggingface", "XDG_CACHE_HOME": cache,
+-    "TORCH_HOME": f"{cache}/torch", "CUDA_CACHE_PATH": f"{cache}/cuda",
+-    "TORCHINDUCTOR_CACHE_DIR": f"{cache}/torchinductor", "TRITON_CACHE_DIR": f"{cache}/triton",
+-    "FLASHINFER_WORKSPACE_BASE": f"{cache}/flashinfer",
+-    "SGLANG_CACHE_DIR": f"{cache}/sglang", "SGLANG_JIT_CACHE_DIR": f"{cache}/sglang/jit",
+-    "SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN": "1",
+-    "OMP_NUM_THREADS": "8", "MKL_NUM_THREADS": "8", "TOKENIZERS_PARALLELISM": "false",
+-    "MAX_JOBS": "8", "CMAKE_BUILD_PARALLEL_LEVEL": "8",
+-    "FLASHINFER_NINJA_JOBS": "8", "FLASHINFER_NVCC_THREADS": "2", "TORCHINDUCTOR_COMPILE_THREADS": "8",
+-    "SGLANG_ENABLE_SM120_LOWM_BF16_GEMM": "1", "SGLANG_SM120_ONLINE_MXFP8": "0",
+-    "SGLANG_SM120_LOWM_FP8_WEIGHT": "0", "SGLANG_SM120_LM_HEAD_FP8": "0",
+-    "SGLANG_MAMBA_CONV_DTYPE": "bfloat16", "SGLANG_NUMA_BIND_V2": "false",
+-    "SGLANG_MM_PREPROCESS_DEVICE": "cpu", "NUMPY_MADVISE_HUGEPAGE": "0",
+-})
+-run([str(Path(CUDA_HOME) / "bin/nvcc"), "--version"], env=env)
+-print("Host compiler:", CXX)
+-# Report the optional later caching patch. This cell does not modify wheel code.
+-run([PYTHON, "-c", '''import pathlib, sglang, torch
++        print(f"Matching offline bundle already installed at {VENV}")
++
++    # ---- bundled CUDA toolkit and linker symlinks ----
++    cu13 = sorted(Path(VENV).glob("lib/python*/site-packages/nvidia/cu13"))
++    if not cu13 or not (cu13[0] / "bin/nvcc").is_file():
++        raise RuntimeError("Bundled CUDA 13 nvcc missing; check that the complete Pennyroyal wheelhouse was uploaded")
++    CUDA_HOME = str(cu13[0])
++    libdir = Path(CUDA_HOME) / "lib"
++    lib64 = Path(CUDA_HOME) / "lib64"
++    if not lib64.exists() and not lib64.is_symlink(): lib64.symlink_to("lib")
++    for so in sorted(libdir.glob("*.so.*")):
++        link = libdir / re.sub(r"\.so\..*$", ".so", so.name)
++        if not link.exists() and not link.is_symlink(): link.symlink_to(so.name)
++    assert (libdir / "libcudart.so").exists(), "libcudart.so missing: JIT linker cannot find CUDA runtime"
++    if not (libdir / "libcuda.so").exists():
++        candidates = []
++        for directory in ("/usr/local/nvidia/lib64", "/usr/local/nvidia/lib", "/usr/lib/x86_64-linux-gnu", "/usr/lib64"):
++            candidates += sorted(p for p in Path(directory).glob("libcuda.so*") if p.is_file())
++        if not candidates:
++            code = 'import torch; torch.cuda.init(); print(open("/proc/self/maps").read())'
++            maps = run([PYTHON, "-c", code], env=install_env).stdout
++            candidates = [Path(p) for p in re.findall(r"(/[^\s]*libcuda\.so[^\s]*)", maps)]
++        if not candidates: raise RuntimeError("GPU driver libcuda.so not found")
++        link = libdir / "libcuda.so"
++        if link.is_symlink(): link.unlink()
++        link.symlink_to(candidates[0].resolve())
++    CXX = next((c for c in ("g++-15", "g++-14", "g++-13", "g++-12", "g++-11", "g++") if shutil.which(c)), None)
++    assert CXX, "Host C++ compiler not found"
++    CC = CXX.replace("g++", "gcc")
++    assert shutil.which(CC), f"Matching C compiler missing: {CC}"
++
++    # ---- runtime environment ----
++    env = dict(os.environ)
++    env.pop("PYTHONPATH", None)
++    cache = f"{PREFIX}/cache"
++    for name in ("huggingface", "torch", "torchinductor", "triton", "flashinfer", "cuda", "sglang/jit"):
++        Path(cache, name).mkdir(parents=True, exist_ok=True)
++    env.update({
++        "PYTHONNOUSERSITE": "1", "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
++        "HF_DATASETS_OFFLINE": "1", "UV_OFFLINE": "1", "UV_PYTHON_DOWNLOADS": "never",
++        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
++        "CUDA_HOME": CUDA_HOME, "CUDACXX": f"{CUDA_HOME}/bin/nvcc",
++        "PATH": f"{CUDA_HOME}/bin:{VENV}/bin:" + env.get("PATH", ""),
++        "LD_LIBRARY_PATH": f"{CUDA_HOME}/lib64:{CUDA_HOME}/lib:" + env.get("LD_LIBRARY_PATH", ""),
++        "CC": CC, "CXX": CXX, "CUDAHOSTCXX": CXX,
++        "TORCH_CUDA_ARCH_LIST": "12.0",
++        "HF_HOME": f"{cache}/huggingface", "XDG_CACHE_HOME": cache,
++        "TORCH_HOME": f"{cache}/torch", "CUDA_CACHE_PATH": f"{cache}/cuda",
++        "TORCHINDUCTOR_CACHE_DIR": f"{cache}/torchinductor", "TRITON_CACHE_DIR": f"{cache}/triton",
++        "FLASHINFER_WORKSPACE_BASE": f"{cache}/flashinfer",
++        "SGLANG_CACHE_DIR": f"{cache}/sglang", "SGLANG_JIT_CACHE_DIR": f"{cache}/sglang/jit",
++        "SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN": "1",
++        "OMP_NUM_THREADS": "8", "MKL_NUM_THREADS": "8", "TOKENIZERS_PARALLELISM": "false",
++        "MAX_JOBS": "8", "CMAKE_BUILD_PARALLEL_LEVEL": "8",
++        "FLASHINFER_NINJA_JOBS": "8", "FLASHINFER_NVCC_THREADS": "2", "TORCHINDUCTOR_COMPILE_THREADS": "8",
++        "SGLANG_ENABLE_SM120_LOWM_BF16_GEMM": "1", "SGLANG_SM120_ONLINE_MXFP8": "0",
++        "SGLANG_SM120_LOWM_FP8_WEIGHT": "0", "SGLANG_SM120_LM_HEAD_FP8": "0",
++        "SGLANG_MAMBA_CONV_DTYPE": "bfloat16", "SGLANG_NUMA_BIND_V2": "false",
++        "SGLANG_MM_PREPROCESS_DEVICE": "cpu", "NUMPY_MADVISE_HUGEPAGE": "0",
++    })
++    run([str(Path(CUDA_HOME) / "bin/nvcc"), "--version"], env=env)
++    print("Host compiler:", CXX)
++    # Report the optional later caching patch. This cell does not modify wheel code.
++    run([PYTHON, "-c", '''import pathlib, sglang, torch
+ print("sglang", sglang.__version__, "| torch", torch.__version__)
+ assert torch.cuda.is_available(), "CUDA unavailable"
+@@ -259,93 +260,93 @@
+ '''], env=env)
+ 
+-# ---- validate target and create the read-only draft's SGLang view ----
+-target_cfg = json.loads(Path(MODEL_DIR, "config.json").read_text())
+-q = target_cfg.get("quantization_config", {})
+-assert q.get("quant_method") == "auto-round" and q.get("bits") == 4, "MODEL_DIR must be the Intel/albucino AutoRound INT4 checkpoint"
+-_, target_shards = indexed_shards(MODEL_DIR)
+-print("Target:", MODEL_DIR, "| shards:", len(target_shards), "| PLE dtype:", target_cfg.get("text_config", {}).get("ple_embedding_dtype", "checkpoint default (typically BF16)"))
+-DRAFT_VIEW = None
+-if CFG["SPEC"]:
+-    assert Path(DRAFT_MODEL_DIR).is_dir(), f"draft dir not found: {DRAFT_MODEL_DIR}"
+-    DRAFT_VIEW = prepare_draft_view(MODEL_DIR, DRAFT_MODEL_DIR, PREFIX)
+-
+-# ---- assemble Pennyroyal / AutoRound launch arguments ----
+-graph_bs = sorted({1, 2, 4, 7, 8, 9, 10, CFG["MAXREQ"], CFG["CUDAGRAPH_MAXBS"]})
+-graph_bs = [n for n in graph_bs if n <= CFG["CUDAGRAPH_MAXBS"]]
+-args = [SGLANG, "serve", "--model-path", MODEL_DIR, "--load-format", "safetensors",
+-    "--model-loader-extra-config", '{"enable_multithread_load":false}',
+-    "--served-model-name", str(CFG["SERVED_NAME"]), "--host", "127.0.0.1",
+-    "--port", str(SERVED_MODEL_PORT), "--tensor-parallel-size", "1",
+-    "--dtype", "bfloat16", "--quantization", "auto-round",
+-    "--kv-cache-dtype", CFG["KVDTYPE"], "--mem-fraction-static", str(CFG["MEMFRAC"]),
+-    "--context-length", str(CFG["CTX"]), "--page-size", "64",
+-    "--max-running-requests", str(CFG["MAXREQ"]), "--chunked-prefill-size", str(CFG["CHUNK"]),
+-    "--max-prefill-tokens", str(CFG["MAX_PREFILL"]),
+-    "--cuda-graph-max-bs-decode", str(CFG["CUDAGRAPH_MAXBS"]),
+-    "--cuda-graph-bs-decode", *map(str, graph_bs),
+-    "--mamba-ssm-dtype", CFG["SSM_DTYPE"], "--max-mamba-cache-size", str(CFG["MAMBA_CACHE"]),
+-    "--mamba-radix-cache-strategy", CFG["MAMBA_RADIX"], "--mamba-track-interval", "64",
+-    "--mamba-backend", CFG["LINEAR_BACKEND"],
+-    "--linear-attn-decode-backend", CFG["LINEAR_BACKEND"],
+-    "--linear-attn-prefill-backend", CFG["LINEAR_BACKEND"],
+-    "--moe-runner-backend", "auto", "--ple-offload-embedding", "--trust-remote-code",
+-    "--mm-feature-transport", "cpu", "--image-processor-backend", "pil",
+-    "--reasoning-parser", "qwen3", "--tool-call-parser", "qwen3_coder",
+-    "--default-chat-template-kwargs", '{"preserve_thinking":true}',
+-    "--watchdog-timeout", "1800", "--schedule-policy", "lpm", "--warmups", "structured_output",
+-    "--enable-cache-report", "--enable-metrics", "--enable-request-time-stats-logging"]
+-if CFG["PREFETCH_CHECKPOINTS"]: args += ["--weight-loader-prefetch-checkpoints"]
+-if CFG["DROP_CACHE_AFTER_LOAD"]: args += ["--weight-loader-drop-cache-after-load"]
+-tmpl = Path(MODEL_DIR, "chat_template.jinja")
+-if tmpl.is_file(): args += ["--chat-template", str(tmpl)]
+-if not CFG["AUTOTUNE"]: args += ["--disable-flashinfer-autotune"]
+-if CFG["GDN_MTP_CACHE_MODE"]: args += ["--gdn-mtp-cache-mode", CFG["GDN_MTP_CACHE_MODE"]]
+-if CFG["SPEC"]:
+-    args += ["--speculative-algorithm", "NEXTN", "--speculative-num-steps", str(CFG["SPEC_STEPS"]),
+-        "--speculative-eagle-topk", "1", "--speculative-num-draft-tokens", str(CFG["SPEC_STEPS"]+1),
+-        "--speculative-draft-model-path", str(DRAFT_VIEW),
+-        "--speculative-draft-model-quantization", "compressed-tensors", "--speculative-moe-runner-backend", "auto",
+-        "--speculative-draft-kv-cache-dtype", CFG["KVDTYPE"],
+-        "--speculative-accept-threshold-single", str(CFG["SPEC_ACCEPT_SINGLE"]),
+-        "--speculative-accept-threshold-acc", str(CFG["SPEC_ACCEPT_ACC"])]
+-    if CFG["FRSPEC"]:
+-        tok = find_unique(WHEELHOUSE_DIR, "hot_tokens_64k.pt", required=False)
+-        if tok is None: tok = find_unique(WHEELHOUSE_DIR, "flash-next-64k.pt")
+-        assert sha256(tok) == TOKEN_MAP_SHA, "Wrong FR-Spec map; use the map from the pinned Pennyroyal bundle"
+-        assert sha256(Path(MODEL_DIR, "tokenizer.json")) == TOKENIZER_SHA, "Tokenizer differs from the FR-Spec map; set CFG['FRSPEC']=False"
+-        args += ["--speculative-token-map", str(tok)]
+-
+-# ---- launch detached and wait for health ----
+-precache_model_thread.start()
+-print("\n" + shlex.join(args) + "\n")
+-log_offset = Path(LOG).stat().st_size if Path(LOG).exists() else 0
+-with open(LOG, "ab", buffering=0) as logf:
+-    proc = subprocess.Popen(args, env=env, stdout=logf, stderr=subprocess.STDOUT, start_new_session=True)
+-print(f"pid {proc.pid} -> {LOG}")
+-
+-def show_log_tail():
+-    with open(LOG, "rb") as f:
+-        f.seek(0, 2)
+-        f.seek(max(log_offset, f.tell()-20000))
+-        print(f.read().decode(errors="replace"))
+-
+-url, t0 = f"http://127.0.0.1:{SERVED_MODEL_PORT}/health", time.time()
+-last_report = -30
+-while time.time() - NOTEBOOK_START_TIME < SERVER_STARTUP_TIMEOUT:
+-    if proc.poll() is not None:
+-        show_log_tail()
+-        break
+-    try:
+-        with urllib.request.urlopen(url, timeout=5) as r:
+-            if r.status == 200:
+-                print(f"\nREADY after {int(time.time()-t0)}s -> {url.replace('/health','/v1')}")
+-                break
+-    except Exception:
+-        pass
+-    elapsed = int(time.time()-t0)
+-    if elapsed-last_report >= 30:
+-        print(f"  {elapsed}s ...", flush=True); last_report=elapsed
+-    time.sleep(3)
+-else:
+-    print(f"\nDEADLINE at {int(time.time()-NOTEBOOK_START_TIME)}s from notebook start; "
+-          f"releasing the benchmark with the server still loading")
++    # ---- validate target and create the read-only draft's SGLang view ----
++    target_cfg = json.loads(Path(MODEL_DIR, "config.json").read_text())
++    q = target_cfg.get("quantization_config", {})
++    assert q.get("quant_method") == "auto-round" and q.get("bits") == 4, "MODEL_DIR must be the Intel/albucino AutoRound INT4 checkpoint"
++    _, target_shards = indexed_shards(MODEL_DIR)
++    print("Target:", MODEL_DIR, "| shards:", len(target_shards), "| PLE dtype:", target_cfg.get("text_config", {}).get("ple_embedding_dtype", "checkpoint default (typically BF16)"))
++    DRAFT_VIEW = None
++    if CFG["SPEC"]:
++        assert Path(DRAFT_MODEL_DIR).is_dir(), f"draft dir not found: {DRAFT_MODEL_DIR}"
++        DRAFT_VIEW = prepare_draft_view(MODEL_DIR, DRAFT_MODEL_DIR, PREFIX)
++
++    # ---- assemble Pennyroyal / AutoRound launch arguments ----
++    graph_bs = sorted({1, 2, 4, 7, 8, 9, 10, CFG["MAXREQ"], CFG["CUDAGRAPH_MAXBS"]})
++    graph_bs = [n for n in graph_bs if n <= CFG["CUDAGRAPH_MAXBS"]]
++    args = [SGLANG, "serve", "--model-path", MODEL_DIR, "--load-format", "safetensors",
++        "--model-loader-extra-config", '{"enable_multithread_load":false}',
++        "--served-model-name", str(CFG["SERVED_NAME"]), "--host", "127.0.0.1",
++        "--port", str(SERVED_MODEL_PORT), "--tensor-parallel-size", "1",
++        "--dtype", "bfloat16", "--quantization", "auto-round",
++        "--kv-cache-dtype", CFG["KVDTYPE"], "--mem-fraction-static", str(CFG["MEMFRAC"]),
++        "--context-length", str(CFG["CTX"]), "--page-size", "64",
++        "--max-running-requests", str(CFG["MAXREQ"]), "--chunked-prefill-size", str(CFG["CHUNK"]),
++        "--max-prefill-tokens", str(CFG["MAX_PREFILL"]),
++        "--cuda-graph-max-bs-decode", str(CFG["CUDAGRAPH_MAXBS"]),
++        "--cuda-graph-bs-decode", *map(str, graph_bs),
++        "--mamba-ssm-dtype", CFG["SSM_DTYPE"], "--max-mamba-cache-size", str(CFG["MAMBA_CACHE"]),
++        "--mamba-radix-cache-strategy", CFG["MAMBA_RADIX"], "--mamba-track-interval", "64",
++        "--mamba-backend", CFG["LINEAR_BACKEND"],
++        "--linear-attn-decode-backend", CFG["LINEAR_BACKEND"],
++        "--linear-attn-prefill-backend", CFG["LINEAR_BACKEND"],
++        "--moe-runner-backend", "auto", "--ple-offload-embedding", "--trust-remote-code",
++        "--mm-feature-transport", "cpu", "--image-processor-backend", "pil",
++        "--reasoning-parser", "qwen3", "--tool-call-parser", "qwen3_coder",
++        "--default-chat-template-kwargs", '{"preserve_thinking":true}',
++        "--watchdog-timeout", "1800", "--schedule-policy", "lpm", "--warmups", "structured_output",
++        "--enable-cache-report", "--enable-metrics", "--enable-request-time-stats-logging"]
++    if CFG["PREFETCH_CHECKPOINTS"]: args += ["--weight-loader-prefetch-checkpoints"]
++    if CFG["DROP_CACHE_AFTER_LOAD"]: args += ["--weight-loader-drop-cache-after-load"]
++    tmpl = Path(MODEL_DIR, "chat_template.jinja")
++    if tmpl.is_file(): args += ["--chat-template", str(tmpl)]
++    if not CFG["AUTOTUNE"]: args += ["--disable-flashinfer-autotune"]
++    if CFG["GDN_MTP_CACHE_MODE"]: args += ["--gdn-mtp-cache-mode", CFG["GDN_MTP_CACHE_MODE"]]
++    if CFG["SPEC"]:
++        args += ["--speculative-algorithm", "NEXTN", "--speculative-num-steps", str(CFG["SPEC_STEPS"]),
++            "--speculative-eagle-topk", "1", "--speculative-num-draft-tokens", str(CFG["SPEC_STEPS"]+1),
++            "--speculative-draft-model-path", str(DRAFT_VIEW),
++            "--speculative-draft-model-quantization", "compressed-tensors", "--speculative-moe-runner-backend", "auto",
++            "--speculative-draft-kv-cache-dtype", CFG["KVDTYPE"],
++            "--speculative-accept-threshold-single", str(CFG["SPEC_ACCEPT_SINGLE"]),
++            "--speculative-accept-threshold-acc", str(CFG["SPEC_ACCEPT_ACC"])]
++        if CFG["FRSPEC"]:
++            tok = find_unique(WHEELHOUSE_DIR, "hot_tokens_64k.pt", required=False)
++            if tok is None: tok = find_unique(WHEELHOUSE_DIR, "flash-next-64k.pt")
++            assert sha256(tok) == TOKEN_MAP_SHA, "Wrong FR-Spec map; use the map from the pinned Pennyroyal bundle"
++            assert sha256(Path(MODEL_DIR, "tokenizer.json")) == TOKENIZER_SHA, "Tokenizer differs from the FR-Spec map; set CFG['FRSPEC']=False"
++            args += ["--speculative-token-map", str(tok)]
++
++    # ---- launch detached and wait for health ----
++    precache_model_thread.start()
++    print("\n" + shlex.join(args) + "\n")
++    log_offset = Path(LOG).stat().st_size if Path(LOG).exists() else 0
++    with open(LOG, "ab", buffering=0) as logf:
++        proc = subprocess.Popen(args, env=env, stdout=logf, stderr=subprocess.STDOUT, start_new_session=True)
++    print(f"pid {proc.pid} -> {LOG}")
++
++    def show_log_tail():
++        with open(LOG, "rb") as f:
++            f.seek(0, 2)
++            f.seek(max(log_offset, f.tell()-20000))
++            print(f.read().decode(errors="replace"))
++
++    url, t0 = f"http://127.0.0.1:{SERVED_MODEL_PORT}/health", time.time()
++    last_report = -30
++    while time.time() - NOTEBOOK_START_TIME < SERVER_STARTUP_TIMEOUT:
++        if proc.poll() is not None:
++            show_log_tail()
++            break
++        try:
++            with urllib.request.urlopen(url, timeout=5) as r:
++                if r.status == 200:
++                    print(f"\nREADY after {int(time.time()-t0)}s -> {url.replace('/health','/v1')}")
++                    break
++        except Exception:
++            pass
++        elapsed = int(time.time()-t0)
++        if elapsed-last_report >= 30:
++            print(f"  {elapsed}s ...", flush=True); last_report=elapsed
++        time.sleep(3)
++    else:
++        print(f"\nDEADLINE at {int(time.time()-NOTEBOOK_START_TIME)}s from notebook start; "
++              f"releasing the benchmark with the server still loading")
+--- base/cell6
++++ other/cell6
+@@ -1,10 +1,11 @@
+-# Restore the deployment target and record the real submission state on it.
+-with open(BUNDLE_DIR / "deploy_target.pkl", "rb") as file:
+-    target = pickle.load(file)
+-target.actual_run_as_submission = TRUE_SUBMISSION
+-target.is_competition_rerun = TRUE_SUBMISSION
++if RUN_FULL:
++    # Restore the deployment target and record the real submission state on it.
++    with open(BUNDLE_DIR / "deploy_target.pkl", "rb") as file:
++        target = pickle.load(file)
++    target.actual_run_as_submission = TRUE_SUBMISSION
++    target.is_competition_rerun = TRUE_SUBMISSION
+ 
+-# Restore the benchmark and point its outputs at the Kaggle working dir.
+-with open(BUNDLE_DIR / "benchmark_initial.pkl", "rb") as file:
+-    bm = pickle.load(file)
+-bm.job_dir = WORKING_DIR
++    # Restore the benchmark and point its outputs at the Kaggle working dir.
++    with open(BUNDLE_DIR / "benchmark_initial.pkl", "rb") as file:
++        bm = pickle.load(file)
++    bm.job_dir = WORKING_DIR
+--- base/cell7
++++ other/cell7
+@@ -1,28 +1,29 @@
+-# Make one-off changes to `bm`, `bm.games`, or `bm.solver` here before the run starts.
+-bm.solver.max_runtime_s_per_game = 48*60 #7920.0
+-bm.solver.analyzer_timeout = 900.0
+-bm.solver.concurrency = 10
+-bm.solver.max_actions_per_game = None
+-bm.solver.save_request_logs = True
+-bm.n_passes = 4
+-bm.game_weights = None
++if RUN_FULL:
++    # Make one-off changes to `bm`, `bm.games`, or `bm.solver` here before the run starts.
++    bm.solver.max_runtime_s_per_game = 48*60 #7920.0
++    bm.solver.analyzer_timeout = 900.0
++    bm.solver.concurrency = 10
++    bm.solver.max_actions_per_game = None
++    bm.solver.save_request_logs = True
++    bm.n_passes = 1
++    bm.game_weights = None
+ 
+-demo_excluded_games = [] if TRUE_SUBMISSION else []
++    demo_excluded_games = [] if TRUE_SUBMISSION else ['ar25', 'bp35', 'cd82', 'cn04', 'dc22', 'g50t', 'ka59', 'lf52', 'lp85', 'ls20', 'm0r0', 'r11l', 're86', 's5i5', 'sb26', 'sc25', 'sk48', 'sp80', 'su15', 'tn36', 'tr87', 'tu93', 'vc33', 'wa30']
+ 
+-if TRUE_SUBMISSION:  # overrides for contest run
+-    bm.solver.save_request_logs = False
+-    bm.n_passes = 1
+-    if USE_PRIORITY_SCHEDULING:
+-        bm.solver.concurrency = 120  # game count should be 110
+-        bm.solver.max_runtime_s_per_game = 532*60
+-else:
+-    if USE_PRIORITY_SCHEDULING:
+-        bm.solver.concurrency = (25 - len(demo_excluded_games)) * bm.n_passes
+-        bm.solver.max_runtime_s_per_game = 532*60 * bm.solver.concurrency // 110
+-    if float(getattr(target, 'max_runtime_s', 0.0) or 0.0) != 32400.0:
+-        raise RuntimeError(
+-            f'Expected the 32400-second notebook budget, got {target.max_runtime_s!r}.'
+-        )
++    if TRUE_SUBMISSION:  # overrides for contest run
++        bm.solver.save_request_logs = False
++        bm.n_passes = 1
++        if USE_PRIORITY_SCHEDULING:
++            bm.solver.concurrency = 120  # game count should be 110
++            bm.solver.max_runtime_s_per_game = 532*60
++    else:
++        if USE_PRIORITY_SCHEDULING:
++            bm.solver.concurrency = (25 - len(demo_excluded_games)) * bm.n_passes
++            bm.solver.max_runtime_s_per_game = 5*60  # rehearsal only proves the run completes
++        if float(getattr(target, 'max_runtime_s', 0.0) or 0.0) != 32400.0:
++            raise RuntimeError(
++                f'Expected the 32400-second notebook budget, got {target.max_runtime_s!r}.'
++            )
+ 
+-# show config
+-print('benchmark.solver:', bm.solver)
++    # show config
++    print('benchmark.solver:', bm.solver)
+--- base/cell9
++++ other/cell9
+@@ -1,92 +1,12 @@
+-print('Starting benchmark...')
+-
+-# Build the live competition game list from the gateway's available environments.
+-def _competition_games():
+-    import arc_agi
+-
+-    import taaf.game_api
+-
+-    spec = taaf.game_api.ArcadeSpec(
+-        operation_mode=arc_agi.OperationMode.COMPETITION,
+-        arc_base_url=os.environ["ARC_BASE_URL"],
+-        environments_dir="",
+-    )
+-    arcade = arc_agi.Arcade(
+-        operation_mode=arc_agi.OperationMode.COMPETITION,
+-        arc_base_url=spec.arc_base_url,
+-        environments_dir="",
+-    )
+-    game_ids = [env_info.game_id for env_info in arcade.available_environments]
+-    if not game_ids:
+-        raise RuntimeError("Competition Arcade exposed zero environments.")
+-    return [taaf.game_api.GameAPI(env_name=game_id, arcade_spec=spec) for game_id in game_ids]
+-
+-
+-# Build the offline game list from the competition's bundled environment files.
+-def _offline_games(env_dir: str):
+-    import arc_agi
+-
+-    import taaf.game_api
+-
+-    spec = taaf.game_api.ArcadeSpec(operation_mode=arc_agi.OperationMode.OFFLINE, environments_dir=env_dir)
+-    arcade = arc_agi.Arcade(operation_mode=arc_agi.OperationMode.OFFLINE, environments_dir=env_dir)
+-    game_ids = [env_info.game_id for env_info in arcade.available_environments]
+-    if not game_ids:
+-        raise RuntimeError(f"No offline environments found under {env_dir}.")
+-    game_ids = [game_id for game_id in game_ids if not any(game_id.startswith(g) for g in demo_excluded_games)]
+-    return [taaf.game_api.GameAPI(env_name=game_id, arcade_spec=spec) for game_id in game_ids]
+-
+-
+-# The gateway can take a while to come up; poll until it answers.
+-def _wait_for_gateway(base_url: str, timeout_s: float = 600.0) -> None:
+-    deadline = time.monotonic() + timeout_s
+-    last_error = ""
+-    while time.monotonic() < deadline:
+-        try:
+-            with urlopen(f"{base_url}api/games", timeout=10) as response:
+-                if response.status < 500:
+-                    return
+-        except Exception as exc:
+-            last_error = repr(exc)
+-        time.sleep(5)
+-    raise RuntimeError(f"Kaggle gateway did not become ready: {last_error}")
+-
+-
+-# Print the run preamble and persist the launcher's git status for diagnostics.
+-#print((BUNDLE_DIR / "preamble.txt").read_text())
+-(WORKING_DIR / "git_status.txt").write_text((BUNDLE_DIR / "git_status.txt").read_text())
+-
+-# arc_agi reads RECORDINGS_DIR and ARC_API_KEY from env (ArcadeSpec carries neither); operation
+-# mode, environments dir, and base url are all passed explicitly via the spec, so no env is needed.
+-os.environ.setdefault("RECORDINGS_DIR", str(WORKING_DIR / "server_recording"))
+-
+-if TRUE_SUBMISSION:
+-    # Real submission: play the live competition Arcade served by the Kaggle gateway.
+-    os.environ.setdefault("ARC_API_KEY", "test-key-123")
+-    os.environ.setdefault("ARC_BASE_URL", "http://gateway:8001/")
+-    # The gateway boots asynchronously; wait before swapping in its game list.
+-    _wait_for_gateway(os.environ["ARC_BASE_URL"])
+-    bm.games = _competition_games()
+-else:
+-    # Interactive run: play the bundled competition environments offline (no gateway).
+-    # The competition's environment files ship alongside the wheelhouse in the competition dataset.
+-    competition_env_files = str(Path("/kaggle/input/competitions/arc-prize-2026-arc-agi-3/arc_agi_3_wheels").parent / "environment_files")
+-    bm.games = _offline_games(competition_env_files)
+-
+-# Outside a real submission, stop ~10 min before the wall-clock budget for a graceful exit.
+-soft_end = None
+-if not TRUE_SUBMISSION:
+-    budget = float(getattr(target, "max_runtime_s", 0.0) or 0.0)
+-    if budget > 0:
+-        soft_end = datetime.fromtimestamp(NOTEBOOK_START_EPOCH) + timedelta(seconds=budget - min(600.0, budget / 2))
+-
+-# Play the benchmark; teardown commands run even if the run raises.
+-await bm.run(soft_end_time=soft_end, runtime_environment=target, minimal_diagnostics=TRUE_SUBMISSION)
+-if not TRUE_SUBMISSION:
+-    # An offline run isn't scored, but Kaggle still expects a submission.parquet output.
+-    import pandas as pd
+-
+-    pd.DataFrame(
+-        [["1_0", "1", True, 1]],
+-        columns=["row_id", "game_id", "end_of_game", "score"],
+-    ).to_parquet(WORKING_DIR / "submission.parquet", index=False)
++# --- arc-agi-3-agent: replace the slot priority with the formula found in simulation ---
++# Source: arceval/duck/form_priority.py, embedded verbatim. Active in the real submission.
++# Keeps the scheduler's flow (unstarted games first, swaps only at context trims) and
++# replaces only priority_value (plus a pace tracker: mean tokens per cleared level).
++import sys as _fp_sys, types as _fp_types
++_FP_SOURCE = '"""dfranzen の配分の優先度を、模擬で見つけた式に差し替える（本番でも効かせる）。\n\n彼の配分の流れ（まだ始めていないゲームが先、動いているゲームは履歴を削るときだけ\n入れ替える）はそのまま使い、**優先度の値を出す関数だけ**を替える。\n\n    優先度 = e^{lp·(ℓ-1)}·norm(N) × 2^{-a/ec} × ペース × 2^{-(t/ts)²} × (1 + 伸びしろ/8)\n\n    ℓ  挑戦中のレベル（1始まり）      N  総レベル数（分からなければ10）。norm は 6〜10 に丸めて\n                                         55/(N(N+1)/2)（彼と同じ）\n    a  このレベルで打った手数          t  このレベルで生成したトークン\n    ペース = clip((ref / これまでの1レベルあたりの平均トークン)^pp, 0.25, 4)。\n             1レベルも越えていなければ 1\n    伸びしろ = 残りのレベル数で 3以上→b3, 2→b2, 1→b1, 0→0\n\narceval/sim/simulate.py の Form（level_form=2, eff_form=1, shape=0, c_action=0,\ncombine=2, fade=0）と同じ値を出す（テストで見張る）。\n\n## 取り付け\n\n    install(tool_agent_module)\n\n  - `tool_agent.priority_value` を差し替える（彼の `_snapshot_priority` はこの名前で呼ぶ）\n  - `tool_agent.ProgressPace` を差し替える。各ゲームの分析役は作られるときにこの名前で\n    ペースの入れ物を作り、レベルを越えるたびに `record_completion(そのレベルのトークン, 基準)`\n    を呼ぶ。我々の入れ物は「これまでの1レベルあたりの平均トークン」を返す\n  - `ARC3_PRIORITY_PACE=1` にする。そうしないと彼のコードはペースを記録せず、優先度の\n    材料（PrioritySnapshot.cost_multiplier）にも載せない\n\n★ 本番の提出でも効かせる（そのための差し替え）。取り付けに失敗したら raise する ――\n  提出の前の Save & Run で必ず同じコードが走るので、そこで見つかる。\n"""\nfrom __future__ import annotations\n\nimport math\nimport os\nimport threading\nimport time\n\n# 模擬で選んだ式（data/datarun/forms-joint、2026-10-02）\nCHOSEN = {"level_pow": 0.2, "eff_const": 100.0, "pace_pow": 0.25, "pace_ref": 30_000.0,\n          "token_scale": 124_000.0, "b1": 2.5, "b2": 3.5, "b3": 4.0}\nSCALE = 1000.0   # 彼の優先度は整数。帯（100万）より十分小さく、順位が潰れない桁にする\n\n\nclass FormPace:\n    """これまでに越えたレベルの、1レベルあたりの平均生成トークン。\n\n    彼の ProgressPace と同じ呼ばれ方をする（`record_completion`, `cost_multiplier`）。\n    `cost_multiplier()` は倍率ではなく**平均トークンそのもの**を返す（0 なら、まだ無い）。\n    これを読むのは差し替えた `form_priority` だけ。\n    """\n\n    def __init__(self):\n        self.completed = 0\n        self.tokens = 0.0\n\n    def record_completion(self, tokens_used: float, reference_tokens: float = 0.0) -> None:\n        self.completed += 1\n        self.tokens += max(0.0, float(tokens_used))\n\n    def cost_multiplier(self) -> float:\n        return self.tokens / self.completed if self.completed else 0.0\n\n\ndef _levels(total) -> int | None:\n    try:\n        n = int(total)\n    except (TypeError, ValueError):\n        return None\n    return n if n > 0 else None\n\n\ndef form_value(level: int, actions: float, tokens: float, pace: float, total_levels,\n               params: dict = CHOSEN) -> float:\n    """優先度（小数）。pace はこれまでの1レベルあたりの平均トークン（0 ならまだ無い）。"""\n    level = max(1, int(level))\n    n = _levels(total_levels) or 10\n    n_clamped = min(10, max(6, n))\n    norm = 55 / (n_clamped * (n_clamped + 1) / 2)\n    a = max(0.0, float(actions))\n    t = max(0.0, float(tokens))\n    value = math.exp(params["level_pow"] * (level - 1)) * norm\n    value *= 2 ** (-(a / params["eff_const"]))\n    if pace > 0:\n        value *= min(4.0, max(0.25, (params["pace_ref"] / max(1.0, pace)) ** params["pace_pow"]))\n    value *= 2 ** (-((t / params["token_scale"]) ** 2))\n    remaining = max(0, n - level)\n    bonus = (0.0, params["b1"], params["b2"], params["b3"])[min(remaining, 3)]\n    return value * (1.0 + bonus / 8.0)\n\n\ndef form_priority(state, **_ignored) -> int:\n    """彼の `priority_value(state, ...)` と同じ呼ばれ方で、整数の優先度を返す。\n\n    state は PrioritySnapshot（level, actions, tokens, cost_multiplier, total_levels）。\n    彼の寄せ（tail_fraction）や係数の引数は使わない（この式は寄せを持たない）。\n    """\n    value = form_value(state.level, state.actions, state.tokens,\n                       float(getattr(state, "cost_multiplier", 0.0) or 0.0),\n                       getattr(state, "total_levels", None))\n    return max(1, int(value * SCALE))\n\n\n# ---- D′（2026-10-03、data/datarun/refine-fine。LB の v1 から模擬で +1.5 前後） ----\n#\n#     優先度 = A·M·C + B·φ\n#\n#     A = (1 + 0.5·(ℓ-1))·norm(N) × (300/(300+a))^2.5          深さ（線形）× 手数の効率\n#     M = clip((3万 / ペース)^0.4, 0.25, 4)（1レベルも越えていなければ 1）\n#     C = 0.1·max(0.1, 1 - a/115) + 0.9·max(0.1, 1 - t/T)        詰まりの減衰（線形、下限 0.1）\n#         T = 22.5万 × clip(ペース/3万, 0.5, 2)^0.5（遅いゲームほど我慢を長く。越えていなければ ×1）\n#     B = 残りのレベル数で 3以上→16, 2→14, 1→10, 0→0（伸びしろ。足し算）\n#     φ = 寄せ。走行の最後の4割で 1 → 0（彼の tail_fraction をそのまま使う）\n#\n#   加えて「全員まず1回」をやめる: まだ始めていないゲームも、この式の値（ℓ=1, a=t=0）で並べる。\n#\n# arceval/sim/simulate.py の Form（D_PRIME_FORM）と同じ値を出す（テストで見張る）。\n\nD_PRIME = {"level_pow": 0.5, "eff_const": 300.0, "eff_pow": 2.5, "pace_pow": 0.4,\n           "pace_ref": 30_000.0, "c_action": 0.1, "action_scale": 115.0, "c_token": 0.9,\n           "token_scale": 225_000.0, "lin_floor": 0.1, "rel_pow": 0.5,\n           "b1": 10.0, "b2": 14.0, "b3": 16.0, "fade": 0.4}\n# 模擬の Form の引数で書いた同じ式（テストで突き合わせる）\nD_PRIME_FORM = {"fade": 0.4, "level_form": 3, "level_pow": 0.5, "eff_form": 0, "eff_const": 300.0,\n                "eff_pow": 2.5, "shape": 3, "c_action": 0.1, "c_token": 0.9, "token_scale": 225000.0,\n                "combine": 1, "b1": 10.0, "b2": 14.0, "b3": 16.0, "pace_pow": 0.4, "form_fresh": 0,\n                "lin_floor": 0.1, "eff_floor": 0.2, "rel_pow": 0.5}\n\n\ndef d_parts(level: int, actions: float, tokens: float, pace: float, total_levels,\n            params: dict = D_PRIME) -> tuple:\n    """(A·M·C, B)。pace はこれまでの1レベルあたりの平均トークン（0 ならまだ無い）。"""\n    level = max(1, int(level))\n    n = _levels(total_levels) or 10\n    n_clamped = min(10, max(6, n))\n    norm = 55 / (n_clamped * (n_clamped + 1) / 2)\n    a = max(0.0, float(actions))\n    t = max(0.0, float(tokens))\n    A = (1.0 + params["level_pow"] * (level - 1)) * norm\n    A *= (params["eff_const"] / (params["eff_const"] + a)) ** params["eff_pow"]\n    if pace > 0:\n        A *= min(4.0, max(0.25, (params["pace_ref"] / max(1.0, pace)) ** params["pace_pow"]))\n    scale = params["token_scale"]\n    rel = pace if pace > 0 else params["pace_ref"]\n    scale *= min(2.0, max(0.5, rel / params["pace_ref"])) ** params["rel_pow"]\n    floor = params["lin_floor"]\n    C = (params["c_action"] * max(floor, 1.0 - a / params["action_scale"])\n         + params["c_token"] * max(floor, 1.0 - t / scale))\n    remaining = max(0, n - level)\n    B = (0.0, params["b1"], params["b2"], params["b3"])[min(remaining, 3)]\n    return A * C, B\n\n\ndef d_value(level, actions, tokens, pace, total_levels, phi: float = 1.0) -> float:\n    u, v = d_parts(level, actions, tokens, pace, total_levels)\n    return u + v * phi\n\n\ndef d_priority(state, *, tail_fraction=None, **_ignored) -> int:\n    """彼の `priority_value(state, tail_fraction=..., ...)` と同じ呼ばれ方。\n\n    寄せ φ は彼が渡す tail_fraction（残り時間 ÷ 寄せの窓。窓の外では 1 より大きい）を\n    0〜1 に切って使う。渡されなければ 1（寄せ無し）。\n    """\n    phi = 1.0 if tail_fraction is None else min(1.0, max(0.0, float(tail_fraction)))\n    value = d_value(state.level, state.actions, state.tokens,\n                    float(getattr(state, "cost_multiplier", 0.0) or 0.0),\n                    getattr(state, "total_levels", None), phi)\n    return max(1, int(value * SCALE))\n\n\nFRESH = {"replaced": 0}\n_TL = threading.local()\n\n\ndef install_d(tool_agent, solver) -> str:\n    """D′ を取り付ける。v1 の install と違い、「全員まず1回」も外す。\n\n    彼のコードで、まだ始めていないゲームは `gate.acquire(200万 − 待ち順)` で並ぶ（どの\n    優先度より上の帯）。これを、この式の値（ℓ=1, a=t=0、そのゲームの総レベル数）と、\n    寄せで値が変わるようにスナップショットつきで並べ直す。総レベル数は、その遊びを\n    走らせているスレッドで `_HarnessGameSession.play` が始まるときに覚えておく。\n    """\n    for name in ("priority_value", "ProgressPace", "_PriorityGate", "PrioritySnapshot",\n                 "_PRIORITY_UNTRIMMED_BASE", "_PRIORITY_BAND"):\n        if not hasattr(tool_agent, name):\n            raise RuntimeError(f"tool_agent に {name} が無い。彼の版が変わった。")\n    session_cls = getattr(solver, "_HarnessGameSession", None)\n    if session_cls is None or not callable(getattr(session_cls, "play", None)):\n        raise RuntimeError("solver に _HarnessGameSession.play が無い。彼の版が変わった。")\n    gate_cls = tool_agent._PriorityGate\n    for name in ("acquire", "_enqueue_and_wait", "_snapshot_priority"):\n        if not callable(getattr(gate_cls, name, None)):\n            raise RuntimeError(f"_PriorityGate に {name} が無い。彼の版が変わった。")\n\n    tool_agent.priority_value = d_priority\n    tool_agent.ProgressPace = FormPace\n    os.environ["ARC3_PRIORITY_PACE"] = "1"\n    os.environ["ARC3_PRIORITY_REFRESH_QUEUE"] = "1"\n    os.environ["ARC3_PRIORITY_TAIL_FADE"] = "1"\n    os.environ["ARC3_PRIORITY_TAIL_FADE_FRACTION"] = str(D_PRIME["fade"])\n\n    if not getattr(session_cls.play, "_ours_d", False):\n        orig_play = session_cls.play\n\n        def play(self, *args, **kwargs):\n            run = getattr(getattr(self, "game", None), "game_run", None)\n            _TL.n = getattr(run, "number_of_levels", None)\n            try:\n                return orig_play(self, *args, **kwargs)\n            finally:\n                _TL.n = None\n\n        play._ours_d = True\n        session_cls.play = play\n\n    if not getattr(gate_cls.acquire, "_ours_d", False):\n        orig_acquire = gate_cls.acquire\n        fresh_floor = tool_agent._PRIORITY_UNTRIMMED_BASE - tool_agent._PRIORITY_BAND\n        snapshot_cls = tool_agent.PrioritySnapshot\n\n        def acquire(self, priority):\n            if priority < fresh_floor:\n                return orig_acquire(self, priority)\n            # まだ始めていないゲーム: 帯で先頭に並べず、この式の値で並べる\n            snap = snapshot_cls(1, 0, 0.0, 0.0, getattr(_TL, "n", None))\n            value = self._snapshot_priority(snap, time.monotonic())\n            with self._cond:\n                self._enqueue_and_wait(value, snap)\n            FRESH["replaced"] += 1\n\n        acquire._ours_d = True\n        gate_cls.acquire = acquire\n\n    line = ("#OURS_FORM ok version=d_prime priority_value replaced; fresh-first removed; "\n            "tail fade " + str(D_PRIME["fade"]) + "; "\n            + " ".join(f"{k}={v:g}" for k, v in D_PRIME.items() if k != "fade"))\n    print(line, flush=True)\n    return line\n\n\ndef install(tool_agent) -> str:\n    for name in ("priority_value", "ProgressPace", "_PriorityGate"):\n        if not hasattr(tool_agent, name):\n            raise RuntimeError(f"tool_agent に {name} が無い。彼の版が変わった。")\n    tool_agent.priority_value = form_priority\n    tool_agent.ProgressPace = FormPace\n    os.environ["ARC3_PRIORITY_PACE"] = "1"\n    line = ("#OURS_FORM ok priority_value replaced; pace=mean tokens per cleared level; "\n            + " ".join(f"{k}={v:g}" for k, v in CHOSEN.items()))\n    print(line, flush=True)\n    return line\n'
++_fp_mod = _fp_types.ModuleType('ours_form_priority')
++_fp_sys.modules['ours_form_priority'] = _fp_mod
++exec(compile(_FP_SOURCE, 'ours_form_priority.py', 'exec'), _fp_mod.__dict__)
++import inference.agent.tool_agent as _fp_ta
++import inference.framework.solver as _fp_solver
++_fp_mod.install_d(_fp_ta, _fp_solver)
+--- base/cell10
++++ other/cell10
+@@ -0,0 +1,93 @@
++if RUN_FULL:
++    print('Starting benchmark...')
++
++    # Build the live competition game list from the gateway's available environments.
++    def _competition_games():
++        import arc_agi
++
++        import taaf.game_api
++
++        spec = taaf.game_api.ArcadeSpec(
++            operation_mode=arc_agi.OperationMode.COMPETITION,
++            arc_base_url=os.environ["ARC_BASE_URL"],
++            environments_dir="",
++        )
++        arcade = arc_agi.Arcade(
++            operation_mode=arc_agi.OperationMode.COMPETITION,
++            arc_base_url=spec.arc_base_url,
++            environments_dir="",
++        )
++        game_ids = [env_info.game_id for env_info in arcade.available_environments]
++        if not game_ids:
++            raise RuntimeError("Competition Arcade exposed zero environments.")
++        return [taaf.game_api.GameAPI(env_name=game_id, arcade_spec=spec) for game_id in game_ids]
++
++
++    # Build the offline game list from the competition's bundled environment files.
++    def _offline_games(env_dir: str):
++        import arc_agi
++
++        import taaf.game_api
++
++        spec = taaf.game_api.ArcadeSpec(operation_mode=arc_agi.OperationMode.OFFLINE, environments_dir=env_dir)
++        arcade = arc_agi.Arcade(operation_mode=arc_agi.OperationMode.OFFLINE, environments_dir=env_dir)
++        game_ids = [env_info.game_id for env_info in arcade.available_environments]
++        if not game_ids:
++            raise RuntimeError(f"No offline environments found under {env_dir}.")
++        game_ids = [game_id for game_id in game_ids if not any(game_id.startswith(g) for g in demo_excluded_games)]
++        return [taaf.game_api.GameAPI(env_name=game_id, arcade_spec=spec) for game_id in game_ids]
++
++
++    # The gateway can take a while to come up; poll until it answers.
++    def _wait_for_gateway(base_url: str, timeout_s: float = 600.0) -> None:
++        deadline = time.monotonic() + timeout_s
++        last_error = ""
++        while time.monotonic() < deadline:
++            try:
++                with urlopen(f"{base_url}api/games", timeout=10) as response:
++                    if response.status < 500:
++                        return
++            except Exception as exc:
++                last_error = repr(exc)
++            time.sleep(5)
++        raise RuntimeError(f"Kaggle gateway did not become ready: {last_error}")
++
++
++    # Print the run preamble and persist the launcher's git status for diagnostics.
++    #print((BUNDLE_DIR / "preamble.txt").read_text())
++    (WORKING_DIR / "git_status.txt").write_text((BUNDLE_DIR / "git_status.txt").read_text())
++
++    # arc_agi reads RECORDINGS_DIR and ARC_API_KEY from env (ArcadeSpec carries neither); operation
++    # mode, environments dir, and base url are all passed explicitly via the spec, so no env is needed.
++    os.environ.setdefault("RECORDINGS_DIR", str(WORKING_DIR / "server_recording"))
++
++    if TRUE_SUBMISSION:
++        # Real submission: play the live competition Arcade served by the Kaggle gateway.
++        os.environ.setdefault("ARC_API_KEY", "test-key-123")
++        os.environ.setdefault("ARC_BASE_URL", "http://gateway:8001/")
++        # The gateway boots asynchronously; wait before swapping in its game list.
++        _wait_for_gateway(os.environ["ARC_BASE_URL"])
++        bm.games = _competition_games()
++    else:
++        # Interactive run: play the bundled competition environments offline (no gateway).
++        # The competition's environment files ship alongside the wheelhouse in the competition dataset.
++        competition_env_files = str(Path("/kaggle/input/competitions/arc-prize-2026-arc-agi-3/arc_agi_3_wheels").parent / "environment_files")
++        bm.games = _offline_games(competition_env_files)
++
++    # Outside a real submission, stop ~10 min before the wall-clock budget for a graceful exit.
++    soft_end = None
++    if not TRUE_SUBMISSION:
++        budget = float(getattr(target, "max_runtime_s", 0.0) or 0.0)
++        if budget > 0:
++            soft_end = datetime.fromtimestamp(NOTEBOOK_START_EPOCH) + timedelta(seconds=budget - min(600.0, budget / 2))
++
++    # Play the benchmark; teardown commands run even if the run raises.
++    await bm.run(soft_end_time=soft_end, runtime_environment=target, minimal_diagnostics=TRUE_SUBMISSION)
++    if not TRUE_SUBMISSION:
++        # An offline run isn't scored, but Kaggle still expects a submission.parquet output.
++        import pandas as pd
++
++        pd.DataFrame(
++            [["1_0", "1", True, 1]],
++            columns=["row_id", "game_id", "end_of_game", "score"],
++        ).to_parquet(WORKING_DIR / "submission.parquet", index=False)
+--- base/cell11
++++ other/cell11
+@@ -0,0 +1 @@
++print('#OURS_FRESH replaced=' + str(_fp_mod.FRESH['replaced']), flush=True)

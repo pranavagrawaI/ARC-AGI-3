@@ -1,0 +1,9 @@
+# Operational rebind self-review
+
+Single owner; exact coordinator review required. Runtime42payload/config/metadata are byte-identical to approved r2, which retains both finalization/publication repairs and all original limitations. No model, resource threshold, ownership/deadline, cache, loader, science or cap change.
+
+Reviewed reset handling at the actual SDK boundary: record response and typed durations/UTC refresh; validate raw/typed agreement, exact reviewed allowance/window/current baseline, freshness, chronology and cap availability before workload authority can progress. Historical predecessor usage is checked separately through original source/closure receipts. Unknown fields do not become defaults. Installed SDK strips wire Z into naive UTC; this local serializer behavior is explicitly source-pinned and tested with genuine SDK objects. A malformed response rejected before an SDK object exists yields no invented raw receipt.
+
+Both session branches take a second quota receipt and revalidate after final clearance. Scoped redacted-stub, terminal-session/predecessor, exact/negative search and parsed404 predicates remain. Quota/window/allowance policy cannot be relaxed by an assignment or receipt. Terminal collection requires same-window measured quota, preserves historical charges separately, and makes no cross-window delta claim.
+
+Only necessary operational tests and exact SDK serialization are rerun. Runtime61/65 are not rerun; inherited64/65 conservative abort stays disclosed. Existing approved42payload and unassigned notebook bytes are joined to current source/SDK proof. No API/auth/credential operation, GPU work or launch. CRAP/radon/coverage tooling absent; no invented metrics or dependency installation. Evidence includes exact RED, focused GREEN/negative fixtures and preserved preflight failures.

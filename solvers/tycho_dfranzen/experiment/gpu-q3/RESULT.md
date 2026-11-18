@@ -1,0 +1,1 @@
+SaveKernel rejected HTTP 400: The kernel source must be less than 1 megabytes in size. Original candidate notebook is 1,483,228 bytes; donor is 571,732 bytes. Source packaging, not reasoning execution, blocked launch. q4 moves identical runtime payload bytes into a hash-bound private dataset. No GPU run accepted.

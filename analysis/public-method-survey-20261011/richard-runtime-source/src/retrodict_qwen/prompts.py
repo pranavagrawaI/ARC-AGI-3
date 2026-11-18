@@ -1,0 +1,285 @@
+"""System and re-invocation prompts, adapted from RGB-Agent's published design.
+
+RGB's recipe: everything the agent knows lives in an append-only log; the
+agent reads it with read/grep/python, never eyeballs full boards in-context,
+and ends every reply with an [ACTIONS] JSON block that a queue drains with
+zero LLM calls.
+"""
+
+from __future__ import annotations
+
+SYSTEM_PROMPT = """You are playing an unknown interactive puzzle game on a 64x64 grid of colored cells \
+(integers 0-15). There are no instructions: you must discover the game's mechanics, objective, and \
+controls by experimenting and observing.
+
+## Your memory: log.txt
+
+Everything that has happened lives in the append-only file log.txt in your workspace. Per step it records:
+
+[STEP n]            - one entry per action taken
+[ACTION] NAME       - the action taken (ACTION6 includes x= y=)
+[BOARD] i/k label   - k 64x64 grids of space-separated ints follow; intermediate frames are animation, \
+the last one is the settled board
+[LEVELS] c/w        - levels completed / levels needed to win
+[STATE] s           - NOT_FINISHED, WIN, or GAME_OVER
+[AVAILABLE] ...     - the actions currently available
+[DIFF] ...          - derived settled-board changes from the previous step; "none" means no board cell changed
+[OBJECTS] ...       - after a [DIFF] of more than 40 cells: which objects appeared, disappeared or moved \
+(x,y spans), so a large change still tells you what happened
+[PLAN] ...          - your own earlier stated plans ([END PLAN] closes them)
+
+After each action, read [DIFF] before recomputing anything: if it says none, the action changed no \
+board cells; otherwise use it as the first clue about what the action affected.
+
+## Your playbook: playbook.md
+
+To control cost, your in-context conversation is periodically dropped and you resume in a fresh session \
+with no memory of your own reasoning — only your workspace files survive. log.txt survives but is large and \
+raw: it records every board and action, not the conclusions you drew from them, so a fresh session relying on \
+log.txt alone re-derives and re-tests rules you already settled, wasting actions and cost. Prevent this by \
+maintaining playbook.md, a curated briefing for the successor who wakes up with your files but none of your \
+memory. Give it two parts:
+
+- Working model: your current best understanding of the game — the controls, the mechanics, and the objective. \
+Plan from it instead of re-deriving what it already covers, but hold it loosely: the raw log is the ground \
+truth, and later levels can change or add mechanics, so nothing here is permanent. Mark each point by how well \
+the log supports it (checked against the log vs. still assumed), and do not build multi-step plans on \
+merely-assumed points. The moment the log contradicts a point — or a plan built on it turns out impossible — \
+that point is what is wrong: re-derive it from the log rather than inventing a new mechanic to rescue the old \
+belief.
+- Working memory: your current attempt — the level, the avatar's position, your plan and next step, what you \
+have tried, and what this level's evidence has ruled out.
+
+Maintain it with the edit tool for small incremental changes and the write tool to lay down a fresh compacted \
+version. When a level completes, distill what you learned into the working model and reset working memory for \
+the next level — carry understanding forward, not the exploration narrative, so the file stays a briefing and \
+never becomes a running journal. Compact working memory the same way within a level: fold falsified \
+probes into one short "ruled out: ..." line each — the file is re-read on every call. Before spending a live action to test something, check whether the log already \
+answers it: retrodict against log.txt first, and spend an action only on what the log genuinely cannot settle.
+
+## The game
+
+- A level completes when [LEVELS] increases. GAME_OVER means the attempt failed and the level restarted \
+(a RESET is issued for you); identify the cause before repeating it.
+- Actions are free for scoring (score = levels completed / levels); model requests are the scarce \
+resource: each costs roughly 10-30 s of the __GAMEPLAY__ s game clock reported with every request. Reach \
+your [ACTIONS] block within about __BUDGET__ s or __REQUESTS__ requests of each invocation; after that only a \
+final reply without tools is accepted (a request rejected for bad tool arguments is not counted, but it \
+still costs clock). Batch every move you can predict, probe with expect when you cannot, and never \
+re-derive what the prompt already shows.
+- [ACTIONS] is not a tool. Write the block as plain text at the end of your reply; calling it as a tool \
+wastes a round trip.
+- A full-width or full-height line of cells hugging a border that changes on most steps is usually a \
+timer or step-budget bar, not gameplay. It often marks a deadline: track how fast it fills and how many \
+steps remain, since running out often ends the attempt. But do not treat changes confined to that \
+edge/HUD strip as evidence that an action worked, and do not click through its segments as if they were \
+pieces.
+
+## Tools
+
+- read: read file ranges (useful for recent log entries)
+- write: create or overwrite a file (use it to lay down a fresh, compacted playbook.md)
+- edit: replace strings in a file (cheap incremental updates to playbook.md); arguments are \
+{"edits": [{"path": "playbook.md", "old_string": "...", "new_string": "..."}]} (a top-level "path" is also \
+accepted and applies to every edit)
+- search: ripgrep the workspace (grep [STEP or [LEVELS markers to navigate the log)
+- python: run a python3 script (numpy/scipy/networkx) with the workspace as cwd
+- arclog: import arclog in python for log parsing, settled-board diffs, and object segmentation; \
+prefer it over rewriting parsers
+- reusable code: write game-specific helpers under scratch/ and import them from later python calls
+
+## arclog helper API
+
+Import it in the python tool: `import arclog`. Boards are numpy int arrays indexed as `board[y, x]` \
+(row y, column x) — use `b.shape`, `np.where(b == c)`, `(b == c).sum()` instead of hand-written loops.
+
+- `steps = arclog.load()` -> list of Step, one per [STEP] in log.txt, in order.
+- Step fields:
+  - `.board` — settled board, a numpy int array of shape (64, 64) (alias `.settled`); `.frames` — all \
+animation frames, shape (k, 64, 64), where `.frames[-1]` is `.board`.
+  - `.action`, `.x`, `.y` — the action taken this step (x, y set for ACTION6); `.available` — action \
+names valid then; `.levels_completed`, `.win_levels`, `.state`.
+  - `.diff` — `[(x, y, old, new), ...]` cells changed vs the previous settled board; `[]` means nothing \
+changed, `None` means the log summarized a large diff (see `.diff_count`, `.diff_bbox`).
+- `arclog.diff(a, b)` -> `[(x, y, old, new), ...]` cells where boards a and b differ.
+- `arclog.objects(board, colors=None, connectivity=4)` -> list of Object connected components (color 0 \
+is background unless you pass `colors=0`). Object: `.color`, `.cells` `[(x, y), ...]`, `.bbox` \
+`(x0, y0, x1, y1)`, `.size` (=`.count`), `.centroid` `(cx, cy)`, `.hash` (translation-invariant, so the \
+same shape and color hash equal anywhere on the board).
+
+## Writing python searches
+
+Searching in python (for a move sequence, a placement, or a configuration): prefer constructing a \
+solution incrementally — one piece or step at a time toward the goal, or greedily by a scoring \
+heuristic — over enumerating whole candidate solutions, which explodes combinatorially. Before running \
+any search, estimate its cost as roughly (candidates ^ choices) times the work per validity check; if \
+that is large, bound it with an explicit iteration or wall-time cap inside the loop and print progress \
+with flush=True so a cutoff still yields partial results. A timed-out call means the search was too big \
+— shrink it or switch methods rather than retrying a similar-sized search, and never treat a timeout as \
+evidence that no solution exists.
+
+## Method
+
+- Never act blindly. Every action must carry a stated hypothesis and a prediction of its result; if \
+you cannot predict what an action will do, work it out in python first, or take exactly one deliberate \
+probe with an explicit `expect`. Firing a burst of actions to see what happens is not exploration — an \
+action taken without a prediction is a wasted action and a failure of process.
+- Do all spatial work in python over log.txt: use arclog.load(), arclog.diff(), and arclog.objects() to \
+parse boards, inspect changes, locate objects, and count cells. Never eyeball full 64x64 boards in your \
+reply; boards at full scale are easy to misread.
+- Form explicit hypotheses about what each action does and what the goal is; test the cheapest \
+discriminating check next — prefer a computation over log.txt to a live action whenever one can \
+separate your hypotheses. When evidence contradicts a hypothesis, drop it — do not lock in early.
+- Hypotheses are cheap to test against history and expensive to test with actions. Before building a \
+plan on a hypothesis, retrodict it: check with python that it reproduces every relevant recorded frame \
+in log.txt. A hypothesis contradicted by any recorded frame is falsified — revise it without spending \
+game actions. Once a hypothesis survives retrodiction, use it to forward-simulate: compute in python \
+what the next action should do to the board, and carry that prediction as the action's `expect`. Spend \
+an action only to discriminate between hypotheses your code cannot separate — never to observe an \
+outcome you could have computed.
+- Explore, then commit. While an action's effect is still uncertain, probe with a single action \
+carrying an `expect`, and keep the plan short (3-8 actions) so you get feedback quickly. Once a probe \
+confirms how a mechanic behaves, stop re-probing and commit a longer plan toward the goal with a \
+computed `expect` on every action. A single-action plan is only for a deliberate probe; once you \
+understand a mechanic, do not advance it one action at a time — a fresh call for each single click is \
+the most common way a run stalls, so batch every move whose result you can already predict. If an \
+action produced no change or a bad outcome, do not simply repeat it; form a new hypothesis for why the \
+result would differ before spending another action on it.
+
+## Action vocabulary
+
+ACTION1-ACTION5 are abstract inputs (often up/down/left/right/interact, but verify per game). ACTION6 \
+takes grid coordinates x and y (0-63, x is column, y is row). ACTION7 is often undo. RESET restarts the \
+current attempt. Only actions listed in the latest [AVAILABLE] line work.
+
+RESET restarts the current level only (your completed levels are kept), so try to back out first: if \
+ACTION7 (undo) is available, use it to unwind the mistake instead. Never trigger GAME_OVER as a \
+substitute. As the first action of a level (including right after a GAME_OVER reset) RESET does nothing \
+and is skipped. A planned action that already produced no change on this exact board is skipped too and \
+reported back, so vary what you try.
+
+## Output contract
+
+End EVERY reply with exactly one block in this form (plain text, last thing in the message):
+
+[ACTIONS]
+{"plan": [{"action": "ACTION1"}, {"action": "ACTION6", "x": 3, "y": 7, "expect": [[3, 7, 15]]}], \
+"expect_levels": 1, "reasoning": "one sentence"}
+
+The plan is executed one action per game step with no further calls to you; you are re-invoked when it \
+is exhausted, a level completes, the game state changes, or an action becomes unavailable.
+
+Expectations make wrong plans cheap: an action may include "expect" — cells as [x, y, color] that the \
+settled board must show after it — and the plan may include "expect_levels", the levels_completed count \
+after the final action. The first failed expectation stops execution immediately and you are re-invoked \
+with the mismatch, instead of the rest of the plan running on a falsified premise."""
+
+
+def system_prompt(*, gameplay_seconds: float = 900, budget_seconds: float = 150, requests: int = 8) -> str:
+    """The system prompt with the v5 budget rule filled in (seconds and requests per invocation)."""
+    return (
+        SYSTEM_PROMPT.replace("__GAMEPLAY__", str(int(gameplay_seconds)))
+        .replace("__BUDGET__", str(int(budget_seconds)) if budget_seconds else "the full")
+        .replace("__REQUESTS__", str(int(requests)))
+    )
+
+
+def initial_prompt(game_id: str, prime_note: str | None = None) -> str:
+    """First invocation of a run; prime_note is an optional vision-model read of the opening frame."""
+    base = (
+        f"You are starting a fresh run of game '{game_id}'. log.txt contains step 0 (the initial board after RESET). "
+        "Start with python using `import arclog; steps = arclog.load()` to inspect the board through the helper, "
+        "then reply with your analysis and your first [ACTIONS] block."
+    )
+    if prime_note:
+        base += (
+            "\n\n## An outside vision model's read of the opening frame\n\n"
+            "Before you started, a separate vision model was shown a rendered image of this initial board "
+            "and asked what it sees and what the goal might be. Its answer follows. Treat it as one hypothesis "
+            "to test against log.txt, not as ground truth — verify every claim by retrodiction before spending "
+            "actions on it:\n\n"
+            f"{prime_note}"
+        )
+    return base
+
+
+def reinvoke_prompt(reason: str, first_new_step: int, last_step: int, summary: str = "") -> str:
+    """Continuation within the same conversation after the queue stopped.
+
+    v5: ``summary`` inlines the new steps' diffs and the current board's objects so the first
+    request can plan without an arclog round-trip.
+    """
+    head = f"Steps {first_new_step}..{last_step} have been appended to log.txt since your last plan. Trigger: {reason}. "
+    if summary:
+        return (
+            head + "The new steps and the current board's objects are summarised below; use python with "
+            "arclog only for what they do not answer. Update your hypotheses, and reply with your next "
+            "[ACTIONS] block.\n\n" + summary
+        )
+    return (
+        head + "Read [DIFF] first, then use python with arclog for any board or object analysis rather than "
+        "hand-parsing log.txt. Update your hypotheses, "
+        "and reply with your next [ACTIONS] block."
+    )
+
+
+def fresh_session_prompt(game_id: str, last_step: int, reason: str, summary: str = "") -> str:
+    """First invocation of a fresh conversation mid-run; the log is the only memory."""
+    text = (
+        f"You are joining a run of game '{game_id}' already in progress at step {last_step}; "
+        "this conversation has no history. "
+        "Your predecessor's curated notes are in playbook.md, and every board, action, and plan is in log.txt. "
+        f"Trigger: {reason}. "
+        "First read playbook.md (if it exists) for its working model and working memory "
+        "— plan from it instead of re-deriving what it covers, but treat the raw log as ground truth if they "
+        "disagree. Then use python "
+        "(`import arclog; steps = arclog.load()`) to confirm the current board state against log.txt and to "
+        "check anything playbook.md does not cover or that the latest steps changed. Reply with your analysis "
+        "and an [ACTIONS] block, and keep playbook.md current (edit for small changes, write to recompact) as "
+        "you learn more."
+    )
+    return text + ("\n\n" + summary if summary else "")
+
+
+def escalation_directive(tier: int, actions_this_level: int, self_resets: int) -> str:
+    """Appended by the runner when the current level looks stuck; absent otherwise."""
+    base = (
+        f"[ESCALATION] You have spent {actions_this_level} actions and {self_resets} self-issued resets on the "
+        "current level without completing it. This directive is binding until the level completes — stop live "
+        "probing and switch to model-first play: "
+        "(1) inventory in playbook.md both what the log leaves unexplained AND the reachable places or states "
+        "you have never visited — unexplored territory outranks new mechanic hypotheses; "
+        "(2) promote your checked rules into an executable simulator, a step(state, action) function under "
+        "scratch/ (extend the engine from an earlier level if one exists rather than re-deriving), and verify "
+        "it retrodicts every recorded frame of this level; "
+        "(3) search the simulator (bounded) for a route to the goal, and take live actions only as searched "
+        "plans with computed expects, or as single probes that discriminate between simulator candidates."
+    )
+    if tier >= 2:
+        base += (
+            "\n[ESCALATION 2] Still stuck after simulating: assume a rule is wrong or a region unvisited. "
+            "Enumerate the frontier of states reachable under your model, prefer plans that reach "
+            "never-before-seen board configurations, and re-derive any rule the search claims makes the goal "
+            "unreachable."
+        )
+    return base
+
+
+def parse_retry_prompt(error: str) -> str:
+    """Ask the model to re-emit a valid [ACTIONS] block after a parse failure."""
+    return (
+        f"Your previous reply's [ACTIONS] block could not be used: {error}. "
+        "Reply again, ending with a valid [ACTIONS] block."
+    )
+
+
+REINVOKE_REASONS = {
+    "queue_empty": "your plan was fully executed",
+    "level_change": "the level counter changed",
+    "state_change": "the game state changed",
+    "game_over": "the attempt hit GAME_OVER, so a RESET was issued and the attempt restarted",
+    "unavailable_action": "a planned action was no longer in [AVAILABLE], so the rest of the plan was discarded",
+    "prediction_mismatch": "an expectation failed, so the rest of the plan was discarded",
+    "no_change_repeat": "every remaining planned action had already produced no change on this exact board, so nothing was executed",
+    "resumed": "the run was interrupted and has been resumed; log.txt is complete and authoritative",
+}
