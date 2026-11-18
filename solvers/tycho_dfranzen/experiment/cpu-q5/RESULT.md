@@ -1,0 +1,1 @@
+CPU q5 COMPLETE. Exact offline attachments install; hardened scripted worker/native donor computation/action/Scribe path passes. Critical output hashes, action receipt, worker exit and token ledger reconcile. Source payload matches frozen gpu-q5. Zero GPUs requested; no model capability/efficacy claim. gpu-q5 is permitted by this result and existing campaign authority.

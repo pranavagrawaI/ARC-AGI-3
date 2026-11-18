@@ -1,1 +1,0 @@
-The selected alignment hypothesis remains provisional. Initial evidence shows shapes but no transition or terminal consequence.

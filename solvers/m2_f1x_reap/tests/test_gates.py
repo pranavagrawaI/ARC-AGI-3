@@ -5,6 +5,7 @@ python3 -B -m unittest solvers/m2_f1x_reap/tests/test_gates.py
 PASS fixture: F1x screen-2 play (76 levels, preload/out16k evidence) + REAP candidate2's pruning receipts and
 serve.log with running requests capped at 14 + a kernel log carrying the 14-stream gate line.
 """
+import gzip
 import datetime as dt, importlib.util, json, re, tempfile, unittest
 from pathlib import Path
 from unittest import mock
@@ -13,7 +14,7 @@ HERE = Path(__file__).resolve().parents[1]
 ROOT = HERE.parents[1]
 F1X_OUT = ROOT / 'solvers/m2_f1/experiment/screen-2/f1x/output'
 F1_OUT = ROOT / 'solvers/m2_f1/experiment/screen-1/f1/output'  # 62 levels: below the 64 floor
-REAP_OUT = ROOT / 'analysis/pruning-transfer-20261011/candidate2/output'
+FIXTURES = HERE / 'tests/fixtures'
 
 
 def load(name, path):
@@ -28,16 +29,19 @@ queue_candidate = load('merge_queue', HERE / 'experiment/queue_candidate.py')
 
 def fixture(d, play=F1X_OUT, running_cap=14, gate=14, receipts=True):
     d.mkdir(parents=True)
-    for f in play.iterdir():
-        if f.name.endswith('_requests.jsonl') or f.name == 'benchmark.json':
-            (d / f.name).symlink_to(f)
-    serve = (REAP_OUT / 'serve.log').read_text(errors='replace')
+    (d / 'benchmark.json').symlink_to(play / 'benchmark.json')
+    arm = 'f1x' if play == F1X_OUT else 'f1'
+    # The fixtures retain response lengths, tool errors and serving measurements.
+    with gzip.open(FIXTURES / f'{arm}-responses.jsonl.gz', 'rb') as responses:
+        (d / 'game_requests.jsonl').write_bytes(responses.read())
+    with gzip.open(FIXTURES / 'reap-serving.txt.gz', 'rt') as log:
+        serve = log.read()
     if running_cap:
         serve = re.sub(r'#running-req: (\d+)', lambda m: f'#running-req: {min(int(m.group(1)), running_cap)}', serve)
     (d / 'serve.log').write_text(serve)
     (d / 'kernel.log').write_text(f'priority gate active: {gate} concurrent streams\nSERVER READY at 595s from notebook start\n')
     if receipts:
-        (d / 'pruning').symlink_to(REAP_OUT / 'pruning')
+        (d / 'pruning').symlink_to(FIXTURES / 'pruning')
     return d
 
 
@@ -56,7 +60,8 @@ class Readout(unittest.TestCase):
     def test_unpruned_ten_stream_serving_fails_mechanism(self):
         d = self.d / 'b'
         fixture(d, running_cap=None, gate=10)
-        (d / 'serve.log').unlink(); (d / 'serve.log').symlink_to(F1X_OUT / 'serve.log')
+        with gzip.open(FIXTURES / 'f1x-serving.txt.gz', 'rb') as log:
+            (d / 'serve.log').write_bytes(log.read())
         r = analyze.readout(d)
         self.assertTrue(r['verdict'].startswith('MECHANISM_FAIL'))
         for k in ('gate_14_streams', 'pool_above_f1x', 'throughput_up_10pct'):

@@ -1,0 +1,25 @@
+# R2 owner review
+
+R1 and R2 from the independent blocked-review receipt are both repaired; read REPAIR.md for exact scope and RED/GREEN evidence. Only pair_evidence.py and collection_tools/primary.py alter production behavior. packet-spec.json rebinds unchanged config/metadata to this separate source tree; freeze_packet.py binds the entire original submitted snapshot and review evidence. Exact diff is retained in qualification/R2-DELTA.json. No full scientific pair/GPU pass is demonstrated.
+
+The prior review below describes preserved joins, not an independent approval of r2. Root review superseded its earlier no-findings claim with two concrete defects; both are explicitly retained in REPAIR-BASIS.json.
+
+# Sole-owner source review before coordinator review
+
+Scope: the separate local trial17 packet against approved card f28f25a0 /BASIS7598cdd8 /authority159fb38a. Original trials1–16 are read-only. This is owner review, not independent approval or GPU qualification.
+
+Supported findings corrected before final qualification:
+
+- Reused candidate-alone qualifier reported invalid raw accounting with exit0. Real retained HTTP response with only its image-token total changed (same Content-Length) demonstrated exit0 before repair. It now preserves its report and returns1, stopping the parent before reverse handoff. RED/GREEN receipts are retained. Scientific accounting code is unchanged.
+- Phase/health body completion was checked before group cleanup; delayed cleanup could return past the original phase/startup end. Real CPU subprocess witnesses returned without rejection before repair. Explicit post-cleanup checks now stop further work; independent raw phase joins also reject late cleanup. Cleanup retains its overall emergency bound, so this does not claim a hard syscall deadline.
+- An OOM observed during candidate cleanup must not be ignored by evidence-finalizing boundaries before the second load. A regular boundary now checks it before the sole fresh observation. CPU witnesses cover both pre-replay and cleanup-time increases, retaining resource/series completion without second-control dispatch. An isolated source variant missing that boundary must fail.
+- The final possible monitor poll could otherwise retain a120s timeout near the absolute bound. Timeout is now clipped to remaining time, with explicit one-shot stop receipts; no new poll starts at deadline. No monitor is started in preparation.
+- Fresh audit assembly needs11GiB at its own start, followed by3GiB for derived output. It now checks both and caps combined fetched+embedded assembly bytes at8GiB. The19GiB collection preflight alone is not treated as a reservation against other writers.
+
+Reviewed surviving joins: candidate real binding /replay PID-PGID-starttime-boot →whole-group cleanup →first accepted five-probe raw sample →one fresh sample /raw verification →actual second-control prepare<=2s. No host boundary occurs after fresh and before dispatch. Original140 remains report-only, including the actual retained trial14 false case; measured valid host/OOM evidence remains mandatory. Shipping control binding and query/native scopes are separate from candidate binding. Its own source/environment/interpreter/health/registration/replay precede final targeted frontend TERM, first accepted six-probe raw sample, actual native log/marker/launch identities and configured min(work,cleanup_start+180). Fallback cannot qualify.
+
+Collection: deterministic complete required-file recipe, exact current id/v1/source before and after, Decimal wire/projection validation, independently fetched actual result even if different, source/health/query hashes, exclusive per-attempt primary/required-pass markers, one selected zero-byte response-less ConnectTimeout retry only, no success redownload or residual loop. Full audit requires actual successful collector CLI exit/return evidence, source/raw/scientific checks, separate origins and durable publication agreement. Incomplete primary/index/dependency cases remain explicit invalid gaps, not inferred model failures or archive completeness.
+
+Scientific preservation: unchanged api_arm/catalog/accounting/load-contract/candidate library/resource source bytes; pair gate AST normalized only for declared order and estimand. No historical denominator, threshold fit, loader/cache change, source upgrade, extra case, adoption or reliability inference.
+
+Limits: local CPU/retained-artifact tests cannot prove live reversed handoff, second-control load, GPU capacity or timing. Original inherited64/65 conservative identity abort remains unrerun, along with remote FD/stack/Python3.12 patch/live-code/late-EOF/sampled-memory limits. CRAP baseline has complexity only, so no comparable improvement or CI-gate claim is made; final risk indicators honestly include unexecuted GPU/operational branches. Coordinator exact source review remains necessary before a new serialized assignment. No supported finding is intentionally waived as a false feasible path.

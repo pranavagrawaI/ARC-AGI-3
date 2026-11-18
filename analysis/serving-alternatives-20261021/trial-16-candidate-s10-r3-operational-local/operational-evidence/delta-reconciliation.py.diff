@@ -1,0 +1,109 @@
+diff --git a/home/pranav/projects/arc-agi-3/analysis/serving-alternatives-20261021/trial-16-candidate-s10-r2-local/reconciliation.py b/home/pranav/projects/arc-agi-3/analysis/serving-alternatives-20261021/trial-16-candidate-s10-r3-operational-local/reconciliation.py
+index f88f189..af41bd8 100644
+--- a/home/pranav/projects/arc-agi-3/analysis/serving-alternatives-20261021/trial-16-candidate-s10-r2-local/reconciliation.py
++++ b/home/pranav/projects/arc-agi-3/analysis/serving-alternatives-20261021/trial-16-candidate-s10-r3-operational-local/reconciliation.py
+@@ -5,12 +5,14 @@ This never labels the redacted shell terminal or absent. No remote mutations.
+ import datetime as dt
+ import hashlib
+ import json
++import math,re
+ from pathlib import Path
+ 
+ HERE=Path(__file__).resolve().parent
+ PRIOR_REF='pranavagrawai/serving-candidate-feas5-20261023'
+ PREDECESSOR_REF='pranavagrawai/serving-wire-capacity15-20261024'
+-EXPECTED_QUOTA=77433.978
++HISTORICAL_PREDECESSOR_USED_S=77433.978
++REVIEWED_QUOTA=dict(used_s=0,reserved_s=0,total_allowed_s=21600,minimum_allowed_s=21600,refresh_time_utc='2026-10-31T00:00:00+00:00')
+ SUCCESSOR_REF='pranavagrawai/serving-candidate-s10-16-20261024'
+ STUB={'title':'[Private Notebook]','lastRunTime':'2010-04-01T00:00:00.000Z'}
+ TERMINAL={'COMPLETE','ERROR','CANCELLED','CANCELED','CANCEL_ACKNOWLEDGED'}
+@@ -37,7 +39,7 @@ def load_policy():
+         and predecessor['raw_result']['candidate_health200'] is False and predecessor['rate_qualified'] is False
+         and predecessor['native_log_archive_equality_join']=='PENDING_SINGLE_VERSION_BOUND_ARCHIVE',
+         'predecessor operational closure/partial collection limitations not retained')
+-    require(predecessor['typed_quota']['used_s']==EXPECTED_QUOTA and predecessor['typed_quota']['reserved_s']==0,'wrong predecessor terminal quota')
++    require(predecessor['typed_quota']['used_s']==HISTORICAL_PREDECESSOR_USED_S and predecessor['typed_quota']['reserved_s']==0,'wrong predecessor terminal quota')
+     require(policy['predecessor_freeze_sha256']=='a0eec61df3dfc4be357f14cce41272c994fcaa9e1a5cdb0ef3328d70304b19ef'
+         and hashlib.sha256((HERE/policy['predecessor_freeze']).read_bytes()).hexdigest()==policy['predecessor_freeze_sha256'],'wrong predecessor freeze')
+     accepted=json.loads((HERE/policy['predecessor_acceptance']).read_text())
+@@ -46,10 +48,67 @@ def load_policy():
+     readback=json.loads((HERE/policy['predecessor_readback']).read_text())
+     require(readback['kernel_ref']==PREDECESSOR_REF and readback['kernel_id']==140466291 and readback['version']==1
+         and readback['source_exact'] is True and readback['status']['status']=='ERROR'
+-        and readback['typed_quota']['used_s']==EXPECTED_QUOTA and readback['typed_quota']['reserved_s']==0,'wrong predecessor source/terminal readback')
++        and readback['typed_quota']['used_s']==HISTORICAL_PREDECESSOR_USED_S and readback['typed_quota']['reserved_s']==0,'wrong predecessor source/terminal readback')
++    require(policy['historical_predecessor_used_s']==HISTORICAL_PREDECESSOR_USED_S,'historical terminal charge changed')
++    require(policy['current_quota']==REVIEWED_QUOTA,'unreviewed current quota contract')
+     return policy
+ 
+ 
++def quota_values(raw):
++    gpu=raw['gpuQuota']
++    def seconds(key):
++        value=gpu[key]
++        require(isinstance(value,str) and re.fullmatch(r'\d+(?:\.\d+)?s',value) is not None,'missing/malformed quota duration '+key)
++        value=float(value[:-1]);require(math.isfinite(value),'nonfinite quota duration');return value
++    refresh=dt.datetime.fromisoformat(raw['quotaRefreshTime'].replace('Z','+00:00'))
++    require(refresh.tzinfo is not None and refresh.utcoffset()==dt.timedelta(0),'quota refresh must be explicit UTC')
++    return dict(used_s=seconds('timeUsed'),reserved_s=seconds('timeReserved'),total_allowed_s=seconds('totalTimeAllowed'),
++                minimum_allowed_s=seconds('minimumTimeAllowed'),refresh_time_utc=refresh.astimezone(dt.timezone.utc).isoformat())
++
++
++def quota_receipt(response):
++    receipt=dict(utc=dt.datetime.now(dt.timezone.utc).isoformat(),raw_response=type(response).to_dict(response))
++    try:
++        gpu=response.gpu_quota;refresh=response.quota_refresh_time
++        # Installed SDK DateTimeSerializer strips the wire Z and returns naive UTC.
++        if refresh.tzinfo is None:refresh=refresh.replace(tzinfo=dt.timezone.utc)
++        typed=dict(used_s=gpu.time_used.total_seconds(),reserved_s=gpu.time_reserved.total_seconds(),
++                   total_allowed_s=gpu.total_time_allowed.total_seconds(),minimum_allowed_s=gpu.minimum_time_allowed.total_seconds(),
++                   refresh_time_utc=refresh.astimezone(dt.timezone.utc).isoformat())
++        require(typed==quota_values(receipt['raw_response']),'SDK raw/typed quota disagreement');receipt.update(typed)
++    except Exception as error:receipt['parse_error']=repr(error)
++    return receipt
++
++
++def validate_quota(receipt,policy,now=None,*,prelaunch=True):
++    expected=policy['current_quota'];require(expected==REVIEWED_QUOTA,'unreviewed current quota contract')
++    require(not receipt.get('parse_error'),'invalid measured quota')
++    raw=quota_values(receipt['raw_response'])
++    require(all(receipt[key]==value for key,value in raw.items()),'raw/typed quota disagreement')
++    for key in ('used_s','reserved_s','total_allowed_s','minimum_allowed_s'):
++        require(type(receipt[key]) in (int,float) and math.isfinite(receipt[key]) and receipt[key]>=0,'invalid quota numeric field')
++    require(all(receipt[key]==expected[key] for key in ('refresh_time_utc','total_allowed_s','minimum_allowed_s')),'quota window/allowance changed')
++    now=now or dt.datetime.now(dt.timezone.utc);stamp=dt.datetime.fromisoformat(receipt['utc'])
++    require(0<policy['freshness_seconds']<=120 and 0<=(now-stamp).total_seconds()<=policy['freshness_seconds'],'stale/future quota')
++    refresh=dt.datetime.fromisoformat(receipt['refresh_time_utc'])
++    require(stamp<refresh and receipt['used_s']>=expected['used_s'] and receipt['used_s']+receipt['reserved_s']<=receipt['total_allowed_s'],'quota outside current window/allowance')
++    if prelaunch:
++        require(receipt['used_s']==expected['used_s'] and receipt['reserved_s']==expected['reserved_s']==0,'quota moved or reserved')
++        require(receipt['used_s']+5400<=receipt['total_allowed_s'] and now+dt.timedelta(seconds=5400)<refresh,'insufficient reviewed GPU allowance/window')
++    return raw
++
++
++def evaluate_quota_pair(evidence,policy,now=None):
++    now=now or dt.datetime.now(dt.timezone.utc)
++    for field in ('started_utc','finished_utc'):
++        require(0<=(now-dt.datetime.fromisoformat(evidence[field])).total_seconds()<=policy['freshness_seconds'],'stale/future evidence')
++    start=dt.datetime.fromisoformat(evidence['started_utc']);finish=dt.datetime.fromisoformat(evidence['finished_utc'])
++    stamps=[]
++    for field in ('quota_before','quota_after'):
++        validate_quota(evidence[field],policy,now);stamps.append(dt.datetime.fromisoformat(evidence[field]['utc']))
++    require(start<=stamps[0]<=stamps[1]<=finish,'quota/evidence clock order')
++
++
+ def evaluate(evidence,policy,now=None):
+     require(policy['prior_kernel_ref']==PRIOR_REF and policy['successor_kernel_ref']==SUCCESSOR_REF,'wrong prior/successor identity')
+     require(evidence['prior_kernel_ref']==PRIOR_REF,'wrong queried prior identity')
+@@ -61,9 +120,7 @@ def evaluate(evidence,policy,now=None):
+         age=(now-dt.datetime.fromisoformat(evidence[field])).total_seconds()
+         require(0<=age<=policy['freshness_seconds'],'stale/future evidence')
+     require(evidence['started_utc']<=evidence['finished_utc'],'evidence clock order')
+-    require(policy['quota_used_s']==EXPECTED_QUOTA,'wrong bound quota identity')
+-    for field in ('quota_before','quota_after'):
+-        require(evidence[field]['used_s']==EXPECTED_QUOTA and evidence[field]['reserved_s']==0,'quota moved or reserved')
++    evaluate_quota_pair(evidence,policy,now)
+     unknown=[row for row in evidence['recent'] if not row.get('ref')]
+     named=[row for row in evidence['recent'] if row.get('ref')]
+     require(len(unknown)==1 and unknown[0]['raw']==STUB,'extra/changed redacted stub')

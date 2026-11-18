@@ -1,0 +1,1 @@
+Notebook schema and source hashes passed. SaveKernel rejected with HTTP 400. No accepted launch receipt. Correcting title and notebook schema did not resolve the API rejection. Next diagnostic uses the SDK to retain the HTTP response body, preserving the same runtime configuration and cap.

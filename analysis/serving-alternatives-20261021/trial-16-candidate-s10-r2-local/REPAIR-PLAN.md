@@ -1,0 +1,11 @@
+# Trial16 r2 — narrow local supersession
+
+Preserve submitted16 freeze1f55fdf2 and all9989 bindings untouched. Run exact coordinator OOM and late-publication witnesses against that source; preserve code, raw output and review receipts. No workload/science/caps/threshold/cache/loader/identity change and no inherited65 rerun.
+
+1. Separate OOM workload stop from bounded finalization. Work boundaries retain immediate original OOM error. Only cleanup/evidence boundaries may record a complete OOM increase without raising it again. Always attempt orderly observer completion after the final boundary, even when another boundary predicate fails. Malformed/late/counter-reset/identity/cleanup problems stay invalid. No model/replay/qualify dispatch after OOM.
+2. Check publication after the real receipt write and again after helper return. Persist a small caller completion record with the helper persistence/return clocks and receipt hash, check after that persistence too, and invalidate saved result/rate on any late return. Independent offline validation requires this record and exact bundle/actual-result equality; stale feasible primary cannot qualify. Cooperative completion detection only, no syscall bound.
+3. Prove both exact REDs, GREEN same triggers, malformed/late/identity/cleanup invalidity, sampled OOM orderly completion, caller-return and completion-write delays. Rebind actual new outer/SDK/body/source and one superseding unassigned packet.
+
+Pre-mortem: swallowing all boundary errors would relax validity -> distinguish only finalization OOM policy, retain every other error; final boundary error could still skip observer stop -> separate attempts; skipping series checks could hide malformed/reset counters -> retain raw equality/schema/monotonic checks; return wrapper or last write could overrun -> checks at helper persistence, caller return and last caller write, plus offline actual-result/primary equality. Missing finalization evidence cannot become a negative configuration result.
+
+No delegation. Existing CRAP/radon/coverage dependencies were unavailable; no install or fabricated metrics. Review complete narrow diff and executable failure paths. No API/GPU/slot/launch/staging/commits.

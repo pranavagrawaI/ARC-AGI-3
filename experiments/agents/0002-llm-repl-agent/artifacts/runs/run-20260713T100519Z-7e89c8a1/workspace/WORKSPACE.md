@@ -1,1 +1,0 @@
-This workspace is new for this run. current_observation.json contains the latest public frame and metadata. observations/ contains prior public frames. public_history.jsonl contains executed actions and visible transitions. You may create any additional code, notes, models, or search artifacts here.

@@ -1,0 +1,13 @@
+# Trial16-r2 local self-review
+
+Single implementation owner; coordinator exact review is still required. The original submitted snapshot and 9989 bindings remain byte-exact. Existing trial15 6303 bindings remain preserved. No assignment or launch requested by this artifact.
+
+Reviewed the four-source delta against both demonstrated failures. Cleanup-only OOM finalization never resumes workload, preserves primary failure and raw invalidity, and retains bounded resource/observer receipts. The actual unchanged evidence checker is exercised with coherent raw boundary+series OOM and closes only the bounded configuration. Malformed sampled counters, malformed final accounting and late final boundary remain invalid. Identity/group/pidfd/query/filter/deadline paths are unchanged; existing selected regressions remain in qualification.
+
+The first publication receipt describes the bundle persistence end, not its own later write. The helper measures receipt-write completion afterward; the caller checks helper return and persists a hash-bound completion record, then checks again. If that last persistence is late, actual result becomes INVALID/null and differs from the bundled prepublication result; offline qualification rejects it. Missing completion record, changed receipt hash, out-of-order/late/nonfinite clocks and stale result fail closed. No repeated write is represented as atomic durable storage or a hard kernel syscall bound.
+
+Canonical original REDs are retained separately from GREENs. Nine focused finalization/publication regressions passed after correcting one test-only delay selector that accidentally delayed its normal case. The failed intermediate fixture run is retained. Changed-path full selected qualification includes original tests, SDK interception/bootstrap contexts and exact bodies; inherited64/65 remains disclosed and is not rerun. No independent-review claim is made by this self-review.
+
+No threshold/cache/loader/science/caps or ownership redesign. Original140 is report-only including false, complete valid host/OOM mandatory. Actual GPU/engine/seccomp/platform collection and full production-window feasibility remain unproved. Shared sampled/cumulative/RSS evidence supplies no causal OOM attribution or safe peak margin. Arbitrary high-fd select, cooperative syscall timing, remote FD/stack and 3.12 micro-version limits, prior UnsafeIdentity555 and delayed precutoff EOF limitations remain.
+
+CRAP/radon/coverage dependencies are absent; no installation or invented metric. Review is supported by exact source diffs, executable failure witnesses and preserved raw receipts.

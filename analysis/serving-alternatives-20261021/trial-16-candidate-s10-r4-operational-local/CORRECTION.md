@@ -1,0 +1,5 @@
+# Explicit receipt-boundary correction
+
+R3 and earlier fields labeled raw_response came from SDK to_dict and are NOT raw HTTP. Original receipts and failed preflights remain byte-exact. The coordinator genuine HTTP277B capture proves total/minimum108000s. The typed timedelta1day+21600s agrees108000 via total_seconds. Installed TimeDeltaSerializer.to_dict uses .seconds and emits21600s; fractional values can emit an invalid extra decimal point. R3 local from_dict of that lossy projection reconstructed the wrong6h fixture. Its passing local tests did not validate the live HTTP boundary. All original reports remain historical evidence with this correction.
+
+R4 uses exact bounded captured HTTP bytes, status and allowlisted headers plus an independent SDK typed total_seconds join. No SDK reserialization is quota/fixture authority. New fixtures replay captured HTTP bytes through the actual installed transport _prepare_response with send intercepted, network0. No SDK patch/upgrade/auth change, runtime payload/science/cap change or owner API/GPU/launch.

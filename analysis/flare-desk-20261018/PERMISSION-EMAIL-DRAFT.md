@@ -23,6 +23,10 @@ My reading of LIL-1.0 §2.2(b) is that this is "storage that only You control". 
 host, though, I'd rather have your written confirmation under §2.4 than rely on that reading. Could you confirm
 that this use is permitted? If you'd like it attributed or limited in any way, I'm happy to follow your terms.
 
+One related question: what license covers the `flare` runtime binary itself? The model card names LIL-1.0
+for the package, but I couldn't find terms for the runtime, and the competition rules ask me to know the
+license of every component a submission uses.
+
 If it's useful to you, I'm also glad to share throughput and tool-call results from Kaggle's RTX PRO 6000
 (single GPU, 10-16 concurrent long-context agent streams).
 

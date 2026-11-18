@@ -1,0 +1,13 @@
+# October31 startup handoff
+User moved D21 to tomorrow. D21 is CLOSED_UNLAUNCHED_DEFERRED with zero push attempts; its sources/card remain unchanged. D22 uses the identical931349-byte notebook (SHA2564e89e3f69d058f394a2e246dd9bb0db33252e3657df0340fb489fd32dc2f029c), new metadata identity pranavagrawai/m2-f1x-reap14-keepalive-d22, and a separately frozen card/date/controller. No GPU activity during preparation.
+
+The enabled dated user timer starts startup.py90seconds after the user manager starts and every10minutes onOct31UTC, including catch-up after startup. Linger=yes currently makes the user manager available at boot. ExecCondition and Python date guards prevent a push today. Earliest eligible date isOct31 00:00UTC/05:30IST; new pushes expireOct31 12:00UTC/17:30IST. If boot occurs before05:30IST the dated timer waits for the UTC date. Internet does not need to be ready at boot: only random upload probes run until>=130KB/s, then fresh Kaggle slot/GPU/quota/source guards. ONE push; every attempt marker prevents all later pushes including after reboot or HTTP499. No automatic GPU retry. A marker with accepted identity enables read-only observation/collection; ambiguous acceptance holds for reconciliation. Public cap6000GPU-s, startup1300s, play3600s, floor67 and all frozen health/source gates unchanged.
+
+The startup service handles smoke upload/run, terminal observation, collection and qualification. It does not submit hidden automatically. The bounded T3 continuation in THIS thread independently verifies raw artifacts, exact latest completed remote version/full competition branch and live slot before the one conditional D22 submission, then collects its hidden result. No need to prompt again; T3 must be running/available for that continuation. The local smoke startup works without opening T3.
+
+The original daily timer remains enabled/active. Separate date-only ExecConditions block its service onOct30 andOct31; both pass fromNov1 onward. No rawfallback if smoke fails. No queue/quarantine/incumbent/animation modifications.
+
+Status: systemctl --user status arc-d22-reap14-ka-startup-20261031.timer arc-d22-reap14-ka-startup-20261031.service
+Log: analysis/f1x-reap14-keepalive-20261031/controller.log
+Cancel before launch: systemctl --user disable --now arc-d22-reap14-ka-startup-20261031.timer; systemctl --user stop arc-d22-reap14-ka-startup-20261031.service
+Restore config after handoff if needed: remove only the two arc-d22-reap14-ka-startup-20261031 unit files and arc-hidden-draw-daily.service.d/hold-d22-20261031.conf, then systemctl --user daemon-reload. Do not remove the hold before slot handoff unless deliberately allowing raw fallback.

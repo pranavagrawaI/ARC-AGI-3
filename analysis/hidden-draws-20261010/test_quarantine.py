@@ -149,6 +149,15 @@ class SubmissionQuarantine(unittest.TestCase):
                 self.assertEqual(code, expected)
                 self.assertFalse(any('submit' in cmd for cmd in calls))
 
+    def test_daily_empty_queue_submits_the_control_fallback_once(self):
+        code, _, calls, _, files = self.run_submit(daily=True)
+        self.assertEqual(code, 0)
+        submissions = [cmd for cmd in calls if 'submit' in cmd]
+        self.assertEqual(len(submissions), 1)
+        self.assertEqual(submissions[0][5:8], [daily_draw.FALLBACK[0], '-v', daily_draw.FALLBACK[1]])
+        self.assertIn('receipt-d13.json', files)
+
+    @mock.patch.object(daily_draw, 'FALLBACK', (F1X, '1', 'quarantined fallback'))
     def test_daily_empty_queue_and_quarantined_queue_never_submit_or_fall_back(self):
         for entry in [None, {'kernel': F1, 'version': 1, 'message': 'quarantined queued draw', 'requires': ['D12']}]:
             with self.subTest(entry=entry):
@@ -157,6 +166,7 @@ class SubmissionQuarantine(unittest.TestCase):
                 self.assertEqual(len(calls), 1)  # only the local Python invocation
                 self.assertEqual(sdk.mock_calls, [])
 
+    @mock.patch.object(daily_draw, 'FALLBACK', (F1X, '1', 'no new candidate queued'))
     def test_failed_prerequisite_fallback_is_blocked_at_submission_boundary(self):
         entry = {'kernel': 'pranavagrawai/m2-f1x-reap14-screen1', 'version': 1,
                  'message': 'merge', 'requires': ['D11', 'D12']}

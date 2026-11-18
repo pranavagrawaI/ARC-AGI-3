@@ -9,9 +9,9 @@ sys.path.insert(0, str(HERE.parents[2] / 'analysis/mtp-depth-20261006'))
 import launch_watch as lw  # quota_used_s, active_sessions, refresh_token (shared, already field-tested)
 lw.EVID = HERE  # keep this experiment's log lines out of mtp-depth's evidence
 
-CEILING_S = 6000  # one arm; approved by Pranav 2026-10-20 (screen-1/EXPERIMENT-CARD.md)
+CEILING_S = 12000  # screen-1 (6,000 s, approved 2026-10-20) + screen-2 c16 (6,000 s, asked for 2026-10-25)
 WEEKLY_CAP_S = 30 * 3600
-GROUPS = {'screen-1': (['screen-1/merge'], 6000)}
+GROUPS = {'screen-1': (['screen-1/merge'], 6000), 'screen-2': (['screen-2/c16'], 6000)}
 LEDGER = HERE / 'budget.json'
 
 def now(): return dt.datetime.now(dt.timezone.utc).isoformat()

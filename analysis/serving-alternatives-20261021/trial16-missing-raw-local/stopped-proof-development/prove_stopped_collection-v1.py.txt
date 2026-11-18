@@ -1,0 +1,64 @@
+"""Offline partial-collection inventory only; never run the scientific audit."""
+import datetime as dt,hashlib,json,sys
+from pathlib import Path
+HERE=Path(__file__).resolve().parent
+sys.path.insert(0,str(HERE))
+import run,remote
+
+def sha(path):
+    with Path(path).open('rb') as stream:return hashlib.file_digest(stream,'sha256').hexdigest()
+
+def prove(destination):
+    destination=Path(destination);destination.mkdir(exist_ok=False);run.verify_local()
+    collection=HERE.parent/'trial16-missing-raw-collected-20261024'
+    manifest=json.loads((HERE/'MISSING-MANIFEST.json').read_bytes());required={row['name']:row for row in manifest['files']}
+    state=json.loads((collection/'COLLECTION.json').read_bytes());assert state['complete'] is False and state['error']['type']=='ConnectTimeout'
+    assert state['after'] is None and not (collection/'after').exists()
+    before=json.loads((collection/'before/READBACK.json').read_bytes())
+    checked=remote.validate_readback(collection/'before',now=dt.datetime.fromisoformat(before['typed_quota']['utc']))
+    assert checked==state['before']
+    driver=json.loads((collection/'DRIVER-COMPLETION.json').read_bytes())
+    assert driver['receipt_sha256']==sha(collection/'COLLECTION.json')
+    assert driver['started']<=driver['receipt_persisted_end']<driver['deadline']==driver['started']+1800
+    attempts=[json.loads(line) for line in (collection/'attempts.jsonl').read_bytes().splitlines()]
+    assert len(attempts)==state['download_attempts']==1401 and len({row['name'] for row in attempts})==1401
+    assert all(row['attempt']==1 and row['name'] in required for row in attempts)
+    complete={};total=0
+    for row in state['files']:
+        name=row['name'];assert name in required and name not in complete
+        file=collection/'members'/name;assert not file.is_symlink()
+        assert row['origin']=='INDEPENDENT_CURRENT_SESSION_DOWNLOAD' and row['complete'] is True
+        assert file.stat().st_size==row['bytes'] and sha(file)==row['sha256']
+        expected=required[name];assert expected['expected_bytes'] in (None,row['bytes']) and expected['expected_sha256'] in (None,row['sha256'])
+        complete[name]=dict(row,source=str(file),binding_scope='EXACT_BEFORE_V1; AFTER_UNAVAILABLE; NOT_QUALIFIED')
+        total+=row['bytes']
+    assert len(complete)==1400 and total==state['downloaded_bytes']==248479141
+    failed=state['partial'];assert failed['bytes_persisted']==0 and attempts[-1]['name']==failed['name']
+    attempted={row['name'] for row in attempts};remaining=[]
+    for name,row in sorted(required.items()):
+        if name in complete:continue
+        remaining.append(dict(row,attempt_state='FAILED_CONNECT_TIMEOUT_NO_RETRY' if name in attempted else 'NOT_ATTEMPTED',
+            conditional_resolution='NOT_EVALUATED' if row['conditional'] else None))
+    assert len(remaining)==196 and sum(row['attempt_state']=='FAILED_CONNECT_TIMEOUT_NO_RETRY' for row in remaining)==1
+    gaps=dict(scope='STOPPED_COLLECTION_NO_NEW_AUTHORITY',names=remaining,remaining_count=len(remaining),
+        failed_count=1,unattempted_count=195,unresolved_conditional_bodies=sum(row['conditional'] for row in remaining),
+        independent_actual_result_available='serving-candidate-s10-16/output/result.json' in complete,
+        after_identity_readback_available=False,after_readback_not_attempted_due_to_first_error_stop=True,
+        accepted_rate=None,scientific_audit_executed=False,retry_authorized=False)
+    (destination/'REMAINING-GAPS.json').write_text(json.dumps(gaps,indent=2)+'\n')
+    (destination/'VERIFIED-COMPLETE-ORIGINS.json').write_text(json.dumps(complete,indent=2)+'\n')
+    report=dict(pass_=True,scope='LOCAL_PARTIAL_INVENTORY_PROOF_NOT_SCIENTIFIC_AUDIT',network_calls=0,
+        collection_complete=False,collector_exit_code=1,collector_process_ended=True,
+        list_pages=state['list_pages'],attempts=1401,complete_files=1400,complete_bytes=total,
+        driver_seconds=state['driver_elapsed_seconds'],failed_file=failed['name'],failed_persisted_bytes=0,
+        remaining_files=196,conditional_bodies_unresolved=gaps['unresolved_conditional_bodies'],
+        before_exact_source_terminal_quota=True,after_readback=False,driver_completion_hash_exact=True,
+        original_bindings=13118,approved_collector_pins_sha256=sha(HERE/'SOURCE-PINS.json'),
+        collection_receipt_sha256=sha(collection/'COLLECTION.json'),driver_completion_sha256=sha(collection/'DRIVER-COMPLETION.json'),
+        invocation_sha256=sha(HERE/'REMOTE-COLLECTION-INVOKED.json'),CLI_log_sha256=sha(HERE/'remote-collection.log'),
+        original_archive_and_overlay_status='INVALID_INCONCLUSIVE/null unchanged',scientific_audit_executed=False,
+        accepted_rate=None,ratio=None,adoption=False,candidate_negative=False,
+        conclusion='First connection failure stopped collection; retain partials without retry. Incomplete collection is not a workload-negative.')
+    (destination/'PROOF.json').write_text(json.dumps(report,indent=2)+'\n')
+    print(json.dumps(report,indent=2))
+if __name__=='__main__':prove(Path(sys.argv[1]))

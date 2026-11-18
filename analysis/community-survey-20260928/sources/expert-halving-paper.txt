@@ -1,0 +1,3833 @@
+Training-Free Halving of Activated Expertsin Fine-Grained Mixture-of-Experts Models
+Report GitHub Issue
+×
+Title:
+Content selection saved. Describe the issue below:
+Description:
+Submit without GitHub
+Submit in GitHub
+arXiv is now an independent nonprofit!
+Learn more
+×
+Back to arXiv
+Why HTML?
+Report Issue
+Back to Abstract
+Download PDF
+Abstract
+Introduction
+Related Work
+Sparse MoE language models.
+Analyses of learned routing.
+Training-free MoE compression.
+Changing
+k
+k
+after training.
+Background and Setup
+Models.
+Router and the implicit gain.
+Method: decouple the reference set.
+Evaluation protocol.
+How the Router Actually Behaves
+Load is well balanced; there is no obvious fat to cut.
+Experts are strongly domain-specialized.
+But specialization does not make pruning transferable.
+Attention type structures routing.
+Expert Selection Matters More Than Expert Weighting
+The Reference Set Controls the Damage
+The router’s top-
+k
+k
+mass is small.
+Both extremes of the reference set are harmful.
+Perplexity.
+Downstream Validation
+Halving activated experts is free, if the denominator is not halved too.
+The optimal
+k
+2
+k_{2}
+is model-dependent, and lies in
+[
+k
+,
+2
+​
+k
+]
+[k,2k]
+.
+The ablation structure matters.
+Perplexity picks a significantly worse operating point.
+Generation: the effect survives autoregressive decoding.
+C-Eval: insensitivity is model-specific, not benchmark-specific.
+Cost accounting.
+Discussion
+Practical recommendation.
+Why we do not recommend expert pruning here.
+Limitations.
+Conclusion
+References
+A
+Appendix A: A Third Architecture
+The scalar gain helps but does not fully recover.
+The amplitude degree of freedom is untrained on all three models.
+The flatness mechanism predicts the effect size.
+A protocol caution.
+B
+Appendix B: Reproducibility Notes
+Infrastructure.
+Protocol pitfalls.
+License: CC BY 4.0
+arXiv:2609.04575v1 [cs.LG] 04 Sep 2026
+Training-Free Halving of Activated Experts
+in Fine-Grained Mixture-of-Experts Models
+Xing Chen
+Note:
+Correspondence: raincchio@gmail.com
+Hengshuai Yao
+Abstract
+Modern fine-grained Mixture-of-Experts (MoE) models route each token to a small
+number of experts and renormalize their router probabilities. We show that this
+renormalization implicitly calibrates expert output gain to the training top-
+k
+k
+:
+reducing
+k
+k
+at inference changes not only which experts are used but also the
+strength of the expert branch. We separate these effects by activating the top
+k
+1
+k_{1}
+experts while normalizing by the probability mass of the top
+k
+2
+k_{2}
+experts,
+introducing one integer with no parameters, training, or measurable compute overhead.
+On Qwen3.6-35B-A3B, reducing from 8 to 4 experts causes a 4.65-point MMLU drop under
+standard renormalization but only 0.35 points with
+k
+2
+=
+16
+k_{2}=16
+, while halving
+routed-expert compute. The result replicates on the
+11
+×
+11\times
+larger
+Qwen3.5-397B-A17B, where reducing from 10 to 5 experts loses only 0.55 points with an
+appropriate reference set. Removing renormalization entirely is catastrophic, showing
+that preserving a suitable reference mass is crucial. We further find that perplexity
+and downstream accuracy favor different
+k
+2
+k_{2}
+, cautioning against selecting MoE
+compression settings using unlabeled text alone. Analyses also show that expert
+identity matters substantially more than expert weighting, while balanced and
+domain-specialized routing leaves limited room for expert pruning.
+Introduction
+Sparse Mixture-of-Experts (MoE) architectures decouple parameter count from
+per-token compute by activating only a few of many expert
+sub-networks
+(
+Shazeer et al. 2017
+;
+Lepikhin et al. 2021
+;
+Fedus et al. 2022
+)
+.
+Recent open-weight models have pushed this design toward
+fine-grained
+sparsity: rather than 8 or 16 large experts, they use hundreds of small ones and
+route each token to a handful of them
+(
+Dai et al. 2024
+;
+DeepSeek-AI 2024
+;
+Qwen Team 2025
+)
+.
+In Qwen3.6-35B-A3B, our primary object of study, all 40 layers are MoE layers with
+256 experts each and
+k
+=
+8
+k{=}8
+selected per token; the routed experts hold
+32.2
+32.2
+B of
+the model’s
+35.9
+35.9
+B parameters (89.6%), while each token touches only
+3.1
+%
+3.1\%
+of them.
+This memory–compute asymmetry—all experts must be resident, few are used—is what
+makes MoE compression attractive and awkward at the same time. Reducing the number of
+experts (pruning or merging) saves memory but not compute, since
+k
+k
+is unchanged;
+reducing
+k
+k
+saves compute but not memory. A large body of training-free work
+attacks the memory side by identifying and removing redundant
+experts
+(
+Lu et al. 2024
+;
+Li et al. 2024
+)
+. The compute side, by contrast, is
+usually treated as trivially adjustable:
+k
+k
+is an inference-time argument, so one
+simply lowers it, renormalizes over the survivors, and measures the
+loss
+(
+Chitty-Venkata et al. 2025
+)
+. The loss is large, and the reported remedies are
+training-based—retraining with sampled expert counts, or distilling a
+half-expert student
+(
+Wang et al. 2025
+;
+Gu et al. 2025
+;
+Lv et al. 2026
+)
+.
+We argue this treatment overlooks a detail that turns out to dominate the outcome.
+Nearly all modern MoE implementations renormalize the selected router probabilities,
+w
+i
+=
+p
+i
+/
+∑
+j
+∈
+𝒯
+k
+p
+j
+w_{i}=p_{i}/\sum_{j\in\mathcal{T}_{k}}p_{j}
+, so that the mixture weights sum to one.
+In a coarse-grained router this is nearly a no-op, because the top few probabilities
+already carry most of the mass. In a fine-grained router it is not: in the model we
+study, the top-8 of 256 probabilities sum to only
+0.182
+0.182
+, so renormalization
+multiplies them by
+5.5
+5.5
+on average. That amplification is not a free-standing design
+choice—it is a quantity the model was trained under, and it is a function of
+k
+k
+.
+Lowering
+k
+k
+from 8 to 4 while keeping the renormalization discards four experts
+and
+redistributes their weight onto the survivors, inflating the expert
+branch’s contribution to the residual stream beyond anything the model saw in
+training. The measured degradation of “top-4” therefore conflates two effects: the
+loss of four experts, and a gain miscalibration that has nothing to do with expert
+capacity.
+Our contribution is to separate them, using the observation that the numerator and
+the denominator of the renormalization need not use the same expert set. We activate
+the top
+k
+1
+k_{1}
+experts but normalize by the mass of the top
+k
+2
+k_{2}
+:
+w
+i
+=
+p
+i
+∑
+j
+∈
+𝒯
+k
+2
+p
+j
+,
+i
+∈
+𝒯
+k
+1
+,
+w_{i}=\frac{p_{i}}{\sum_{j\in\mathcal{T}_{k_{2}}}p_{j}},\qquad i\in\mathcal{T}_{k_{1}},
+where
+k
+1
+k_{1}
+controls compute and
+k
+2
+k_{2}
+controls gain. Setting
+k
+2
+=
+k
+1
+k_{2}{=}k_{1}
+recovers
+standard renormalization;
+k
+2
+=
+E
+k_{2}{=}E
+removes it;
+k
+2
+=
+k
+k_{2}{=}k
+anchors the gain to the
+trained value; and
+k
+2
+>
+k
+k_{2}>k
+pushes the gain below its trained value, adaptively per
+token. Only
+k
+1
+k_{1}
+expert FFNs are ever evaluated, and the router already computes all
+E
+E
+probabilities, so varying
+k
+2
+k_{2}
+costs nothing measurable.
+The empirical payoff is large, and it is largest exactly where prior practice reports
+the reduction of
+k
+k
+as unaffordable. On 2000-question, 5-shot MMLU with paired
+McNemar testing, activating 4 of 256 experts per layer instead of 8—halving
+routed-expert compute—costs
+4.65
+4.65
+accuracy points under standard renormalization
+(
+p
+=
+1.7
+×
+10
+−
+9
+p{=}1.7{\times}10^{-9}
+), but only
+0.35
+0.35
+points at
+k
+2
+=
+16
+k_{2}{=}16
+(
+p
+=
+0.66
+p{=}0.66
+), which
+the paired test cannot distinguish from the top-8 baseline. The same experiment on
+Qwen3.5-397B-A17B, an
+11
+×
+11\times
+larger model with 512 experts and
+k
+=
+10
+k{=}10
+, gives
+2.10
+2.10
+points at
+k
+2
+=
+k
+1
+=
+5
+k_{2}{=}k_{1}{=}5
+versus
+0.55
+0.55
+points at
+k
+2
+=
+10
+k_{2}{=}10
+(
+p
+=
+0.24
+p{=}0.24
+).
+We summarize our findings as follows.
+•
+The renormalization reference set is a free variable.
+Lowering
+k
+k
+without decoupling the denominator conflates capacity loss with gain miscalibration.
+Decoupling it is a one-line change that makes it possible to halve the number of
+activated experts with no statistically detectable MMLU loss on two models spanning
+11
+×
+11\times
+in scale.
+•
+The gain, not the weights, is what breaks.
+Removing renormalization
+entirely (
+k
+2
+=
+E
+k_{2}{=}E
+) costs
+27.5
+27.5
+MMLU points and
+356
+%
+356\%
+perplexity, so the model is
+not indifferent to weight magnitudes; and with
+k
+1
+k_{1}
+held fixed, both shrinking and
+enlarging the reference set away from its optimum degrade the model. The damage is
+specific to the reference set being wrong, and it is two-sided.
+•
+Which experts, not how much.
+With the number of activated experts held
+fixed at 8, replacing the router’s weights with uniform ones costs
++
+49.7
+%
++49.7\%
+perplexity, while sampling experts instead of taking the argmax costs
++
+310
+%
++310\%
+and
+random selection
++
+1667
+%
++1667\%
+. Expert
+identity
+is worth several times more than
+expert
+weighting
+, which rules out approximate or stochastic routing on this
+model but is precisely what makes a cheap global gain correction viable.
+•
+Perplexity picks the wrong operating point.
+On the 35B model
+perplexity is minimized at
+k
+2
+=
+8
+k_{2}{=}8
+and MMLU at
+k
+2
+=
+16
+k_{2}{=}16
+; the perplexity-optimal
+setting is significantly worse on MMLU (
+−
+1.10
+-1.10
+points,
+p
+=
+0.021
+p{=}0.021
+). Selecting
+compression hyperparameters on unlabeled text is not safe here, and we recommend
+paired significance testing on a downstream task.
+•
+Expert pruning has less headroom than this.
+The router is well balanced
+with essentially no dead experts, and its specialization is strongly domain-dependent:
+WikiText and code top-64 expert sets overlap at
+0.164
+0.164
+, below the
+0.250
+0.250
+random
+baseline, so domain-pruned models do not transfer and the union of two domains’
+top-128 sets already covers 198 of 256 experts.
+All results are obtained without any training, distillation, or fine-tuning.
+Related Work
+Sparse MoE language models.
+Conditional computation via learned routing dates to
+Shazeer et al. (2017)
+,
+and was scaled to modern transformers by GShard
+(
+Lepikhin et al. 2021
+)
+and Switch
+Transformer
+(
+Fedus et al. 2022
+)
+, which also documented the training instabilities
+that motivate auxiliary load-balancing losses
+(
+Zoph et al. 2022
+)
+. Alternatives to
+token-choice top-
+k
+k
+routing include expert-choice routing
+(
+Zhou et al. 2022
+)
+.
+Open-weight decoder MoEs such as Mixtral
+(
+Jiang et al. 2024
+)
+use coarse
+granularity (8 experts, top-2), whereas DeepSeekMoE
+(
+Dai et al. 2024
+)
+argued
+for many small experts plus always-on shared experts, a design adopted by
+DeepSeek-V3
+(
+DeepSeek-AI 2024
+)
+and the Qwen3 series
+(
+Qwen Team 2025
+)
+, and pushed further
+by
+He (2024)
+. Our objects of study belong to this
+fine-grained family, and the effect we describe is a direct consequence of fine
+granularity: it is the flatness of a 256-way router’s top-
+k
+k
+mass that makes the
+renormalization gain large and thus makes miscalibrating it expensive.
+Analyses of learned routing.
+Several studies have asked whether experts specialize semantically. OpenMoE
+(
+Xue et al. 2024
+)
+reported context-independent, largely token-identity-driven routing, and
+Lo et al. (2024)
+analyzed routing behavior across layers in open MoE models. Our routing measurements
+are consistent with the general picture that routers are well balanced, but we reach
+a sharper conclusion on specialization for this model: the domain effect exceeds a
+within-domain resampling noise floor by nearly four orders of magnitude, and
+cross-domain expert overlap falls
+below
+chance. We also separate layers by
+attention type—both models interleave linear-attention and full-attention layers in
+a 3:1 pattern—and find the two classes behave differently, a grouping that prior
+analyses of homogeneous architectures had no reason to consider.
+Training-free MoE compression.
+Expert pruning removes experts judged redundant
+(
+Lu et al. 2024
+)
+and
+merging consolidates them using routing statistics
+(
+Li et al. 2024
+)
+;
+Lasby et al. (2025)
+report near-lossless one-shot pruning at 50% expert reduction
+with a router-weighted criterion. These target memory, as does
+quantization
+(
+Frantar et al. 2023
+;
+Lin et al. 2024
+)
+, which suits MoE well since the routed
+experts are a large homogeneous block;
+Huang et al. (2025)
+combine both
+in a training-free pipeline. On the compute side the closest method to ours is
+LExI
+(
+Chitty-Venkata et al. 2025
+)
+, which picks a per-layer number of active experts
+data-free—and renormalizes the surviving router weights, which in our
+parameterization is
+k
+2
+=
+k
+1
+k_{2}{=}k_{1}
+, precisely the setting we find worst on both models.
+The two compose: LExI decides
+how many
+experts a layer keeps, the reference set
+decides
+how strongly
+the survivors drive the residual stream. More generally,
+we are not aware of prior work that scans the renormalization denominator separately
+from
+k
+k
+, and prior top-
+k
+k
+reduction numbers on fine-grained models are, for this
+reason, likely to be pessimistic. Some architectures do expose a related
+knob—GLM-style configurations ship a
+routed_scaling_factor
+applied after
+renormalization—but as a fixed scalar chosen at training time.
+Changing
+k
+k
+after training.
+That MoE models degrade sharply when the number of activated experts is altered at
+inference is well documented—
+Wang et al. (2025)
+call the degradation
+“precipitous”—and the reported remedies are
+training-based
+: retraining with
+randomly sampled expert counts
+(
+Wang et al. 2025
+)
+, training expert
+combinations so that
+k
+k
+can be scaled
+up
+(
+Gu et al. 2025
+)
+, null experts
+that let the effective
+k
+k
+vary per token
+(
+Zeng et al. 2024
+)
+, and, closest to our
+headline result, self-distilling a post-trained MoE that skips roughly half its
+experts
+(
+Lv et al. 2026
+)
+. That last work also argues, as we do, that
+renormalizing the surviving weights inflates the effective scale of the expert residual
+branch relative to what pre-training calibrated. Our contribution relative to it is
+twofold: our correction needs no training, and we find the choice is not the binary
+“renormalize or do not”—those are the endpoints
+k
+2
+=
+k
+1
+k_{2}{=}k_{1}
+and
+k
+2
+=
+E
+k_{2}{=}E
+of a
+family whose useful settings are interior. Which endpoint is less wrong depends on the
+model’s native forward pass: for a model that does not renormalize, not renormalizing
+preserves the trained gain, whereas both models here renormalize by construction and
+removing it costs
+27.45
+27.45
+MMLU points. The invariant is not a rule about
+renormalization but the reference set.
+Background and Setup
+Models.
+We study two fine-grained MoE models from the same series but very different scales
+(Table
+1
+). Qwen3.6-35B-A3B has 40 layers, hidden size 2048, and 256
+routed experts of intermediate size 512 per layer with
+k
+=
+8
+k{=}8
+, plus one always-on
+shared expert per layer modulated by a learned scalar gate; every layer is an MoE
+layer. Qwen3.5-397B-A17B has 60 layers, hidden size 4096, and 512 routed experts of
+intermediate size 1024 with
+k
+=
+10
+k{=}10
+. Both interleave linear-attention (gated
+delta-net style) and full-attention blocks in a repeating 3:1 pattern. For the 35B
+model we enumerated tensors in the released checkpoint: routed experts hold 89.6% of
+all parameters (
+32.212
+32.212
+B of
+35.952
+35.952
+B; the remainder is
+2.448
+2.448
+B of attention,
+embeddings, shared experts and norms, a
+0.845
+0.845
+B multi-token-prediction head, and a
+0.447
+0.447
+B vision tower). Each token activates
+8
++
+1
+8{+}1
+of 256 experts per layer, i.e.
+3.1
+%
+3.1\%
+of expert parameters—a
+32
+:
+1
+32{:}1
+memory-to-compute asymmetry that organizes
+the rest of this paper.
+Qwen3.6
+Qwen3.5
+35B-A3B
+397B-A17B
+Layers (all MoE)
+40
+60
+Hidden size
+2048
+4096
+Experts per layer
+E
+E
+256
+512
+Trained
+k
+k
+8
+10
+Expert interm. size
+512
+1024
+Shared experts
+1
+1
+Top-
+k
+k
+router mass
+0.182
+0.192
+Renorm. gain
+5.50
+×
+5.50\times
+5.22
+×
+5.22\times
+Act. expert params, native
+1.132 B
+8.305 B
+at
+k
+1
+=
+0.75
+​
+k
+k_{1}=0.75k
+/
+0.8
+​
+k
+0.8k
+0.881 B
+6.795 B
+at
+k
+1
+=
+0.5
+​
+k
+k_{1}=0.5k
+0.629 B
+4.530 B
+Table 1:
+The two models. “Act. expert params” counts routed experts activated per
+token plus the always-on shared expert, summed over layers. Router mass and gain are
+measured on WikiText.
+Router and the implicit gain.
+For hidden state
+x
+x
+at a given layer, the router computes
+p
+=
+softmax
+⁡
+(
+W
+g
+​
+x
+)
+p=\mathrm{softmax}(W_{g}x)
+over all
+E
+E
+experts, selects the index set
+𝒯
+k
+\mathcal{T}_{k}
+of the
+k
+k
+largest
+entries, and forms the layer output
+y
+=
+∑
+i
+∈
+𝒯
+k
+w
+i
+​
+E
+i
+​
+(
+x
+)
++
+g
+sh
+​
+E
+sh
+​
+(
+x
+)
+,
+w
+i
+=
+p
+i
+∑
+j
+∈
+𝒯
+k
+p
+j
+.
+y=\sum_{i\in\mathcal{T}_{k}}w_{i}\,E_{i}(x)+g_{\mathrm{sh}}\,E_{\mathrm{sh}}(x),\qquad w_{i}=\frac{p_{i}}{\sum_{j\in\mathcal{T}_{k}}p_{j}}.
+(1)
+The denominator is what concerns us. Write
+m
+k
+​
+(
+x
+)
+=
+∑
+j
+∈
+𝒯
+k
+p
+j
+m_{k}(x)=\sum_{j\in\mathcal{T}_{k}}p_{j}
+for the retained probability mass. Renormalization multiplies the raw probabilities by
+1
+/
+m
+k
+​
+(
+x
+)
+1/m_{k}(x)
+, and since
+m
+k
+m_{k}
+increases with
+k
+k
+, this gain is implicitly tied to the
+k
+k
+used in training. We measure
+𝔼
+⁡
+[
+m
+8
+]
+=
+0.182
+\mathbb{E}[m_{8}]=0.182
+on WikiText and
+0.170
+0.170
+on
+code for the 35B model, i.e. average amplifications of
+5.50
+×
+5.50\times
+and
+5.87
+×
+5.87\times
+;
+for the 397B model
+𝔼
+⁡
+[
+m
+10
+]
+=
+0.192
+\mathbb{E}[m_{10}]=0.192
+, i.e.
+5.22
+×
+5.22\times
+. Dropping to
+k
+=
+4
+k{=}4
+reduces
+m
+k
+m_{k}
+and hence
+raises
+the gain applied to the surviving
+experts, pushing the expert branch out of the regime the model was trained in. This is
+the miscalibration we correct.
+Method: decouple the reference set.
+We keep the selection rule and the numerator, and replace only the denominator’s index
+set:
+w
+i
+=
+p
+i
+∑
+j
+∈
+𝒯
+k
+2
+p
+j
+,
+i
+∈
+𝒯
+k
+1
+,
+w_{i}=\frac{p_{i}}{\sum_{j\in\mathcal{T}_{k_{2}}}p_{j}},\qquad i\in\mathcal{T}_{k_{1}},
+(2)
+with
+𝒯
+k
+1
+⊆
+𝒯
+k
+2
+\mathcal{T}_{k_{1}}\subseteq\mathcal{T}_{k_{2}}
+when
+k
+2
+≥
+k
+1
+k_{2}\geq k_{1}
+. The
+parameterization is a strict generalization of common practice:
+•
+k
+2
+=
+k
+1
+k_{2}=k_{1}
+: standard renormalization (Eq.
+1
+);
+•
+k
+2
+=
+k
+k_{2}=k
+(trained value): the gain is anchored to what training calibrated;
+•
+k
+2
+=
+E
+k_{2}=E
+: no renormalization at all, since
+∑
+j
+p
+j
+=
+1
+\sum_{j}p_{j}=1
+;
+•
+k
+2
+>
+k
+k_{2}>k
+: gain below the trained value, applied per token.
+The weights no longer sum to one when
+k
+2
+>
+k
+1
+k_{2}>k_{1}
+; they sum to
+m
+k
+1
+​
+(
+x
+)
+/
+m
+k
+2
+​
+(
+x
+)
+<
+1
+m_{k_{1}}(x)/m_{k_{2}}(x)<1
+, which is a
+per-token, input-adaptive
+down-scaling rather than a constant. Averaged over tokens this ratio is
+0.854
+0.854
+for
+(
+k
+1
+,
+k
+2
+)
+=
+(
+6
+,
+8
+)
+(k_{1},k_{2}){=}(6,8)
+and
+0.592
+0.592
+for
+(
+6
+,
+16
+)
+(6,16)
+on the 35B model, so the discrete grid we
+scan spans the range a tuned global scalar would explore, without introducing a
+continuous hyperparameter.
+Only
+k
+1
+k_{1}
+expert FFNs are evaluated, so the compute saving is exactly that of
+reducing
+k
+k
+to
+k
+1
+k_{1}
+. The extra cost of a larger
+k
+2
+k_{2}
+is a wider top-
+k
+k
+over router
+logits that are computed for all
+E
+E
+experts anyway—negligible against
+k
+1
+k_{1}
+expert
+FFNs. Both are implemented by replacing the router’s
+forward
+at inference
+time; no weights are modified.
+Evaluation protocol.
+Perplexity is measured on 100K-token samples of WikiText-103
+(
+Merity et al. 2017
+)
+and a Python subset of CodeParrot
+(
+Tunstall et al. 2022
+)
+, at a 2048-token
+context, with a held-out WikiText
+split (drawn beyond row 400,000, disjoint from the tuning split) used to check that
+the choice of
+k
+2
+k_{2}
+does not overfit. All configurations are scored on byte-identical
+token chunks. Downstream accuracy is measured on MMLU
+(
+Hendrycks et al. 2021
+)
+: 2000
+questions sampled with a fixed seed from all 14,042 questions across all 57
+subjects, 5-shot, scored by comparing the logits of the single tokens
+A
+–
+D
+; on C-Eval
+(
+Huang et al. 2023
+)
+(1300 questions, 5-shot,
+Chinese); and, as a generation task, on GSM8K
+(
+Cobbe et al. 2021
+)
+(500 questions,
+0-shot, greedy to 512 tokens, reasoning disabled via the chat template, exact-match on
+the final number). All configurations run on
+identical
+question sets, compared to
+the baseline with a paired McNemar test
+(
+McNemar 1947
+)
+. Pairing is not optional
+at these effect sizes: a power analysis at
+n
+=
+2000
+n{=}2000
+gives a minimum detectable
+difference of
+0.98
+%
+0.98\%
+paired versus
+3.04
+%
+3.04\%
+unpaired, and our effects are
+0.3
+0.3
+–
+5
+%
+5\%
+.
+How the Router Actually Behaves
+Before modifying the router we characterize it, using forward hooks on all gates to
+record the selected expert indices and softmax weights over 500K tokens per domain
+(WikiText and code), giving an expected 15,680 activations per expert per layer on
+the 35B model.
+Load is well balanced; there is no obvious fat to cut.
+Normalized activation entropy is
+0.889
+0.889
+(WikiText) and
+0.915
+0.915
+(code), with Gini
+coefficients of
+0.581
+0.581
+and
+0.492
+0.492
+. The number of never-activated experts per layer
+has median
+0
+0
+and maximum
+1
+1
+across all layers and both domains. The 397B model
+behaves similarly (entropy
+0.911
+0.911
+, Gini
+0.527
+0.527
+, dead experts median
+1
+1
+of 512).
+Figure
+1
+(b) shows the resulting retention curves: keeping the top
+50% of experts per layer retains only
+88.8
+%
+88.8\%
+(WikiText) and
+81.3
+%
+81.3\%
+(code) of
+routing mass, and the worst layer retains just
+64.2
+%
+64.2\%
+. A router trained with
+load-balancing pressure leaves little slack for pruning, which is the first reason we
+look elsewhere for compute savings.
+Experts are strongly domain-specialized.
+Comparing per-layer expert distributions across domains yields a mean Jensen–Shannon
+divergence of
+0.258
+0.258
+nats. To calibrate this we estimate a noise floor by
+multinomial resampling within a domain at matched counts, obtaining
+3.2
+×
+10
+−
+5
+3.2\times 10^{-5}
+nats; the observed divergence is roughly
+8,200
+×
+8{,}200\times
+the floor,
+so it is not a sampling artifact. More strikingly, the top-64 expert sets of the two
+domains overlap at
+0.164
+0.164
+,
+below
+the random baseline of
+0.250
+0.250
+: the domains
+do not merely prefer different experts, they actively avoid each other’s.
+Specialization increases with depth (Figure
+1
+(a)), from
+0.135
+0.135
+nats
+at layer 0 to
+0.338
+0.338
+at layer 39.
+But specialization does not make pruning transferable.
+Pruning to the top-128 experts using code-derived rankings retains
+81.3
+%
+81.3\%
+of code
+routing mass; using WikiText-derived rankings retains only
+38.0
+%
+38.0\%
+on the same
+domain—a factor of two. Meanwhile the union of the two domains’ top-128 sets covers
+198 of 256 experts. Strong specialization is thus a double-edged result: it licenses
+domain-specific
+pruned models, but it forecloses a single general-purpose
+pruned model, because any expert set broad enough to serve both domains is barely
+smaller than the original.
+Attention type structures routing.
+Grouping layers by attention type reveals structure that a layer-agnostic average
+hides. Full-attention layers share expert preferences with each other (cross-layer
+top-64 overlap
+0.309
+0.309
+versus the
+0.250
+0.250
+random baseline), whereas linear-attention
+layers are mutually near-independent (
+0.258
+0.258
+), and cross-type pairs are
+indistinguishable from chance (
+0.251
+0.251
+). The shared-expert gate follows the same
+split: mean
+0.178
+0.178
+on full-attention layers versus
+0.151
+0.151
+on linear-attention
+layers, rising with depth to
+0.405
+0.405
+at layer 39. We report this as a caution for
+routing analyses of the increasingly common hybrid-attention architectures: layers are
+not interchangeable samples.
+Figure 1:
+Routing structure of Qwen3.6-35B-A3B measured over 500K tokens per domain.
+(a) Cross-domain (WikiText vs. code) Jensen–Shannon divergence of the per-layer
+expert distribution rises with depth; full-attention layers are marked separately.
+(b) Fraction of routing mass retained when keeping only the top-
+N
+N
+experts per layer;
+shaded bands span the best and worst layer. Even keeping half the experts loses
+11–19% of routing mass, and the worst layer far more.
+Expert Selection Matters More Than Expert Weighting
+If a global correction to the router weights is to work, the model must be more
+sensitive to expert selection than to the precise weight values. We test this directly
+with three ablations that all keep the number of activated experts at exactly 8, so
+compute is held constant (Table
+2
+).
+WikiText
+Code
+Routing rule
+PPL
+Δ
+\Delta
+PPL
+Δ
+\Delta
+top-
+k
+k
+(native)
+6.64
+—
+2.59
+—
+top-
+k
+k
+, uniform
+w
+w
+9.95
++49.7%
+3.11
++20.3%
+sampled without repl.
+27.22
++310%
+6.09
++135%
+uniformly random
+117.39
++1667%
+18.69
++623%
+Table 2:
+Routing ablations at fixed compute (8 experts activated in every row) on
+Qwen3.6-35B-A3B. Replacing the router’s weights with uniform ones is far less
+damaging than replacing its
+choices
+.
+Discarding the router’s weights entirely but keeping its choices costs
++
+49.7
+%
++49.7\%
+perplexity on WikiText. Keeping the router’s distribution but sampling from it instead
+of taking the argmax costs
++
+310
+%
++310\%
+, and choosing experts uniformly at random costs
++
+1667
+%
++1667\%
+. Selection is worth roughly six times more than weighting on both
+domains.
+This has two consequences. Negatively, it rules out a family of efficiency methods on
+this model: approximate top-
+k
+k
+, locality-sensitive-hashing routers, and any scheme
+that injects stochasticity into selection will be catastrophic, because exact argmax
+is effectively a hard requirement. Positively, it is what makes our method plausible.
+Since the model tolerates substantial distortion of the weight
+magnitudes
+as
+long as the selected set is right, correcting the systematic component of that
+distortion is enough—and reducing
+k
+1
+k_{1}
+produces exactly a systematic, not
+idiosyncratic, magnitude error.
+The Reference Set Controls the Damage
+The router’s top-
+k
+k
+mass is small.
+Table
+3
+reports the mean softmax mass by rank on the 35B model. The single
+highest-scoring expert receives only
+0.046
+0.046
+of the probability mass, the top-8
+together only
+0.182
+0.182
+, and even the top-32 only
+0.380
+0.380
+. The distribution is remarkably
+flat, as one would expect from a 256-way router trained with load balancing.
+Renormalization therefore performs a
+5.50
+×
+5.50\times
+amplification, and that factor is a
+property of
+k
+=
+8
+k{=}8
+.
+Domain
+rank 1
+top-4
+top-6
+top-8
+top-16
+WikiText
+0.046
+0.122
+0.155
+0.182
+0.262
+Code
+0.046
+0.116
+0.146
+0.170
+0.245
+Table 3:
+Cumulative router softmax mass by rank on Qwen3.6-35B-A3B, averaged over
+tokens and layers. The top-8 of 256 experts carry under a fifth of the total mass, so
+the renormalization in Eq.
+1
+applies a large,
+k
+k
+-dependent gain.
+Both extremes of the reference set are harmful.
+Two observations bracket the effect. Removing renormalization altogether
+(
+k
+2
+=
+E
+=
+256
+k_{2}{=}E{=}256
+) at
+k
+1
+=
+6
+k_{1}{=}6
+raises WikiText perplexity from
+6.64
+6.64
+to
+30.29
+30.29
+(
++
+356
+%
++356\%
+) and drops MMLU by
+27.45
+27.45
+points; the model depends on the amplification
+rather than merely tolerating it. At the other extreme, shrinking the reference set
+along with
+k
+1
+k_{1}
+(
+k
+2
+=
+k
+1
+k_{2}{=}k_{1}
+) costs
++
+4.08
+%
++4.08\%
+perplexity and
+2.60
+2.60
+MMLU points at
+k
+1
+=
+6
+k_{1}{=}6
+, and
+4.65
+4.65
+MMLU points at
+k
+1
+=
+4
+k_{1}{=}4
+. Between them,
+k
+2
+k_{2}
+in the range
+[
+k
+,
+2
+​
+k
+]
+[k,2k]
+recovers nearly all of it. Perplexity as a function of
+k
+2
+k_{2}
+is thus
+U-shaped with an interior minimum, and MMLU is inverted-U with an interior maximum
+(Figure
+2
+); neither optimum sits at an endpoint of the scanned grid.
+Perplexity.
+Table
+4
+gives the perplexity scan. On the 35B model at
+k
+1
+=
+6
+k_{1}{=}6
+, standard
+renormalization costs
++
+4.08
+%
++4.08\%
+, while
+k
+2
+=
+8
+k_{2}{=}8
+yields
+−
+1.61
+%
+-1.61\%
+—slightly
+better
+than the native top-8 baseline while activating 22% fewer expert
+parameters. The held-out WikiText split, disjoint from the split used to choose
+k
+2
+k_{2}
+,
+reproduces the ranking exactly (
+−
+0.57
+%
+-0.57\%
+at
+k
+2
+=
+8
+k_{2}{=}8
+), as does code (
++
+0.68
+%
++0.68\%
+),
+so the choice is not an artifact of the tuning split. The 397B model shows the same
+ordering at
+k
+1
+=
+8
+k_{1}{=}8
+, with
+k
+2
+=
+10
+k_{2}{=}10
+the best of the grid on all three corpora
+(WikiText, held-out, and code). Across both models and all six corpus/model
+combinations, perplexity is minimized at
+k
+2
+k_{2}
+equal to the model’s trained
+k
+k
+and
+degrades monotonically as
+k
+2
+k_{2}
+moves away in either direction.
+Configuration
+WikiText
+Held-out
+Code
+Qwen3.6-35B-A3B
+(trained
+k
+=
+8
+k{=}8
+,
+E
+=
+256
+E{=}256
+)
+k
+1
+=
+8
+k_{1}{=}8
+native
+6.643
+6.986
+2.585
+k
+1
+=
+6
+k_{1}{=}6
+,
+k
+2
+=
+6
+k_{2}{=}6
++4.08%
++4.69%
++1.72%
+k
+1
+=
+6
+k_{1}{=}6
+,
+k
+2
+=
+8
+k_{2}{=}8
+–1.61%
+–0.57%
++0.68%
+k
+1
+=
+6
+k_{1}{=}6
+,
+k
+2
+=
+16
+k_{2}{=}16
++1.81%
++1.42%
++3.29%
+k
+1
+=
+6
+k_{1}{=}6
+,
+k
+2
+=
+32
+k_{2}{=}32
++23.25%
++19.04%
++13.00%
+k
+1
+=
+6
+k_{1}{=}6
+,
+k
+2
+=
+256
+k_{2}{=}256
++356%
++313%
++158%
+Qwen3.5-397B-A17B
+(trained
+k
+=
+10
+k{=}10
+,
+E
+=
+512
+E{=}512
+)
+k
+1
+=
+10
+k_{1}{=}10
+native
+4.159
+3.198
+2.249
+k
+1
+=
+8
+k_{1}{=}8
+,
+k
+2
+=
+8
+k_{2}{=}8
++1.06%
++1.54%
++0.42%
+k
+1
+=
+8
+k_{1}{=}8
+,
+k
+2
+=
+10
+k_{2}{=}10
++0.46%
++0.56%
++0.34%
+k
+1
+=
+8
+k_{1}{=}8
+,
+k
+2
+=
+20
+k_{2}{=}20
++4.98%
++4.95%
++2.18%
+k
+1
+=
+8
+k_{1}{=}8
+,
+k
+2
+=
+40
+k_{2}{=}40
++17.18%
++18.11%
++6.87%
+k
+1
+=
+8
+k_{1}{=}8
+,
+k
+2
+=
+512
+k_{2}{=}512
++128%
++146%
++56.04%
+Table 4:
+Perplexity relative to the native baseline (absolute PPL in the native rows).
+Held-out is a WikiText split disjoint from the split used to choose
+k
+2
+k_{2}
+. Perplexity
+is minimized at
+k
+2
+k_{2}
+equal to the trained
+k
+k
+on both models and all three corpora.
+Figure 2:
+(a) WikiText perplexity (blue, left) and MMLU accuracy (orange, right) as a
+function of the reference set size
+k
+2
+k_{2}
+at
+k
+1
+=
+6
+k_{1}{=}6
+on Qwen3.6-35B-A3B; stars mark
+the optima, dashed lines the native top-8 baselines. The two metrics disagree:
+perplexity is minimized at
+k
+2
+=
+8
+k_{2}{=}8
+, MMLU at
+k
+2
+=
+16
+k_{2}{=}16
+. (b) MMLU change versus
+k
+2
+/
+k
+k_{2}/k
+for both models at two values of
+k
+1
+k_{1}
+each; hollow markers are significant
+at
+p
+<
+0.05
+p<0.05
+under a paired McNemar test, filled markers are not. Shrinking the
+reference set together with
+k
+1
+k_{1}
+(leftmost point of each curve) is significantly
+harmful in three of four settings;
+k
+2
+≥
+k
+k_{2}\geq k
+recovers it. The
+k
+2
+=
+E
+k_{2}{=}E
+endpoint is
+off-scale and omitted.
+Downstream Validation
+Perplexity on 100K tokens is weak evidence for a claim about model capability. We
+therefore validate on MMLU under the paired protocol described earlier
+(Table
+5
+), and confirm the conclusion on a generation task (GSM8K) and a
+Chinese benchmark (C-Eval) below.
+Configuration
+Acc.
+Δ
+\Delta
+(pp)
+flips
+−
+/
++
+-/+
+McNemar
+p
+p
+Qwen3.6-35B-A3B
+,
+n
+=
+2000
+n{=}2000
+k
+1
+=
+8
+k_{1}{=}8
+native
+81.65%
+—
+—
+—
+k
+1
+=
+6
+k_{1}{=}6
+,
+k
+2
+=
+6
+k_{2}{=}6
+79.05%
+–2.60
+82 / 30
+9.3
+×
+10
+−
+7
+9.3\times 10^{-7}
+k
+1
+=
+6
+k_{1}{=}6
+,
+k
+2
+=
+8
+k_{2}{=}8
+80.55%
+–1.10
+53 / 31
+0.021
+k
+1
+=
+6
+k_{1}{=}6
+,
+k
+2
+=
+16
+k_{2}{=}16
+82.40%
++0.75
+74 / 89
+0.27
+k
+1
+=
+6
+k_{1}{=}6
+,
+k
+2
+=
+256
+k_{2}{=}256
+54.20%
+–27.45
+637 / 88
+10
+−
+103
+10^{-103}
+k
+1
+=
+4
+k_{1}{=}4
+,
+k
+2
+=
+4
+k_{2}{=}4
+77.00%
+–4.65
+166 / 73
+1.7
+×
+10
+−
+9
+1.7\times 10^{-9}
+k
+1
+=
+4
+k_{1}{=}4
+,
+k
+2
+=
+8
+k_{2}{=}8
+78.55%
+–3.10
+97 / 35
+6.4
+×
+10
+−
+8
+6.4\times 10^{-8}
+k
+1
+=
+4
+k_{1}{=}4
+,
+k
+2
+=
+16
+k_{2}{=}16
+81.30%
+–0.35
+99 / 92
+0.66
+Qwen3.5-397B-A17B
+,
+n
+=
+2000
+n{=}2000
+k
+1
+=
+10
+k_{1}{=}10
+native
+89.45%
+—
+—
+—
+k
+1
+=
+8
+k_{1}{=}8
+,
+k
+2
+=
+8
+k_{2}{=}8
+89.60%
++0.15
+23 / 26
+0.78
+k
+1
+=
+8
+k_{1}{=}8
+,
+k
+2
+=
+10
+k_{2}{=}10
+89.00%
+–0.45
+28 / 19
+0.24
+k
+1
+=
+8
+k_{1}{=}8
+,
+k
+2
+=
+20
+k_{2}{=}20
+88.45%
+–1.00
+46 / 26
+0.024
+k
+1
+=
+5
+k_{1}{=}5
+,
+k
+2
+=
+5
+k_{2}{=}5
+87.35%
+–2.10
+78 / 36
+1.0
+×
+10
+−
+4
+1.0\times 10^{-4}
+k
+1
+=
+5
+k_{1}{=}5
+,
+k
+2
+=
+10
+k_{2}{=}10
+88.90%
+–0.55
+42 / 31
+0.24
+k
+1
+=
+5
+k_{1}{=}5
+,
+k
+2
+=
+20
+k_{2}{=}20
+87.75%
+–1.70
+64 / 30
+5.9
+×
+10
+−
+4
+5.9\times 10^{-4}
+k
+1
+=
+5
+k_{1}{=}5
+,
+k
+2
+=
+512
+k_{2}{=}512
+70.90%
+–18.55
+410 / 39
+10
+−
+79
+10^{-79}
+Table 5:
+MMLU, 5-shot, greedy, paired McNemar test against each model’s native
+baseline. “flips” counts questions the baseline answered correctly and the variant
+did not, versus the reverse. Bold rows halve or nearly halve activated routed experts
+and are statistically indistinguishable from the baseline.
+Halving activated experts is free, if the denominator is not halved too.
+Activating 4 of 8 experts on the 35B model costs
+4.65
+4.65
+points under standard
+renormalization but
+0.35
+0.35
+at
+k
+2
+=
+16
+k_{2}{=}16
+, with a near-symmetric flip distribution
+(
+99
+/
+92
+99/92
+); activating 5 of 10 on the 397B model costs
+2.10
+2.10
+points at
+k
+2
+=
+k
+1
+k_{2}{=}k_{1}
+but
+0.55
+0.55
+at
+k
+2
+=
+10
+k_{2}{=}10
+(
+p
+=
+0.24
+p{=}0.24
+). The reference set recovers
+4.30
+4.30
+and
+1.55
+1.55
+points
+at identical compute. A non-significant result is not proof of equivalence—the paired
+design only bounds any residual loss below the
+0.98
+0.98
+-point resolution at
+n
+=
+2000
+n{=}2000
+.
+The optimal
+k
+2
+k_{2}
+is model-dependent, and lies in
+[
+k
+,
+2
+​
+k
+]
+[k,2k]
+.
+The 35B model prefers
+k
+2
+=
+2
+​
+k
+k_{2}{=}2k
+at both
+k
+1
+k_{1}
+we tried; the 397B model prefers
+k
+2
+=
+k
+k_{2}{=}k
+; neither prefers
+k
+2
+=
+k
+1
+k_{2}{=}k_{1}
+once the cut is deep. We therefore do not propose
+a universal value but that
+k
+2
+k_{2}
+be scanned over
+{
+k
+1
+,
+k
+,
+2
+​
+k
+}
+\{k_{1},k,2k\}
+whenever
+k
+1
+k_{1}
+is
+reduced. The consistent finding is the negative one:
+k
+2
+=
+k
+1
+k_{2}{=}k_{1}
+, every
+implementation’s default, is the worst choice in that grid.
+The ablation structure matters.
+Had we evaluated only the baseline and our final candidate—common practice—the 35B
+result would read as “top-4 is simply lossless” and attribute nothing to the
+reference set; only the
+k
+2
+=
+k
+1
+k_{2}{=}k_{1}
+row shows the reduction is damaging by default.
+Conversely, the 397B
+k
+1
+=
+8
+k_{1}{=}8
+block, where the default is already fine (
++
+0.15
++0.15
+),
+shows the opposite: reporting only that row would conclude renormalization never
+matters.
+Perplexity picks a significantly worse operating point.
+On the 35B model perplexity is minimized at
+k
+2
+=
+8
+k_{2}{=}8
+but MMLU at
+k
+2
+=
+16
+k_{2}{=}16
+(Figure
+2
+(a)): the perplexity-optimal setting is significantly worse on MMLU
+(
+−
+1.10
+-1.10
+points,
+p
+=
+0.021
+p{=}0.021
+), and the MMLU-optimal one
++
+1.81
+%
++1.81\%
+worse on perplexity.
+Since selecting
+k
+2
+k_{2}
+on unlabeled text is exactly the cheap protocol one would reach
+for, we regard this as the main methodological finding—compression settings chosen on
+perplexity alone should be treated as unvalidated. This sharpens the known pattern that
+pruned LLMs retain perplexity while degrading on knowledge
+tasks
+(
+Jaiswal et al. 2024
+)
+: here the two metrics are not merely of different
+sensitivity but optimized at different points, so perplexity mis-ranks configurations.
+Generation: the effect survives autoregressive decoding.
+A single-token multiple-choice score cannot reveal damage that accumulates over a
+generated sequence, so we repeat the experiment on GSM8K (Table
+6
+). The
+pattern matches MMLU, and is if anything sharper. Reducing to
+k
+1
+=
+k
+/
+2
+k_{1}{=}k/2
+under standard
+renormalization costs
+6.60
+6.60
+points (35B) and
+4.20
+4.20
+(397B)—larger than the
+corresponding MMLU losses, as expected if a miscalibrated gain compounds token by
+token—both highly significant. Anchoring the reference set to the native
+k
+k
+erases
+the loss:
+k
+1
+=
+4
+k_{1}{=}4
+,
+k
+2
+=
+16
+k_{2}{=}16
+costs
+0.60
+0.60
+points (35B,
+p
+=
+0.68
+p{=}0.68
+) and
+k
+1
+=
+5
+k_{1}{=}5
+,
+k
+2
+=
+10
+k_{2}{=}10
+costs
+0.80
+0.80
+(397B,
+p
+=
+0.34
+p{=}0.34
+), neither detectable.
+The truncation rate tracks the accuracy loss closely—it reaches
+10.4
+%
+10.4\%
+at the worst
+35B setting and falls to
+1.4
+%
+1.4\%
+once the reference set is corrected—so the default
+reduction does not merely change answers but degrades the model into unterminated
+outputs.
+Configuration
+Acc.
+Δ
+\Delta
+(pp)
+McNemar
+p
+p
+trunc.
+Qwen3.6-35B-A3B
+,
+n
+=
+500
+n{=}500
+k
+1
+=
+8
+k_{1}{=}8
+native
+95.00%
+—
+—
+2.8%
+k
+1
+=
+6
+k_{1}{=}6
+,
+k
+2
+=
+6
+k_{2}{=}6
+92.80%
+–2.20
+0.027
+6.0%
+k
+1
+=
+6
+k_{1}{=}6
+,
+k
+2
+=
+8
+k_{2}{=}8
+95.00%
++0.00
+1.00
+2.2%
+k
+1
+=
+4
+k_{1}{=}4
+,
+k
+2
+=
+4
+k_{2}{=}4
+88.40%
+–6.60
+10
+−
+6
+10^{-6}
+10.4%
+k
+1
+=
+4
+k_{1}{=}4
+,
+k
+2
+=
+16
+k_{2}{=}16
+94.40%
+–0.60
+0.68
+1.4%
+Qwen3.5-397B-A17B
+,
+n
+=
+500
+n{=}500
+k
+1
+=
+10
+k_{1}{=}10
+native
+96.60%
+—
+—
+2.6%
+k
+1
+=
+8
+k_{1}{=}8
+,
+k
+2
+=
+8
+k_{2}{=}8
+94.60%
+–2.00
+0.006
+3.8%
+k
+1
+=
+8
+k_{1}{=}8
+,
+k
+2
+=
+10
+k_{2}{=}10
+96.20%
+–0.40
+0.63
+2.2%
+k
+1
+=
+5
+k_{1}{=}5
+,
+k
+2
+=
+5
+k_{2}{=}5
+92.40%
+–4.20
+10
+−
+5
+10^{-5}
+7.0%
+k
+1
+=
+5
+k_{1}{=}5
+,
+k
+2
+=
+10
+k_{2}{=}10
+95.80%
+–0.80
+0.34
+1.6%
+Table 6:
+GSM8K, 0-shot, greedy decoding, paired McNemar test against each model’s
+native baseline. “trunc.” is the fraction of generations that reach the 512-token
+limit without emitting an answer. Bold rows halve the activated experts with no
+detectable loss; the default reduction (
+k
+2
+=
+k
+1
+k_{2}{=}k_{1}
+) is significantly worse and
+truncates more often.
+C-Eval: insensitivity is model-specific, not benchmark-specific.
+On C-Eval (1300 Chinese questions, 5-shot) the 35B model shows no significant
+difference for
+any
+configuration, including the default reduction (
+k
+1
+=
+6
+k_{1}{=}6
+,
+k
+2
+=
+6
+k_{2}{=}6
+:
++
+0.23
++0.23
+,
+p
+=
+0.80
+p{=}0.80
+;
+k
+1
+=
+4
+k_{1}{=}4
+,
+k
+2
+=
+8
+k_{2}{=}8
+:
+−
+0.77
+-0.77
+,
+p
+=
+0.31
+p{=}0.31
+; baseline
+83.92
+%
+83.92\%
+). Read alone, this benchmark would license the default reduction that MMLU
+and GSM8K reject. Yet the same benchmark on the 397B model rejects it:
+k
+1
+=
+8
+k_{1}{=}8
+,
+k
+2
+=
+8
+k_{2}{=}8
+loses
+2.92
+2.92
+points (
+p
+<
+10
+−
+4
+p{<}10^{-4}
+; baseline
+88.31
+%
+88.31\%
+), and anchoring to the
+native
+k
+k
+recovers most of it (
+k
+1
+=
+8
+k_{1}{=}8
+,
+k
+2
+=
+10
+k_{2}{=}10
+:
+−
+1.00
+-1.00
+;
+k
+1
+=
+5
+k_{1}{=}5
+,
+k
+2
+=
+10
+k_{2}{=}10
+:
+−
+0.77
+-0.77
+,
+p
+=
+0.20
+p{=}0.20
+). The recovery direction is consistent with every other
+result—anchoring helps,
+k
+2
+=
+k
+1
+k_{2}{=}k_{1}
+is worst—but a benchmark’s
+sensitivity
+to the intervention is not a property of the benchmark alone: the very C-Eval that
+certifies the default reduction on one model refutes it on another. Validating on a
+single (benchmark, model) pair risks certifying an artifact of that pair—our
+perplexity caution, one level up.
+Cost accounting.
+On the 35B model, halving
+k
+1
+k_{1}
+from 8 to 4 cuts routed-expert compute in half
+(
+1.006
+1.006
+B to
+0.503
+0.503
+B activated routed parameters per token) and the total expert term
+by
+44
+%
+44\%
+(
+1.132
+1.132
+B to
+0.629
+0.629
+B), a
+17
+%
+17\%
+end-to-end reduction against the
+∼
+\sim
+3.0
+3.0
+B
+parameters per token—though the expert term dominates weight traffic during
+memory-bound decoding. Memory is unchanged (all
+E
+E
+experts stay resident), so this is a
+pure compute-side lever, orthogonal to quantization.
+Discussion
+Practical recommendation.
+When compute or decode bandwidth binds, decouple the reference set from the activation
+count whenever
+k
+k
+is changed and scan
+k
+2
+∈
+{
+k
+1
+,
+k
+,
+2
+​
+k
+}
+k_{2}\in\{k_{1},k,2k\}
+with paired testing:
+one integer, three evaluations, and the difference between a significant
+2
+2
+–
+5
+5
+point
+MMLU regression and none. It is also a control for any published top-
+k
+k
+reduction
+result, which absent a decoupled
+k
+2
+k_{2}
+overstates the cost of reducing
+k
+k
+.
+Why we do not recommend expert pruning here.
+Structural compression looks like the harder path on this architecture: the router is
+well balanced with essentially no dead experts, retention falls off quickly
+(Figure
+1
+(b)), and specialization is domain-bound, so a general-purpose
+pruned model has almost no room (
+198
+/
+256
+198/256
+experts in the two-domain union). Since the
+routed experts are homogeneous and
+89.6
+%
+89.6\%
+of parameters, quantization looks better
+matched to the memory problem and composes with our compute-only method. This claim
+rests on activation-mass retention and cross-domain transfer; it does not contradict the
+near-lossless single-domain pruning of
+Lasby et al. (2025)
+.
+Limitations.
+Both models are from the same series; though they differ by
+11
+×
+11\times
+in parameters
+and in depth, expert count, and trained
+k
+k
+, cross-architecture generalization remains
+a hypothesis. The mechanism predicts the effect scales with router flatness, so
+coarse-grained MoEs (e.g. 8 experts, top-2) should benefit little; a preliminary check
+on a third architecture (Appendix A) is consistent but ran under an earlier scalar
+parameterization and is not directly comparable. Our corpora are English and Python
+only, long-context is untested, and the perplexity-optimal
+k
+2
+k_{2}
+is already
+domain-dependent. Downstream we cover multiple-choice (MMLU, C-Eval) and short-form
+generation (GSM8K) but not long-form generation. Finally, we scan
+k
+2
+k_{2}
+over a
+geometric grid; a finer grid, or a per-layer or per-domain
+k
+2
+k_{2}
+, may do better.
+Conclusion
+Training-free reduction of activated experts in a fine-grained MoE is usually presented
+as a compute/accuracy trade-off. We showed it is confounded by an implicit variable:
+renormalization applies a gain calibrated to the trained
+k
+k
+, and lowering
+k
+k
+shrinks
+the denominator with the activation count, silently miscalibrating the expert branch.
+Decoupling the two—activate
+k
+1
+k_{1}
+experts, normalize by the top-
+k
+2
+k_{2}
+mass—turns a
+4.65
+4.65
+point MMLU regression at half the activated experts into
+0.35
+0.35
+points (35B) and
+a
+2.10
+2.10
+point regression into
+0.55
+0.55
+points (397B), for one integer and no measurable
+compute. Because perplexity and downstream accuracy select different reference sets,
+this knob should be validated on a downstream task with paired testing, not on
+perplexity.
+References
+Chitty-Venkata
+et al.
+(2025)
+K. T. Chitty-Venkata, S. Madireddy, M. Emani, and V. Vishwanath
+LExI: layer-adaptive active experts for efficient MoE model inference
+.
+arXiv preprint arXiv:2509.02753
+.
+Cited by:
+Introduction
+,
+Training-free MoE compression.
+.
+Cobbe
+et al.
+(2021)
+K. Cobbe, V. Kosaraju, M. Bavarian, M. Chen, H. Jun, L. Kaiser, M. Plappert, J. Tworek, J. Hilton, R. Nakano, C. Hesse, and J. Schulman
+Training verifiers to solve math word problems
+.
+Cited by:
+Evaluation protocol.
+.
+Dai
+et al.
+(2024)
+D. Dai, C. Deng, C. Zhao, R. X. Xu, H. Gao, D. Chen,
+et al.
+DeepSeekMoE: towards ultimate expert specialization in mixture-of-experts language models
+.
+In
+Proceedings of the Annual Meeting of the Association for Computational Linguistics (ACL)
+,
+Cited by:
+Introduction
+,
+Sparse MoE language models.
+.
+DeepSeek-AI (2024)
+DeepSeek-AI
+DeepSeek-V3 technical report
+.
+arXiv preprint arXiv:2412.19437
+.
+Cited by:
+Introduction
+,
+Sparse MoE language models.
+.
+Fedus
+et al.
+(2022)
+W. Fedus, B. Zoph, and N. Shazeer
+Switch transformers: scaling to trillion parameter models with simple and efficient sparsity
+.
+Journal of Machine Learning Research
+23
+(
+120
+),
+pp. 1–39
+.
+Cited by:
+Introduction
+,
+Sparse MoE language models.
+.
+Frantar
+et al.
+(2023)
+E. Frantar, S. Ashkboos, T. Hoefler, and D. Alistarh
+GPTQ: accurate post-training quantization for generative pre-trained transformers
+.
+In
+International Conference on Learning Representations (ICLR)
+,
+Cited by:
+Training-free MoE compression.
+.
+Gu
+et al.
+(2025)
+N. Gu, Z. Zhang, Y. Feng, Y. Chen, P. Fu, Z. Lin, S. Wang, Y. Sun, H. Wu, W. Wang, and H. Wang
+Elastic MoE: unlocking the inference-time scalability of mixture-of-experts
+.
+arXiv preprint arXiv:2509.21892
+.
+Cited by:
+Introduction
+,
+Changing
+k
+k
+after training.
+.
+He (2024)
+X. O. He
+Mixture of a million experts
+.
+arXiv preprint arXiv:2407.04153
+.
+Cited by:
+Sparse MoE language models.
+.
+Hendrycks
+et al.
+(2021)
+D. Hendrycks, C. Burns, S. Basart, A. Zou, M. Mazeika, D. Song, and J. Steinhardt
+Measuring massive multitask language understanding
+.
+In
+International Conference on Learning Representations (ICLR)
+,
+Cited by:
+Evaluation protocol.
+.
+Huang
+et al.
+(2025)
+W. Huang, Y. Liao, J. Liu, R. He, H. Tan, S. Zhang, H. Li, S. Liu, and X. Qi
+Mixture compressor for mixture-of-experts LLMs gains more
+.
+In
+International Conference on Learning Representations (ICLR)
+,
+Cited by:
+Training-free MoE compression.
+.
+Huang
+et al.
+(2023)
+Y. Huang, Y. Bai, Z. Zhu, J. Zhang, J. Zhang, T. Su, J. Liu, C. Lv, Y. Zhang, J. Lei, Y. Fu, M. Sun, and J. He
+C-Eval: a multi-level multi-discipline chinese evaluation suite for foundation models
+.
+In
+Advances in Neural Information Processing Systems (NeurIPS)
+,
+Cited by:
+Evaluation protocol.
+.
+Jaiswal
+et al.
+(2024)
+A. Jaiswal, Z. Gan, X. Du, B. Zhang, Z. Wang, and Y. Yang
+Compressing LLMs: the truth is rarely pure and never simple
+.
+In
+International Conference on Learning Representations (ICLR)
+,
+Cited by:
+Perplexity picks a significantly worse operating point.
+.
+Jiang
+et al.
+(2024)
+A. Q. Jiang, A. Sablayrolles, A. Roux, A. Mensch, B. Savary, C. Bamford,
+et al.
+Mixtral of experts
+.
+arXiv preprint arXiv:2401.04088
+.
+Cited by:
+Sparse MoE language models.
+.
+Lasby
+et al.
+(2025)
+M. Lasby, I. Lazarevich, N. Sinnadurai, S. Lie, Y. Ioannou, and V. Thangarasa
+REAP the experts: why pruning prevails for one-shot MoE compression
+.
+arXiv preprint arXiv:2510.13999
+.
+Cited by:
+Training-free MoE compression.
+,
+Why we do not recommend expert pruning here.
+.
+Lepikhin
+et al.
+(2021)
+D. Lepikhin, H. Lee, Y. Xu, D. Chen, O. Firat, Y. Huang, M. Krikun, N. Shazeer, and Z. Chen
+GShard: scaling giant models with conditional computation and automatic sharding
+.
+In
+International Conference on Learning Representations (ICLR)
+,
+Cited by:
+Introduction
+,
+Sparse MoE language models.
+.
+Li
+et al.
+(2024)
+P. Li, Z. Zhang, P. Yadav, Y. Sung, Y. Cheng, M. Bansal, and T. Chen
+Merge, then compress: demystify efficient SMoE with hints from its routing policy
+.
+In
+International Conference on Learning Representations (ICLR)
+,
+Cited by:
+Introduction
+,
+Training-free MoE compression.
+.
+Lin
+et al.
+(2024)
+J. Lin, J. Tang, H. Tang, S. Yang, W. Chen, W. Wang, G. Xiao, X. Dang, C. Gan, and S. Han
+AWQ: activation-aware weight quantization for on-device LLM compression and acceleration
+.
+In
+Proceedings of Machine Learning and Systems (MLSys)
+,
+Cited by:
+Training-free MoE compression.
+.
+Lo
+et al.
+(2024)
+K. M. Lo, Z. Huang, Z. Qiu, Z. Wang, and J. Fu
+A closer look into mixture-of-experts in large language models
+.
+arXiv preprint arXiv:2406.18219
+.
+Cited by:
+Analyses of learned routing.
+.
+Lu
+et al.
+(2024)
+X. Lu, Q. Liu, Y. Xu, A. Zhou, S. Huang, B. Zhang, J. Yan, and H. Li
+Not all experts are equal: efficient expert pruning and skipping for mixture-of-experts large language models
+.
+In
+Proceedings of the Annual Meeting of the Association for Computational Linguistics (ACL)
+,
+Cited by:
+Introduction
+,
+Training-free MoE compression.
+.
+Lv
+et al.
+(2026)
+X. Lv, L. Sheng, K. Zhang, Y. You, S. Gao, X. Luo, Y. Zuo, Y. Fan, J. Yang, G. Cui, B. Wang, F. Yang, Y. Sun, N. Ding, and B. Zhou
+Post-trained MoE can skip half experts via self-distillation
+.
+arXiv preprint arXiv:2605.18643
+.
+Cited by:
+Introduction
+,
+Changing
+k
+k
+after training.
+.
+McNemar (1947)
+Q. McNemar
+Note on the sampling error of the difference between correlated proportions or percentages
+.
+Psychometrika
+12
+(
+2
+),
+pp. 153–157
+.
+Cited by:
+Evaluation protocol.
+.
+Merity
+et al.
+(2017)
+S. Merity, C. Xiong, J. Bradbury, and R. Socher
+Pointer sentinel mixture models
+.
+In
+International Conference on Learning Representations (ICLR)
+,
+Cited by:
+Evaluation protocol.
+.
+Qwen Team (2025)
+Qwen Team
+Qwen3 technical report
+.
+arXiv preprint arXiv:2505.09388
+.
+Cited by:
+Introduction
+,
+Sparse MoE language models.
+.
+Shazeer
+et al.
+(2017)
+N. Shazeer, A. Mirhoseini, K. Maziarz, A. Davis, Q. Le, G. Hinton, and J. Dean
+Outrageously large neural networks: the sparsely-gated mixture-of-experts layer
+.
+In
+International Conference on Learning Representations (ICLR)
+,
+Cited by:
+Introduction
+,
+Sparse MoE language models.
+.
+Tunstall
+et al.
+(2022)
+L. Tunstall, L. von Werra, and T. Wolf
+CodeParrot: a GPT-2 model trained to generate Python code
+.
+Note:
+https://huggingface.co/datasets/codeparrot/codeparrot-clean
+Cited by:
+Evaluation protocol.
+.
+Wang
+et al.
+(2025)
+Y. Wang, Q. Hu, Y. Ding, R. Wang, Y. Gong, J. Jiao, Y. Shen, P. Cheng, and J. Su
+Training matryoshka mixture-of-experts for elastic inference-time expert utilization
+.
+arXiv preprint arXiv:2509.26520
+.
+Cited by:
+Introduction
+,
+Changing
+k
+k
+after training.
+.
+Xue
+et al.
+(2024)
+F. Xue, Z. Zheng, Y. Fu, J. Ni, Z. Zheng, W. Zhou, and Y. You
+OpenMoE: an early effort on open mixture-of-experts language models
+.
+arXiv preprint arXiv:2402.01739
+.
+Cited by:
+Analyses of learned routing.
+.
+Zeng
+et al.
+(2024)
+Z. Zeng, Y. Miao, H. Gao, H. Zhang, and Z. Deng
+AdaMoE: token-adaptive routing with null experts for mixture-of-experts language models
+.
+In
+Findings of the Association for Computational Linguistics: EMNLP
+,
+Cited by:
+Changing
+k
+k
+after training.
+.
+Zhou
+et al.
+(2022)
+Y. Zhou, T. Lei, H. Liu, N. Du, Y. Huang, V. Zhao, A. Dai, Z. Chen, Q. Le, and J. Laudon
+Mixture-of-experts with expert choice routing
+.
+In
+Advances in Neural Information Processing Systems (NeurIPS)
+,
+Cited by:
+Sparse MoE language models.
+.
+Zoph
+et al.
+(2022)
+B. Zoph, I. Bello, S. Kumar, N. Du, Y. Huang, J. Dean, N. Shazeer, and W. Fedus
+ST-MoE: designing stable and transferable sparse expert models
+.
+arXiv preprint arXiv:2202.08906
+.
+Cited by:
+Sparse MoE language models.
+.
+Appendix A
+Appendix A: A Third Architecture
+Before adopting the
+k
+1
+/
+k
+2
+k_{1}/k_{2}
+parameterization we ran a preliminary study on
+Gemma-4-26B-A4B (30 layers, 128 experts, top-8). It used a global scalar gain
+w
+i
+=
+α
+⋅
+p
+i
+/
+m
+k
+1
+​
+(
+x
+)
+w_{i}=\alpha\cdot p_{i}/m_{k_{1}}(x)
+—a fixed, rather than per-token, version of the
+correction studied above—and a different evaluation protocol, so its numbers are not
+directly comparable to the main results and we report them as directional evidence only.
+They are nonetheless informative on two points: whether a scalar gain helps on a
+third architecture, and whether the flatness mechanism predicts the size of the effect.
+The scalar gain helps but does not fully recover.
+On MMLU (
+n
+=
+1000
+n{=}1000
+, 5-shot, chat template, instruction-tuned variant, baseline
+80.40
+%
+80.40\%
+), reducing to
+k
+1
+=
+6
+k_{1}{=}6
+at the native
+α
+=
+1
+\alpha{=}1
+costs
+2.30
+2.30
+points
+(Table
+7
+). Scanning
+α
+\alpha
+recovers up to
+1.00
+1.00
+point: the best value
+α
+=
+0.80
+\alpha{=}0.80
+reaches
+−
+1.30
+-1.30
+(
+p
+=
+0.079
+p{=}0.079
+), the only non-significant setting, but
+unlike the two Qwen models it does not return all the way to the baseline. As on Qwen,
+the “natural” guess
+α
+=
+m
+6
+/
+m
+8
+=
+0.86
+\alpha{=}m_{6}/m_{8}{=}0.86
+is not the empirical optimum.
+Configuration
+Acc.
+Δ
+\Delta
+(pp)
+McNemar
+p
+p
+k
+1
+=
+8
+k_{1}{=}8
+native
+80.40%
+—
+—
+k
+1
+=
+6
+k_{1}{=}6
+,
+α
+=
+1.00
+\alpha{=}1.00
+78.10%
+–2.30
+0.0018
+k
+1
+=
+6
+k_{1}{=}6
+,
+α
+=
+0.90
+\alpha{=}0.90
+78.60%
+–1.80
+0.015
+k
+1
+=
+6
+k_{1}{=}6
+,
+α
+=
+0.85
+\alpha{=}0.85
+78.60%
+–1.80
+0.020
+k
+1
+=
+6
+k_{1}{=}6
+,
+α
+=
+0.80
+\alpha{=}0.80
+79.10%
+–1.30
+0.079
+k
+1
+=
+6
+k_{1}{=}6
+,
+α
+=
+0.75
+\alpha{=}0.75
+78.80%
+–1.60
+0.033
+Table 7:
+Gemma-4-26B-A4B, MMLU
+n
+=
+1000
+n{=}1000
+, scalar-gain scan (preliminary protocol).
+Only
+α
+=
+0.80
+\alpha{=}0.80
+is not significantly worse than the baseline.
+The amplitude degree of freedom is untrained on all three models.
+Gemma exposes two learnable scale parameters in its router. The pre-softmax temperature
+router.scale
+was trained hard: it moved from its initialization of
+1.0
+1.0
+to a
+near-constant
+32.06
+±
+0.02
+32.06\pm 0.02
+across all 30 layers (an effective gain of
+32.06
+⋅
+2816
+−
+1
+/
+2
+≈
+0.60
+32.06\cdot 2816^{-1/2}\approx 0.60
+on the RMSNorm-scaled logits). The post-selection
+amplitude
+per_expert_scale
+, by contrast, stayed at its initialization: all
+3840
+3840
+values are
+1.000
+±
+0.011
+1.000\pm 0.011
+, essentially untouched, because it is mathematically
+redundant with each expert’s
+down_proj
+and the gradient flows to the
+larger-magnitude weights instead. The amplitude—the exact quantity our
+k
+2
+k_{2}
+controls—is therefore a degree of freedom that training never optimized on any of the
+three models we examined: Qwen exposes no such parameter, Gemma has one but left it at
+1.0
+1.0
+, and GLM-style configurations set it by hand. This strengthens rather than
+weakens the main claim: we are not correcting an already-optimized quantity but filling
+a gap the training procedure leaves open.
+The flatness mechanism predicts the effect size.
+The mechanism in the main text predicts the effect should scale with router flatness.
+Gemma’s top-8 router mass is
+0.302
+0.302
+versus
+0.182
+0.182
+for Qwen3.6-35B-A3B, i.e. a
+renormalization gain of
+3.31
+×
+3.31\times
+rather than
+5.50
+×
+5.50\times
+. Correspondingly the gain
+is far less load-bearing: on the base variant, removing renormalization entirely at
+k
+1
+=
+6
+k_{1}{=}6
+(
+k
+2
+=
+E
+k_{2}{=}E
+) raises WikiText perplexity only from
+9.158
+9.158
+to
+9.224
+9.224
+(
++
+0.7
+%
++0.7\%
+),
+and is in fact
+better
+than standard renormalization at the same
+k
+1
+k_{1}
+(
+9.318
+9.318
+)—
+whereas the identical intervention costs
++
+356
+%
++356\%
+on Qwen. The selection-over-weighting
+result also replicates: with the eight activated experts fixed, uniform weights cost
++
+34.4
+%
++34.4\%
+WikiText perplexity, sampling
++
+218
+%
++218\%
+, and random selection
++
+2436
+%
++2436\%
+. A
+matched
+k
+1
+/
+k
+2
+k_{1}/k_{2}
+replication on this architecture remains future work.
+A protocol caution.
+Gemma is a reasoning model whose base and instruction-tuned variants must be evaluated
+differently: the instruction-tuned variant scores WikiText perplexity of
+573
+573
+under
+plain completion but
+9.6
+9.6
+for the base variant, because bare completion triggers
+degenerate repetition. All Gemma perplexity numbers above use the base variant; the
+MMLU scan uses the instruction-tuned variant under its chat template. This
+protocol dependence is the same one noted in Appendix B.
+Appendix B
+Appendix B: Reproducibility Notes
+Infrastructure.
+All experiments use PyTorch with the HuggingFace Transformers library; the method is a
+drop-in replacement of the router’s
+forward
+, and no weights are modified. We
+verified that the router computation is numerically identical across Transformers
+versions 5.3–5.14 (only variable names changed), reproducing the WikiText baseline
+perplexity exactly. Qwen3.6-35B-A3B runs in bf16 on a single 98 GB accelerator
+(
+∼
+\sim
+72 GB resident); Qwen3.5-397B-A17B is sharded across the machine
+(
+∼
+\sim
+752 GB in bf16). All routing and downstream configurations are inference-only.
+Protocol pitfalls.
+Several protocol details changed our results by more than the effects we set out to
+measure, and we record them for others. An initial 0-shot, per-option-loglikelihood
+MMLU protocol scored the 35B baseline at
+53
+%
+53\%
+—implausible for a model of this
+size—and standard 5-shot single-letter scoring restored it to
+81.65
+%
+81.65\%
+; conclusions
+drawn under the first protocol would have been meaningless. The model emits reasoning
+traces spontaneously even under plain completion formatting, which exhausts the token
+budget on generation tasks unless thinking is explicitly disabled via the chat
+template. The released generation config defaults to sampling, which must be disabled
+for paired comparison. Evaluation protocol must be matched to model form, a failure
+that produced the Gemma perplexity anomaly discussed in Appendix A and that we
+initially misattributed to a framework bug. And, as noted, unpaired testing at
+n
+=
+2000
+n{=}2000
+cannot resolve differences below
+3
+%
+3\%
+, larger than most effects reported
+here.
+Experimental support, please
+view the build logs
+for errors. Generated by
+L
+A
+T
+E
+xml
+.
+Instructions for reporting errors
+We are continuing to improve HTML versions of papers, and your feedback helps enhance accessibility and mobile
+      support. To report errors in the HTML that will help us improve conversion and rendering, choose any of the
+      methods listed below:
+Click the "Report Issue"
+(
+)
+button, located in the page header.
+Tip:
+You can select the relevant text first, to include it in your report.
+Our team has already identified
+the following issues
+. We appreciate your time reviewing and reporting rendering errors we
+      may not have found yet. Your efforts will help us improve the HTML versions for all readers, because disability
+      should not be a barrier to accessing research. Thank you for your continued support in championing open access for
+      all.
+Have a free development cycle? Help support accessibility at arXiv! Our collaborators at LaTeXML maintain a
+list of packages that need conversion
+, and welcome
+developer contributions
+.
+We gratefully acknowledge support from
+        our
+major funders
+,
+member institutions
+,
+,
+        and all contributors.
+About
+·
+Help
+·
+Contact
+·
+Subscribe
+·
+Copyright
+·
+Privacy
+·
+Accessibility
+·
+Operational Status
+(opens in new tab)
+Major funding support from

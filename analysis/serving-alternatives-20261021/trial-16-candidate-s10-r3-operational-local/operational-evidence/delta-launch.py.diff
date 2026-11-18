@@ -1,0 +1,72 @@
+diff --git a/home/pranav/projects/arc-agi-3/analysis/serving-alternatives-20261021/trial-16-candidate-s10-r2-local/launch.py b/home/pranav/projects/arc-agi-3/analysis/serving-alternatives-20261021/trial-16-candidate-s10-r3-operational-local/launch.py
+index e24e10d..c42670f 100644
+--- a/home/pranav/projects/arc-agi-3/analysis/serving-alternatives-20261021/trial-16-candidate-s10-r2-local/launch.py
++++ b/home/pranav/projects/arc-agi-3/analysis/serving-alternatives-20261021/trial-16-candidate-s10-r3-operational-local/launch.py
+@@ -2,7 +2,6 @@
+ import datetime as dt
+ import hashlib
+ import json
+-import math
+ from pathlib import Path
+ import packet
+ import reconciliation
+@@ -71,7 +70,7 @@ def arm(slot,report,destination):
+ 
+ def quota_readback(api):
+     with api.build_kaggle_client() as c:q=c.kernels.kernels_api_client.get_accelerator_quota_statistics()
+-    return dict(utc=dt.datetime.now(dt.timezone.utc).isoformat(),used_s=q.gpu_quota.time_used.total_seconds(),reserved_s=q.gpu_quota.time_reserved.total_seconds())
++    return reconciliation.quota_receipt(q)
+ 
+ 
+ def fresh_checks(api):
+@@ -79,10 +78,11 @@ def fresh_checks(api):
+     (HERE/'collection-space-prelaunch.json').write_text(json.dumps(local,indent=2))
+     if not local['eligible']:raise ValueError('local simultaneous archive/extraction/derived space unavailable; no API')
+     started=dt.datetime.now(dt.timezone.utc).isoformat()
+-    quota=quota_readback(api);used=quota['used_s'];reserved=quota['reserved_s']
++    policy=reconciliation.load_policy()
++    quota=quota_readback(api)
+     (HERE/'quota-prelaunch.json').write_text(json.dumps(quota))
+-    if not all(math.isfinite(v) for v in (used,reserved)) or used<0 or reserved!=0 or used+5400>108000:
+-        raise ValueError('unknown/occupied/insufficient GPU quota')
++    (HERE/'quota-before-prelaunch.json').write_text(json.dumps(quota,indent=2))
++    reconciliation.validate_quota(quota,policy)
+     sessions=[]
+     for kernel in api.kernels_list(mine=True,user='pranavagrawai',sort_by='dateRun',page_size=20):
+         if not kernel.ref:
+@@ -96,10 +96,14 @@ def fresh_checks(api):
+     require_terminal_sessions([predecessor_status])
+     if all(row['ref'] for row in sessions):
+         require_terminal_sessions(sessions)
+-        return None
++        after=quota_readback(api)
++        (HERE/'quota-after-prelaunch.json').write_text(json.dumps(after,indent=2))
++        pair=dict(started_utc=started,finished_utc=dt.datetime.now(dt.timezone.utc).isoformat(),quota_before=quota,quota_after=after)
++        (HERE/'quota-pair-prelaunch.json').write_text(json.dumps(pair,indent=2))
++        reconciliation.evaluate_quota_pair(pair,policy)
++        return pair
+     # A generic redacted row is forbidden. The frozen, trial16-only proposed policy must
+     # independently establish every reconciliation predicate; slot cannot override.
+-    policy=reconciliation.load_policy()
+     evidence=dict(started_utc=started,prior_kernel_ref=reconciliation.PRIOR_REF,predecessor_kernel_ref=reconciliation.PREDECESSOR_REF,predecessor_status=predecessor_status,quota_before=quota,recent=sessions)
+     try:
+         for key,search in (('exact_search','serving-candidate-feas5-20261023'),('negative_search','no-such-kernel-feas5-reconciliation-20261023')):
+@@ -111,6 +115,7 @@ def fresh_checks(api):
+         except Exception as error:
+             evidence['prior_status']=exception_record(error)
+         evidence['quota_after']=quota_readback(api)
++        (HERE/'quota-after-prelaunch.json').write_text(json.dumps(evidence['quota_after'],indent=2))
+         (HERE/'quota-prelaunch.json').write_text(json.dumps(evidence['quota_after']))
+         evidence['finished_utc']=dt.datetime.now(dt.timezone.utc).isoformat()
+         evidence['judgment']=reconciliation.evaluate(evidence,policy)
+@@ -141,7 +146,9 @@ def main():
+     api=KaggleApi();api.authenticate()
+     evidence=fresh_checks(api)
+     clearance()  # Live authority freshness/source recheck immediately before the attempt marker.
+-    if evidence is not None:reconciliation.evaluate(evidence,reconciliation.load_policy())
++    policy=reconciliation.load_policy()
++    if 'prior_status' in evidence:reconciliation.evaluate(evidence,policy)
++    else:reconciliation.evaluate_quota_pair(evidence,policy)
+     push_once(api,slot,manifest)
+ 
+ 

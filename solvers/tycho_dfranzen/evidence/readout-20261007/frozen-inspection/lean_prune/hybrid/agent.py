@@ -1,0 +1,43 @@
+"""Canonical agent with candidate context, role and sampling configuration."""
+from __future__ import annotations
+
+from tycho_nooa.agent import TychoNooaAgent
+from tycho_nooa.strategy import NativeToolConfig
+from tycho_nooa.scribe import ScribeConfig
+from tycho_nooa.builder import BuilderConfig
+from tycho_nooa.optionality import OPTIONALITY_PROMPT_BRIEF
+from tycho_nooa.runtime_notice import prompt_brief
+from hybrid import policy
+from hybrid.deadlines import RequestedBuilderConfig
+from hybrid.lean import DEFAULT_TOOL_CALLS, lean
+
+class HybridAgent(TychoNooaAgent):
+    def __init__(self, **kwargs):
+        choice = lean()
+        kwargs.update(strategy_config=NativeToolConfig(
+            # Lean inlines only the newest grid; the others keep the whole history
+            # verbatim so the cached prefix is never rewritten.
+            grid_keep=1 if choice else 1_000_000, history_keep_turns=1_000_000,
+            max_tokens=12*1024, max_tool_steps=choice.tool_calls if choice else DEFAULT_TOOL_CALLS,
+            max_context_value_bytes=12*1024, temperature=0.7,
+            # The donor server has no evidence of tool_choice="required"; the final
+            # call offers take_actions alone, without thinking, and is retried once.
+            action_demand_disable_thinking=bool(choice),
+            action_demand_max_tokens=2048 if choice else None,
+        ), scribe_config=ScribeConfig(max_tokens=12*1024, max_context_value_bytes=12*1024, temperature=0.7),
+            builder_config=BuilderConfig(max_tokens=12*1024, temperature=0.7, show_budget_telemetry=True),
+            truncation=policy.unbounded_render(),
+            deadline_config=RequestedBuilderConfig())
+        super().__init__(**kwargs)
+
+    def _resolve_system_prompt(self) -> str:
+        prompt = super()._resolve_system_prompt()
+        if lean() is None:
+            return prompt
+        # The Actor-only arm has no world model to build: drop the optionality
+        # lines and the symmetry/dynamics toolbox brief.
+        for block in (f"\n\n{OPTIONALITY_PROMPT_BRIEF}", f"\n\n{prompt_brief(self._workspace.dir)}"):
+            if prompt.count(block) != 1:
+                raise RuntimeError("Actor system prompt seam changed; re-audit the lean prompt")
+            prompt = prompt.replace(block, "", 1)
+        return prompt

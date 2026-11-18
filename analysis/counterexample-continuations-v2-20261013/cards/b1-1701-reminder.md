@@ -1,0 +1,14 @@
+# counterexample-continuations-v2-20261013/b1-1701-reminder
+Question: Does reminder improve next-level completion at checkpoint b1?
+Posture: Matched diagnostic continuation; selected cases, not general efficacy.
+Contrast: Same checkpoint and seed 1701 across control, reminder and counterexample; matched original runtime per checkpoint.
+Prediction: Counterexample may improve B1 completion; the already-self-repairing control tests unnecessary-feedback cost.
+Measure: result.json levels_completed>=2, game score including the historical action prefix; wire.jsonl raw usage; actions.json; checkpoint.json restoration audit. Prediction and repair behavior are secondary transcript evidence.
+Cap: 32768 newly generated tokens; 32 model requests; 120 absolute seconds per request; 900 absolute seconds after branch; one worker; no retry; no monetary endpoint charges (self-hosted Kaggle). GPU session shares the matrix's 10800-second hard cap, including setup. Matrix maximum 393216 generated tokens, 12 episodes, one RTX PRO6000.
+Stop: Stop on L2 completion or any cap. Entire matrix stops on restoration/integrity failure, missing usage, HTTP/provider failure, request deadline or unresolved request exposure. A normal episode cap ends this episode only. Preserve all attempted episodes.
+Invalid if: Checkpoint source/pixels/action prefix/helper replay diverges; future data reaches model; usage absent; unequal arm budgets; model/quantization/serving differs from archived notebook; treatment additions differ from frozen feedback.
+Result map: >=2 paired completion gains versus control and no paired loss across 4 blocks -> qualify generic triggering next; reminder tie -> prefer reminder; repair without score -> inspect residual defect/search bound; all fail -> inspect cap/repair before rejecting approach; self-repair case harmed -> tighten trigger. No full-evaluation promotion from this screen.
+Outputs: episodes/b1-1701-reminder/ and episodes/b1-1701-reminder.log.
+Authority: Pranav's 'We should give it a try' following the proposed bounded continuation comparison. Private diagnostic run only; no competition submission.
+Packaging revision: predecessor SaveKernel returned HTTP400; read-only reconciliation found no remote run, no active session and unchanged quota. This new run ID uses lossless long-range compression; actor source, observations, contrasts and compute caps are unchanged. The original launch attempt remains preserved.
+Common continuation setup: isolated sequential episodes, priority gate disabled; exact archived first request plus assigned feedback, original sampling with paired seed. Clocks restart with the fixed continuation budget. Initial history PNGs use original bytes. Restoration comparisons normalize only pixel-equivalent PNG encodings, printed set ordering, and named elapsed/remaining clock fields.

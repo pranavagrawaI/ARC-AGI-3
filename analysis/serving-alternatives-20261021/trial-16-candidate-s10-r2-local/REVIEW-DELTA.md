@@ -1,0 +1,13 @@
+# Trial16-r2 narrow superseding delta
+
+The original trial16 packet/freeze and exact coordinator witnesses are immutable references. This is an UNASSIGNED local superseding revision, with identical remote slug, config, mounts, candidate package, science and caps. No prior assignment exists or authorizes launch.
+
+Only three runtime payloads change: observation.py, candidate_runner.py and primary_bundle.py. Only one operational collection module changes: collection_tools/reduce.py. Cleanup-only boundary/observer finalization permits complete monotonic raw OOM increases to be retained, without rethrowing the same OOM during evidence completion. Workload boundaries still stop immediately with the original primary error; no replay/qualification starts after OOM. Orderly observer completion is attempted independently of final boundary rejection. Late/malformed/raw-reset/identity/cleanup rejection remains invalid. The existing independent raw checker decides complete OOM-close versus invalid; it is unchanged.
+
+Primary publication checks the clock after actual receipt persistence, on helper return in the caller, and after caller completion-record persistence. The V2 caller record binds the exact receipt bytes and helper post-persistence/return clocks. Offline collection uses the same durable join and actual-result/bundled-result equality, rejecting a stale passing bundle when final persistence made the actual result invalid. No hard syscall timing guarantee is claimed.
+
+All other runtime payloads remain byte-exact, including candidate_evidence/outcomes, selected phase_tools lifecycle, query containment/filter/ownership/IPC, resource/identity/deadline predicates, corpus/catalog/replay/accounting, candidate loader/cache/flags and model assets. Config/metadata are identical. Local paths, policy review-evidence pins, tests/docs and packet binding tools are rebound only as necessary. identity-delta.json records the exact comparison.
+
+Exact REDs run unchanged canonical witnesses against original sources. GREENs retain the same injected OOM and real final-receipt delay, plus coherent complete OOM through the real raw checker/outcome reducer, malformed/late invalidity, late helper return and late completion write. The short CPU pipeline explicitly substitutes model/package, hardware and online-window fixtures; real process/query/observer/port plumbing and cleanup run. These are source-path proofs, not real OOM/GPU/production feasibility.
+
+No inherited65 rerun, API, GPU, slot, launch, staging or commit. Original red runs and the failed intermediate test delay-selector fixture are preserved; the latter was corrected solely to delay the selected write, leaving the normal case undelayed.

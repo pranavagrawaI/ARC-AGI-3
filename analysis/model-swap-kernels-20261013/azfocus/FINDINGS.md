@@ -1,0 +1,17 @@
+# AZ-Focus: stopped at the quantized-weight graft gate
+
+The release is not confined to attention/shared-expert output projections. At least `model.language_model.layers.20.mlp.experts.down_proj` changes too. Intel quantizes that routed-expert module to INT4. A graft of just the BF16 projections would silently omit part of AZ-Focus.
+
+Pinned source revisions: Qwen `de4b8e4d43b917e7706784d8bb445c9af86a3540`, AZ `c8615ea03475f98d0e7434852cdebdb5664ba2a2`, Intel `4c67bf686b7f7fd386bae6b07ab59e8ff1d5b897`. HF LFS SHA256 identifies 103/131 shards as identical and 28 as changed. Safetensors headers locate every tensor in the changed shards. These headers describe storage, not value equality.
+
+Three independent 1024-byte ranged samples at relative offsets 0, 100000 and 800000000 of layer 20's fused expert down-projection tensor all differ. Raw first-sample bytes are saved as `evidence/base-expert20-sample.bin` and `evidence/az-expert20-sample.bin`; hashes and ranges are in `expert-sample-check.json`. The sample BF16 ratios range from 0.5575 to 1.0194805 with median 1.0. Thus a uniform scale adjustment is not a verified shortcut. Two fully read small tensors also differ: layer 20's linear-attention output projection and shared-expert down projection.
+
+Intel's layer-20 expert-0 down projection has `qweight` INT32 [80,2560], `qzeros` INT32 [5,320] and FP16 `scales` [5,2560], rather than a BF16 weight. `evidence/quantization-blocker.json` binds these header entries to the changed BF16 expert tensor and the published scheme: symmetric 4-bit, group 128, `auto_round:auto_gptq`, AutoRound 0.15.0. Intel's published recipe uses tuning with 200 iterations and leaves attention/shared-expert weights unquantized. The learned rounding/calibration inputs are not supplied by the BF16 slices or safetensors headers.
+
+The direct comparison initially stopped at its explicit 256 MiB range cap when it encountered a 3.355 GB MTP tensor. A second attempt used Xet content-addressed spans; it also stopped safely because most expert regions were not identical. Both failures are preserved. No giant tensor or full model was downloaded locally, and no local quantization/training was attempted. The decisive mismatches invalidate the proposed BF16-only graft without requiring a complete transfer of the approximately 54.66 GB of tensors in each release's changed shards. The complete tensor diff remains unfinished and is not claimed as complete.
+
+Under the brief's small-slice workflow, faithful reproduction of Intel's tuned quantization is blocked by the changed routed experts and unavailable calibration/tuning information. Untuned RTN would introduce a different quantization intervention. The public AZ-Focus INT4 sibling uses the A5B/top-5 base, so substituting it also violates the weights-only control. This is a bounded workflow stop, not a claim that AZ can never be quantized.
+
+No kernel was launched, checkpoint published, public-publication approval requested, or hidden draw queued for AZ. GPU use: zero. There is no smoke or efficacy result.
+
+Primary sources: [AZ release](https://huggingface.co/AxonZeta/Qwen3.8-Flash-Next-AZ-Focus), [Intel checkpoint and recipe](https://huggingface.co/Intel/Qwen3.8-Flash-Next-W4A16-AutoRound), [Xet reconstruction specification](https://huggingface.co/docs/xet/file-reconstruction). Pinned metadata, headers, content-address records, failures and ranged evidence are in `evidence/`.

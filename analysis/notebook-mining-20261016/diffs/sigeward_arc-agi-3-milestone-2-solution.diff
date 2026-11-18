@@ -1,0 +1,112 @@
+--- base/cell0
++++ other/cell0
+@@ -14,5 +14,7 @@
+ # and the first started game will perform a single reset action.
+ NOTEBOOK_START_TIME = time.time()
+-SERVER_STARTUP_TIMEOUT = 12 * 60
++SOURCE_NOTEBOOK = 'https://www.kaggle.com/code/dfranzen/arc-agi-3-milestone-2-solution'
++OPTIMIZATION_ID = 'arc3-wrapper-opt-v1'
++SERVER_STARTUP_TIMEOUT = 7 * 60
+ os.environ['ARC3_WARMUP_ACTION_GAMES'] = '1'
+ os.environ['ARC3_HTTP_RETRY_INITIAL_SECONDS'] = '900'
+@@ -24,4 +26,17 @@
+ ORIG_BUNDLE_DIR   = '/kaggle/input/datasets/dfranzen/taaf-kaggle-source-bundle-copy'
+ SERVED_MODEL_NAME = 'flashnext'
++
++# Fail early if a required Kaggle input was not attached.
++_required_inputs = {
++    'wheelhouse': Path(WHEELHOUSE_DIR),
++    'target model': Path(MODEL_DIR),
++    'source bundle': Path(ORIG_BUNDLE_DIR),
++}
++_missing_inputs = {name: str(path) for name, path in _required_inputs.items() if not path.exists()}
++if _missing_inputs:
++    raise FileNotFoundError(f'Missing Kaggle inputs: {_missing_inputs}')
++if not Path('/kaggle/harness-changes.patch').is_file():
++    raise FileNotFoundError('/kaggle/harness-changes.patch was not created by the patch cell')
++print(f'{OPTIMIZATION_ID}: inputs validated; source={SOURCE_NOTEBOOK}')
+ 
+ # Apply harness patch
+--- base/cell4
++++ other/cell4
+@@ -266,7 +266,14 @@
+ print("Target:", MODEL_DIR, "| shards:", len(target_shards), "| PLE dtype:", target_cfg.get("text_config", {}).get("ple_embedding_dtype", "checkpoint default (typically BF16)"))
+ DRAFT_VIEW = None
++if CFG["SPEC"] and not Path(DRAFT_MODEL_DIR).is_dir():
++    print(f"[warn] draft model missing at {DRAFT_MODEL_DIR}; disabling speculative decoding")
++    CFG["SPEC"] = False
+ if CFG["SPEC"]:
+-    assert Path(DRAFT_MODEL_DIR).is_dir(), f"draft dir not found: {DRAFT_MODEL_DIR}"
+-    DRAFT_VIEW = prepare_draft_view(MODEL_DIR, DRAFT_MODEL_DIR, PREFIX)
++    try:
++        DRAFT_VIEW = prepare_draft_view(MODEL_DIR, DRAFT_MODEL_DIR, PREFIX)
++    except Exception as exc:
++        print(f"[warn] draft model incompatible ({exc!r}); disabling speculative decoding")
++        CFG["SPEC"] = False
++        DRAFT_VIEW = None
+ 
+ # ---- assemble Pennyroyal / AutoRound launch arguments ----
+@@ -311,8 +318,15 @@
+     if CFG["FRSPEC"]:
+         tok = find_unique(WHEELHOUSE_DIR, "hot_tokens_64k.pt", required=False)
+-        if tok is None: tok = find_unique(WHEELHOUSE_DIR, "flash-next-64k.pt")
+-        assert sha256(tok) == TOKEN_MAP_SHA, "Wrong FR-Spec map; use the map from the pinned Pennyroyal bundle"
+-        assert sha256(Path(MODEL_DIR, "tokenizer.json")) == TOKENIZER_SHA, "Tokenizer differs from the FR-Spec map; set CFG['FRSPEC']=False"
+-        args += ["--speculative-token-map", str(tok)]
++        if tok is None:
++            tok = find_unique(WHEELHOUSE_DIR, "flash-next-64k.pt", required=False)
++        tokenizer = Path(MODEL_DIR, "tokenizer.json")
++        if tok is None:
++            print("[warn] FR-Spec token map missing; continuing without token-map acceleration")
++        elif sha256(tok) != TOKEN_MAP_SHA:
++            print("[warn] FR-Spec token map hash mismatch; continuing without token-map acceleration")
++        elif not tokenizer.is_file() or sha256(tokenizer) != TOKENIZER_SHA:
++            print("[warn] tokenizer differs from FR-Spec map; continuing without token-map acceleration")
++        else:
++            args += ["--speculative-token-map", str(tok)]
+ 
+ # ---- launch detached and wait for health ----
+--- base/cell8
++++ other/cell8
+@@ -1,3 +1,16 @@
+ print('Starting benchmark...')
++
++_wall_budget = float(getattr(target, 'max_runtime_s', 0.0) or 0.0)
++_provenance = {
++    'optimization_id': OPTIMIZATION_ID,
++    'source_notebook': SOURCE_NOTEBOOK,
++    'upstream': 'https://github.com/Tufalabs/duck-harness',
++    'true_submission': TRUE_SUBMISSION,
++    'max_runtime_s': _wall_budget,
++    'server_startup_timeout_s': SERVER_STARTUP_TIMEOUT,
++    'priority_scheduling': USE_PRIORITY_SCHEDULING,
++}
++(WORKING_DIR / 'arc3_optimization.json').write_text(json.dumps(_provenance, indent=2) + '\n')
++print('source attribution:', SOURCE_NOTEBOOK)
+ 
+ # Build the live competition game list from the gateway's available environments.
+@@ -74,10 +87,11 @@
+     bm.games = _offline_games(competition_env_files)
+ 
+-# Outside a real submission, stop ~10 min before the wall-clock budget for a graceful exit.
++# Always reserve a short teardown window. In a real submission this lets
++# the harness close games cleanly instead of being hard-killed at 9 hours.
+ soft_end = None
+-if not TRUE_SUBMISSION:
+-    budget = float(getattr(target, "max_runtime_s", 0.0) or 0.0)
+-    if budget > 0:
+-        soft_end = datetime.fromtimestamp(NOTEBOOK_START_EPOCH) + timedelta(seconds=budget - min(600.0, budget / 2))
++budget = float(getattr(target, "max_runtime_s", 0.0) or 0.0)
++if budget > 0:
++    reserve_s = 120.0 if TRUE_SUBMISSION else min(600.0, budget / 2)
++    soft_end = datetime.fromtimestamp(NOTEBOOK_START_EPOCH) + timedelta(seconds=max(0.0, budget - reserve_s))
+ 
+ # Play the benchmark; teardown commands run even if the run raises.
+--- base/cell9
++++ other/cell9
+@@ -1,2 +1,5 @@
++print(f'Source: {SOURCE_NOTEBOOK}')
++print(f'Optimization profile: {OPTIMIZATION_ID}')
++
+ from html import escape
+ 

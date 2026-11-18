@@ -1,4 +1,4 @@
-"""Standing daily draw: submit today's queued candidate, else the fallback candidate (F1x since 10-18).
+"""Standing daily draw: submit today's queued candidate, else the fallback (control again since 10-25).
 Exact-version submission quarantine takes precedence and can leave the slot unused.
 
   daily_draw.py            (run by arc-hidden-draw-daily.timer, hourly at :30 UTC)
@@ -21,9 +21,11 @@ FALLBACK_HOUR = 10  # UTC (15:30 IST); was 20, but 20-24Z is 01:30-05:30 IST whe
 # five control draws anchor the finals already, a sixth adds no information, and an equal-ticket candidate does.
 # The private LB is the other 55 games of the same run (draw-variance-20261018), so every draw is a finals ticket.
 # F1x is also the incumbent stack in incumbent/stack.json since 2026-10-20.
-FALLBACK = ("pranavagrawai/m2-f1-screen2-f1x", "1",
-            "(fallback candidate, F1x, no new candidate queued): B1 + stdlib preload + 16K output cap; "
-            "screen-2 no-harm PASS 76 vs b1ctl 72 at 60 min public-25.")
+# From 2026-10-25 the fallback is the control again: F1x v1 is quarantined, so its fallback left D13-D15 unused.
+# An unused slot is a lost finals ticket; the control is 0/5 zeros (27.8 +/- 3.2).
+FALLBACK = ("pranavagrawai/dfranzen-m2-raw", "1",
+            "(fallback control, dfranzen M2 raw, no new candidate queued): unchanged control, "
+            "5 prior hidden draws 27.8 +/- 3.2, no zeros.")
 
 
 def main():
