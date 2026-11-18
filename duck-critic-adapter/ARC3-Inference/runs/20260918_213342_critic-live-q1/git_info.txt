@@ -1,0 +1,321 @@
+commit: 3a63a092ad6ffd546904d98dce2d5207b1b2ca3d
+
+diff --git a/ARC3-Inference/inference/agent/tool_agent.py b/ARC3-Inference/inference/agent/tool_agent.py
+index f635489..7a183cf 100644
+--- a/ARC3-Inference/inference/agent/tool_agent.py
++++ b/ARC3-Inference/inference/agent/tool_agent.py
+@@ -976,8 +976,18 @@ class ToolAgent:
+             "summarized_knowledge": dict(self._summarized_knowledge),
+             "last_step_summary": dict(self._last_step_summary) if self._last_step_summary else None,
+             "last_action_result": dict(self._last_action_result) if self._last_action_result else None,
++            "last_tool_code": self._last_python_code(),
+         }
+ 
++    def _last_python_code(self) -> str:
++        for message in reversed(self._history_messages):
++            for call in reversed(message.get("tool_calls") or []) if message.get("role") == "assistant" else []:
++                arguments = _normalize_tool_call_arguments((call.get("function") or {}).get("arguments"))
++                code = str(arguments.get("code", "") or "")
++                if code.strip():
++                    return code
++        return ""
++
+     def model_config(self) -> tuple[str, str, str, str]:
+         """(provider, base_url, model_id, api_key) so a critic can share the actor's endpoint."""
+         return self._model.provider, self._model.base_url, self._model.model_id, self._api_key
+diff --git a/ARC3-Inference/inference/critic/gate.py b/ARC3-Inference/inference/critic/gate.py
+index 49a9d83..7f08710 100644
+--- a/ARC3-Inference/inference/critic/gate.py
++++ b/ARC3-Inference/inference/critic/gate.py
+@@ -90,7 +90,8 @@ def run_gate(
+             f"[{index}/{len(packet_paths)}] {source} L{packet.level} a{packet.action_num} {packet.trigger_cause}: "
+             f"{firing.seconds:.1f}s calls={firing.model_calls} tools={firing.tool_calls} "
+             f"tok={firing.prompt_tokens}+{firing.completion_tokens} parsed={firing.parsed} "
+-            f"legal={firing.recommended_legal} rec={list(firing.report.recommended_actions)[:2]} {firing.error}",
++            f"legal={firing.recommended_legal} rec={list(firing.report.recommended_actions)[:2]} {firing.error}"
++            + (f"\n      Q: {firing.report.open_questions[0]}" if firing.report.open_questions else ""),
+             flush=True,
+         )
+ 
+@@ -135,6 +136,7 @@ def main(argv: list[str] | None = None) -> int:
+     parser.add_argument("--provider", default=os.environ.get("CRITIC_PROVIDER", "openrouter"))
+     parser.add_argument("--base-url", default=os.environ.get("CRITIC_BASE_URL", "https://openrouter.ai/api/v1"))
+     parser.add_argument("--api-key", default="", help="defaults to CRITIC_API_KEY, then OPENROUTER_API_KEY")
++    parser.add_argument("--mode", choices=["question", "report"], default=CriticPolicyConfig.mode)
+     parser.add_argument("--max-tool-steps", type=int, default=CriticPolicyConfig.max_tool_steps)
+     parser.add_argument("--max-seconds", type=float, default=CriticPolicyConfig.max_seconds)
+     parser.add_argument("--max-output-tokens", type=int, default=CriticPolicyConfig.max_output_tokens)
+@@ -156,6 +158,7 @@ def main(argv: list[str] | None = None) -> int:
+             request_timeout_seconds=args.request_timeout,
+         ),
+         CriticPolicyConfig(
++            mode=args.mode,
+             max_tool_steps=args.max_tool_steps,
+             max_seconds=args.max_seconds,
+             max_output_tokens=args.max_output_tokens,
+diff --git a/ARC3-Inference/inference/critic/packet.py b/ARC3-Inference/inference/critic/packet.py
+index 8cb263c..470870a 100644
+--- a/ARC3-Inference/inference/critic/packet.py
++++ b/ARC3-Inference/inference/critic/packet.py
+@@ -23,7 +23,7 @@ from inference.agent.runtime_state import (
+ 
+ DEFAULT_HISTORY_LIMIT = 12
+ DEFAULT_TRANSITION_LIMIT = 25
+-PACKET_SCHEMA_VERSION = 1
++PACKET_SCHEMA_VERSION = 2
+ 
+ 
+ @dataclass(frozen=True)
+@@ -98,6 +98,7 @@ class CriticPacket:
+     last_action_result: dict[str, Any]
+     actor_beliefs: dict[str, str]
+     step_summary: dict[str, Any] | None
++    actor_last_code: str = ""
+     schema_version: int = PACKET_SCHEMA_VERSION
+     packet_id: str = field(default="", compare=False)
+ 
+@@ -143,6 +144,7 @@ class CriticPacket:
+             last_action_result=_listed(data.get("last_action_result") or {}),
+             actor_beliefs={str(k): str(v) for k, v in (data.get("actor_beliefs") or {}).items()},
+             step_summary=_listed(data.get("step_summary")) if isinstance(data.get("step_summary"), dict) else None,
++            actor_last_code=str(data.get("actor_last_code", "") or ""),
+             schema_version=int(data.get("schema_version", PACKET_SCHEMA_VERSION)),
+         )
+         if packet_id and packet_id != packet.packet_id:
+@@ -190,6 +192,7 @@ def build_packet_from_state(
+     trigger_reason: str,
+     history_limit: int = DEFAULT_HISTORY_LIMIT,
+     transition_limit: int = DEFAULT_TRANSITION_LIMIT,
++    actor_last_code: str = "",
+ ) -> CriticPacket:
+     """Freeze already-loaded runtime state into a packet (pure; no file access)."""
+     transitions = transitions_from_history(history)
+@@ -212,6 +215,7 @@ def build_packet_from_state(
+         last_action_result=_listed(dict(last_action_result or {})),
+         actor_beliefs={str(key): str(value) for key, value in summarized_knowledge.items()},
+         step_summary=_listed(dict(last_step_summary)) if last_step_summary else None,
++        actor_last_code=str(actor_last_code or ""),
+     )
+ 
+ 
+diff --git a/ARC3-Inference/inference/critic/policy.py b/ARC3-Inference/inference/critic/policy.py
+index 3c18bdd..e67b28f 100644
+--- a/ARC3-Inference/inference/critic/policy.py
++++ b/ARC3-Inference/inference/critic/policy.py
+@@ -21,6 +21,13 @@ import requests
+ 
+ from inference.agent.action_names import to_model_actions
+ from inference.critic.packet import CriticPacket
++from inference.critic.question import (
++    FALLBACK_QUESTION_TEXT,
++    QUESTION_SYSTEM_PROMPT,
++    parse_question_text,
++    question_report,
++    render_question_kickoff,
++)
+ from inference.critic.report import CriticReport
+ from inference.critic.sandbox import run_investigation_python
+ from inference.utils.grid_utils import ARC_COLOR_LEGEND
+@@ -159,9 +166,12 @@ class CriticPolicyConfig:
+     the firing past its budget by more than that grace.
+     """
+ 
++    mode: str = "question"  # "question": one call, reasoning off; "report": bounded tool loop
+     max_tool_steps: int = 2
+     max_seconds: float = 90.0
+     max_output_tokens: int | None = 4096
++    question_max_output_tokens: int = 160
++    question_max_seconds: float = 30.0
+     tool_timeout_seconds: int = 20
+     tool_output_chars: int = 4000
+     commit_calls_remaining: int = 1
+@@ -369,8 +379,16 @@ class CriticPolicy:
+             raise requests.RequestException(f"{response.status_code} | {response.text.strip()[:500]}")
+         return response.json()
+ 
+-    def _chat(self, messages: list[dict[str, Any]], *, tools: bool, final: bool = False, seconds_left: float | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+-        max_tokens = self._config.max_output_tokens
++    def _chat(
++        self,
++        messages: list[dict[str, Any]],
++        *,
++        tools: bool,
++        final: bool = False,
++        seconds_left: float | None = None,
++        max_tokens: int | None = None,
++    ) -> tuple[dict[str, Any], dict[str, Any]]:
++        max_tokens = self._config.max_output_tokens if max_tokens is None else max_tokens
+         if final and max_tokens is not None:
+             # The report call must survive a long reasoning prefix; give it headroom.
+             max_tokens = max_tokens * self._config.final_output_multiplier
+@@ -390,6 +408,10 @@ class CriticPolicy:
+         if seconds_left is not None:
+             bounded = max(5.0, seconds_left + self._config.request_grace_seconds)
+             timeout = bounded if timeout is None else min(timeout, bounded)
++        if not self._model.thinking and self._model.provider.strip().lower() in {"openrouter", "router"}:
++            # vLLM honours chat_template_kwargs.enable_thinking (set by build_chat_payload);
++            # OpenRouter needs its unified flag or the model burns the whole budget thinking.
++            payload["reasoning"] = {"enabled": False}
+         body = self._http_post(payload, timeout) if self._post_is_http else self._post(payload)
+         choices = body.get("choices") or []
+         if not choices:
+@@ -397,6 +419,73 @@ class CriticPolicy:
+         return choices[0].get("message", {}) or {}, body.get("usage") or {}
+ 
+     def run(self, packet: CriticPacket, notes: CriticNotes) -> CriticFiring:
++        if self._config.mode == "question":
++            return self.run_question(packet, notes)
++        return self.run_report(packet, notes)
++
++    def run_question(self, packet: CriticPacket, notes: CriticNotes) -> CriticFiring:
++        """One call, reasoning off, three lines. The scratchpad holds the questions asked."""
++        config = self._config
++        started = time.monotonic()
++        kickoff = render_question_kickoff(packet, notes.lines)
++        messages = [{"role": "system", "content": QUESTION_SYSTEM_PROMPT}, {"role": "user", "content": kickoff}]
++        transcript: list[dict[str, Any]] = [{"role": "user", "content": kickoff}]
++        prompt_tokens = completion_tokens = 0
++        content = reasoning = error = ""
++        model_calls = 0
++        model = self._model
++        if model.thinking:
++            self._model = CriticModelConfig(**{**model.__dict__, "thinking": False})
++        try:
++            message, usage = self._chat(
++                messages,
++                tools=False,
++                seconds_left=config.question_max_seconds,
++                max_tokens=config.question_max_output_tokens,
++            )
++            model_calls = 1
++            prompt_tokens = int(usage.get("prompt_tokens") or 0)
++            completion_tokens = int(usage.get("completion_tokens") or 0)
++            content = _text(message.get("content"))
++            reasoning = _text(message.get("reasoning") or message.get("reasoning_content"))
++            transcript.append({"role": "assistant", "content": content, "reasoning": reasoning[:1000]})
++        except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
++            error = f"{type(exc).__name__}: {str(exc)[:300]}"
++        finally:
++            self._model = model
++        fields = parse_question_text(content) or parse_question_text(reasoning)
++        parsed = bool(fields.get("question"))
++        fallback = not parsed
++        report_text = content if parsed else FALLBACK_QUESTION_TEXT
++        if fallback:
++            fields = parse_question_text(FALLBACK_QUESTION_TEXT)
++        candidates = parse_recommended_actions(fields.get("probe", ""))
++        # The host owns legality: a probe outside the packet's action set is dropped; the question stands.
++        recommended = [action for action in candidates if _legal([action], packet.valid_actions)]
++        report = question_report(packet.packet_id, fields, recommended)
++        if parsed:
++            notes.add(packet.level, packet.action_num, fields.get("question", ""))
++        return CriticFiring(
++            packet_id=packet.packet_id,
++            report=report,
++            report_text=report_text,
++            scratchpad=fields.get("question", ""),
++            seconds=round(time.monotonic() - started, 3),
++            model_calls=model_calls,
++            tool_calls=0,
++            tool_errors=0,
++            refused_action_calls=0,
++            prompt_tokens=prompt_tokens,
++            completion_tokens=completion_tokens,
++            parsed=parsed,
++            fallback=fallback,
++            forced_final=False,
++            recommended_legal=_legal(recommended, packet.valid_actions),
++            error=error,
++            transcript=transcript,
++        )
++
++    def run_report(self, packet: CriticPacket, notes: CriticNotes) -> CriticFiring:
+         config = self._config
+         started = time.monotonic()
+         transcript: list[dict[str, Any]] = []
+diff --git a/ARC3-Inference/inference/critic/runner.py b/ARC3-Inference/inference/critic/runner.py
+index 67a264f..82e52d5 100644
+--- a/ARC3-Inference/inference/critic/runner.py
++++ b/ARC3-Inference/inference/critic/runner.py
+@@ -8,6 +8,7 @@ is byte-identical to upstream Duck.
+ 
+ Configuration is environment-driven so the Kaggle setup env can carry it:
+   DUCK_CRITIC_ENABLED=1            turn the critic on
++  DUCK_CRITIC_MODE=question        "question" (one call, reasoning off) or "report" (tool loop)
+   DUCK_CRITIC_MAX_TOOL_STEPS=2     investigation calls per firing
+   DUCK_CRITIC_MAX_SECONDS=90       wall budget per firing
+   DUCK_CRITIC_MAX_OUTPUT_TOKENS=4096
+@@ -56,6 +57,7 @@ def critic_enabled() -> bool:
+ 
+ def policy_config_from_env() -> CriticPolicyConfig:
+     return CriticPolicyConfig(
++        mode=os.environ.get("DUCK_CRITIC_MODE", "").strip() or CriticPolicyConfig.mode,
+         max_tool_steps=_env_int("DUCK_CRITIC_MAX_TOOL_STEPS", CriticPolicyConfig.max_tool_steps),
+         max_seconds=_env_float("DUCK_CRITIC_MAX_SECONDS", CriticPolicyConfig.max_seconds),
+         max_output_tokens=_env_int("DUCK_CRITIC_MAX_OUTPUT_TOKENS", CriticPolicyConfig.max_output_tokens or 4096),
+@@ -134,6 +136,7 @@ class CriticRunner:
+             valid_actions=valid_actions,
+             trigger_cause=decision.cause or "",
+             trigger_reason=decision.reason or "",
++            actor_last_code=str(actor_context.get("last_tool_code") or ""),
+         )
+         firing = self.policy.run(packet, self.notes)
+         record = {
+diff --git a/ARC3-Inference/tests/critic/test_runner.py b/ARC3-Inference/tests/critic/test_runner.py
+index c179b01..21b4ba2 100644
+--- a/ARC3-Inference/tests/critic/test_runner.py
++++ b/ARC3-Inference/tests/critic/test_runner.py
+@@ -8,10 +8,7 @@ from inference.critic.policy import CriticModelConfig, CriticPolicy, CriticPolic
+ from inference.critic.runner import CriticRunner, critic_enabled, policy_config_from_env
+ from inference.framework import solver as solver_module
+ 
+-REPORT = (
+-    "confidence: low\nmodel: clicks recolor\nobjective: unknown\nplan: none\n"
+-    "recommended_action: MOUSE(row=2, col=3)\nsubgoal: probe\nnote: click once\nscratchpad: tiles 2x2"
+-)
++REPORT = "assumption: clicks recolor tiles\nquestion: does the order of clicks matter?\nprobe: MOUSE(row=2, col=3)"
+ 
+ 
+ def _frame(level: int, step: int, fill: int) -> Frame:
+@@ -21,6 +18,7 @@ def _frame(level: int, step: int, fill: int) -> Frame:
+ def _scripted_policy(calls: list[dict]) -> CriticPolicy:
+     def post(payload: dict) -> dict:
+         calls.append(payload)
++        assert "tools" not in payload, "question mode is a single call without tools"
+         return {"choices": [{"message": {"role": "assistant", "content": REPORT}}], "usage": {"prompt_tokens": 10, "completion_tokens": 5}}
+ 
+     return CriticPolicy(CriticModelConfig(provider="vllm", base_url="http://x", model_id="m"), CriticPolicyConfig(max_tool_steps=2), post=post)
+@@ -35,7 +33,7 @@ def test_runner_fires_level_start_then_stays_quiet_until_stall(tmp_path: Path) -
+     assert first.fired and first.cause == "level_start"
+     firing = runner.fire(first, current_frame=history[-1].frame, history=history, valid_actions=["ACTION1", "ACTION6"], actor_context={"summarized_knowledge": {}, "last_step_summary": None, "last_action_result": None})
+     assert firing.parsed and firing.report.recommended_actions == ({"action": "MOUSE", "row": 2, "col": 3},)
+-    assert runner.notes.render().endswith("tiles 2x2")
++    assert runner.notes.render().endswith("does the order of clicks matter?")
+     trace = [json.loads(line) for line in (tmp_path / "critic.jsonl").read_text().splitlines()]
+     assert trace[0]["cause"] == "level_start" and trace[0]["transcript"]
+ 
+@@ -50,6 +48,24 @@ def test_runner_fires_level_start_then_stays_quiet_until_stall(tmp_path: Path) -
+     assert runner.summary()["firings"] == 1  # decide() does not fire the policy; fire() does
+ 
+ 
++def test_question_mode_drops_off_list_probe(tmp_path: Path) -> None:
++    """The host owns legality: a probe outside the action set is dropped; the question stands."""
++    report = "assumption: the bar is a wall\nquestion: is it a timer instead?\nprobe: SPACE"
++
++    def post(payload: dict) -> dict:
++        return {"choices": [{"message": {"role": "assistant", "content": report}}], "usage": {"prompt_tokens": 10, "completion_tokens": 5}}
++
++    policy = CriticPolicy(CriticModelConfig(provider="vllm", base_url="http://x", model_id="m"), CriticPolicyConfig(), post=post)
++    runner = CriticRunner(policy=policy, trace_path=None)
++    history = [HistoryEntry(action="RESET", frame=_frame(1, 0, 0))]
++    first = runner.decide(history=history, level=1, action_num=0, critic_request="")
++    firing = runner.fire(first, current_frame=history[-1].frame, history=history, valid_actions=["ACTION1", "ACTION6"], actor_context={"summarized_knowledge": {}, "last_step_summary": None, "last_action_result": None})
++    assert firing.parsed
++    assert firing.report.recommended_actions == ()
++    assert firing.report.open_questions == ("is it a timer instead?",)
++    assert firing.recommended_legal is None
++
++
+ def test_explicit_request_fires(tmp_path: Path) -> None:
+     runner = CriticRunner(policy=_scripted_policy([]), trace_path=None)
+     history = [HistoryEntry(action="RESET", frame=_frame(1, 0, 0)), HistoryEntry(action="UP", frame=_frame(1, 1, 1))]

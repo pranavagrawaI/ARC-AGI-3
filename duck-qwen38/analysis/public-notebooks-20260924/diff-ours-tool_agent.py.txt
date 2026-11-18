@@ -1,0 +1,193 @@
+--- keith
++++ ours
+@@ -30,6 +30,7 @@
+ )
+ 
+ from inference.agent.python_tool_sandbox import run_sandboxed_python
++from inference.critic.report import CriticReport, render_report_block
+ from inference.agent.runtime_state import Frame, HistoryEntry, RUNTIME_STATE_FILENAME, load_runtime_state
+ from inference.utils.openai_compat import build_chat_payload, build_headers
+ 
+@@ -141,6 +142,24 @@
+ _LOCAL_ANALYZER_TOOL_TIMEOUT = _get_env_int("LOCAL_ANALYZER_TOOL_TIMEOUT", 30)
+ _LOCAL_ANALYZER_TOOL_OUTPUT_TOKENS = _get_env_int("LOCAL_ANALYZER_TOOL_OUTPUT_TOKENS", 1024)
+ _LOCAL_ANALYZER_YIELD_SECONDS = _get_env_float("LOCAL_ANALYZER_YIELD_SECONDS", 0.0)
++# Prompt fixes from the 3.8 step-1 readback (runs/qwen38-learnings/STEP1.md); off = upstream text.
++# GAMEOVER_RETRY: the auto-RESET after GAME_OVER keeps the current level, but actors read
++# "The game is over." as "stop playing" (tn36 idled; tr87 cleared L1 in 9 actions after its retry).
++_PROMPT_GAMEOVER_RETRY = _get_env_bool("DUCK_PROMPT_GAMEOVER_RETRY", False)
++# LEVELUP_REVIEW: actors carried a hasty rule for what cleared the last level (lf52 "reduce to 1"
++# was really "reduce to 2") and re-derived it from history only many turns later.
++_PROMPT_LEVELUP_REVIEW = _get_env_bool("DUCK_PROMPT_LEVELUP_REVIEW", False)
++# SELF_QUESTION_PERIOD: every Nth analyzer turn within a level (after the 2nd), the actor is asked to
++# doubt itself -- name the belief its plan depends on and the strongest alternative explanation. An
++# external "why" question was mostly answered by defending the belief (77 %), after which the actor
++# explored less (runs/qwen38-fixes/RESULT-FQ.md, "Do questions entrench?"). 0 = off.
++_PROMPT_SELF_QUESTION_PERIOD = _get_env_int("DUCK_PROMPT_SELF_QUESTION_PERIOD", 0)
++SELF_QUESTION_TEXT = (
++    "Before you act this turn, doubt yourself once. Name the belief your current plan depends on, then write "
++    "the strongest alternative explanation of the same evidence -- one that would make your plan pointless -- "
++    "in one line starting `Alternative:`. If what you have seen cannot rule it out, prefer an action that tells "
++    "the two apart."
++)
+ _LOCAL_ANALYZER_ENABLE_THINKING = _get_env_bool("LOCAL_ANALYZER_ENABLE_THINKING", True)
+ _LOCAL_ANALYZER_TEMPERATURE = _get_env_float("LOCAL_ANALYZER_TEMPERATURE", 0.6)
+ _LOCAL_ANALYZER_TOP_P = _get_env_float("LOCAL_ANALYZER_TOP_P", 0.95)
+@@ -276,6 +295,7 @@
+             "Hypothesis",
+             "History check",
+             "Next test",
++            "Critic",
+         ],
+     )
+     result = {
+@@ -286,6 +306,7 @@
+         "open_questions": extracted.get("Open questions", ""),
+         "current_plan": extracted.get("Plan", ""),
+         "cross_level_notes": extracted.get("Cross-level notes", ""),
++        "critic_request": extracted.get("Critic", ""),
+     }
+     if not result["world_model"]:
+         result["world_model"] = extracted.get("Hypothesis", "")
+@@ -955,6 +976,53 @@
+         self._last_step_summary: dict[str, Any] | None = None
+         self._last_action_result: dict[str, Any] | None = None
+         self._summarized_knowledge = _empty_world_model()
++        self._pending_critic_report: CriticReport | None = None
++        self._critic_request = ""
++        # The actor's own words per model response (critic v2 reads these; the carried world
++        # model is empty on ~half of turns). Bounded; never fed back to the actor.
++        self._recent_words: list[dict[str, Any]] = []
++        self._recent_words_seq = 0
++
++    def set_critic_report(self, report: CriticReport | None) -> None:
++        """Queue an advisory critic report for the next user prompt (consumed once)."""
++        self._pending_critic_report = report
++
++    def take_critic_request(self) -> str:
++        """Return and clear the actor's latest `Critic:` request line, if any."""
++        request, self._critic_request = self._critic_request, ""
++        return request
++
++    def critic_context(self) -> dict[str, Any]:
++        """Read-only view of the actor state a critic packet freezes (beliefs, last step, last result)."""
++        return {
++            "summarized_knowledge": dict(self._summarized_knowledge),
++            "last_step_summary": dict(self._last_step_summary) if self._last_step_summary else None,
++            "last_action_result": dict(self._last_action_result) if self._last_action_result else None,
++            "last_tool_code": self._last_python_code(),
++            "recent_words": [dict(item) for item in self._recent_words],
++        }
++
++    def _self_question_due(self, level: int) -> bool:
++        """Count analyzer turns per level; due on every Nth turn after the 2nd (the questioner's cadence)."""
++        if _PROMPT_SELF_QUESTION_PERIOD <= 0:
++            return False
++        if level != getattr(self, "_self_question_level", None):
++            self._self_question_level, self._self_question_turns = level, 0
++        self._self_question_turns += 1
++        return self._self_question_turns > 2 and (self._self_question_turns - 1) % _PROMPT_SELF_QUESTION_PERIOD == 0
++
++    def _last_python_code(self) -> str:
++        for message in reversed(self._history_messages):
++            for call in reversed(message.get("tool_calls") or []) if message.get("role") == "assistant" else []:
++                arguments = _normalize_tool_call_arguments((call.get("function") or {}).get("arguments"))
++                code = str(arguments.get("code", "") or "")
++                if code.strip():
++                    return code
++        return ""
++
++    def model_config(self) -> tuple[str, str, str, str]:
++        """(provider, base_url, model_id, api_key) so a critic can share the actor's endpoint."""
++        return self._model.provider, self._model.base_url, self._model.model_id, self._api_key
+ 
+     def _headers(self) -> dict[str, str]:
+         api_key = (
+@@ -1107,6 +1175,10 @@
+         if not note:
+             return
+         for key, value in note.items():
++            if key == "critic_request":
++                if value:
++                    self._critic_request = value
++                continue
+             if value:
+                 self._summarized_knowledge[key] = value
+ 
+@@ -1204,10 +1276,24 @@
+                 lines.append("You have completed the run!")
+             elif previous_step_summary.get("level_transition"):
+                 lines.append("You have progressed to a new level!")
++                if _PROMPT_LEVELUP_REVIEW:
++                    lines.append(
++                        "Before planning this level, use `history` to establish exactly what the previous level's final "
++                        "actions changed and which condition completed it. Write that as a verified rule under "
++                        "`Cross-level notes:`, and treat any earlier guess about the win condition as unverified until "
++                        "it matches that evidence."
++                    )
+             else:
+                 lines.append("You are still on the same level.")
+             if previous_step_summary.get("game_over"):
+-                lines.append("The game is over.")
++                if _PROMPT_GAMEOVER_RETRY:
++                    lines.append(
++                        "The previous action reached GAME_OVER. The runner has reset the current level: you keep your "
++                        "level progress, and play continues from this level's start with a fresh budget. Keep playing, "
++                        "and use what the failed attempt taught you; record it under `Cross-level notes:`."
++                    )
++                else:
++                    lines.append("The game is over.")
+         elif (current_frame is not None and current_frame.step > 0) or action_num > 0:
+             lines.append("No previous action sequence was captured.")
+         else:
+@@ -1232,9 +1318,15 @@
+         lines.append(
+             "You may call `action(actions)` more than once in one Python snippet if your search or control loop needs it, "
+             "but stop immediately if a result reports `game_over`, `run_complete`, `level_completed`, or `done`."
++            + (" That ends only the current snippet; after a game over or level change, play continues next turn." if _PROMPT_GAMEOVER_RETRY else "")
+         )
+         lines.extend(self._summarized_knowledge_lines())
+         lines.append("end of world model. ")
++        if self._pending_critic_report is not None:
++            lines.extend(render_report_block(self._pending_critic_report))
++            self._pending_critic_report = None
++        if self._self_question_due(current_level):
++            lines.append(SELF_QUESTION_TEXT)
+         if action_num == 0:
+             lines.append(
+                 "Ground yourself in `current_frame` before acting, but start with a compact structural summary rather than restating the full frame."
+@@ -1724,6 +1816,7 @@
+         analyzer_log = transcript_path or (state_path.parent / f"{state_path.stem}_analyzer.txt")
+         prompt_log = _resolve_prompt_log_path(state_path)
+         current_frame, history_entries = load_runtime_state(state_path)
++        injected_critic_report = self._pending_critic_report
+         user_prompt = self._build_user_prompt(
+             action_num,
+             valid_actions=valid_actions,
+@@ -1750,6 +1843,8 @@
+ 
+         append_transcript("SYSTEM PROMPT", self._system_prompt)
+         append_transcript("USER PROMPT", user_prompt)
++        if injected_critic_report is not None:
++            append_transcript("CRITIC REPORT", injected_critic_report.to_json(indent=2))
+ 
+         previous_history_messages = list(self._history_messages)
+         preserve_history = True
+@@ -1890,6 +1985,17 @@
+                     captured_reasoning = reasoning
+                     append_transcript("THINKING", reasoning)
+                     assistant_message["reasoning"] = reasoning
++                if content or reasoning:
++                    self._recent_words_seq += 1
++                    self._recent_words.append(
++                        {
++                            "seq": self._recent_words_seq,
++                            "action_num": display_action_num,
++                            "said": str(content or "")[-2000:],
++                            "thinking": str(reasoning or "")[-3000:],
++                        }
++                    )
++                    del self._recent_words[:-8]
+ 
+                 if not tool_calls:
+                     if content:
