@@ -13,3 +13,7 @@ Keep experiment cards and compact results with their experiment. Check ignored p
 The November 2026 cleanup removed local raw runs. Historical analyses that read full request transcripts or captured model weights need those inputs from the original run. The daily submission service reads its queue and draw log from `analysis/hidden-draws-20261010/`.
 
 The Tycho/dfranzen solver assembles its runtime from a pinned external Git repository. After cloning, run `git submodule update --init -- analysis/m2-winners-20261001/audit/dfranzen-repo` before building that solver.
+
+## Linear probing on synthetic sequences
+
+When probing LLM activations on synthetic stochastic processes (e.g., HMM belief states under `analysis/cognitive-map-derisk/`), do not trust random within-sequence train/test splits or minimum-norm OLS: random splits leak strongly via temporal autocorrelation, and min-norm OLS fails catastrophically off-sequence. Use held-out-sequence splits, cross-validated Ridge regression, and a matched i.i.d. (`0-HMM`) sequence control alongside the next-token-probability baseline.
